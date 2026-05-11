@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Apple Music</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #1f1f1f;
+        }
+        .loading {
+            color: white;
+            font-family: sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <div class="loading">Loading Apple Music...</div>
+    <script>
+        // Directly navigate to Apple Music to bypass X-Frame-Options
+        window.location.replace("https://music.apple.com");
+    </script>
+</body>
+</html>
