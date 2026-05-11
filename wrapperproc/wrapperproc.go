@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -28,6 +29,22 @@ var instance *Wrapper
 // It resolves the binary path relative to the executable's own directory,
 // so it works correctly both in development (wails dev) and production builds.
 func StartWrapper(email, password string) (*Wrapper, error) {
+	if len(embedded.WrapperBinary) == 0 {
+		return nil, fmt.Errorf("no wrapper binary available for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve user config dir: %w", err)
+	}
+	dataDir := filepath.Join(configDir, "apple-music-linux", "wrapper-data")
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to create wrapper data dir: %w", err)
+	}
+	if err := os.Chmod(dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("failed to secure wrapper data dir: %w", err)
+	}
+
 	tempDir, err := os.MkdirTemp("", "aml-wrapper-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp dir: %w", err)
@@ -45,13 +62,18 @@ func StartWrapper(email, password string) (*Wrapper, error) {
 
 	log.Printf("[WrapperProc] Extracted wrapper to: %s", binaryPath)
 
-	cmd := exec.Command(binaryPath, "-H", "127.0.0.1")
+	args := []string{"-H", "127.0.0.1"}
+	if email != "" && password != "" {
+		args = append(args, "-F")
+	}
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Dir = dataDir
 
 	// Ensure the wrapper process is in its own process group so that
 	// SIGTERM does not accidentally propagate to the parent (Wails) process.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// Pipe stdout → logger
+	// Pass credentials via stdin so they never show up in ps output.
 	if email != "" && password != "" {
 		cmd.Stdin = strings.NewReader(email + ":" + password + "\n")
 	}
