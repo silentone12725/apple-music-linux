@@ -11,6 +11,8 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"apple-music-linux/wrapperproc"
 )
 
 //go:embed all:frontend/dist
@@ -37,6 +39,13 @@ func main() {
 		OnStartup: func(ctx context.Context) {
 			app.startup(ctx)
 
+			// Start the wrapper child process.
+			if w, err := wrapperproc.StartWrapper(); err != nil {
+				log.Printf("[WrapperProc] Failed to start wrapper: %v", err)
+			} else {
+				app.wrapper = w
+			}
+
 			// Continuously inject our preload JS.
 			// Because we navigate away from the local Vite server,
 			// Wails' normal asset injection is bypassed.
@@ -46,6 +55,12 @@ func main() {
 					runtime.WindowExecJS(ctx, preloadJS)
 				}
 			}()
+		},
+		OnShutdown: func(ctx context.Context) {
+			// Gracefully terminate the wrapper process on app exit.
+			if app.wrapper != nil {
+				app.wrapper.Stop()
+			}
 		},
 		Bind: []interface{}{
 			app,

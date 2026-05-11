@@ -4,29 +4,244 @@
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>Apple Music</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
         body, html {
-            margin: 0;
-            padding: 0;
             width: 100vw;
             height: 100vh;
-            background-color: #1f1f1f;
+            background: #111;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            overflow: hidden;
         }
-        .loading {
-            color: white;
-            font-family: sans-serif;
+
+        /* ── Background gradient ── */
+        .bg {
+            position: fixed; inset: 0;
+            background: radial-gradient(ellipse at 30% 40%, #3a0a0a 0%, #111 60%),
+                        radial-gradient(ellipse at 70% 80%, #1a0a1a 0%, transparent 60%);
+        }
+
+        /* ── Card ── */
+        .card {
+            position: relative;
+            z-index: 10;
             display: flex;
-            justify-content: center;
+            flex-direction: column;
             align-items: center;
-            height: 100vh;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 32px;
+        }
+
+        .login-box {
+            background: rgba(28, 28, 30, 0.85);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 20px;
+            padding: 40px 44px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 32px 80px rgba(0,0,0,0.6);
+        }
+
+        /* ── Logo ── */
+        .logo-area {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-bottom: 32px;
+            gap: 10px;
+        }
+
+        .logo-icon {
+            width: 56px; height: 56px;
+            background: linear-gradient(135deg, #fc3c44, #c3002f);
+            border-radius: 14px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 28px;
+            box-shadow: 0 8px 24px rgba(252, 60, 68, 0.4);
+        }
+
+        .logo-title {
+            font-size: 22px;
+            font-weight: 600;
+            color: #fff;
+            letter-spacing: -0.3px;
+        }
+
+        .logo-subtitle {
+            font-size: 13px;
+            color: rgba(255,255,255,0.45);
+            font-weight: 400;
+            margin-top: -4px;
+        }
+
+        /* ── Form ── */
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .input-wrap {
+            position: relative;
+        }
+
+        .input-wrap input {
+            width: 100%;
+            padding: 13px 16px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 14px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .input-wrap input::placeholder { color: rgba(255,255,255,0.3); }
+
+        .input-wrap input:focus {
+            border-color: rgba(252, 60, 68, 0.6);
+            background: rgba(255,255,255,0.09);
+        }
+
+        /* ── Button ── */
+        .btn-signin {
+            width: 100%;
+            padding: 13px;
+            background: linear-gradient(135deg, #fc3c44, #c3002f);
+            border: none;
+            border-radius: 10px;
+            color: #fff;
+            font-size: 15px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: opacity 0.2s, transform 0.1s;
+            box-shadow: 0 4px 20px rgba(252, 60, 68, 0.35);
+            margin-top: 4px;
+        }
+
+        .btn-signin:hover { opacity: 0.88; }
+        .btn-signin:active { transform: scale(0.98); }
+        .btn-signin:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* ── Status ── */
+        .status {
+            margin-top: 14px;
+            font-size: 13px;
+            text-align: center;
+            color: rgba(255,255,255,0.4);
+            min-height: 18px;
+        }
+        .status.error { color: #ff6b6b; }
+        .status.success { color: #30d158; }
+
+        /* ── Spinner ── */
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spinner {
+            display: inline-block;
+            width: 14px; height: 14px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            vertical-align: middle;
+            margin-right: 6px;
         }
     </style>
 </head>
 <body>
-    <div class="loading">Loading Apple Music...</div>
+    <div class="bg"></div>
+    <div class="card">
+        <div class="login-box">
+            <div class="logo-area">
+                <div class="logo-icon">♪</div>
+                <div class="logo-title">Apple Music</div>
+                <div class="logo-subtitle">Sign in to continue</div>
+            </div>
+
+            <div class="form-group">
+                <div class="input-wrap">
+                    <input type="email" id="email" placeholder="Apple ID (email)" autocomplete="username"/>
+                </div>
+                <div class="input-wrap">
+                    <input type="password" id="password" placeholder="Password" autocomplete="current-password"/>
+                </div>
+            </div>
+
+            <button class="btn-signin" id="signin-btn" onclick="handleSignIn()">
+                Continue
+            </button>
+
+            <div class="status" id="status"></div>
+        </div>
+    </div>
+
+    <script src="/wailsjs/runtime/runtime.js"></script>
+    <script src="/wailsjs/go/main/App.js"></script>
     <script>
-        // Directly navigate to Apple Music to bypass X-Frame-Options
-        window.location.replace("https://music.apple.com");
+        const { StoreAppleIDCredentials, HasAppleIDCredentials } = window.go.main.App;
+
+        // If credentials already exist, skip the login page immediately
+        window.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const hasCredentials = await HasAppleIDCredentials();
+                if (hasCredentials) {
+                    navigateToAppleMusic();
+                }
+            } catch (e) {
+                // First launch — show the login form
+            }
+        });
+
+        async function handleSignIn() {
+            const email = document.getElementById('email').value.trim();
+            const password = document.getElementById('password').value;
+            const btn = document.getElementById('signin-btn');
+            const status = document.getElementById('status');
+
+            if (!email || !password) {
+                setStatus('Please enter your Apple ID and password.', 'error');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span>Saving...';
+            setStatus('');
+
+            try {
+                await StoreAppleIDCredentials(email, password);
+                setStatus('Credentials saved securely. Launching...', 'success');
+                setTimeout(navigateToAppleMusic, 800);
+            } catch (err) {
+                setStatus('Failed to save credentials: ' + err, 'error');
+                btn.disabled = false;
+                btn.textContent = 'Continue';
+            }
+        }
+
+        function navigateToAppleMusic() {
+            window.location.replace('https://music.apple.com');
+        }
+
+        function setStatus(msg, type = '') {
+            const el = document.getElementById('status');
+            el.textContent = msg;
+            el.className = 'status ' + type;
+        }
+
+        // Allow Enter key to submit
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Enter') handleSignIn();
+        });
     </script>
 </body>
 </html>
