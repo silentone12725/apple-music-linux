@@ -25,9 +25,9 @@ func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:  "Apple Music",
-		Width:  1200,
-		Height: 800,
+		Title:     "Apple Music",
+		Width:     1200,
+		Height:    800,
 		Frameless: false, // Use the standard native OS title bar
 		AssetServer: &assetserver.Options{
 			Assets: assets,
@@ -39,8 +39,15 @@ func main() {
 		OnStartup: func(ctx context.Context) {
 			app.startup(ctx)
 
+			email, password, err := app.LoadAppleIDCredentials()
+			if err != nil {
+				log.Println("[WrapperProc] No credentials found, wrapper uses existing session DB")
+				email = ""
+				password = ""
+			}
+
 			// Start the wrapper child process.
-			if w, err := wrapperproc.StartWrapper(); err != nil {
+			if w, err := wrapperproc.StartWrapper(email, password); err != nil {
 				log.Printf("[WrapperProc] Failed to start wrapper: %v", err)
 			} else {
 				app.wrapper = w
