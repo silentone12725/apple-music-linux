@@ -1,19 +1,31 @@
-# README
+# Apple Music Linux Client
 
-## About
+A native-feeling Linux desktop client for Apple Music built with Go and the [Wails](https://wails.io) framework.
 
-This is the official Wails Vanilla template.
+## Features
 
-You can configure the project by editing `wails.json`. More information about the project settings can be found
-here: https://wails.io/docs/reference/project-config
+- **Frameless Window**: Blends seamlessly into Linux desktop environments using the native WebKit2GTK renderer.
+- **Glassmorphism Support**: GPU hardware acceleration enabled by default for beautiful UI blurring.
+- **Dynamic CSS Injection**: Automatically eradicates "Open in App" upsell banners and buttons from the live Apple Music DOM.
 
-## Live Development
+## Development
 
-To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
-server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
-and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
-to this in your browser, and you can call your Go code from devtools.
+To run the application in live development mode (which provides hot-reloading for both Go and frontend changes):
+
+```bash
+# On Ubuntu 24.04 / Zorin OS 18, you must install the WebKit 4.1 dev libraries:
+# sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential pkg-config
+
+# Run with the webkit2_41 tag
+wails dev -tags webkit2_41
+```
 
 ## Building
 
-To build a redistributable, production mode package, use `wails build`.
+To build a standalone executable for production:
+
+```bash
+wails build -tags webkit2_41
+```
+
+The compiled binary will be placed in `build/bin/`.
