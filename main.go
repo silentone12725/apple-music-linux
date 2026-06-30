@@ -42,15 +42,10 @@ func main() {
 			patchCookieStorage() // MUST be called after GTK/WebKit initialization
 			app.startup(ctx)
 
-			email, password, err := app.LoadAppleIDCredentials()
-			if err != nil {
-				log.Println("[WrapperProc] No credentials found, wrapper uses existing session DB")
-				email = ""
-				password = ""
-			}
-
-			// Start the wrapper child process.
-			if w, err := wrapperproc.StartWrapper(email, password); err != nil {
+			// Start the wrapper child process with stdin left open; the
+			// Settings terminal lets the user complete its interactive
+			// Apple ID login (and any 2FA prompts) at any time.
+			if w, err := wrapperproc.StartWrapper(ctx, ""); err != nil {
 				log.Printf("[WrapperProc] Failed to start wrapper: %v", err)
 			} else {
 				app.wrapper = w
@@ -68,16 +63,14 @@ func main() {
 		},
 		OnDomReady: func(ctx context.Context) {
 			// Navigate to Apple Music as the top-level page so cookies persist.
-			// Ensure we only navigate once, to avoid an infinite reload loop.
-			// After navigation (or if already on Apple Music), show the window.
-			if app.HasAppleIDCredentials() {
-				// Credentials exist → go straight to Apple Music, then show.
-				runtime.WindowExecJS(ctx, `
-					if (!window.location.hostname.includes('apple.com')) {
-						window.location.href = 'https://music.apple.com';
-					}
-				`)
-			}
+			// Login (Apple ID + 2FA) happens through the wrapper's own
+			// interactive terminal, exposed via the Settings panel — this
+			// page goes straight to Apple Music with no gate.
+			runtime.WindowExecJS(ctx, `
+				if (!window.location.hostname.includes('apple.com')) {
+					window.location.href = 'https://music.apple.com';
+				}
+			`)
 			// Delay showing the window slightly so the webview finishes its
 			// first paint before becoming visible — eliminates the resize glitch.
 			go func() {

@@ -11,10 +11,8 @@ import (
 )
 
 const (
-	keyringService      = "apple-music-linux"
-	keyringUserToken    = "media-user-token"
-	keyringUserEmail    = "apple-id-email"
-	keyringUserPassword = "apple-id-password"
+	keyringService   = "apple-music-linux"
+	keyringUserToken = "media-user-token"
 )
 
 // App struct
@@ -41,14 +39,6 @@ func (a *App) startup(ctx context.Context) {
 	} else {
 		log.Printf("[Keyring] Loaded stored media-user-token (%d chars)", len(token))
 	}
-
-	// Check if Apple ID credentials are stored
-	email, _, err := a.LoadAppleIDCredentials()
-	if err != nil {
-		log.Println("[Keyring] No stored Apple ID credentials found:", err)
-	} else {
-		log.Printf("[Keyring] Loaded Apple ID credentials for: %s", email)
-	}
 }
 
 // ── media-user-token (session token from cookie) ──────────────────────────
@@ -72,52 +62,34 @@ func (a *App) LoadCredentials() (string, error) {
 	return keyring.Get(keyringService, keyringUserToken)
 }
 
-// ── Apple ID email & password ──────────────────────────────────────────────
+// ── Wrapper process terminal (Settings panel) ─────────────────────────────
 
-// StoreAppleIDCredentials saves the user's Apple ID email and password
-// to the OS keyring (GNOME Keyring / KWallet), encrypted at rest.
-func (a *App) StoreAppleIDCredentials(email, password string) error {
-	if email == "" || password == "" {
-		return fmt.Errorf("email and password cannot be empty")
+// WrapperSendInput logs the wrapper in. The wrapper binary takes its Apple ID
+// credentials as a "-L email:password" startup flag rather than over stdin,
+// so submitting a line from the Settings terminal stops any running wrapper
+// and relaunches it with that login.
+func (a *App) WrapperSendInput(text string) error {
+	if text == "" {
+		return fmt.Errorf("login is empty (expected email:password)")
 	}
-	if err := keyring.Set(keyringService, keyringUserEmail, email); err != nil {
-		log.Println("[Keyring] Failed to store Apple ID email:", err)
+	if a.wrapper != nil {
+		a.wrapper.Stop()
+	}
+	w, err := wrapperproc.StartWrapper(a.ctx, text)
+	if err != nil {
 		return err
 	}
-	if err := keyring.Set(keyringService, keyringUserPassword, password); err != nil {
-		log.Println("[Keyring] Failed to store Apple ID password:", err)
-		return err
-	}
-	log.Printf("[Keyring] Apple ID credentials stored for: %s", email)
+	a.wrapper = w
 	return nil
 }
 
-// LoadAppleIDCredentials retrieves the Apple ID email and password from the OS keyring.
-// Returns ("", "", error) if credentials have not been stored yet.
-func (a *App) LoadAppleIDCredentials() (string, string, error) {
-	email, err := keyring.Get(keyringService, keyringUserEmail)
-	if err != nil {
-		return "", "", err
+// WrapperLogs returns the buffered wrapper output so the Settings terminal
+// can render history on open; live updates arrive via the "wrapper:log" event.
+func (a *App) WrapperLogs() []string {
+	if a.wrapper == nil {
+		return nil
 	}
-	password, err := keyring.Get(keyringService, keyringUserPassword)
-	if err != nil {
-		return "", "", err
-	}
-	return email, password, nil
-}
-
-// HasAppleIDCredentials returns true if Apple ID credentials are already stored.
-func (a *App) HasAppleIDCredentials() bool {
-	email, _, err := a.LoadAppleIDCredentials()
-	return err == nil && email != ""
-}
-
-// ClearAppleIDCredentials removes stored Apple ID credentials from the keyring.
-func (a *App) ClearAppleIDCredentials() error {
-	_ = keyring.Delete(keyringService, keyringUserEmail)
-	_ = keyring.Delete(keyringService, keyringUserPassword)
-	log.Println("[Keyring] Apple ID credentials cleared.")
-	return nil
+	return a.wrapper.Logs()
 }
 
 // StartStreamPlayback launches apple-music-cli stream playback for a track URL.
