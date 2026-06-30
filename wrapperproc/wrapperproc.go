@@ -1,37 +1,52 @@
 // Package wrapperproc manages the lifecycle of the wrapper child process.
-// It starts the binary, pipes its stdout/stderr to the Go logger, and
-// provides a graceful shutdown via SIGTERM to prevent zombie processes.
+// The wrapper binary takes its Apple ID login as a `-L user:pass` startup
+// flag (it does not read credentials from stdin), so logging in means
+// relaunching it with that flag. This package starts the binary, buffers
+// its combined stdout/stderr for display in the app's Settings terminal,
+// and provides a graceful shutdown via SIGTERM.
 package wrapperproc
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
+	goruntime "runtime"
+	"sync"
 	"syscall"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"apple-music-linux/internal/embedded"
 )
 
+// LogEvent is the Wails event name used to stream wrapper output live to the frontend.
+const LogEvent = "wrapper:log"
+
+const maxLogLines = 1000
+
 // Wrapper holds the running child process handle.
 type Wrapper struct {
+	ctx     context.Context
 	cmd     *exec.Cmd
 	tempDir string
+
+	mu   sync.Mutex
+	logs []string
 }
 
-var instance *Wrapper
-
 // StartWrapper launches the wrapper binary as a background child process.
-// It resolves the binary path relative to the executable's own directory,
-// so it works correctly both in development (wails dev) and production builds.
-func StartWrapper(email, password string) (*Wrapper, error) {
+// login, if non-empty, is passed as "-L <login>" (format "email:password")
+// so the wrapper authenticates with Apple on startup; if empty, the wrapper
+// falls back to any session already persisted in its local account database.
+func StartWrapper(ctx context.Context, login string) (*Wrapper, error) {
 	if len(embedded.WrapperBinary) == 0 {
-		return nil, fmt.Errorf("no wrapper binary available for %s/%s", runtime.GOOS, runtime.GOARCH)
+		return nil, fmt.Errorf("no wrapper binary available for %s/%s", goruntime.GOOS, goruntime.GOARCH)
 	}
 
 	configDir, err := os.UserConfigDir()
@@ -67,8 +82,8 @@ func StartWrapper(email, password string) (*Wrapper, error) {
 	log.Printf("[WrapperProc] Extracted wrapper to: %s", binaryPath)
 
 	args := []string{"-H", "127.0.0.1"}
-	if email != "" && password != "" {
-		args = append(args, "-F")
+	if login != "" {
+		args = append(args, "-L", login)
 	}
 	cmd := exec.Command(binaryPath, args...)
 	cmd.Dir = dataDir
@@ -77,18 +92,12 @@ func StartWrapper(email, password string) (*Wrapper, error) {
 	// SIGTERM does not accidentally propagate to the parent (Wails) process.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// Pass credentials via stdin so they never show up in ps output.
-	if email != "" && password != "" {
-		cmd.Stdin = strings.NewReader(email + ":" + password + "\n")
-	}
-
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = os.RemoveAll(tempDir)
 		return nil, err
 	}
 
-	// Pipe stderr → logger
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		_ = os.RemoveAll(tempDir)
@@ -102,35 +111,31 @@ func StartWrapper(email, password string) (*Wrapper, error) {
 
 	log.Printf("[WrapperProc] Started with PID %d", cmd.Process.Pid)
 
-	// Stream stdout line-by-line into the logger in a goroutine
-	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			log.Printf("[wrapper stdout] %s", scanner.Text())
-		}
-	}()
+	w := &Wrapper{ctx: ctx, cmd: cmd, tempDir: tempDir}
 
-	// Stream stderr line-by-line into the logger in a goroutine
-	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			log.Printf("[wrapper stderr] %s", scanner.Text())
-		}
-	}()
+	go w.streamLog("[wrapper stdout]", stdoutPipe)
+	go w.streamLog("[wrapper stderr]", stderrPipe)
 
-	// Reap the process in the background so it doesn't become a zombie
-	w := &Wrapper{cmd: cmd, tempDir: tempDir}
+	// Reap the process in the background so it doesn't become a zombie.
 	go func() {
 		if err := cmd.Wait(); err != nil {
-			log.Printf("[WrapperProc] Process exited with: %v", err)
+			w.appendLog(fmt.Sprintf("[WrapperProc] Process exited with: %v", err))
 		} else {
-			log.Println("[WrapperProc] Process exited cleanly.")
+			w.appendLog("[WrapperProc] Process exited cleanly.")
 		}
 		w.cleanup()
 	}()
 
-	instance = w
 	return w, nil
+}
+
+// Logs returns a snapshot of the buffered wrapper output, oldest first.
+func (w *Wrapper) Logs() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]string, len(w.logs))
+	copy(out, w.logs)
+	return out
 }
 
 // Stop sends SIGTERM to the wrapper process for a graceful shutdown.
@@ -148,6 +153,29 @@ func (w *Wrapper) Stop() {
 	w.cleanup()
 }
 
+func (w *Wrapper) streamLog(prefix string, r io.ReadCloser) {
+	defer r.Close()
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		w.appendLog(fmt.Sprintf("%s %s", prefix, scanner.Text()))
+	}
+}
+
+func (w *Wrapper) appendLog(line string) {
+	log.Print(line)
+
+	w.mu.Lock()
+	w.logs = append(w.logs, line)
+	if len(w.logs) > maxLogLines {
+		w.logs = w.logs[len(w.logs)-maxLogLines:]
+	}
+	w.mu.Unlock()
+
+	if w.ctx != nil {
+		runtime.EventsEmit(w.ctx, LogEvent, line)
+	}
+}
+
 func (w *Wrapper) cleanup() {
 	if w.tempDir == "" {
 		return
@@ -159,7 +187,7 @@ func (w *Wrapper) cleanup() {
 
 func ensureRootFS(dataDir string) error {
 	if embedded.RootFSPrefix == "" {
-		return fmt.Errorf("rootfs not embedded for %s/%s", runtime.GOOS, runtime.GOARCH)
+		return fmt.Errorf("rootfs not embedded for %s/%s", goruntime.GOOS, goruntime.GOARCH)
 	}
 
 	destRoot := filepath.Join(dataDir, "rootfs")
