@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"log"
+	"os"
 	"time"
 
 	"github.com/wailsapp/wails/v2"
@@ -22,6 +23,14 @@ var assets embed.FS
 var preloadJS string
 
 func main() {
+	// Force enable hardware acceleration for WebKitGTK (required for CSS blur)
+	os.Setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "0")
+	// Disable DMA-BUF renderer to fix "Failed to create GBM buffer" error
+	// often seen on proprietary drivers (like NVIDIA) or XWayland with WebKitGTK
+	os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+	// Try without forcing X11 first, or keep X11. Let's keep X11 to be safe against Wayland protocol errors.
+	os.Setenv("GDK_BACKEND", "x11")
+
 	app := NewApp()
 
 	err := wails.Run(&options.App{
@@ -92,7 +101,7 @@ func main() {
 		},
 		Linux: &linux.Options{
 			// Explicitly enable hardware acceleration for CSS backdrop-filter (glassmorphism)
-			WebviewGpuPolicy:    linux.WebviewGpuPolicyOnDemand,
+			WebviewGpuPolicy:    linux.WebviewGpuPolicyAlways,
 			ProgramName:         "apple-music-linux",
 		},
 	})
