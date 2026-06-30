@@ -29,6 +29,8 @@ func main() {
 		Width:     1200,
 		Height:    800,
 		Frameless: false, // Use the standard native OS title bar
+		StartHidden:      true, // Stay invisible until the page has settled (no glitchy resize flash)
+		BackgroundColour: options.NewRGBA(31, 31, 31, 255), // #1f1f1f
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
@@ -37,6 +39,7 @@ func main() {
 		// otherwise Part 4 (Go <-> JS communication) won't work!
 		BindingsAllowedOrigins: "https://music.apple.com",
 		OnStartup: func(ctx context.Context) {
+			patchCookieStorage() // MUST be called after GTK/WebKit initialization
 			app.startup(ctx)
 
 			email, password, err := app.LoadAppleIDCredentials()
@@ -63,10 +66,32 @@ func main() {
 				}
 			}()
 		},
+		OnDomReady: func(ctx context.Context) {
+			// Navigate to Apple Music as the top-level page so cookies persist.
+			// Ensure we only navigate once, to avoid an infinite reload loop.
+			// After navigation (or if already on Apple Music), show the window.
+			if app.HasAppleIDCredentials() {
+				// Credentials exist → go straight to Apple Music, then show.
+				runtime.WindowExecJS(ctx, `
+					if (!window.location.hostname.includes('apple.com')) {
+						window.location.href = 'https://music.apple.com';
+					}
+				`)
+			}
+			// Delay showing the window slightly so the webview finishes its
+			// first paint before becoming visible — eliminates the resize glitch.
+			go func() {
+				time.Sleep(800 * time.Millisecond)
+				runtime.WindowShow(ctx)
+			}()
+		},
 		OnShutdown: func(ctx context.Context) {
 			// Gracefully terminate the wrapper process on app exit.
 			if app.wrapper != nil {
 				app.wrapper.Stop()
+			}
+			if err := app.StopStreamPlayback(); err != nil {
+				log.Printf("[Player] Failed to stop playback: %v", err)
 			}
 		},
 		Bind: []interface{}{
@@ -74,7 +99,8 @@ func main() {
 		},
 		Linux: &linux.Options{
 			// Explicitly enable hardware acceleration for CSS backdrop-filter (glassmorphism)
-			WebviewGpuPolicy: linux.WebviewGpuPolicyAlways,
+			WebviewGpuPolicy:    linux.WebviewGpuPolicyOnDemand,
+			ProgramName:         "apple-music-linux",
 		},
 	})
 

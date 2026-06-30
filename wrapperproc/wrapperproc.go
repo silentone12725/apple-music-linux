@@ -6,6 +6,7 @@ package wrapperproc
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -43,6 +44,9 @@ func StartWrapper(email, password string) (*Wrapper, error) {
 	}
 	if err := os.Chmod(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to secure wrapper data dir: %w", err)
+	}
+	if err := ensureRootFS(dataDir); err != nil {
+		return nil, err
 	}
 
 	tempDir, err := os.MkdirTemp("", "aml-wrapper-*")
@@ -151,4 +155,59 @@ func (w *Wrapper) cleanup() {
 	log.Printf("[WrapperProc] Cleaning up temp dir: %s", w.tempDir)
 	_ = os.RemoveAll(w.tempDir)
 	w.tempDir = ""
+}
+
+func ensureRootFS(dataDir string) error {
+	if embedded.RootFSPrefix == "" {
+		return fmt.Errorf("rootfs not embedded for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	destRoot := filepath.Join(dataDir, "rootfs")
+	mainPath := filepath.Join(destRoot, "system", "bin", "main")
+	if _, err := os.Stat(mainPath); err == nil {
+		return nil
+	}
+
+	if err := fs.WalkDir(embedded.RootFS, embedded.RootFSPrefix, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(embedded.RootFSPrefix, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		target := filepath.Join(destRoot, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		data, err := fs.ReadFile(embedded.RootFS, path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, data, 0644); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to extract rootfs: %w", err)
+	}
+
+	baseDir := filepath.Join(destRoot, "data", "data", "com.apple.android.music", "files")
+	if err := os.MkdirAll(baseDir, 0777); err != nil {
+		return fmt.Errorf("failed to create base dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(baseDir, "mpl_db"), 0777); err != nil {
+		return fmt.Errorf("failed to create mpl_db dir: %w", err)
+	}
+
+	_ = os.Chmod(filepath.Join(destRoot, "system", "bin", "linker64"), 0755)
+	_ = os.Chmod(filepath.Join(destRoot, "system", "bin", "main"), 0755)
+
+	return nil
 }

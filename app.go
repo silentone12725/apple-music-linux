@@ -5,26 +5,28 @@ import (
 	"fmt"
 	"log"
 
+	"apple-music-linux/cliplayer"
 	"apple-music-linux/wrapperproc"
 	"github.com/zalando/go-keyring"
 )
 
 const (
-	keyringService       = "apple-music-linux"
-	keyringUserToken     = "media-user-token"
-	keyringUserEmail     = "apple-id-email"
-	keyringUserPassword  = "apple-id-password"
+	keyringService      = "apple-music-linux"
+	keyringUserToken    = "media-user-token"
+	keyringUserEmail    = "apple-id-email"
+	keyringUserPassword = "apple-id-password"
 )
 
 // App struct
 type App struct {
 	ctx     context.Context
 	wrapper *wrapperproc.Wrapper
+	player  *cliplayer.Player
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{player: cliplayer.New()}
 }
 
 // startup is called when the app starts. The context is saved
@@ -116,6 +118,29 @@ func (a *App) ClearAppleIDCredentials() error {
 	_ = keyring.Delete(keyringService, keyringUserPassword)
 	log.Println("[Keyring] Apple ID credentials cleared.")
 	return nil
+}
+
+// StartStreamPlayback launches apple-music-cli stream playback for a track URL.
+func (a *App) StartStreamPlayback(url string) error {
+	if url == "" {
+		return fmt.Errorf("track url is empty")
+	}
+	if a.player == nil {
+		return fmt.Errorf("player not initialized")
+	}
+	mediaToken, err := a.LoadCredentials()
+	if err != nil {
+		return fmt.Errorf("missing media-user-token: %w", err)
+	}
+	return a.player.StartStream(url, mediaToken)
+}
+
+// StopStreamPlayback stops any active apple-music-cli playback.
+func (a *App) StopStreamPlayback() error {
+	if a.player == nil {
+		return nil
+	}
+	return a.player.Stop()
 }
 
 // Greet returns a greeting for the given name

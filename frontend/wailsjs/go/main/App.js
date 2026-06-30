@@ -22,6 +22,14 @@ export function LoadCredentials() {
   return window['go']['main']['App']['LoadCredentials']();
 }
 
+export function StartStreamPlayback(arg1) {
+  return window['go']['main']['App']['StartStreamPlayback'](arg1);
+}
+
+export function StopStreamPlayback() {
+  return window['go']['main']['App']['StopStreamPlayback']();
+}
+
 export function StoreAppleIDCredentials(arg1, arg2) {
   return window['go']['main']['App']['StoreAppleIDCredentials'](arg1, arg2);
 }

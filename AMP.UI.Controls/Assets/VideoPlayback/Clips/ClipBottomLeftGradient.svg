@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="auto" height="auto" preserveAspectRatio="xMinYMin" viewBox="0 0 400 213" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>_Assets/macOS/Content Gradients/Now Playing/Clips Playlist - Bottom Left Gradient</title>
+    <defs>
+        <radialGradient cx="0%" cy="100%" fx="0%" fy="100%" r="73.5290377%" gradientTransform="translate(0, 1), scale(0.4613, 1), scale(1, 0.4396), translate(-0, -1)" id="radialGradient-1">
+            <stop stop-color="#000000" stop-opacity="0.6" offset="0%"></stop>
+            <stop stop-color="#000000" stop-opacity="0.4" offset="24.0805022%"></stop>
+            <stop stop-color="#000000" stop-opacity="0.3" offset="58.2262432%"></stop>
+            <stop stop-color="#000000" stop-opacity="0.15" offset="86.8414574%"></stop>
+            <stop stop-color="#000000" stop-opacity="0" offset="99.9699519%"></stop>
+        </radialGradient>
+    </defs>
+    <g id="_Assets/macOS/Content-Gradients/Now-Playing/Clips-Playlist---Bottom-Left-Gradient" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <rect id="Bot-Overlay" fill="url(#radialGradient-1)" x="0" y="28" width="400" height="184.507042"></rect>
+    </g>
+</svg>

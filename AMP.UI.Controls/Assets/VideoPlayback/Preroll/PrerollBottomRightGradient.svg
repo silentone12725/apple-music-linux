@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="auto" height="auto" preserveAspectRatio="xMinYMin" viewBox="0 0 909 420" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>_Assets/macOS/Content Gradients/Now Playing/Pre-Roll - Bottom Right Gradient</title>
+    <defs>
+        <radialGradient cx="100%" cy="100%" fx="100%" fy="100%" r="95.966941%" gradientTransform="translate(1.000000,1.000000),scale(0.462085,1.000000),translate(-1.000000,-1.000000)" id="radialGradient-1">
+            <stop stop-color="#000000" stop-opacity="0.5" offset="0%"></stop>
+            <stop stop-color="#000000" stop-opacity="0.4" offset="40.4447115%"></stop>
+            <stop stop-color="#000000" stop-opacity="0" offset="99.9699519%"></stop>
+        </radialGradient>
+    </defs>
+    <g id="_Assets/macOS/Content-Gradients/Now-Playing/Pre-Roll---Bottom-Right-Gradient" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <rect id="Bot-Overlay" fill="url(#radialGradient-1)" x="0.0769230769" y="0" width="908.923077" height="420"></rect>
+    </g>
+</svg>

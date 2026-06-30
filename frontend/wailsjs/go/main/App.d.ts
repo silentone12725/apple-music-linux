@@ -11,6 +11,10 @@ export function LoadAppleIDCredentials():Promise<string>;
 
 export function LoadCredentials():Promise<string>;
 
+export function StartStreamPlayback(arg1:string):Promise<void>;
+
+export function StopStreamPlayback():Promise<void>;
+
 export function StoreAppleIDCredentials(arg1:string,arg2:string):Promise<void>;
 
 export function StoreCredentials(arg1:string):Promise<void>;

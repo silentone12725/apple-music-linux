@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 102 72" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>assets/dolby</title>
+    <g id="assets/dolby" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <path d="M0,0 L10.5754174,0 C30.3221712,0 46.4242899,16.17 46.4242899,36 C46.4242899,55.83 30.3221712,72 10.5754174,72 L0,72 L0,0 Z M102,72 L91.4245826,72 C71.6778288,72 55.5757101,55.83 55.5757101,36 C55.5757101,16.17 71.6778288,0 91.4245826,0 L102,0 L102,72 Z" id="dolby" fill="#000000" fill-rule="nonzero"></path>
+    </g>
+</svg>
