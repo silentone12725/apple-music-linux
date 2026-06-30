@@ -308,3 +308,151 @@
 
     window.addEventListener('beforeunload', () => clearInterval(poll));
 })();
+
+// ─── Settings: collapsible wrapper terminal ────────────────────────────────
+// The wrapper process's Apple ID login is a startup flag, not a stdin
+// prompt, so this panel doubles as the login form: typing "email:password"
+// and pressing Enter relaunches the wrapper with that login. Its log output
+// streams in here too, replacing the old custom login page. Modeled after
+// pear-desktop's collapsible menu bar: a slim tab that drops an overlay down
+// over the page only while open.
+(function setupWrapperSettings() {
+    if (!window.location.hostname.includes('apple.com')) return;
+    if (window.__wailsWrapperSettingsActive) return;
+    window.__wailsWrapperSettingsActive = true;
+
+    const withBindings = () => window.go && window.go.main && window.go.main.App;
+
+    const bar = document.createElement('button');
+    bar.id = 'aml-settings-bar';
+    bar.textContent = '⚙ Wrapper';
+    bar.style.cssText = [
+        'position: fixed', 'top: 0', 'right: 24px', 'z-index: 2147483647',
+        'padding: 6px 14px', 'border: 1px solid rgba(255,255,255,0.1)', 'border-top: none',
+        'border-radius: 0 0 10px 10px', 'background: rgba(20,20,22,0.92)',
+        'color: rgba(255,255,255,0.65)', 'font: 600 11px -apple-system, sans-serif',
+        'letter-spacing: 0.02em', 'cursor: pointer', 'backdrop-filter: blur(8px)',
+        'transition: color 0.15s, background 0.15s'
+    ].join(';');
+
+    const panel = document.createElement('div');
+    panel.id = 'aml-settings-panel';
+    panel.style.cssText = [
+        'position: fixed', 'top: 28px', 'right: 24px', 'z-index: 2147483646',
+        'width: 440px', 'max-height: 0', 'opacity: 0', 'pointer-events: none',
+        'display: flex', 'flex-direction: column', 'overflow: hidden',
+        'background: rgba(18,18,20,0.97)', 'border: 1px solid rgba(255,255,255,0.1)',
+        'border-radius: 0 0 12px 12px', 'box-shadow: 0 16px 48px rgba(0,0,0,0.55)',
+        'font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace',
+        'transition: max-height 0.22s ease, opacity 0.18s ease'
+    ].join(';');
+
+    const logEl = document.createElement('div');
+    logEl.id = 'aml-settings-log';
+    logEl.style.cssText = [
+        'flex: 1', 'min-height: 220px', 'max-height: 280px', 'overflow-y: auto',
+        'padding: 10px 12px', 'color: rgba(255,255,255,0.8)',
+        'white-space: pre-wrap', 'word-break: break-all'
+    ].join(';');
+
+    const inputRow = document.createElement('div');
+    inputRow.style.cssText = 'display:flex;border-top:1px solid rgba(255,255,255,0.08);';
+
+    const input = document.createElement('input');
+    input.placeholder = 'Apple ID:Password — press Enter to log in';
+    input.style.cssText = [
+        'flex: 1', 'padding: 9px 12px', 'background: transparent', 'border: none',
+        'outline: none', 'color: #fff', 'font: inherit'
+    ].join(';');
+
+    const sendBtn = document.createElement('button');
+    sendBtn.textContent = 'Send';
+    sendBtn.style.cssText = [
+        'padding: 9px 14px', 'background: transparent', 'border: none',
+        'color: #fc3c44', 'cursor: pointer', 'font: 600 12px inherit'
+    ].join(';');
+
+    inputRow.appendChild(input);
+    inputRow.appendChild(sendBtn);
+    panel.appendChild(logEl);
+    panel.appendChild(inputRow);
+
+    let renderedCount = 0;
+    const renderLines = (lines) => {
+        if (!lines || lines.length <= renderedCount) return;
+        const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 4;
+        const fresh = lines.slice(renderedCount);
+        logEl.textContent += (logEl.textContent ? '\n' : '') + fresh.join('\n');
+        renderedCount = lines.length;
+        if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+    };
+    const sendInput = async () => {
+        const text = input.value;
+        if (!text || !withBindings()) return;
+        input.value = '';
+        try {
+            await window.go.main.App.WrapperSendInput(text);
+        } catch (err) {
+            logEl.textContent += (logEl.textContent ? '\n' : '') + '[settings] failed to send input: ' + err;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+    };
+
+    sendBtn.addEventListener('click', sendInput);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendInput();
+    });
+
+    let open = false;
+    let pollHandle = null;
+    const poll = async () => {
+        if (!withBindings()) return;
+        try {
+            renderLines(await window.go.main.App.WrapperLogs());
+        } catch (e) {
+            // wrapper not running yet
+        }
+    };
+
+    const setOpen = (next) => {
+        open = next;
+        panel.style.maxHeight = open ? '360px' : '0';
+        panel.style.opacity = open ? '1' : '0';
+        panel.style.pointerEvents = open ? 'auto' : 'none';
+        if (open) {
+            poll();
+            if (!pollHandle) pollHandle = setInterval(poll, 1000);
+        } else if (pollHandle) {
+            clearInterval(pollHandle);
+            pollHandle = null;
+        }
+    };
+
+    bar.addEventListener('click', () => setOpen(!open));
+
+    const mount = () => {
+        document.body.appendChild(bar);
+        document.body.appendChild(panel);
+    };
+    if (document.body) {
+        mount();
+    } else {
+        document.addEventListener('DOMContentLoaded', mount);
+    }
+
+    // Best-effort live push in addition to the polling above.
+    const subscribeToLogs = () => {
+        if (!window.runtime || !window.runtime.EventsOnMultiple) return false;
+        window.runtime.EventsOnMultiple('wrapper:log', (line) => {
+            renderedCount++;
+            logEl.textContent += (logEl.textContent ? '\n' : '') + line;
+            logEl.scrollTop = logEl.scrollHeight;
+        }, -1);
+        return true;
+    };
+    if (!subscribeToLogs()) {
+        const retry = setInterval(() => {
+            if (subscribeToLogs()) clearInterval(retry);
+        }, 500);
+    }
+})();
