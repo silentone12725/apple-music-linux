@@ -50,9 +50,16 @@ func (p *Player) StartStream(url, mediaUserToken string) error {
 		return err
 	}
 
-	cmd := exec.Command(cliPath, "--stream", url)
+	cmd := exec.Command(cliPath, "--stream", "--song", url)
 	cmd.Dir = configDir
+	// Own process group so the whole group (CLI + mpv child) can be killed together.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Detach stdin so survey/TUI in the CLI doesn't block waiting for a terminal.
+	devNull, err := os.Open(os.DevNull)
+	if err == nil {
+		cmd.Stdin = devNull
+		defer devNull.Close()
+	}
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -102,9 +109,12 @@ func (p *Player) stopLocked() error {
 		return nil
 	}
 	log.Println("[CLI] Stopping playback...")
-	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		log.Printf("[CLI] SIGTERM failed (%v), sending SIGKILL", err)
-		_ = p.cmd.Process.Signal(syscall.SIGKILL)
+	// Kill the entire process group (negative PID) so mpv, a child of the CLI
+	// subprocess, is also terminated and doesn't continue as an orphan.
+	pgid := p.cmd.Process.Pid
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		log.Printf("[CLI] SIGTERM to group failed (%v), sending SIGKILL", err)
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	}
 	p.cmd = nil
 	p.currentURL = ""
@@ -200,5 +210,19 @@ aac-type: aac-lc
 alac-max: 192000
 atmos-max: 2768
 limit-max: 200
+alac-stream-folder: "AM-Stream-ALAC"
+aac-stream-folder: "AM-Stream-AAC"
+atmos-stream-folder: "AM-Stream-Atmos"
+stream-cache-size: 500
+alac-save-folder: "AM-DL downloads"
+aac-save-folder: "AM-DL-AAC downloads"
+atmos-save-folder: "AM-DL-Atmos downloads"
+mv-save-folder: "AM-DL-MV downloads"
+album-folder-format: "{AlbumName}"
+artist-folder-format: "{ArtistName}"
+song-file-format: "{SongNumer}. {SongName}"
+playlist-folder-format: "{PlaylistName}"
+embed-cover: false
+embed-lrc: false
 `, mediaUserToken)
 }
