@@ -7,6 +7,7 @@ A native-feeling Linux desktop client for Apple Music built with Go and the [Wai
 - **Frameless Window**: Blends seamlessly into Linux desktop environments using the native WebKit2GTK renderer.
 - **Glassmorphism Support**: GPU hardware acceleration enabled by default for beautiful UI blurring.
 - **Dynamic CSS Injection**: Automatically eradicates "Open in App" upsell banners and buttons from the live Apple Music DOM.
+- **CLI Hardware Acceleration**: The underlying CLI (`apple-music-cli`) utilizes `ffmpeg` and `mpv` for media processing and playback. Hardware decoding (`-hwaccel auto` and `--hwdec=auto`) is strictly enabled in the CLI to offload processing to the GPU. This minimizes CPU usage, prevents stuttering during high-res lossless streaming, and reduces battery drain.
 
 ## Development
 
