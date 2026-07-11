@@ -143,3 +143,10 @@
 /internal/embedded/rootfs_arm64/system/lib64/libstoreservicescore.so filter=lfs diff=lfs merge=lfs -text
 /internal/embedded/rootfs_arm64/system/lib64/libxml2.so filter=lfs diff=lfs merge=lfs -text
 /test_bin filter=lfs diff=lfs merge=lfs -text
+/electron/dist/chrome_crashpad_handler filter=lfs diff=lfs merge=lfs -text
+/electron/dist/electron filter=lfs diff=lfs merge=lfs -text
+/electron/dist/icudtl.dat filter=lfs diff=lfs merge=lfs -text
+/electron/dist/libGLESv2.so filter=lfs diff=lfs merge=lfs -text
+/electron/dist/libffmpeg.so filter=lfs diff=lfs merge=lfs -text
+/electron/dist/libvulkan.so.1 filter=lfs diff=lfs merge=lfs -text
+/electron/dist/resources.pak filter=lfs diff=lfs merge=lfs -text
