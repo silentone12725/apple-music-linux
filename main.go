@@ -23,13 +23,14 @@ var assets embed.FS
 var preloadJS string
 
 func main() {
-	// Force enable hardware acceleration for WebKitGTK (required for CSS blur)
-	os.Setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "0")
-	// Disable DMA-BUF renderer to fix "Failed to create GBM buffer" error
-	// often seen on proprietary drivers (like NVIDIA) or XWayland with WebKitGTK
-	os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
-	// Try without forcing X11 first, or keep X11. Let's keep X11 to be safe against Wayland protocol errors.
-	os.Setenv("GDK_BACKEND", "x11")
+	// Disable NVIDIA explicit sync on the Wayland socket — fixes the "Error 71
+	// (Protocol error) dispatching to Wayland display" crash that appears on
+	// NVIDIA proprietary + WebKitGTK without sacrificing the DMA-BUF rendering
+	// path (unlike WEBKIT_DISABLE_DMABUF_RENDERER which falls back to SHM).
+	// Confirmed fix per NVIDIA EGL-Wayland 1.15 and Tauri/WebKitGTK issue trackers.
+	os.Setenv("__NV_DISABLE_EXPLICIT_SYNC", "1")
+	// Keep DMA-BUF compositing enabled for full hardware-accelerated blur/rendering.
+	// (No WEBKIT_DISABLE_DMABUF_RENDERER — that would drop to the slow SHM path.)
 
 	app := NewApp()
 
@@ -38,7 +39,7 @@ func main() {
 		Width:     1200,
 		Height:    800,
 		Frameless: false, // Use the standard native OS title bar
-		StartHidden:      true, // Stay invisible until the page has settled (no glitchy resize flash)
+		StartHidden:      false, // Set to false to avoid GBM buffer allocation issues on X11
 		BackgroundColour: options.NewRGBA(31, 31, 31, 255), // #1f1f1f
 		AssetServer: &assetserver.Options{
 			Assets: assets,
@@ -65,7 +66,13 @@ func main() {
 			// Wails' normal asset injection is bypassed.
 			go func() {
 				for {
-					time.Sleep(500 * time.Millisecond)
+					// 3s: each IIFE guards itself with a window.__wailsXxxActive
+					// flag so re-evaluation is nearly free after first run — but
+					// 500ms was still parsing/executing this 460-line script on the
+					// WebKit main thread 2×/second indefinitely, saturating it and
+					// causing click events to drop after a few minutes while the
+					// compositor-thread-driven scroll remained unaffected.
+					time.Sleep(3 * time.Second)
 					runtime.WindowExecJS(ctx, preloadJS)
 				}
 			}()
