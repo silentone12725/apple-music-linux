@@ -98,7 +98,33 @@
         injectLosslessIcon();
     }
 
-    const observer = new MutationObserver(() => injectLosslessIcon());
+    // Debounced MutationObserver: coalesce rapid SPA mutations into a single
+    // check rather than firing querySelectorAll on every individual mutation.
+    // Disconnect once the icon is successfully placed; reconnect only if it
+    // disappears (e.g. after an SPA navigation replaces the playback bar).
+    let debounceTimer = null;
+    const observer = new MutationObserver(() => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            const iconAlreadyPresent = !!document.getElementById(LOSSLESS_ID);
+            if (iconAlreadyPresent) return;
+            observer.disconnect();
+            injectLosslessIcon();
+            // If icon was successfully placed, watch only for its removal.
+            const icon = document.getElementById(LOSSLESS_ID);
+            if (icon) {
+                new MutationObserver((_, obs) => {
+                    if (!document.getElementById(LOSSLESS_ID)) {
+                        obs.disconnect();
+                        startObserver();
+                    }
+                }).observe(document.body, { childList: true, subtree: true });
+            } else {
+                // Icon anchor not in DOM yet — keep watching broadly but debounced.
+                startObserver();
+            }
+        }, 80);
+    });
     const startObserver = () => {
         observer.observe(document.body, { childList: true, subtree: true });
         injectLosslessIcon();
@@ -206,8 +232,6 @@
     };
 
     const isSongKind = (kind) => kind === 'song' || kind === 'songs';
-    const isVideoKind = (kind) => kind.includes('music-video') || kind.includes('musicvideo');
-    const isRadioKind = (kind) => kind.includes('radio') || kind.includes('station');
 
     const setWebVolume = (music, value) => {
         try {
@@ -269,7 +293,12 @@
         const trackId = now.id || (now.attributes.playParams && now.attributes.playParams.id) || '';
         if (!trackId || trackId === lastTrackId) return;
 
-        const trackUrl = now.attributes.url || '';
+        // attributes.url is the canonical Apple Music song URL. When absent
+        // (radio, curated streams, library-only items), build a /song/ URL from
+        // the catalog ID so the CLI's ripSong path handles single-song lookup.
+        const storefront = (music.storefrontId || 'us').toLowerCase().slice(0, 2);
+        const trackUrl = now.attributes.url ||
+            (trackId ? `https://music.apple.com/${storefront}/song/${trackId}` : '');
         if (!trackUrl) return;
 
         hijackInFlight = true;
@@ -451,8 +480,9 @@
         return true;
     };
     if (!subscribeToLogs()) {
+        let attempts = 0;
         const retry = setInterval(() => {
-            if (subscribeToLogs()) clearInterval(retry);
+            if (subscribeToLogs() || ++attempts > 60) clearInterval(retry);
         }, 500);
     }
 })();
