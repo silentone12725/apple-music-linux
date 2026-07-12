@@ -2,6 +2,10 @@ import * as electronMain from 'electron/main';
 const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, protocol, net } = electronMain;
 import { spawn } from 'child_process';
 
+// Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
+process.stdout.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
+process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
+
 // Register aml-engine:// scheme before app is ready.
 // This proxies http://127.0.0.1:20025 through a privileged Electron protocol
 // so the renderer can reach the engine without hitting Chromium's Private
@@ -12,7 +16,7 @@ protocol.registerSchemesAsPrivileged([{
         standard: true,
         secure: true,
         supportFetchAPI: true,
-        corsEnabled: false,
+        corsEnabled: true,
         bypassCSP: true,
         stream: true,
     },
@@ -550,13 +554,18 @@ function createWindow() {
         }
 
         if (cacheCode) {
-            await win.webContents.executeJavaScript(cacheCode)
-                .catch(e => console.error('[AML] smart-cache bundle error:', e));
+            // Wrap in try-catch so the script always evaluates to undefined.
+            // Without it, Electron 38's executeJavaScript spuriously rejects when
+            // the last expression is a class-instance assignment.
+            await win.webContents.executeJavaScript(
+                `try{${cacheCode}}catch(e){console.error('[AML cache runtime]',e.name,e.message,e.stack);}`
+            ).catch(e => console.error('[AML] smart-cache bundle error:', e));
         }
 
         if (engineCode) {
-            await win.webContents.executeJavaScript(engineCode)
-                .catch(e => console.error('[AML] engine bundle error:', e));
+            await win.webContents.executeJavaScript(
+                `try{${engineCode}}catch(e){console.error('[AML engine runtime]',e.name,e.message,e.stack);}`
+            ).catch(e => console.error('[AML] engine bundle error:', e));
         }
 
         await win.webContents.executeJavaScript(bundleCode)
@@ -1039,14 +1048,25 @@ app.whenReady().then(() => {
         const url = details.url || '';
 
         if (/mzstatic\.com/i.test(url)) {
-            // Album art, artist photos, animated artwork — content-addressed.
-            // immutable tells Chromium to never revalidate during max-age.
-            h['cache-control'] = ['public, max-age=604800, immutable'];
-            delete h['Cache-Control'];
-            delete h['pragma'];
-            delete h['Pragma'];
-            delete h['expires'];
-            delete h['Expires'];
+            // Album art, artist photos — all URLs are content-addressed (hash in path).
+            // Only extend the cache if Apple's own max-age is shorter than our target.
+            // Never shorten a good value (album art already ships with ~187-day max-age).
+            const MIN_GOOD = 7 * 24 * 3600; // 7 days in seconds
+            const rawCC = (h['cache-control'] || h['Cache-Control'] || [''])[0];
+            const m = rawCC.match(/max-age=(\d+)/i);
+            const currentMaxAge = m ? parseInt(m[1], 10) : 0;
+
+            if (currentMaxAge < MIN_GOOD) {
+                // Extend: replace the short/missing directive.
+                // `immutable` is safe because URLs are content-addressed.
+                h['cache-control'] = [`public, max-age=${MIN_GOOD}, immutable`];
+                delete h['Cache-Control'];
+                delete h['pragma'];
+                delete h['Pragma'];
+                delete h['expires'];
+                delete h['Expires'];
+            }
+            // If currentMaxAge >= MIN_GOOD, leave Apple's headers untouched.
         } else if (/music\.apple\.com/i.test(url) &&
                    /\.(js|mjs|css|woff2?|ttf|otf|eot|svg|png|jpg|jpeg|webp|avif|gif)(\?|$)/i.test(url)) {
             // Fingerprinted static assets — safe to cache for 24 h.
@@ -1064,33 +1084,61 @@ app.whenReady().then(() => {
     });
 
     // ── aml-engine:// protocol — proxies to the local engine API ─────────────
-    // MUST be registered on the session, not the global protocol object.
-    // The global protocol.handle only covers the DEFAULT session; requests from
-    // the persist:apple-music partition go through s.protocol instead.
-    s.protocol.handle('aml-engine', async (request) => {
+    // Protocol handlers are per-session. The global protocol.handle() only covers
+    // the default session; BrowserWindows on a named partition (persist:apple-music)
+    // must register on that session explicitly.
+    const amlEngineHandler = async (request) => {
+        // CORS preflight: browser sends OPTIONS before non-simple requests.
+        if (request.method === 'OPTIONS') {
+            return new Response(null, {
+                status: 204,
+                headers: {
+                    'Access-Control-Allow-Origin':  '*',
+                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control, Last-Event-ID',
+                    'Access-Control-Max-Age':       '86400',
+                },
+            });
+        }
+
         try {
-            // URL is aml-engine://host/path?query. With standard:true, the URL
-            // is parsed normally: host is the first path component (e.g. "api"),
-            // pathname is the rest. Reconstruct the full engine path from both.
+            // URL is aml-engine://host/path?query. With standard:true the URL is
+            // parsed normally: host = first path component (e.g. "api"),
+            // pathname = the rest. Reconstruct the full engine path from both.
             const parsed = new URL(request.url);
             const engineUrl = `http://127.0.0.1:20025/${parsed.host}${parsed.pathname}${parsed.search}`;
             console.log(`[AML Protocol] ${request.method} ${engineUrl.replace('http://127.0.0.1:20025', '')}`);
             const body = ['GET', 'HEAD'].includes(request.method)
                 ? undefined
                 : await request.arrayBuffer();
-            return await net.fetch(engineUrl, {
+            const upstream = await net.fetch(engineUrl, {
                 method:  request.method,
                 headers: Object.fromEntries(request.headers),
                 body,
+            });
+            // Inject CORS header so the renderer (https://music.apple.com) can
+            // read the response — required when corsEnabled:true on the scheme.
+            const headers = new Headers(upstream.headers);
+            headers.set('Access-Control-Allow-Origin', '*');
+            return new Response(upstream.body, {
+                status:     upstream.status,
+                statusText: upstream.statusText,
+                headers,
             });
         } catch (e) {
             console.error(`[AML Protocol] ERROR: ${e.message}`);
             return new Response(JSON.stringify({ error: e.message }), {
                 status:  502,
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type':                'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                },
             });
         }
-    });
+    };
+
+    protocol.handle('aml-engine', amlEngineHandler);
+    s.protocol.handle('aml-engine', amlEngineHandler);
 
     buildAppMenu();
     createWindow();
