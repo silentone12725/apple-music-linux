@@ -1,0 +1,24 @@
+# media_cbcs_alac.m3u8
+# Synthetic ALAC CBCS byterange playlist matching the real Apple Music format.
+# Key rotation: segment 0 uses prefetch URI P000000000/s1/e1,
+# segment 1 uses content URI p1238037727/c6, segments 2-13 inherit (Key=nil).
+# All segments are byteranges of one fMP4 file.
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:15
+#EXT-X-MAP:URI="track_m.mp4",BYTERANGE="3872@0"
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://itunes.apple.com/P000000000/s1/e1",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1"
+#EXTINF:14.951836735,
+#EXT-X-BYTERANGE:2432024@3872
+track_m.mp4
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://itunes.apple.com/p1238037727/c6",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1"
+#EXTINF:14.951836735,
+#EXT-X-BYTERANGE:2341580@2435896
+track_m.mp4
+#EXTINF:14.951836735,
+#EXT-X-BYTERANGE:2298792@4777476
+track_m.mp4
+#EXTINF:14.951836735,
+#EXT-X-BYTERANGE:2297048@7076268
+track_m.mp4
+#EXT-X-ENDLIST

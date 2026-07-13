@@ -1,0 +1,17 @@
+# media_cbcs_mixed_keys.m3u8
+# Playlist with multiple EXT-X-KEY formats: streamingkeydelivery AND identity.
+# filterStreamingKeyDelivery must strip the identity key line.
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:15
+#EXT-X-MAP:URI="track_m.mp4",BYTERANGE="3872@0"
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="https://play.itunes.apple.com/identityKeyRequest/abc",KEYFORMAT="identity",IV=0xdeadbeef00000000deadbeef00000000
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://itunes.apple.com/P000000000/s1/e1",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1"
+#EXTINF:14.951836735,
+#EXT-X-BYTERANGE:2432024@3872
+track_m.mp4
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://itunes.apple.com/p1238037727/c6",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1"
+#EXTINF:14.951836735,
+#EXT-X-BYTERANGE:2341580@2435896
+track_m.mp4
+#EXT-X-ENDLIST

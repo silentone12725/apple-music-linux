@@ -1,0 +1,18 @@
+# media_encrypted.m3u8
+# Encrypted media playlist (SAMPLE-AES / FairPlay).
+# Tests OpenMedia parsing of:
+#   - EXT-X-MAP init segment (init.mp4)
+#   - EXT-X-KEY -> Encryption.URIPrefix="skd://key001", KIDBase64="base64kidhere=="
+#   - 3 relative segment URIs resolved to absolute
+#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:6
+#EXT-X-MAP:URI="init.mp4"
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://key001,base64kidhere==",KEYFORMAT="com.apple.streamingkeydelivery"
+#EXTINF:6.0,
+seg0.mp4
+#EXTINF:6.0,
+seg1.mp4
+#EXTINF:6.0,
+seg2.mp4
+#EXT-X-ENDLIST

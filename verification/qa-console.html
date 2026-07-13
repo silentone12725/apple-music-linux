@@ -1,0 +1,1346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Apple Music Engine — QA Console</title>
+<style>
+:root {
+  --bg: #0a0a0a; --surface: #141414; --card: #1c1c1c; --border: #2a2a2a;
+  --text: #e8e8e8; --muted: #666; --dim: #444;
+  --accent: #fc3c44; --blue: #0a84ff; --green: #30d158; --yellow: #ffd60a;
+  --red: #ff453a; --purple: #bf5af2; --orange: #ff9f0a;
+  --mono: "SF Mono","Fira Code","Cascadia Code",monospace;
+  --radius: 8px; --gap: 12px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font: 13px/1.5 system-ui,sans-serif; display: flex; flex-direction: column; }
+
+/* ── Top bar ── */
+#topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+#topbar h1 { font-size: 14px; font-weight: 700; color: var(--accent); white-space: nowrap; }
+#engine-url { flex: 1; max-width: 260px; background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); border-radius: var(--radius); padding: 5px 10px; font-size: 13px; }
+#conn-btn { padding: 5px 14px; border-radius: var(--radius); border: none; cursor: pointer;
+  background: var(--accent); color: #fff; font-weight: 600; font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex-shrink: 0; }
+.dot.ok  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.err { background: var(--red); box-shadow: 0 0 6px var(--red); }
+#conn-label { font-size: 12px; color: var(--muted); }
+.spacer { flex: 1; }
+#sse-pill { font-size: 11px; padding: 3px 9px; border-radius: 20px; background: var(--card);
+  border: 1px solid var(--border); cursor: pointer; }
+#sse-pill.on { background: #0d2b17; border-color: var(--green); color: var(--green); }
+
+/* ── Nav tabs ── */
+#nav { display: flex; gap: 2px; padding: 0 12px; background: var(--surface);
+  border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto; }
+.nav-btn { padding: 9px 16px; border: none; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 12px; font-weight: 500; border-bottom: 2px solid transparent;
+  white-space: nowrap; transition: color .15s; }
+.nav-btn:hover { color: var(--text); }
+.nav-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+.badge { display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); color: #fff; border-radius: 10px;
+  font-size: 10px; font-weight: 700; min-width: 16px; height: 16px;
+  padding: 0 4px; margin-left: 5px; }
+
+/* ── Layout ── */
+#layout { flex: 1; display: flex; overflow: hidden; }
+.panel { flex: 1; overflow-y: auto; padding: 16px; display: none; }
+.panel.active { display: block; }
+
+/* ── Event log drawer ── */
+#sse-drawer { width: 320px; border-left: 1px solid var(--border); display: flex;
+  flex-direction: column; background: var(--surface); flex-shrink: 0; }
+#sse-drawer h3 { padding: 10px 14px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px; }
+#sse-clear { margin-left: auto; font-size: 10px; padding: 2px 8px; border-radius: 4px;
+  border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer; }
+#sse-log { flex: 1; min-height: 0; overflow-y: auto; font-family: var(--mono); font-size: 10px;
+  line-height: 1.6; padding: 8px; }
+.ev { padding: 2px 4px; border-radius: 3px; margin-bottom: 1px; }
+.ev-export { color: #7dd3fc; }
+.ev-err    { color: var(--red); }
+.ev-ping   { color: var(--dim); }
+.ev-ts     { color: var(--dim); margin-right: 6px; }
+
+/* ── Cards ── */
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px; margin-bottom: var(--gap); }
+.card-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin-bottom: 10px; }
+
+/* ── Form elements ── */
+label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+input, select, textarea { width: 100%; background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); border-radius: 6px; padding: 7px 10px; font-size: 12px; margin-bottom: 8px; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { font-family: var(--mono); resize: vertical; min-height: 80px; }
+.row { display: flex; gap: 8px; align-items: flex-end; }
+.row > * { flex: 1; }
+.row > button { flex: 0 0 auto; }
+
+/* ── Buttons ── */
+btn, button { display: inline-flex; align-items: center; gap: 5px; padding: 7px 14px;
+  border-radius: 6px; border: none; cursor: pointer; font-size: 12px;
+  font-weight: 600; transition: opacity .15s; }
+button { display: inline-flex; align-items: center; gap: 5px; padding: 7px 14px;
+  border-radius: 6px; border: none; cursor: pointer; font-size: 12px;
+  font-weight: 600; transition: opacity .15s; }
+button:hover { opacity: .8; }
+.btn-primary   { background: var(--accent); color: #fff; }
+.btn-secondary { background: var(--border); color: var(--text); }
+.btn-blue      { background: var(--blue); color: #fff; }
+.btn-green     { background: var(--green); color: #000; }
+.btn-red       { background: var(--red); color: #fff; }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+
+/* ── Status tags ── */
+.tag { display: inline-flex; align-items: center; font-size: 10px; font-weight: 700;
+  padding: 2px 7px; border-radius: 4px; }
+.tag-get    { background: #0d2b17; color: var(--green); }
+.tag-post   { background: #1a1040; color: var(--purple); }
+.tag-del    { background: #2b0d0d; color: var(--red); }
+.tag-ok     { background: #0d2b17; color: var(--green); }
+.tag-err    { background: #2b0d0d; color: var(--red); }
+.tag-warn   { background: #2b2008; color: var(--yellow); }
+
+/* ── JSON viewer ── */
+.json-box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px; font-family: var(--mono); font-size: 11px; color: #7dd3fc;
+  max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+
+/* ── Network log ── */
+#net-log { font-family: var(--mono); font-size: 11px; }
+.net-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 8px;
+  border-bottom: 1px solid var(--border); cursor: pointer; }
+.net-row:hover { background: var(--card); }
+.net-method { width: 44px; font-weight: 700; font-size: 10px; flex-shrink: 0; }
+.net-status { width: 32px; flex-shrink: 0; }
+.net-path { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net-time { color: var(--muted); flex-shrink: 0; font-size: 10px; }
+.net-detail { background: var(--card); padding: 10px; border-bottom: 1px solid var(--border);
+  display: none; }
+.net-detail.open { display: block; }
+
+/* ── Artwork ── */
+#artwork-wrap { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+#artwork-img { width: 240px; height: 240px; object-fit: cover; border-radius: 10px;
+  background: var(--border); display: block; }
+
+/* ── Lyrics ── */
+#lyrics-wrap { max-height: 400px; overflow-y: auto; }
+.lrc-line { padding: 4px 8px; border-radius: 4px; font-size: 14px; cursor: pointer;
+  transition: all .2s; color: var(--muted); }
+.lrc-line.active { color: var(--text); font-size: 16px; font-weight: 600;
+  background: var(--card); }
+.lrc-line:hover { color: var(--text); }
+
+/* ── Player ── */
+audio, video { width: 100%; border-radius: var(--radius); margin-top: 8px; }
+video { max-height: 300px; background: #000; }
+
+/* ── Sessions ── */
+.session-card { display: flex; align-items: center; gap: 10px; padding: 10px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  margin-bottom: 6px; }
+.session-id { font-family: var(--mono); font-size: 11px; color: var(--muted); flex: 1; }
+.session-info { flex: 2; font-size: 12px; }
+
+/* ── Export ── */
+.job-card { background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  padding: 12px; margin-bottom: 8px; }
+.job-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.job-id { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.job-phase { font-size: 11px; font-weight: 600; }
+.job-asset { font-size: 12px; flex: 1; }
+.progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 6px; }
+.progress-fill { height: 100%; background: var(--accent); transition: width .5s; }
+.job-output { font-family: var(--mono); font-size: 10px; color: var(--green);
+  margin-top: 4px; word-break: break-all; }
+.job-error { font-family: var(--mono); font-size: 10px; color: var(--red); margin-top: 4px; }
+
+/* ── Dashboard grid ── */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px,1fr)); gap: 10px; margin-bottom: 12px; }
+.stat { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px; text-align: center; }
+.stat-val { font-size: 28px; font-weight: 700; line-height: 1; margin-bottom: 4px; }
+.stat-lbl { font-size: 11px; color: var(--muted); }
+
+/* ── Concurrent test ── */
+.conc-row { display: grid; grid-template-columns: repeat(5,1fr); gap: 6px; margin-top: 8px; }
+.conc-cell { background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px; font-size: 11px; text-align: center; }
+.conc-cell.ok { border-color: var(--green); color: var(--green); }
+.conc-cell.err { border-color: var(--red); color: var(--red); }
+.conc-cell.wait { border-color: var(--yellow); color: var(--yellow); }
+
+/* ── Error injection ── */
+.err-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+</style>
+</head>
+<body>
+
+<!-- ── TOP BAR ── -->
+<div id="topbar">
+  <h1>🎵 Apple Music Engine</h1>
+  <input id="engine-url" value="http://127.0.0.1:8080" placeholder="http://127.0.0.1:8080">
+  <button id="conn-btn" class="btn-primary" onclick="connect()">Connect</button>
+  <div class="dot" id="dot"></div>
+  <span id="conn-label">not connected</span>
+  <div class="spacer"></div>
+  <button id="sse-pill" onclick="toggleSSE()">SSE ○</button>
+</div>
+
+<!-- ── NAV TABS ── -->
+<div id="nav">
+  <button class="nav-btn active" onclick="showTab('dashboard')">Dashboard</button>
+  <button class="nav-btn" onclick="showTab('drm')">DRM <span class="badge" id="drm-badge" style="background:var(--border);color:var(--muted)">?</span></button>
+  <button class="nav-btn" onclick="showTab('metadata')">Metadata</button>
+  <button class="nav-btn" onclick="showTab('artwork')">Artwork</button>
+  <button class="nav-btn" onclick="showTab('lyrics')">Lyrics</button>
+  <button class="nav-btn" onclick="showTab('player')">Player</button>
+  <button class="nav-btn" onclick="showTab('sessions')">Sessions <span class="badge" id="sess-badge">0</span></button>
+  <button class="nav-btn" onclick="showTab('export')">Export <span class="badge" id="exp-badge">0</span></button>
+  <button class="nav-btn" onclick="showTab('concurrent')">Concurrent</button>
+  <button class="nav-btn" onclick="showTab('errors')">Error Injection</button>
+  <button class="nav-btn" onclick="showTab('network')">Network <span class="badge" id="net-badge" style="background:var(--border);color:var(--muted)">0</span></button>
+</div>
+
+<!-- ── MAIN LAYOUT ── -->
+<div id="layout">
+
+<!-- ═══════════════════════════ PANELS ═══════════════════════════ -->
+
+<!-- DASHBOARD -->
+<div class="panel active" id="tab-dashboard">
+  <div class="stat-grid">
+    <div class="stat"><div class="stat-val" id="s-status">—</div><div class="stat-lbl">Status</div></div>
+    <div class="stat"><div class="stat-val" id="s-sessions">0</div><div class="stat-lbl">Sessions</div></div>
+    <div class="stat"><div class="stat-val" id="s-exports">0</div><div class="stat-lbl">Export Jobs</div></div>
+    <div class="stat"><div class="stat-val" id="s-requests">0</div><div class="stat-lbl">Requests</div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Capabilities</div>
+    <div id="caps-display" class="json-box">—</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Quick test — enter Adam ID then hit a button</div>
+    <div class="row">
+      <div><label>Adam ID</label><input id="d-id" placeholder="1488408568"></div>
+      <div><label>Storefront</label><input id="d-sf" value="us" style="width:60px"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="quickMeta()">Metadata</button>
+      <button class="btn-secondary" onclick="quickArtwork()">Artwork →</button>
+      <button class="btn-secondary" onclick="quickLyrics()">Lyrics →</button>
+      <button class="btn-blue" onclick="quickPlay('alac')">Play ALAC</button>
+      <button class="btn-blue" onclick="quickPlay('aac')">Play AAC</button>
+      <button class="btn-blue" onclick="quickPlay('atmos')">Play Atmos</button>
+      <button class="btn-blue" onclick="quickPlay('video')">Play MV</button>
+    </div>
+    <div id="dash-result" class="json-box" style="margin-top:8px;display:none"></div>
+  </div>
+</div>
+
+<!-- METADATA -->
+<div class="panel" id="tab-metadata">
+  <div class="card">
+    <div class="card-title">Lookup <span class="tag tag-get">GET</span></div>
+    <div class="row">
+      <div><label>Adam ID</label><input id="m-id" placeholder="1488408568"></div>
+      <div><label>Storefront</label><input id="m-sf" value="us" style="width:60px"></div>
+      <div><label>Type</label>
+        <select id="m-type"><option value="song">Song</option><option value="music-video">Music Video</option></select>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="fetchMeta()">Fetch</button>
+      <button class="btn-secondary" onclick="clearMeta()">Clear</button>
+    </div>
+  </div>
+  <div id="meta-fields" style="display:none">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+      <div class="card">
+        <div class="card-title">Track Info</div>
+        <table style="width:100%;border-collapse:collapse" id="meta-table"></table>
+      </div>
+      <div class="card">
+        <div class="card-title">Available Streams</div>
+        <div id="meta-streams"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Raw Response</div>
+      <div id="meta-raw" class="json-box"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ARTWORK -->
+<div class="panel" id="tab-artwork">
+  <div class="card">
+    <div class="card-title">Artwork Preview <span class="tag tag-get">GET</span></div>
+    <div class="row">
+      <div><label>Adam ID</label><input id="art-id" placeholder="1488408568"></div>
+      <div><label>Storefront</label><input id="art-sf" value="us" style="width:60px"></div>
+      <div><label>Size</label><input id="art-size" value="500" type="number" style="width:80px"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="loadArtwork()">Load</button>
+      <button class="btn-secondary" onclick="loadArtwork(3000)">3000px</button>
+      <button class="btn-secondary" onclick="loadArtwork(1000)">1000px</button>
+      <button class="btn-secondary" onclick="loadArtwork(100)">100px</button>
+    </div>
+    <div id="artwork-wrap">
+      <img id="artwork-img" alt="artwork" style="display:none">
+      <div style="flex:1">
+        <div id="art-info" class="json-box" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- LYRICS -->
+<div class="panel" id="tab-lyrics">
+  <div class="card">
+    <div class="card-title">Lyrics <span class="tag tag-get">GET</span></div>
+    <div class="row">
+      <div><label>Adam ID</label><input id="lrc-id" placeholder="1488408568"></div>
+      <div><label>Storefront</label><input id="lrc-sf" value="us" style="width:60px"></div>
+      <div><label>Format</label>
+        <select id="lrc-fmt"><option value="lrc">LRC</option><option value="ttml">TTML</option></select></div>
+      <div><label>Type</label>
+        <select id="lrc-type"><option value="lyrics">Lyrics</option><option value="syllable-lyrics">Syllable</option></select></div>
+    </div>
+    <button class="btn-primary" onclick="fetchLyrics()">Fetch Lyrics</button>
+  </div>
+  <div class="card" id="lrc-player-card" style="display:none">
+    <div class="card-title">Synced View — attach audio session to sync</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input id="lrc-sess-id" placeholder="Session ID (from Player tab)">
+      <button class="btn-secondary btn-sm" onclick="attachLrcPlayer()">Attach</button>
+    </div>
+    <audio id="lrc-audio" controls style="width:100%;margin-bottom:10px;display:none"></audio>
+    <div id="lyrics-wrap"></div>
+  </div>
+  <div class="card" id="lrc-raw-card" style="display:none">
+    <div class="card-title">Raw <span id="lrc-raw-fmt"></span></div>
+    <div id="lrc-raw" class="json-box"></div>
+  </div>
+</div>
+
+<!-- PLAYER -->
+<div class="panel" id="tab-player">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div class="card">
+      <div class="card-title">Create Session <span class="tag tag-post">POST</span></div>
+      <div class="row">
+        <div><label>Adam ID</label><input id="p-id" placeholder="1488408568"></div>
+        <div><label>Storefront</label><input id="p-sf" value="us" style="width:60px"></div>
+      </div>
+      <label>Quality</label>
+      <select id="p-quality" style="margin-bottom:8px">
+        <option value="aac">AAC 256 kbps</option>
+        <option value="alac" selected>ALAC (lossless)</option>
+        <option value="atmos">Dolby Atmos</option>
+        <option value="video">Music Video</option>
+      </select>
+      <div class="btn-row">
+        <button class="btn-primary" onclick="createSession()">▶ Create &amp; Play</button>
+        <button class="btn-secondary" onclick="stopSession()">■ Stop</button>
+        <button class="btn-red btn-sm" onclick="deleteSession()">Delete</button>
+      </div>
+      <div id="player-sess-info" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Session Info</div>
+      <div id="player-meta" class="json-box" style="max-height:160px">—</div>
+    </div>
+  </div>
+  <div class="card" id="player-audio-card">
+    <div class="card-title">Audio <span id="player-audio-label" style="color:var(--muted);font-size:10px;margin-left:6px"></span></div>
+    <audio id="player-audio" controls></audio>
+    <div id="player-audio-error" style="color:var(--red);font-size:11px;margin-top:4px;display:none"></div>
+    <div id="vlc-row" style="display:none;margin-top:10px;flex-direction:column;gap:6px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">cmd:</span>
+        <code id="vlc-url" style="flex:1;font-size:11px;font-family:var(--mono);background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:#7dd3fc;word-break:break-all"></code>
+        <button class="btn-secondary btn-sm" onclick="copyVLC()">Copy</button>
+        <button class="btn-red btn-sm" onclick="stopForVLC()" title="Stop browser player first — wrapper handles one connection at a time">Stop &amp; hand off</button>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+        <button class="btn-secondary btn-sm" onclick="setPlayer('mpv')">mpv (recommended)</button>
+        <button class="btn-secondary btn-sm" onclick="setPlayer('ffplay')">ffplay</button>
+        <button class="btn-secondary btn-sm" onclick="setPlayer('vlc')">VLC (may fail)</button>
+      </div>
+      <div id="vlc-note" style="font-size:10px;color:var(--yellow);margin-top:4px">
+        ⚠ Stop the browser player before streaming (one CBCS connection at a time). VLC 3.x fails on streaming fMP4 — it seeks backward on non-seekable HTTP streams. Use mpv or ffplay.
+      </div>
+    </div>
+  </div>
+  <div class="card" id="player-video-card" style="display:none">
+    <div class="card-title">Video</div>
+    <video id="player-video" controls></video>
+    <div id="player-video-error" style="color:var(--red);font-size:11px;margin-top:4px;display:none"></div>
+  </div>
+</div>
+
+<!-- SESSIONS -->
+<div class="panel" id="tab-sessions">
+  <div class="card">
+    <div class="card-title">Active Sessions</div>
+    <div class="btn-row">
+      <button class="btn-secondary btn-sm" onclick="refreshSessions()">Refresh</button>
+      <button class="btn-red btn-sm" onclick="deleteAllSessions()">Delete All</button>
+    </div>
+    <div id="sessions-list"></div>
+  </div>
+</div>
+
+<!-- EXPORT -->
+<div class="panel" id="tab-export">
+  <div class="card">
+    <div class="card-title">New Export Job <span class="tag tag-post">POST</span></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div>
+        <div class="row">
+          <div><label>Adam ID</label><input id="e-id" placeholder="1488408568"></div>
+          <div><label>Storefront</label><input id="e-sf" value="us" style="width:60px"></div>
+        </div>
+        <label>Quality</label>
+        <select id="e-quality" style="margin-bottom:8px">
+          <option value="aac">AAC 256 kbps</option>
+          <option value="alac" selected>ALAC</option>
+          <option value="atmos">Atmos</option>
+          <option value="video">Music Video</option>
+        </select>
+        <label>Output Directory</label>
+        <input id="e-dir" placeholder="/home/user/Music">
+        <label>Overwrite Policy</label>
+        <select id="e-overwrite" style="margin-bottom:8px">
+          <option value="skip" selected>Skip existing</option>
+          <option value="overwrite">Overwrite</option>
+          <option value="rename">Rename (add counter)</option>
+        </select>
+      </div>
+      <div>
+        <label>Filename Template</label>
+        <input id="e-tmpl" value="{album_artist}/{album}/{track_number:02d} - {title}">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:8px">
+          Variables: {title} {artist} {album_artist} {album} {track_number:02d} {disc_number} {year} {genre} {codec} {ext}
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:5px;margin-bottom:6px">
+            <input type="checkbox" id="e-art" checked style="width:auto;margin:0"> Embed artwork
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;margin-bottom:6px">
+            <input type="checkbox" id="e-lrc" checked style="width:auto;margin:0"> Embed lyrics
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;margin-bottom:6px">
+            <input type="checkbox" id="e-sidecar" style="width:auto;margin:0"> .lrc sidecar
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;margin-bottom:6px">
+            <input type="checkbox" id="e-flac" style="width:auto;margin:0"> Convert to FLAC
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="startExport()">Queue Export</button>
+      <button class="btn-secondary" onclick="listExports()">Refresh List</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Export Queue</div>
+    <div id="export-list"></div>
+  </div>
+</div>
+
+<!-- CONCURRENT -->
+<div class="panel" id="tab-concurrent">
+  <div class="card">
+    <div class="card-title">Concurrent Session Test</div>
+    <div class="row">
+      <div><label>Adam ID</label><input id="c-id" placeholder="1488408568"></div>
+      <div><label>Storefront</label><input id="c-sf" value="us" style="width:60px"></div>
+      <div><label>Quality</label>
+        <select id="c-quality">
+          <option value="aac">AAC</option>
+          <option value="alac" selected>ALAC</option>
+        </select>
+      </div>
+      <div><label>Count</label><input id="c-count" type="number" value="5" min="1" max="20" style="width:60px"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="concurrentOpen()">Open N Sessions</button>
+      <button class="btn-blue" onclick="concurrentStream()">Open + Stream All</button>
+      <button class="btn-red" onclick="concurrentCleanup()">Delete All</button>
+    </div>
+    <div id="conc-grid" class="conc-row" style="display:none"></div>
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">Cancel Mid-Stream Test</div>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:8px">
+        Opens a session and immediately aborts the fetch after 300 ms. Verifies the engine cleans up cleanly.
+      </p>
+      <div class="row">
+        <div><label>Adam ID</label><input id="cancel-id" placeholder="1488408568"></div>
+        <div><label>Delay (ms)</label><input id="cancel-delay" value="300" type="number" style="width:80px"></div>
+      </div>
+      <button class="btn-primary" onclick="cancelMidStream()">Test Cancel</button>
+      <div id="cancel-result" style="margin-top:8px;font-size:12px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ERROR INJECTION -->
+<div class="panel" id="tab-errors">
+  <div class="card">
+    <div class="card-title">Error Injection Panel</div>
+    <div class="err-grid">
+      <div>
+        <button class="btn-secondary" style="width:100%;margin-bottom:6px" onclick="errTest('bad-id')">404 — Bad Adam ID</button>
+        <button class="btn-secondary" style="width:100%;margin-bottom:6px" onclick="errTest('no-session')">404 — Session not found</button>
+        <button class="btn-secondary" style="width:100%;margin-bottom:6px" onclick="errTest('bad-export')">400 — Export missing assetId</button>
+        <button class="btn-secondary" style="width:100%;margin-bottom:6px" onclick="errTest('retry-active')">400 — Retry active job</button>
+      </div>
+      <div>
+        <button class="btn-secondary" style="width:100%;margin-bottom:6px" onclick="errTest('bad-lyrics')">404 — Lyrics for bad ID</button>
+        <button class="btn-secondary" style="width:100%;margin-bottom:6px" onclick="errTest('bad-artwork')">404 — Artwork for bad ID</button>
+        <button class="btn-secondary" style="width:100%;margin-bottom:6px" onclick="errTest('bad-metadata')">404 — Metadata for bad ID</button>
+        <button class="btn-secondary" style="width:100%;margin-bottom:6px" onclick="errTest('cancel-export')">Cancel then retry export</button>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Custom Error Request</div>
+    <div class="row">
+      <div><label>Method</label><select id="err-method"><option>GET</option><option>POST</option><option>DELETE</option></select></div>
+      <div><label>Path</label><input id="err-path" value="/api/v1/metadata/000000000"></div>
+    </div>
+    <label>Body (JSON, optional)</label>
+    <textarea id="err-body" placeholder='{"assetId":""}'></textarea>
+    <button class="btn-primary" onclick="customErrTest()">Send</button>
+  </div>
+  <div class="card" style="margin-top:10px">
+    <div class="card-title">Results</div>
+    <div id="err-results" class="json-box">—</div>
+  </div>
+</div>
+
+<!-- DRM -->
+<div class="panel" id="tab-drm">
+  <!-- State card -->
+  <div class="card">
+    <div class="card-title" style="display:flex;align-items:center;gap:8px">
+      DRM State
+      <button class="btn-secondary btn-sm" onclick="drmRefresh()">Refresh</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <table id="drm-state-table" style="width:100%;border-collapse:collapse;font-size:12px"></table>
+      </div>
+      <div>
+        <div class="card-title">Capabilities</div>
+        <table id="drm-caps-table" style="width:100%;border-collapse:collapse;font-size:12px"></table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Authenticate -->
+  <div class="card">
+    <div class="card-title">Authenticate <span class="tag tag-post">POST /api/v1/drm/authenticate</span></div>
+    <div class="row">
+      <div><label>Apple ID (email)</label><input id="drm-email" type="email" placeholder="you@example.com" autocomplete="username"></div>
+      <div><label>Password</label><input id="drm-pass" type="password" placeholder="Apple ID password" autocomplete="current-password"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="drmAuthenticate()">Authenticate</button>
+    </div>
+    <div id="drm-auth-result" style="display:none;margin-top:6px"></div>
+  </div>
+
+  <!-- 2FA challenge -->
+  <div class="card" id="drm-challenge-card" style="display:none">
+    <div class="card-title" style="color:var(--yellow)">⚠ Authentication challenge required</div>
+    <div id="drm-challenge-desc" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
+    <div class="row">
+      <div><label>Reply (2FA code / "approved" / "denied")</label><input id="drm-reply" placeholder="123456" autocomplete="one-time-code"></div>
+      <button class="btn-primary" onclick="drmChallenge()">Submit</button>
+    </div>
+    <div id="drm-challenge-result" style="display:none;margin-top:6px"></div>
+  </div>
+
+  <!-- Session management -->
+  <div class="card">
+    <div class="card-title">Session</div>
+    <div class="btn-row">
+      <button class="btn-red" onclick="drmLogout()">Logout</button>
+      <button class="btn-secondary" onclick="drmClearSession()">Clear session DB only</button>
+    </div>
+    <div id="drm-session-result" style="display:none;margin-top:6px"></div>
+  </div>
+
+  <!-- Raw status -->
+  <div class="card">
+    <div class="card-title">Raw status response</div>
+    <div id="drm-raw" class="json-box">—</div>
+  </div>
+</div>
+
+<!-- NETWORK -->
+<div class="panel" id="tab-network">
+  <div class="btn-row">
+    <button class="btn-secondary btn-sm" onclick="clearNetwork()">Clear</button>
+    <span style="font-size:11px;color:var(--muted);margin-left:4px" id="net-count">0 requests</span>
+  </div>
+  <div id="net-log"></div>
+</div>
+
+</div><!-- end layout left side -->
+
+<!-- ═══════════════════════════ SSE DRAWER ═══════════════════════════ -->
+<div id="sse-drawer">
+  <h3>Live Events <button id="sse-clear" onclick="document.getElementById('sse-log').innerHTML=''">Clear</button></h3>
+  <div id="sse-log"></div>
+</div>
+
+</div><!-- end #layout -->
+
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────────────
+let BASE = 'http://127.0.0.1:8080';
+let sseSource = null;
+let activeSessions = new Map(); // id → {info, type}
+let exportJobs     = new Map(); // id → ExportJob
+let netLog         = [];
+let lrcLines       = [];
+let lrcAudioSrc    = null;
+let lrcTimer       = null;
+let requestCount   = 0;
+let concSessions   = [];
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function base() { return document.getElementById('engine-url').value.replace(/\/$/,''); }
+function v(id)  { return document.getElementById(id)?.value?.trim() ?? ''; }
+
+async function api(method, path, body, tag) {
+  BASE = base();
+  const url = BASE + path;
+  const t0 = performance.now();
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  requestCount++;
+  document.getElementById('s-requests').textContent = requestCount;
+  let status = 0, responseText = '';
+  try {
+    const r = await fetch(url, opts);
+    status = r.status;
+    responseText = await r.text();
+  } catch(e) { responseText = e.message; status = 0; }
+  const ms = Math.round(performance.now() - t0);
+  logNet(method, path, status, responseText, ms, tag);
+  let data;
+  try { data = JSON.parse(responseText); } catch { data = responseText; }
+  return { ok: status >= 200 && status < 300, status, data, text: responseText };
+}
+
+function logNet(method, path, status, body, ms, tag) {
+  const entry = { method, path, status, body, ms, tag };
+  netLog.unshift(entry);
+  document.getElementById('net-badge').textContent = netLog.length;
+  const log = document.getElementById('net-log');
+  const row = document.createElement('div');
+  row.className = 'net-row';
+  const sc = status === 0 ? 'var(--red)' : status < 300 ? 'var(--green)' : status < 400 ? 'var(--yellow)' : 'var(--red)';
+  row.innerHTML = `
+    <span class="net-method" style="color:${method==='GET'?'var(--green)':method==='POST'?'var(--purple)':'var(--red)'}">${method}</span>
+    <span class="net-status" style="color:${sc}">${status||'ERR'}</span>
+    <span class="net-path">${path}</span>
+    <span class="net-time">${ms}ms</span>`;
+  const detail = document.createElement('div');
+  detail.className = 'net-detail';
+  detail.innerHTML = `<div class="json-box" style="max-height:160px">${esc(typeof body==='string'?body:JSON.stringify(body,null,2))}</div>`;
+  row.onclick = () => detail.classList.toggle('open');
+  log.prepend(detail);
+  log.prepend(row);
+  document.getElementById('net-count').textContent = netLog.length + ' requests';
+}
+
+function clearNetwork() {
+  netLog=[]; document.getElementById('net-log').innerHTML='';
+  document.getElementById('net-badge').textContent='0';
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtJSON(o) { return typeof o==='string' ? esc(o) : esc(JSON.stringify(o,null,2)); }
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-'+name)?.classList.add('active');
+  [...document.querySelectorAll('.nav-btn')].find(b => b.textContent.trim().toLowerCase().startsWith(name))?.classList.add('active');
+}
+
+// ── Connection ─────────────────────────────────────────────────────────────
+async function connect() {
+  const { ok, data } = await api('GET', '/api/v1/status');
+  const dot = document.getElementById('dot');
+  dot.className = 'dot ' + (ok ? 'ok' : 'err');
+  document.getElementById('conn-label').textContent = ok ? `OK · ${JSON.stringify(data)}` : 'unreachable';
+  document.getElementById('s-status').textContent = ok ? '✓' : '✗';
+  if (ok) {
+    const caps = await api('GET', '/api/v1/capabilities');
+    document.getElementById('caps-display').textContent = JSON.stringify(caps.data, null, 2);
+    startSSE();
+    drmRefresh();
+  }
+}
+
+// ── SSE ────────────────────────────────────────────────────────────────────
+function toggleSSE() { sseSource ? stopSSE() : startSSE(); }
+
+function startSSE() {
+  if (sseSource) return;
+  sseSource = new EventSource(base() + '/api/v1/events');
+  const pill = document.getElementById('sse-pill');
+  sseSource.onopen  = () => { pill.textContent='SSE ●'; pill.className='on'; appendSSE('ping','connected','ev-ping'); };
+  sseSource.onerror = () => { pill.textContent='SSE ○'; pill.className=''; sseSource=null; };
+  sseSource.onmessage = e => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.type === 'export') {
+        appendSSE('export', `${d.data.phase} ${d.data.percent}% · ${d.data.jobId}`, 'ev-export');
+        handleExportEvent(d.data);
+      } else if (d.type === 'drm') {
+        appendSSE('drm', JSON.stringify(d.data), '');
+        renderDRMStatus(d.data);
+      } else {
+        appendSSE(d.type || 'ev', JSON.stringify(d.data), '');
+      }
+    } catch { appendSSE('raw', e.data, ''); }
+  };
+}
+
+function stopSSE() {
+  sseSource?.close(); sseSource=null;
+  document.getElementById('sse-pill').textContent='SSE ○';
+  document.getElementById('sse-pill').className='';
+  appendSSE('ping','disconnected','ev-ping');
+}
+
+function appendSSE(type, msg, cls) {
+  const el = document.getElementById('sse-log');
+  const ts = new Date().toTimeString().slice(0,8);
+  el.innerHTML = `<div class="ev ${cls}"><span class="ev-ts">${ts}</span><b>${esc(type)}</b> ${esc(msg)}</div>` + el.innerHTML;
+}
+
+// ── Dashboard quick actions ────────────────────────────────────────────────
+async function quickMeta() {
+  const id = v('d-id'), sf = v('d-sf')||'us';
+  if (!id) return;
+  const {ok,data} = await api('GET',`/api/v1/metadata/${id}?sf=${sf}`);
+  const box = document.getElementById('dash-result');
+  box.style.display='block';
+  box.textContent = JSON.stringify(data,null,2);
+  if (ok) { document.getElementById('m-id').value=id; showTab('metadata'); fetchMeta(); }
+}
+function quickArtwork() {
+  const id=v('d-id'); if(!id)return;
+  document.getElementById('art-id').value=id;
+  showTab('artwork'); loadArtwork();
+}
+function quickLyrics() {
+  const id=v('d-id'); if(!id)return;
+  document.getElementById('lrc-id').value=id;
+  showTab('lyrics'); fetchLyrics();
+}
+async function quickPlay(codec) {
+  const id=v('d-id'); if(!id)return;
+  document.getElementById('p-id').value=id;
+  document.getElementById('p-quality').value=codec;
+  showTab('player'); await createSession();
+}
+
+// ── Metadata ───────────────────────────────────────────────────────────────
+async function fetchMeta() {
+  const id=v('m-id'), sf=v('m-sf')||'us', type=v('m-type');
+  if(!id)return;
+  const {ok,data} = await api('GET',`/api/v1/metadata/${id}?sf=${sf}&type=${type}`);
+  if(!ok){ document.getElementById('meta-raw').textContent=JSON.stringify(data); return; }
+  document.getElementById('meta-fields').style.display='block';
+  const tbl = document.getElementById('meta-table');
+  const fields = [
+    ['Title',data.title],['Artist',data.artistName],['Album',data.albumName||'—'],
+    ['Duration',msToTime(data.durationMs)],['Has Lyrics',data.hasLyrics?'yes':'no'],
+    ['Type',data.type||'—'],
+  ];
+  tbl.innerHTML = fields.map(([k,v])=>`<tr><td style="color:var(--muted);padding:3px 8px;white-space:nowrap">${k}</td><td style="padding:3px 8px">${esc(v??'—')}</td></tr>`).join('');
+  const streams = document.getElementById('meta-streams');
+  streams.innerHTML = (data.streams||[]).map(s=>`<div class="tag tag-ok" style="margin:2px">${s.codec}${s.bitrate?' '+s.bitrate+'kbps':''}${s.sampleRate?' '+s.sampleRate:''}${s.bitDepth?'/'+s.bitDepth+'bit':''}</div>`).join('');
+  document.getElementById('meta-raw').textContent=JSON.stringify(data,null,2);
+}
+function clearMeta() {
+  document.getElementById('meta-fields').style.display='none';
+  document.getElementById('meta-raw').textContent='';
+}
+function msToTime(ms) {
+  if(!ms)return'—';
+  const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
+  return h?`${h}:${pad(m%60)}:${pad(s%60)}`:`${m}:${pad(s%60)}`;
+}
+function pad(n){return String(n).padStart(2,'0');}
+
+// ── Artwork ────────────────────────────────────────────────────────────────
+async function loadArtwork(overrideSize) {
+  const id=v('art-id'), sf=v('art-sf')||'us';
+  const size=overrideSize||parseInt(v('art-size'))||500;
+  if(!id)return;
+  const img=document.getElementById('artwork-img');
+  img.style.display='none';
+  const url=`${base()}/api/v1/artwork/${id}?sf=${sf}&size=${size}`;
+  const t0=performance.now();
+  img.onload=()=>{
+    img.style.display='block';
+    const ms=Math.round(performance.now()-t0);
+    const info=document.getElementById('art-info');
+    info.style.display='block';
+    info.textContent=JSON.stringify({url,size,naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight,loadMs:ms},null,2);
+    logNet('GET',`/api/v1/artwork/${id}?sf=${sf}&size=${size}`,200,'<image>',ms,'artwork');
+  };
+  img.onerror=()=>{ logNet('GET',`/api/v1/artwork/${id}?sf=${sf}&size=${size}`,404,'error',0,'artwork'); };
+  img.src=url;
+}
+
+// ── Lyrics ─────────────────────────────────────────────────────────────────
+let lrcText='';
+async function fetchLyrics() {
+  const id=v('lrc-id'), sf=v('lrc-sf')||'us', fmt=v('lrc-fmt'), type=v('lrc-type');
+  if(!id)return;
+  const {ok,data,text}=await api('GET',`/api/v1/lyrics/${id}?sf=${sf}&format=${fmt}&type=${type}`);
+  const rawCard=document.getElementById('lrc-raw-card');
+  const pCard=document.getElementById('lrc-player-card');
+  rawCard.style.display='block';
+  document.getElementById('lrc-raw-fmt').textContent=fmt.toUpperCase();
+  document.getElementById('lrc-raw').textContent=ok?text:JSON.stringify(data);
+  if(ok && fmt==='lrc'){
+    lrcText=text;
+    lrcLines=parseLRC(text);
+    renderLRC();
+    pCard.style.display='block';
+  }
+}
+
+function parseLRC(text) {
+  const lines=[];
+  for(const line of text.split('\n')) {
+    const m=line.match(/^\[(\d+):(\d+)\.(\d+)\](.*)/);
+    if(m){
+      const secs=parseInt(m[1])*60+parseInt(m[2])+parseInt(m[3])/100;
+      lines.push({t:secs,text:m[4].trim()});
+    }
+  }
+  return lines.sort((a,b)=>a.t-b.t);
+}
+
+function renderLRC() {
+  const wrap=document.getElementById('lyrics-wrap');
+  wrap.innerHTML=lrcLines.map((l,i)=>
+    `<div class="lrc-line" id="lrc-${i}" onclick="seekLrc(${l.t})">${esc(l.text)||'&nbsp;'}</div>`
+  ).join('');
+}
+
+function attachLrcPlayer() {
+  const sid=v('lrc-sess-id'); if(!sid)return;
+  const audio=document.getElementById('lrc-audio');
+  audio.src=`${base()}/api/v1/playback/${sid}/audio`;
+  audio.style.display='block';
+  if(lrcTimer)clearInterval(lrcTimer);
+  lrcTimer=setInterval(()=>syncLRC(audio.currentTime),250);
+}
+
+function syncLRC(t) {
+  let active=0;
+  for(let i=0;i<lrcLines.length;i++){
+    if(lrcLines[i].t<=t) active=i;
+  }
+  document.querySelectorAll('.lrc-line').forEach((el,i)=>{
+    const wasActive=el.classList.contains('active');
+    el.classList.toggle('active',i===active);
+    if(i===active && !wasActive) el.scrollIntoView({block:'center',behavior:'smooth'});
+  });
+}
+
+function seekLrc(t) {
+  const audio=document.getElementById('lrc-audio');
+  if(audio.src)audio.currentTime=t;
+}
+
+// ── Player ─────────────────────────────────────────────────────────────────
+let currentSess = null;
+async function createSession() {
+  const id=v('p-id'), sf=v('p-sf')||'us', cap=v('p-quality');
+  if(!id)return;
+  const req={assetId:id,storefront:sf,capabilities:{}};
+  if(cap==='alac')req.capabilities.lossless=true;
+  if(cap==='atmos')req.capabilities.atmos=true;
+  if(cap==='video')req.capabilities.video=true;
+  const {ok,data}=await api('POST','/api/v1/playback',req);
+  if(!ok){ document.getElementById('player-meta').textContent=JSON.stringify(data); return; }
+  currentSess=data;
+  activeSessions.set(data.sessionId, data);
+  updateSessionBadge();
+  document.getElementById('player-sess-info').textContent=`Session: ${data.sessionId} · ${data.type}`;
+  document.getElementById('player-meta').textContent=JSON.stringify(data,null,2);
+  const audio=document.getElementById('player-audio');
+  const video=document.getElementById('player-video');
+  const audioCard=document.getElementById('player-audio-card');
+  const videoCard=document.getElementById('player-video-card');
+
+  // Determine stream URL
+  const streamURL = `${base()}/api/v1/playback/${data.sessionId}/audio`;
+  
+  // Check if browser supports ALAC natively (Chrome does, Firefox/Zen does not).
+  const supportsALAC = document.createElement('audio').canPlayType('audio/mp4; codecs="alac"') !== '';
+  
+  if (cap === 'aac') {
+    _rawStreamURL = streamURL;
+  } else if (cap === 'alac' && !supportsALAC) {
+    _rawStreamURL = streamURL + '?transcode=flac';
+    document.getElementById('player-sess-info').textContent += ' (Transcoded to FLAC for browser compatibility)';
+  } else {
+    _rawStreamURL = streamURL + '?raw=1';
+  }
+  updatePlayerCmd();
+  document.getElementById('vlc-row').style.display = 'flex';
+
+  if(cap==='video') {
+    // MV: set BOTH audio and video sources.
+    // The engine serves them as separate HTTP streams.
+    // We sync the audio element to the video element's play/pause/seek.
+    audio.src=_rawStreamURL;
+    video.src=`${base()}/api/v1/playback/${data.sessionId}/video`;
+    audioCard.style.display='block';
+    videoCard.style.display='block';
+    document.getElementById('player-audio-label').textContent='(MV audio — synced to video)';
+
+    // Sync: audio follows video controls
+    video.onplay   = () => audio.play().catch(()=>{});
+    video.onpause  = () => audio.pause();
+    video.onseeked = () => { audio.currentTime = video.currentTime; };
+    audio.oncanplay = () => { if(!video.paused) audio.play().catch(()=>{}); };
+
+    // Surface stream errors
+    audio.onerror = () => showMediaError('player-audio-error', audio.error);
+    video.onerror = () => showMediaError('player-video-error', video.error);
+
+    document.getElementById('player-sess-info').textContent +=
+      ' — MV: press ▶ on video; audio syncs automatically';
+  } else {
+    audio.src=_rawStreamURL;
+    audioCard.style.display='block';
+    videoCard.style.display='none';
+    document.getElementById('player-audio-label').textContent='';
+    video.src='';
+    video.onplay=video.onpause=video.onseeked=audio.oncanplay=null;
+    audio.onerror = () => showMediaError('player-audio-error', audio.error);
+  }
+}
+
+function showMediaError(elemId, err) {
+  const el = document.getElementById(elemId);
+  if (!el || !err) return;
+  const codes = ['','ABORTED','NETWORK','DECODE','SRC_NOT_SUPPORTED'];
+  el.style.display = 'block';
+  el.textContent = `Media error ${err.code}: ${codes[err.code]||'unknown'} — ${err.message||'check Network tab for stream error'}`;
+}
+let _playerCmd = 'mpv';
+let _rawStreamURL = '';
+
+function setPlayer(p) {
+  _playerCmd = p;
+  updatePlayerCmd();
+}
+
+function updatePlayerCmd() {
+  if (!_rawStreamURL) return;
+  const url = _rawStreamURL;
+  let cmd;
+  if (_playerCmd === 'vlc') {
+    cmd = `vlc --demux mp4 --network-caching 3000 "${url}"`;
+  } else if (_playerCmd === 'ffplay') {
+    cmd = `ffplay "${url}"`;
+  } else {
+    cmd = `mpv "${url}"`;
+  }
+  document.getElementById('vlc-url').textContent = cmd;
+}
+
+function copyVLC() {
+  const txt = document.getElementById('vlc-url').textContent;
+  navigator.clipboard.writeText(txt).then(() => {
+    const btn = event.target;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+function stopForVLC() {
+  // Stop the browser player so the CBCS connection is released,
+  // then copy the command — the wrapper can then accept the external player's connection.
+  const audio = document.getElementById('player-audio');
+  audio.pause();
+  audio.src = '';
+  document.getElementById('player-video').src = '';
+  const note = document.getElementById('vlc-note');
+  note.style.color = 'var(--green)';
+  note.textContent = '✓ Browser player stopped. Paste the command in your terminal.';
+  copyVLC();
+}
+
+function stopSession() {
+  document.getElementById('player-audio').src='';
+  document.getElementById('player-video').src='';
+}
+async function deleteSession() {
+  if(!currentSess)return;
+  await api('DELETE',`/api/v1/playback/${currentSess.sessionId}`);
+  activeSessions.delete(currentSess.sessionId);
+  currentSess=null;
+  updateSessionBadge();
+  document.getElementById('player-sess-info').textContent='';
+  document.getElementById('player-meta').textContent='—';
+  document.getElementById('vlc-row').style.display='none';
+  _rawStreamURL = '';
+}
+function updateSessionBadge(){ document.getElementById('sess-badge').textContent=activeSessions.size; document.getElementById('s-sessions').textContent=activeSessions.size; }
+
+// ── Sessions panel ─────────────────────────────────────────────────────────
+function refreshSessions() {
+  const list=document.getElementById('sessions-list');
+  if(!activeSessions.size){list.innerHTML='<div style="color:var(--muted);font-size:12px">No active sessions.</div>';return;}
+  list.innerHTML=[...activeSessions.values()].map(s=>`
+    <div class="session-card">
+      <div class="session-id">${s.sessionId}</div>
+      <div class="session-info">${s.title||'—'} · ${s.artistName||'—'} · ${s.codec||s.type}</div>
+      <button class="btn-red btn-sm" onclick="deleteSessById('${s.sessionId}')">Delete</button>
+    </div>`).join('');
+}
+async function deleteSessById(id) {
+  await api('DELETE',`/api/v1/playback/${id}`);
+  activeSessions.delete(id); updateSessionBadge(); refreshSessions();
+}
+async function deleteAllSessions() {
+  for(const id of [...activeSessions.keys()]){
+    await api('DELETE',`/api/v1/playback/${id}`);
+    activeSessions.delete(id);
+  }
+  updateSessionBadge(); refreshSessions();
+}
+
+// ── Export ─────────────────────────────────────────────────────────────────
+async function startExport() {
+  const id=v('e-id'), sf=v('e-sf')||'us', cap=v('e-quality');
+  if(!id)return;
+  const req={
+    assetId:id, storefront:sf, capabilities:{},
+    outputDir:v('e-dir')||undefined,
+    filenameTemplate:v('e-tmpl')||undefined,
+    options:{
+      embedArtwork:document.getElementById('e-art').checked,
+      embedLyrics:document.getElementById('e-lrc').checked,
+      saveLrcSidecar:document.getElementById('e-sidecar').checked,
+      convertToFlac:document.getElementById('e-flac').checked,
+      overwritePolicy:v('e-overwrite')||'skip',
+    }
+  };
+  if(cap==='alac')req.capabilities.lossless=true;
+  if(cap==='atmos')req.capabilities.atmos=true;
+  if(cap==='video')req.capabilities.video=true;
+  const {ok,data}=await api('POST','/api/v1/export',req);
+  if(ok){ exportJobs.set(data.jobId,data); renderExportList(); updateExpBadge(); }
+}
+
+async function listExports() {
+  const {ok,data}=await api('GET','/api/v1/export');
+  if(!ok)return;
+  (data||[]).forEach(j=>exportJobs.set(j.jobId,j));
+  renderExportList(); updateExpBadge();
+}
+
+function handleExportEvent(ev) {
+  if(exportJobs.has(ev.jobId)){
+    const j=exportJobs.get(ev.jobId);
+    Object.assign(j,ev);
+    renderExportList(); updateExpBadge();
+  }
+}
+
+function updateExpBadge(){ const n=exportJobs.size; document.getElementById('exp-badge').textContent=n; document.getElementById('s-exports').textContent=n; }
+
+function renderExportList(){
+  const el=document.getElementById('export-list');
+  if(!exportJobs.size){el.innerHTML='<div style="color:var(--muted);font-size:12px">No export jobs.</div>';return;}
+  el.innerHTML=[...exportJobs.values()].reverse().map(j=>{
+    const phaseColor={queued:'var(--muted)',resolving:'var(--yellow)',downloading:'var(--blue)',tagging:'var(--purple)',moving:'var(--orange)',done:'var(--green)',failed:'var(--red)',cancelled:'var(--dim)'}[j.phase]||'var(--text)';
+    return `<div class="job-card">
+      <div class="job-header">
+        <span class="job-id">${j.jobId}</span>
+        <span class="job-asset">${j.assetId}</span>
+        <span class="job-phase" style="color:${phaseColor}">${j.phase}</span>
+        ${j.phase==='failed'||j.phase==='cancelled'?`<button class="btn-sm btn-secondary" onclick="retryExport('${j.jobId}')">Retry</button>`:''}
+        ${j.phase!=='done'&&j.phase!=='failed'&&j.phase!=='cancelled'?`<button class="btn-sm btn-red" onclick="cancelExport('${j.jobId}')">Cancel</button>`:''}
+      </div>
+      <div class="progress-bar"><div class="progress-fill" style="width:${j.percent||0}%"></div></div>
+      ${j.output?`<div class="job-output">✓ ${esc(j.output)}</div>`:''}
+      ${j.error?`<div class="job-error">✗ ${esc(j.error)}</div>`:''}
+    </div>`;
+  }).join('');
+}
+
+async function cancelExport(id){
+  await api('DELETE',`/api/v1/export/${id}`);
+  await listExports();
+}
+async function retryExport(id){
+  const {ok,data}=await api('POST',`/api/v1/export/${id}/retry`);
+  if(ok){ exportJobs.set(data.jobId,data); renderExportList(); updateExpBadge(); }
+}
+
+// ── Concurrent ─────────────────────────────────────────────────────────────
+async function concurrentOpen() {
+  const id=v('c-id'), sf=v('c-sf')||'us', cap=v('c-quality');
+  const n=parseInt(v('c-count'))||5;
+  if(!id)return;
+  const grid=document.getElementById('conc-grid');
+  grid.style.display='grid';
+  grid.innerHTML=Array(n).fill('').map((_,i)=>`<div class="conc-cell wait" id="cc-${i}">⏳ ${i+1}</div>`).join('');
+  concSessions=[];
+  const promises=Array.from({length:n},(_,i)=>
+    api('POST','/api/v1/playback',{assetId:id,storefront:sf,capabilities:cap==='alac'?{lossless:true}:{}}).then(r=>{
+      const cell=document.getElementById(`cc-${i}`);
+      if(r.ok){ cell.className='conc-cell ok'; cell.textContent=`✓ ${r.data.sessionId?.slice(-6)}`; concSessions.push(r.data.sessionId); activeSessions.set(r.data.sessionId,r.data); }
+      else { cell.className='conc-cell err'; cell.textContent=`✗ ${r.status}`; }
+      updateSessionBadge();
+    })
+  );
+  await Promise.all(promises);
+}
+
+async function concurrentStream() {
+  await concurrentOpen();
+  for(const sid of concSessions){
+    const audio=new Audio(`${base()}/api/v1/playback/${sid}/audio`);
+    audio.play().catch(()=>{});
+    setTimeout(()=>audio.pause(),5000);
+  }
+}
+
+async function concurrentCleanup() {
+  for(const id of concSessions){
+    await api('DELETE',`/api/v1/playback/${id}`);
+    activeSessions.delete(id);
+  }
+  concSessions=[];
+  updateSessionBadge();
+  document.getElementById('conc-grid').style.display='none';
+}
+
+async function cancelMidStream() {
+  const id=v('cancel-id')||v('p-id'); if(!id)return;
+  const delay=parseInt(v('cancel-delay'))||300;
+  const {ok,data}=await api('POST','/api/v1/playback',{assetId:id,storefront:'us',capabilities:{lossless:true}});
+  if(!ok)return;
+  const sid=data.sessionId;
+  const ctrl=new AbortController();
+  const t0=performance.now();
+  setTimeout(()=>ctrl.abort(),delay);
+  const res=document.getElementById('cancel-result');
+  res.textContent=`Streaming ${sid}, will abort in ${delay}ms…`;
+  try {
+    await fetch(`${base()}/api/v1/playback/${sid}/audio`,{signal:ctrl.signal});
+    res.textContent='Stream completed before cancel (track may be cached/small).';
+  } catch(e) {
+    const ms=Math.round(performance.now()-t0);
+    res.textContent=`✓ Aborted after ${ms}ms: ${e.name}`;
+    res.style.color='var(--green)';
+  }
+  await api('DELETE',`/api/v1/playback/${sid}`);
+  activeSessions.delete(sid); updateSessionBadge();
+}
+
+// ── Error injection ────────────────────────────────────────────────────────
+async function errTest(type) {
+  const res=document.getElementById('err-results');
+  let r;
+  switch(type) {
+    case 'bad-id':       r=await api('GET','/api/v1/metadata/000000000?sf=us'); break;
+    case 'no-session':   r=await api('GET','/api/v1/playback/fakeid/audio'); break;
+    case 'bad-export':   r=await api('POST','/api/v1/export',{}); break;
+    case 'retry-active': {
+      const e=await api('POST','/api/v1/export',{assetId:'1488408568',storefront:'us',capabilities:{lossless:true}});
+      if(e.ok){ r=await api('POST',`/api/v1/export/${e.data.jobId}/retry`); } // active job can't retry
+      else { r=e; }
+      break;
+    }
+    case 'bad-lyrics':   r=await api('GET','/api/v1/lyrics/000000000?sf=us'); break;
+    case 'bad-artwork':  r=await api('GET','/api/v1/artwork/000000000?sf=us'); break;
+    case 'bad-metadata': r=await api('GET','/api/v1/metadata/000000000?sf=us'); break;
+    case 'cancel-export': {
+      const e=await api('POST','/api/v1/export',{assetId:'1488408568',storefront:'us',capabilities:{lossless:true}});
+      if(e.ok){
+        await api('DELETE',`/api/v1/export/${e.data.jobId}`);
+        await new Promise(x=>setTimeout(x,500));
+        r=await api('POST',`/api/v1/export/${e.data.jobId}/retry`);
+      } else r=e;
+      break;
+    }
+  }
+  if(r) res.textContent=`HTTP ${r.status}\n\n${JSON.stringify(r.data,null,2)}`;
+}
+
+async function customErrTest() {
+  const method=v('err-method')||'GET', path=v('err-path'), bodyStr=v('err-body');
+  let body; try { body=bodyStr?JSON.parse(bodyStr):undefined; } catch{}
+  const r=await api(method,path,body);
+  document.getElementById('err-results').textContent=`HTTP ${r.status}\n\n${JSON.stringify(r.data,null,2)}`;
+}
+
+// ── DRM ────────────────────────────────────────────────────────────────────
+
+const DRM_STATE_COLORS = {
+  ready: 'var(--green)', running: 'var(--green)', logged_in: 'var(--green)', valid: 'var(--green)', fairplay_ready: 'var(--green)',
+  initializing: 'var(--yellow)', logging_in: 'var(--yellow)', challenging: 'var(--yellow)', refreshing: 'var(--yellow)', scheduled: 'var(--yellow)',
+  failed: 'var(--red)', logged_out: 'var(--red)', empty: 'var(--red)', expired: 'var(--red)',
+  stopped: 'var(--muted)', unknown: 'var(--muted)',
+};
+
+function drmStateColor(val) {
+  return DRM_STATE_COLORS[String(val).toLowerCase()] || 'var(--text)';
+}
+
+function drmRow(k, val) {
+  const color = drmStateColor(val);
+  return `<tr>
+    <td style="color:var(--muted);padding:3px 8px;white-space:nowrap;font-size:11px">${k}</td>
+    <td style="padding:3px 8px;font-weight:600;color:${color}">${esc(String(val ?? '—'))}</td>
+  </tr>`;
+}
+
+function renderDRMStatus(data) {
+  const state = data.state || {};
+  const caps  = data.capabilities || {};
+
+  const stateRows = ['manager','process','authentication','fairplay','session','recovery']
+    .map(k => drmRow(k, state[k] ?? '—')).join('');
+  document.getElementById('drm-state-table').innerHTML = stateRows;
+
+  const capKeys = {CBCS:'cbcs', ALAC:'alac', Atmos:'atmos', HiRes:'hiRes'};
+  const capRows = ['CBCS','ALAC','Atmos','HiRes']
+    .map(k => drmRow(k, caps[capKeys[k]] ? '✓' : '✗')).join('');
+  document.getElementById('drm-caps-table').innerHTML = capRows;
+
+  document.getElementById('drm-raw').textContent = JSON.stringify(data, null, 2);
+
+  // Badge: show auth state abbreviation
+  const badge = document.getElementById('drm-badge');
+  const fp = state.fairplay;
+  if (fp === 'ready') {
+    badge.textContent = '✓';
+    badge.style.background = 'var(--green)';
+    badge.style.color = '#000';
+  } else if (state.authentication === 'challenging') {
+    badge.textContent = '2FA';
+    badge.style.background = 'var(--yellow)';
+    badge.style.color = '#000';
+  } else if (state.authentication === 'logged_out' || state.session === 'empty') {
+    badge.textContent = '✗';
+    badge.style.background = 'var(--red)';
+    badge.style.color = '#fff';
+  } else {
+    badge.textContent = '…';
+    badge.style.background = 'var(--border)';
+    badge.style.color = 'var(--muted)';
+  }
+
+  // Show/hide challenge card
+  const challengeCard = document.getElementById('drm-challenge-card');
+  if (data.challenge) {
+    challengeCard.style.display = 'block';
+    document.getElementById('drm-challenge-desc').textContent =
+      `${data.challenge.title || data.challenge.type}${data.challenge.description ? ' — ' + data.challenge.description : ''}`;
+  } else if (state.authentication !== 'challenging') {
+    challengeCard.style.display = 'none';
+  }
+}
+
+async function drmRefresh() {
+  const { ok, data } = await api('GET', '/api/v1/drm/status');
+  if (ok) renderDRMStatus(data);
+}
+
+async function drmAuthenticate() {
+  const email = v('drm-email'), pass = v('drm-pass');
+  if (!email || !pass) return;
+  const res = document.getElementById('drm-auth-result');
+  res.style.display = 'block';
+  res.style.color = 'var(--muted)';
+  res.textContent = 'Authenticating…';
+  const { ok, data } = await api('POST', '/api/v1/drm/authenticate', { email, password: pass });
+  res.style.color = ok ? 'var(--green)' : 'var(--red)';
+  res.textContent = ok ? '✓ Authenticate request accepted — watch SSE for state transitions' : `✗ ${JSON.stringify(data)}`;
+  if (ok) {
+    document.getElementById('drm-pass').value = '';
+    setTimeout(drmRefresh, 1000);
+  }
+}
+
+async function drmChallenge() {
+  const reply = v('drm-reply');
+  if (!reply) return;
+  const res = document.getElementById('drm-challenge-result');
+  res.style.display = 'block';
+  const { ok, data } = await api('POST', '/api/v1/drm/challenge', { reply });
+  res.style.color = ok ? 'var(--green)' : 'var(--red)';
+  res.textContent = ok ? '✓ Reply submitted' : `✗ ${JSON.stringify(data)}`;
+  if (ok) {
+    document.getElementById('drm-reply').value = '';
+    setTimeout(drmRefresh, 1500);
+  }
+}
+
+async function drmLogout() {
+  const res = document.getElementById('drm-session-result');
+  res.style.display = 'block';
+  const { ok, data } = await api('POST', '/api/v1/drm/logout');
+  res.style.color = ok ? 'var(--green)' : 'var(--red)';
+  res.textContent = ok ? '✓ Logged out' : `✗ ${JSON.stringify(data)}`;
+  if (ok) setTimeout(drmRefresh, 500);
+}
+
+async function drmClearSession() {
+  const res = document.getElementById('drm-session-result');
+  res.style.display = 'block';
+  const { ok, data } = await api('DELETE', '/api/v1/drm/session');
+  res.style.color = ok ? 'var(--green)' : 'var(--red)';
+  res.textContent = ok ? '✓ Session DB cleared' : `✗ ${JSON.stringify(data)}`;
+  if (ok) setTimeout(drmRefresh, 500);
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  connect();
+  setInterval(listExports, 3000);  // poll export jobs
+  setInterval(drmRefresh, 5000);   // poll DRM state
+});
+</script>
+</body>
+</html>
