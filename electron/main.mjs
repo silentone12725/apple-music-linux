@@ -1,6 +1,6 @@
 import * as electronMain from 'electron/main';
 const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, protocol, net } = electronMain;
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
 process.stdout.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
@@ -105,8 +105,18 @@ const ENGINE_PORT = 20025;
 function ensureEngineConfig() {
     mkdirSync(ENGINE_DATA_DIR, { recursive: true });
     const cfgPath = path.join(ENGINE_DATA_DIR, 'config.yaml');
-    // Write a minimal stub only if one doesn't already exist.  Users who want
-    // to customise stream quality / ALAC / Atmos can edit the file themselves.
+
+    // Derive the live credential directory — the engine must know this path to
+    // call ReadMusicToken() / ReadStorefrontID() for DRM authentication.
+    const wrapperBase = path.join(
+        os.homedir(), '.config', 'apple-music-linux', 'wrapper-data',
+        'rootfs', 'data', 'data', 'com.apple.android.music', 'files'
+    );
+    // Wrapper binary: packaged at <resources>/wrapper, dev fallback beside Wrapper.x86_64.latest/
+    const wrapperBin = existsSync(path.join(process.resourcesPath, 'wrapper'))
+        ? path.join(process.resourcesPath, 'wrapper')
+        : path.join(__dirname, '..', 'Wrapper.x86_64.latest', 'wrapper-rootless');
+
     if (!existsSync(cfgPath)) {
         const stub = [
             'storefront: us',
@@ -118,9 +128,36 @@ function ensureEngineConfig() {
             'get-m3u8-mode: hires',
             'aac-type: aac-lc',
             'alac-max: 192000',
+            `wrapper-binary-path: "${wrapperBin}"`,
+            `wrapper-base-dir: "${wrapperBase}"`,
         ].join('\n') + '\n';
         writeFileSync(cfgPath, stub);
+        return;
     }
+
+    // Patch existing config: add wrapper paths if absent (old installs lacked them).
+    let content = readFile(cfgPath, 'utf8');
+    let changed = false;
+    for (const [key, val] of [['wrapper-binary-path', wrapperBin], ['wrapper-base-dir', wrapperBase]]) {
+        if (!content.includes(`${key}:`)) {
+            content += `${key}: "${val}"\n`;
+            changed = true;
+        }
+    }
+    if (changed) writeFileSync(cfgPath, content);
+}
+
+function killStaleEngine(port) {
+    try {
+        const out = execFileSync('ss', ['-tlnpH', `sport = :${port}`],
+            { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+        const m = out.match(/pid=(\d+)/);
+        if (m) {
+            const pid = parseInt(m[1], 10);
+            console.log(`[AML] Killing stale engine on port ${port} (pid ${pid})`);
+            try { process.kill(pid, 'SIGTERM'); } catch (_) {}
+        }
+    } catch (_) {}
 }
 
 function startEngine() {
@@ -129,6 +166,7 @@ function startEngine() {
         console.log('[AML] Engine binary not found at', ENGINE_BIN, '— skipping engine start');
         return;
     }
+    killStaleEngine(ENGINE_PORT);
     ensureEngineConfig();
     engineProc = spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
         cwd: ENGINE_DATA_DIR,
