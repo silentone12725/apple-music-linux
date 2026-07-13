@@ -1,0 +1,14 @@
+# master_audio.m3u8
+# Master playlist with 3 audio-only variants at different bitrates.
+# Tests OpenMaster variant parsing, relative URI resolution, and SelectByCodec:
+#   - 320kbps AAC (mp4a.40.2)  -> highest AAC bandwidth
+#   - 256kbps AAC (mp4a.40.2)
+#   - ALAC variant (codecs="alac")
+# All URIs are relative and must resolve against the served base URL.
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS="mp4a.40.2"
+audio_320.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=256000,CODECS="mp4a.40.2"
+audio_256.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=900000,CODECS="alac"
+audio_alac.m3u8

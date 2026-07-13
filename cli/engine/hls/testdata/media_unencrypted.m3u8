@@ -1,0 +1,12 @@
+# media_unencrypted.m3u8
+# Unencrypted media playlist (no EXT-X-KEY).
+# Tests OpenMedia leaves Encryption nil and parses 2 segments.
+#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:6
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:6.0,
+seg0.mp4
+#EXTINF:6.0,
+seg1.mp4
+#EXT-X-ENDLIST
