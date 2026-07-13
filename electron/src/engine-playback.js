@@ -26,6 +26,56 @@ let _nativePlay   = null; // saved when play() proxy is installed on the element
 
 let _engineCaps = { lossless: false, atmos: false };
 
+// ── DRM key system stub (prevents MKError mk-140 in Electron) ─────────────────
+// Electron doesn't ship Widevine/FairPlay CDM. MusicKit probes for a key system
+// via navigator.requestMediaKeySystemAccess() before setting nowPlayingItem;
+// if none found it throws CONTENT_UNSUPPORTED and nowPlayingItemDidChange never
+// fires. We stub the probe so MusicKit proceeds to change the queue, then our
+// MSE pipeline takes over. Since MSE pipes raw AAC (no encryption), no actual
+// DRM license is ever requested.
+
+function stubDRM() {
+    if (window.__amlDRMStubbed) return;
+    window.__amlDRMStubbed = true;
+
+    const _origRMKSA = navigator.requestMediaKeySystemAccess?.bind(navigator);
+    navigator.requestMediaKeySystemAccess = async function(keySystem, configs) {
+        // Prefer a real CDM if Electron ever gets one.
+        if (_origRMKSA) {
+            try { return await _origRMKSA(keySystem, configs); } catch (_) {}
+        }
+        const fakeSession = {
+            sessionId: '', expiration: NaN, closed: Promise.resolve(),
+            keyStatuses: new Map(),
+            addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+            generateRequest: async () => {}, load: async () => false,
+            update: async () => {}, close: async () => {}, remove: async () => {},
+        };
+        const fakeMediaKeys = {
+            createSession: () => fakeSession,
+            setServerCertificate: async () => true,
+        };
+        return {
+            keySystem,
+            getConfiguration: () => (configs && configs[0]) || {},
+            createMediaKeys: async () => fakeMediaKeys,
+        };
+    };
+
+    // Stub setMediaKeys so the browser doesn't reject our fake MediaKeys object.
+    const _origSMK = HTMLMediaElement.prototype.setMediaKeys;
+    HTMLMediaElement.prototype.setMediaKeys = async function(keys) {
+        if (!keys) { try { return await _origSMK.call(this, null); } catch (_) {} return; }
+        // If it's a real browser MediaKeys instance, delegate normally.
+        if (typeof MediaKeys !== 'undefined' && keys instanceof MediaKeys) {
+            return _origSMK.call(this, keys);
+        }
+        // Fake keys — accept silently; our MSE stream never generates encrypted events.
+    };
+
+    console.log('[AML Engine] DRM stub installed');
+}
+
 // ── CDN blocker (prototype-level, runs at parse time) ─────────────────────────
 
 function blockAppleCDN() {
@@ -85,19 +135,19 @@ function installPlayProxy(mkAudio) {
     });
 
     mkAudio.play = () => {
-        // MSE has data and session is active — play immediately via native.
-        if (_sessionId && mkAudio.readyState >= 3) return _nativePlay();
-        // Return a Promise that intentionally never resolves.
+        // Always return a never-resolving Promise so MK's "after play() settled"
+        // handler never runs (it would call audio.pause() because it sees CDN
+        // loading never completed, breaking every manual resume).
         //
-        // MK calls audio.play() before our MSE is ready, gets this Promise,
-        // and waits.  When our canplay handler fires _nativePlay(), the 'playing'
-        // DOM event fires and MK's state machine transitions to "playing" (2)
-        // through its own audio-element event listeners — without the Promise
-        // ever resolving.
+        // When MSE has data (readyState ≥ 3) we call _nativePlay() ourselves to
+        // actually start/resume audio; the 'playing' DOM event then advances MK's
+        // state machine to "playing" (2) through its own event listeners.
         //
-        // If we resolved the Promise, MK's "after play() settled" handler runs
-        // and calls audio.pause() because it sees CDN loading never completed.
-        // Leaving it pending prevents that handler entirely.
+        // Before MSE is ready the canplay handler in handleTrackChange calls
+        // _nativePlay() instead, so we leave it pending here too.
+        if (_sessionId && mkAudio.readyState >= 3) {
+            _nativePlay().catch(() => {});
+        }
         return new Promise(() => {}); // intentionally never resolves
     };
 
@@ -507,7 +557,12 @@ async function handleTrackChange(mk) {
     _seekable    = false;
     showQualityBadge(null);
 
-    const adamId = item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
+    // Library tracks have an `i.` prefixed id; the engine needs the catalog id.
+    const adamId = item.playParams?.catalogId
+        ?? item.attributes?.playParams?.catalogId
+        ?? item.id
+        ?? item.playParams?.id
+        ?? item.attributes?.playParams?.id;
     const sf     = mk.storefrontId ?? 'us';
     if (!adamId) { console.warn('[AML Engine] No Adam ID'); return; }
 
@@ -672,6 +727,7 @@ async function setup() {
     if (window.__amlEngineMounted) return;
     window.__amlEngineMounted = true;
 
+    stubDRM();
     blockAppleCDN();
 
     // Wait for the engine's SSE snapshot instead of polling GET /api/v1/status.

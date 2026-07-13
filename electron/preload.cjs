@@ -2,6 +2,65 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+// ── DRM key-system stub — must run before MusicKit.js initialises ─────────────
+// Injected as a <script> tag so it executes in world 0 synchronously at
+// document-start, before any page scripts (including musickit.js) are parsed.
+// MusicKit probes navigator.requestMediaKeySystemAccess() during init and caches
+// the result; our executeJavaScript bundles arrive too late to intercept that.
+// This injection runs early enough to patch the probe in place.
+;(function injectDRMPatch() {
+    if (!location.hostname.includes('apple.com')) return;
+    const patchCode = `(function(){
+  if (window.__amlDRMPatch) return;
+  window.__amlDRMPatch = true;
+  var _origRMKSA = navigator.requestMediaKeySystemAccess && navigator.requestMediaKeySystemAccess.bind(navigator);
+  navigator.requestMediaKeySystemAccess = function(ks, cfgs) {
+    var real = _origRMKSA ? Promise.resolve().then(function(){ return _origRMKSA(ks, cfgs); }) : Promise.reject(new Error('none'));
+    return real.catch(function() {
+      var fakeSession = {
+        sessionId:'', expiration:NaN, closed:Promise.resolve(), keyStatuses:new Map(),
+        addEventListener:function(){}, removeEventListener:function(){}, dispatchEvent:function(){return false;},
+        generateRequest:function(){return Promise.resolve();},
+        load:function(){return Promise.resolve(false);},
+        update:function(){return Promise.resolve();},
+        close:function(){return Promise.resolve();},
+        remove:function(){return Promise.resolve();}
+      };
+      var fakeKeys = {
+        createSession:function(){return fakeSession;},
+        setServerCertificate:function(){return Promise.resolve(true);}
+      };
+      return { keySystem:ks, getConfiguration:function(){return cfgs&&cfgs[0]||{};}, createMediaKeys:function(){return Promise.resolve(fakeKeys);} };
+    });
+  };
+  var _origSMK = HTMLMediaElement.prototype.setMediaKeys;
+  HTMLMediaElement.prototype.setMediaKeys = function(keys) {
+    if (!keys) { try { return _origSMK.call(this, null); } catch(e) { return Promise.resolve(); } }
+    try { if (keys instanceof MediaKeys) return _origSMK.call(this, keys); } catch(e) {}
+    return Promise.resolve();
+  };
+  console.log('[AML] DRM patch active');
+})();`;
+    function doInject() {
+        const s = document.createElement('script');
+        s.textContent = patchCode;
+        document.documentElement.appendChild(s);
+        s.remove();
+    }
+    if (document.documentElement) {
+        doInject();
+    } else {
+        // documentElement not yet created — observe document for the <html> element
+        const obs = new MutationObserver(() => {
+            if (document.documentElement) {
+                obs.disconnect();
+                doInject();
+            }
+        });
+        obs.observe(document, { childList: true });
+    }
+})();
+
 // ── Bridge: expose IPC channels to the injected main-world renderer ──────────
 // Following pear-desktop's pattern: expose a thin IPC bridge via contextBridge
 // so the renderer bundle (running in world 0) can call PTY methods and receive
