@@ -1,9 +1,64 @@
-var __enginePlayback = (() => {
-  // src/engine-playback.js
-  var ENGINE = "aml-engine:/";
-  var _nativeSrcSet = null;
-  var _nativePlay = null;
-  var _engineCaps = { lossless: false, atmos: false };
+(() => {
+  const ENGINE = "aml-engine:/";
+  let _nativeSrcSet = null;
+  let _nativePlay = null;
+  let _engineCaps = { lossless: false, atmos: false };
+  function stubDRM() {
+    if (window.__amlDRMStubbed) return;
+    window.__amlDRMStubbed = true;
+    const _origRMKSA = navigator.requestMediaKeySystemAccess?.bind(navigator);
+    navigator.requestMediaKeySystemAccess = async function(keySystem, configs) {
+      if (_origRMKSA) {
+        try {
+          return await _origRMKSA(keySystem, configs);
+        } catch (_) {
+        }
+      }
+      const fakeSession = {
+        sessionId: "",
+        expiration: NaN,
+        closed: Promise.resolve(),
+        keyStatuses: /* @__PURE__ */ new Map(),
+        addEventListener: () => {
+        },
+        removeEventListener: () => {
+        },
+        dispatchEvent: () => false,
+        generateRequest: async () => {
+        },
+        load: async () => false,
+        update: async () => {
+        },
+        close: async () => {
+        },
+        remove: async () => {
+        }
+      };
+      const fakeMediaKeys = {
+        createSession: () => fakeSession,
+        setServerCertificate: async () => true
+      };
+      return {
+        keySystem,
+        getConfiguration: () => configs && configs[0] || {},
+        createMediaKeys: async () => fakeMediaKeys
+      };
+    };
+    const _origSMK = HTMLMediaElement.prototype.setMediaKeys;
+    HTMLMediaElement.prototype.setMediaKeys = async function(keys) {
+      if (!keys) {
+        try {
+          return await _origSMK.call(this, null);
+        } catch (_) {
+        }
+        return;
+      }
+      if (typeof MediaKeys !== "undefined" && keys instanceof MediaKeys) {
+        return _origSMK.call(this, keys);
+      }
+    };
+    console.log("[AML Engine] DRM stub installed");
+  }
   function blockAppleCDN() {
     if (window.__amlCDNBlocked) return;
     window.__amlCDNBlocked = true;
@@ -29,7 +84,7 @@ var __enginePlayback = (() => {
     };
     console.log("[AML Engine] Apple CDN audio blocked");
   }
-  var _proxyInstalled = false;
+  let _proxyInstalled = false;
   function installPlayProxy(mkAudio) {
     if (_proxyInstalled) return;
     _proxyInstalled = true;
@@ -40,7 +95,10 @@ var __enginePlayback = (() => {
       batch.forEach((r) => r());
     });
     mkAudio.play = () => {
-      if (_sessionId && mkAudio.readyState >= 3) return _nativePlay();
+      if (_sessionId && mkAudio.readyState >= 3) {
+        _nativePlay().catch(() => {
+        });
+      }
       return new Promise(() => {
       });
     };
@@ -94,7 +152,7 @@ var __enginePlayback = (() => {
     const c = document.cookie.split(";").find((s) => s.trim().startsWith("media-user-token="));
     return c ? decodeURIComponent(c.trim().slice("media-user-token=".length)) : "";
   }
-  var _mkInstance = null;
+  let _mkInstance = null;
   function bridgeDuration(mk, durationSec) {
     _mkInstance = mk;
     try {
@@ -124,16 +182,16 @@ var __enginePlayback = (() => {
       _mkInstance = null;
     }
   }
-  var _sessionId = null;
-  var _durationSec = 0;
-  var _abortCtrl = null;
-  var _pipeCtrl = null;
-  var _generation = 0;
-  var _seekable = false;
-  var _activeSb = null;
-  var _activeMs = null;
-  var _activeStreamBase = "";
-  var _videoPipeCtrl = null;
+  let _sessionId = null;
+  let _durationSec = 0;
+  let _abortCtrl = null;
+  let _pipeCtrl = null;
+  let _generation = 0;
+  let _seekable = false;
+  let _activeSb = null;
+  let _activeMs = null;
+  let _activeStreamBase = "";
+  let _videoPipeCtrl = null;
   function showQualityBadge(codec, sampleRate, bitDepth) {
     let badge = document.getElementById("aml-quality-badge");
     if (codec !== "alac") {
@@ -391,7 +449,7 @@ var __enginePlayback = (() => {
     _durationSec = 0;
     _seekable = false;
     showQualityBadge(null);
-    const adamId = item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
+    const adamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
     const sf = mk.storefrontId ?? "us";
     if (!adamId) {
       console.warn("[AML Engine] No Adam ID");
@@ -521,6 +579,7 @@ var __enginePlayback = (() => {
   async function setup() {
     if (window.__amlEngineMounted) return;
     window.__amlEngineMounted = true;
+    stubDRM();
     blockAppleCDN();
     try {
       const msg = await window._amlEngine?.waitFor("engine.snapshot", 8e3);

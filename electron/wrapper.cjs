@@ -6,9 +6,11 @@ const os   = require('os');
 const path = require('path');
 const net  = require('net');
 
-const WRAPPER_SRC = process.resourcesPath
-    ? path.join(process.resourcesPath, 'wrapper')
-    : path.join(__dirname, '..', 'Wrapper.x86_64.latest', 'wrapper-rootless');
+const WRAPPER_SRC = (() => {
+    const pkgBin = path.join(process.resourcesPath, 'wrapper');
+    if (fs.existsSync(pkgBin)) return pkgBin;
+    return path.join(__dirname, '..', 'Wrapper.x86_64.latest', 'wrapper-rootless');
+})();
 
 const DATA_DIR    = path.join(os.homedir(), '.config', 'apple-music-linux', 'wrapper-data');
 const PROXY_PORTS = [10020, 20020, 30020]; // decrypt / m3u8 / account ports

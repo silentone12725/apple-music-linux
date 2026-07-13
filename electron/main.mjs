@@ -25,7 +25,7 @@ protocol.registerSchemesAsPrivileged([{
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import os from 'os';
 
 const require = createRequire(import.meta.url);
@@ -72,6 +72,10 @@ app.commandLine.appendSwitch('enable-zero-copy');
 // Remove Chromium's internal 60 fps cap — lets the Wayland compositor drive
 // the actual display refresh rate (120 Hz, 144 Hz, etc.) instead of 60 Hz.
 app.commandLine.appendSwitch('disable-frame-rate-limit');
+// Music player: allow audio.play() without a live user gesture. Without this,
+// _nativePlay() called from the async canplay handler is blocked by Chromium's
+// autoplay policy when the engine takes >5 s to start streaming.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 // Smooth pixel-level scroll animation for mouse wheel (matches trackpad feel).
 app.commandLine.appendSwitch('enable-smooth-scrolling');
 // Chromium flag required for transparent windows on Linux.
@@ -92,12 +96,12 @@ let isQuitting = false;
 //
 // Binary resolution order:
 //  1. AML_ENGINE_BIN environment variable (manual override / CI)
-//  2. <resources>/apple-music-cli  (packaged Electron distribution)
-//  3. ../../apple-music-engine-dev/apple-music-cli  (dev checkout layout)
-const ENGINE_BIN = process.env.AML_ENGINE_BIN ||
-    (process.resourcesPath
-        ? path.join(process.resourcesPath, 'apple-music-cli')
-        : path.join(__dirname, '..', '..', 'apple-music-engine-dev', 'apple-music-cli'));
+//  2. <resources>/apple-music-cli  (packaged Electron — app.isPackaged)
+//  3. dist/resources/apple-music-cli  (dev: electron . from electron/ dir)
+const _resPkgBin  = path.join(process.resourcesPath, 'apple-music-cli');
+const _resDevBin  = path.join(__dirname, 'dist', 'resources', 'apple-music-cli');
+const ENGINE_BIN  = process.env.AML_ENGINE_BIN ||
+    (app.isPackaged ? _resPkgBin : (existsSync(_resDevBin) ? _resDevBin : _resPkgBin));
 
 const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
 const ENGINE_PORT = 20025;
@@ -113,7 +117,7 @@ function ensureEngineConfig() {
         'rootfs', 'data', 'data', 'com.apple.android.music', 'files'
     );
     // Wrapper binary: packaged at <resources>/wrapper, dev fallback beside Wrapper.x86_64.latest/
-    const wrapperBin = existsSync(path.join(process.resourcesPath, 'wrapper'))
+    const wrapperBin = app.isPackaged && existsSync(path.join(process.resourcesPath, 'wrapper'))
         ? path.join(process.resourcesPath, 'wrapper')
         : path.join(__dirname, '..', 'Wrapper.x86_64.latest', 'wrapper-rootless');
 
@@ -148,6 +152,7 @@ function ensureEngineConfig() {
 }
 
 function killStaleEngine(port) {
+    // SIGKILL anything on the port — no graceful shutdown needed for a stale engine.
     try {
         const out = execFileSync('ss', ['-tlnpH', `sport = :${port}`],
             { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -155,18 +160,46 @@ function killStaleEngine(port) {
         if (m) {
             const pid = parseInt(m[1], 10);
             console.log(`[AML] Killing stale engine on port ${port} (pid ${pid})`);
-            try { process.kill(pid, 'SIGTERM'); } catch (_) {}
+            try { process.kill(pid, 'SIGKILL'); } catch (_) {}
+        }
+    } catch (_) {}
+
+    // Kill the lock-file owner and remove the lock unconditionally.
+    const lockPath = path.join(
+        os.homedir(), '.config', 'apple-music-linux', 'wrapper-data',
+        'rootfs', 'data', 'data', 'com.apple.android.music', 'files', 'engine-session.lock'
+    );
+    try {
+        const pidStr = readFileSync(lockPath, 'utf8').trim();
+        const lockPid = parseInt(pidStr, 10);
+        if (lockPid > 0) {
+            try { process.kill(lockPid, 'SIGKILL'); } catch (_) {}
+            unlinkSync(lockPath);
+            console.log(`[AML] Removed stale session lock (was held by pid ${lockPid})`);
         }
     } catch (_) {}
 }
 
-function startEngine() {
+function isPortFree(port) {
+    try {
+        const out = execFileSync('ss', ['-tlnH', `sport = :${port}`],
+            { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+        return out.trim() === '';
+    } catch (_) { return true; }
+}
+
+async function startEngine() {
     if (engineProc) return;
     if (!existsSync(ENGINE_BIN)) {
         console.log('[AML] Engine binary not found at', ENGINE_BIN, '— skipping engine start');
         return;
     }
     killStaleEngine(ENGINE_PORT);
+    // Wait up to 2 s for the port to be released after SIGKILL.
+    for (let i = 0; i < 20; i++) {
+        if (isPortFree(ENGINE_PORT)) break;
+        await new Promise(r => setTimeout(r, 100));
+    }
     ensureEngineConfig();
     engineProc = spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
         cwd: ENGINE_DATA_DIR,
