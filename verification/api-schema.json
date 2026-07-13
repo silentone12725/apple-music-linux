@@ -1,0 +1,377 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Apple Music Engine API",
+    "version": "1.0.0",
+    "description": "HTTP API exposed by apple-music-cli when started with --api <port>. All endpoints require the server to have valid bearer token + media user token configured."
+  },
+  "servers": [{ "url": "http://127.0.0.1:8080", "description": "Local engine" }],
+  "paths": {
+    "/api/v1/status": {
+      "get": {
+        "summary": "Health check",
+        "operationId": "getStatus",
+        "responses": {
+          "200": {
+            "description": "Engine is running",
+            "content": { "application/json": {
+              "example": { "status": "ok" }
+            }}
+          }
+        }
+      }
+    },
+    "/api/v1/capabilities": {
+      "get": {
+        "summary": "Feature flags for frontends",
+        "operationId": "getCapabilities",
+        "responses": {
+          "200": {
+            "description": "Current feature support",
+            "content": { "application/json": {
+              "example": {
+                "lossless": true, "hiRes": true, "musicVideo": true,
+                "downloads": true, "lyrics": true, "queue": false, "radio": false
+              }
+            }}
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "summary": "Server-Sent Events push channel",
+        "operationId": "getEvents",
+        "description": "SSE stream. Event types: export (ExportEvent). Keep-alive comments sent every 15 s.",
+        "responses": {
+          "200": {
+            "description": "SSE stream",
+            "content": { "text/event-stream": {} }
+          }
+        }
+      }
+    },
+    "/api/v1/playback": {
+      "post": {
+        "summary": "Create playback session",
+        "operationId": "createPlayback",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "$ref": "#/components/schemas/PlaybackRequest" },
+            "example": {
+              "assetId": "1488408568",
+              "storefront": "us",
+              "capabilities": { "lossless": true }
+            }
+          }}
+        },
+        "responses": {
+          "201": {
+            "description": "Session created",
+            "content": { "application/json": {
+              "schema": { "$ref": "#/components/schemas/Session" }
+            }}
+          },
+          "400": { "description": "Missing assetId" },
+          "401": { "description": "Not authenticated" },
+          "502": { "description": "Apple Music API error" }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/audio": {
+      "get": {
+        "summary": "Stream audio for a session",
+        "operationId": "getAudio",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Decrypted fMP4 audio stream",
+            "content": { "audio/mp4": {} }
+          },
+          "404": { "description": "Session not found or expired" }
+        }
+      }
+    },
+    "/api/v1/playback/{id}/video": {
+      "get": {
+        "summary": "Stream video for a music video session",
+        "operationId": "getVideo",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "Decrypted fMP4 video stream",
+            "content": { "video/mp4": {} }
+          },
+          "404": { "description": "Session not found, expired, or has no video track" }
+        }
+      }
+    },
+    "/api/v1/playback/{id}": {
+      "delete": {
+        "summary": "Release a playback session",
+        "operationId": "deletePlayback",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "204": { "description": "Session released" }
+        }
+      }
+    },
+    "/api/v1/metadata/{id}": {
+      "get": {
+        "summary": "Track or MV metadata",
+        "operationId": "getMetadata",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "sf", "in": "query", "schema": { "type": "string", "default": "us" } },
+          { "name": "type", "in": "query", "schema": { "type": "string", "enum": ["song", "music-video"], "default": "song" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadata object",
+            "content": { "application/json": {
+              "schema": { "$ref": "#/components/schemas/MetadataResponse" }
+            }}
+          },
+          "404": { "description": "Asset not found" }
+        }
+      }
+    },
+    "/api/v1/artwork/{id}": {
+      "get": {
+        "summary": "Proxy artwork image from Apple CDN",
+        "operationId": "getArtwork",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "sf", "in": "query", "schema": { "type": "string", "default": "us" } },
+          { "name": "size", "in": "query", "schema": { "type": "integer", "default": 500 } }
+        ],
+        "responses": {
+          "200": { "description": "JPEG or PNG image", "content": { "image/jpeg": {}, "image/png": {} } },
+          "404": { "description": "Asset not found" }
+        }
+      }
+    },
+    "/api/v1/lyrics/{id}": {
+      "get": {
+        "summary": "Fetch lyrics for a track",
+        "operationId": "getLyrics",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "sf", "in": "query", "schema": { "type": "string", "default": "us" } },
+          { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["lrc", "ttml"], "default": "lrc" } },
+          { "name": "type", "in": "query", "schema": { "type": "string", "enum": ["lyrics", "syllable-lyrics"], "default": "lyrics" } }
+        ],
+        "responses": {
+          "200": { "description": "LRC or TTML lyrics", "content": { "text/plain": {}, "application/xml": {} } },
+          "404": { "description": "Lyrics unavailable for this track or region" }
+        }
+      }
+    },
+    "/api/v1/export": {
+      "post": {
+        "summary": "Enqueue an export job",
+        "operationId": "createExport",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": {
+            "schema": { "$ref": "#/components/schemas/ExportRequest" },
+            "example": {
+              "assetId": "1488408568",
+              "storefront": "us",
+              "capabilities": { "lossless": true },
+              "outputDir": "/home/user/Music",
+              "filenameTemplate": "{album_artist}/{album}/{track_number:02d} - {title}",
+              "options": {
+                "embedArtwork": true, "embedLyrics": true,
+                "saveLrcSidecar": false, "convertToFlac": false,
+                "overwritePolicy": "skip"
+              }
+            }
+          }}
+        },
+        "responses": {
+          "202": {
+            "description": "Job accepted",
+            "content": { "application/json": {
+              "schema": { "$ref": "#/components/schemas/ExportJob" }
+            }}
+          },
+          "400": { "description": "Missing assetId or invalid request" },
+          "401": { "description": "Not authenticated" }
+        }
+      },
+      "get": {
+        "summary": "List all export jobs",
+        "operationId": "listExports",
+        "responses": {
+          "200": {
+            "description": "Array of export jobs",
+            "content": { "application/json": {
+              "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ExportJob" } }
+            }}
+          }
+        }
+      }
+    },
+    "/api/v1/export/{id}": {
+      "get": {
+        "summary": "Get export job status",
+        "operationId": "getExport",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Job status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExportJob" } } } },
+          "404": { "description": "Job not found" }
+        }
+      },
+      "delete": {
+        "summary": "Cancel an export job",
+        "operationId": "cancelExport",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "204": { "description": "Cancellation requested" },
+          "404": { "description": "Job not found" }
+        }
+      }
+    },
+    "/api/v1/export/{id}/retry": {
+      "post": {
+        "summary": "Retry a failed or cancelled export job",
+        "operationId": "retryExport",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "202": { "description": "New job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExportJob" } } } },
+          "400": { "description": "Job is not in a retryable state (must be failed or cancelled)" },
+          "404": { "description": "Job not found" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PlaybackRequest": {
+        "type": "object",
+        "required": ["assetId"],
+        "properties": {
+          "assetId": { "type": "string" },
+          "storefront": { "type": "string", "default": "us" },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "lossless": { "type": "boolean" },
+              "atmos":    { "type": "boolean" },
+              "video":    { "type": "boolean" }
+            }
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "sessionId":   { "type": "string" },
+          "assetId":     { "type": "string" },
+          "storefront":  { "type": "string" },
+          "type":        { "type": "string", "enum": ["song", "mv"] },
+          "codec":       { "type": "string" },
+          "sampleRate":  { "type": "integer" },
+          "bitDepth":    { "type": "integer" },
+          "title":       { "type": "string" },
+          "artistName":  { "type": "string" },
+          "albumName":   { "type": "string" },
+          "durationMs":  { "type": "integer" },
+          "artworkUrl":  { "type": "string" },
+          "expiresIn":   { "type": "integer", "description": "Seconds until TTL expiry (4 hours)" },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "audio":  { "type": "boolean" },
+              "video":  { "type": "boolean" },
+              "lyrics": { "type": "boolean" }
+            }
+          },
+          "streams": {
+            "type": "object",
+            "properties": {
+              "audio": { "type": "string", "description": "Relative URL for audio stream" },
+              "video": { "type": "string", "description": "Relative URL for video stream (MV only)" }
+            }
+          }
+        }
+      },
+      "MetadataResponse": {
+        "type": "object",
+        "properties": {
+          "id":         { "type": "string" },
+          "type":       { "type": "string" },
+          "title":      { "type": "string" },
+          "artistName": { "type": "string" },
+          "albumName":  { "type": "string" },
+          "durationMs": { "type": "integer" },
+          "artworkUrl": { "type": "string" },
+          "hasLyrics":  { "type": "boolean" },
+          "streams":    { "type": "array", "items": { "$ref": "#/components/schemas/StreamInfo" } }
+        }
+      },
+      "StreamInfo": {
+        "type": "object",
+        "properties": {
+          "codec":      { "type": "string" },
+          "sampleRate": { "type": "integer" },
+          "bitDepth":   { "type": "integer" },
+          "bitrate":    { "type": "integer" }
+        }
+      },
+      "ExportRequest": {
+        "type": "object",
+        "required": ["assetId"],
+        "properties": {
+          "assetId":          { "type": "string" },
+          "storefront":       { "type": "string", "default": "us" },
+          "language":         { "type": "string", "default": "en-US" },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "lossless": { "type": "boolean" },
+              "atmos":    { "type": "boolean" },
+              "video":    { "type": "boolean" }
+            }
+          },
+          "outputDir":        { "type": "string", "description": "Absolute path. Defaults to ~/Music." },
+          "filenameTemplate": {
+            "type": "string",
+            "description": "Supports {title}, {artist}, {album_artist}, {album}, {track_number:02d}, {disc_number}, {year}, {genre}, {codec}, {ext}",
+            "example": "{album_artist}/{album}/{track_number:02d} - {title}"
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "embedArtwork":    { "type": "boolean", "default": true },
+              "artworkSize":     { "type": "integer", "default": 3000 },
+              "embedLyrics":     { "type": "boolean", "default": false },
+              "lrcFormat":       { "type": "string", "enum": ["lrc", "ttml"], "default": "lrc" },
+              "lrcType":         { "type": "string", "enum": ["lyrics", "syllable-lyrics"], "default": "lyrics" },
+              "saveLrcSidecar":  { "type": "boolean", "default": false },
+              "overwritePolicy": { "type": "string", "enum": ["skip", "overwrite", "rename"], "default": "skip" },
+              "convertToFlac":   { "type": "boolean", "default": false },
+              "ffmpegPath":      { "type": "string", "description": "Path to ffmpeg binary. Defaults to 'ffmpeg' on PATH." },
+              "keepOriginal":    { "type": "boolean", "default": false, "description": "Keep .m4a when convertToFlac is true." }
+            }
+          }
+        }
+      },
+      "ExportJob": {
+        "type": "object",
+        "properties": {
+          "jobId":     { "type": "string" },
+          "assetId":   { "type": "string" },
+          "phase":     { "type": "string", "enum": ["queued", "resolving", "downloading", "tagging", "moving", "done", "failed", "cancelled"] },
+          "percent":   { "type": "integer", "minimum": 0, "maximum": 100 },
+          "output":    { "type": "string", "description": "Final file path; set when phase=done" },
+          "error":     { "type": "string", "description": "Error message; set when phase=failed" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}
