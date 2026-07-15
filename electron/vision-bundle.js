@@ -1,5 +1,4 @@
 (() => {
-  // src/vision-glass.js
   (function detectUIReady() {
     if (typeof window.amlReady !== "function") return;
     const fire = () => window.amlReady();
@@ -21,7 +20,7 @@
       fire();
     }, 1e4);
   })();
-  var sheet = new CSSStyleSheet();
+  const sheet = new CSSStyleSheet();
   sheet.replaceSync(`
   :root {
     --aml-glass-blur:    48px;
@@ -155,11 +154,11 @@
      terminal=right). No :has() override needed. */
 `);
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-  var _canvas = document.createElement("canvas");
+  const _canvas = document.createElement("canvas");
   _canvas.width = 8;
   _canvas.height = 8;
-  var _ctx = _canvas.getContext("2d", { willReadFrequently: true });
-  var _lastSrc = "";
+  const _ctx = _canvas.getContext("2d", { willReadFrequently: true });
+  let _lastSrc = "";
   async function sampleArtwork(img) {
     if (!img || img.src === _lastSrc || !img.src) return;
     _lastSrc = img.src;
@@ -188,14 +187,14 @@
   function findPlayerArt() {
     return document.querySelector('[class*="playback"] img[src]') || document.querySelector('[class*="lcd"] img[src]') || document.querySelector('[class*="player"] img[src]');
   }
-  var artObserver = new MutationObserver((mutations) => {
+  const artObserver = new MutationObserver((mutations) => {
     for (const m of mutations) {
       if (m.type === "attributes" && m.attributeName === "src") {
         sampleArtwork(m.target);
       }
     }
   });
-  var barObserver = new MutationObserver(() => {
+  const barObserver = new MutationObserver(() => {
     const img = findPlayerArt();
     if (!img) return;
     artObserver.observe(img, { attributes: true, attributeFilter: ["src"] });
