@@ -765,7 +765,8 @@ async function setup() {
   } catch (e) {
     console.warn("[AML Engine] Engine snapshot timeout:", e.message, "\u2014 continuing");
   }
-  window._amlEngine?.on("drm", (snap) => {
+  window._amlEngine?.on("drm", (msg) => {
+    const snap = msg?.payload;
     const wasLossless = _engineCaps.lossless;
     const sess = snap?.state?.session ?? "unknown";
     if (snap?.capabilities) {
