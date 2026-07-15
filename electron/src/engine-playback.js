@@ -26,9 +26,10 @@ let _nativePlay   = null; // saved when play() proxy is installed on the element
 
 let _engineCaps      = { lossless: false, atmos: false };
 let _flacSupported    = false;  // MediaSource.isTypeSupported('audio/mp4; codecs="flac"') at setup()
-let _sessionLossless  = false;  // true when current session is streaming raw ALAC (not transcoded)
+let _sessionLossless  = false;  // true when current session is streaming FLAC or raw lossless
 let _upgradeInFlight  = false;  // guard: only one seamless lossless upgrade at a time
 let _losslessWaitDone = false;  // true after waitForLossless has timed out once — skip future waits
+let _snapshotEventId  = -1;     // SSE meta.id of the last engine.snapshot — drm events older than this are stale replays
 
 // ── DRM key system stub (prevents MKError mk-140 in Electron) ─────────────────
 // Electron doesn't ship Widevine/FairPlay CDM. MusicKit probes for a key system
@@ -491,15 +492,11 @@ async function seekToTime(seekSec, audio, sb, ms) {
 
 // ── Seamless lossless upgrade ─────────────────────────────────────────────────
 //
-// When DRM becomes valid after an AAC session is already playing, splice in a
-// native ALAC stream at a future "seam" point via SourceBuffer.changeType().
-// The existing AAC data before the seam keeps playing without interruption;
-// ALAC replaces everything from the seam onward.
-//
-// Requires: _alacSupported (Chromium 116+), an active MSE session, and enough
-// track remaining (≥20 s). The ALAC session's CBCSSeekableSource supports ?t=
-// (same as AAC's HLSSeekableSource), so we can pre-fetch from the exact segment
-// boundary reported in X-Actual-Start before touching the SourceBuffer.
+// Splices a FLAC-transcode stream into a live AAC session via changeType().
+// Kept for future use — currently not triggered because FLAC transcode streams
+// start at position 0 with no ?t= seek support, making a buffer-safe seam
+// impossible. The drm handler resets _losslessWaitDone on lossless transition
+// so the NEXT track starts in FLAC directly via waitForLossless().
 async function scheduleLosslessUpgrade(mk) {
     if (_upgradeInFlight) return;
     _upgradeInFlight = true;
@@ -948,10 +945,11 @@ async function setup() {
         const snap = msg?.payload?.snapshot;
         const gen  = msg?.meta?.generation ?? '?';
         const why  = msg?.meta?.reason     ?? '?';
+        _snapshotEventId = msg?.meta?.id ?? -1;  // used to filter stale replayed drm events
         if (snap?.capabilities) {
             _engineCaps = { lossless: !!snap.capabilities.lossless, atmos: !!snap.capabilities.atmos };
         }
-        console.log(`[AML Engine] Engine ready — drm.session=${snap?.drm?.session ?? 'unknown'} lossless=${_engineCaps.lossless} gen=${gen} reason=${why}`);
+        console.log(`[AML Engine] Engine ready — drm.session=${snap?.drm?.session ?? 'unknown'} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
     } catch (e) {
         console.warn('[AML Engine] Engine snapshot timeout:', e.message, '— continuing');
     }
@@ -959,6 +957,15 @@ async function setup() {
     // React to DRM state changes pushed over SSE (session lost, re-auth, lossless ready).
     // SSE events arrive as {meta:{id,generation,...}, payload:<DRMSnapshot>} — unwrap payload.
     window._amlEngine?.on('drm', (msg) => {
+        // Skip events that predate our last engine.snapshot — they are stale ring-buffer
+        // replays whose state is already captured in the snapshot. Applying them would
+        // overwrite newer snapshot data (e.g. lossless=true → false).
+        const eventId = msg?.meta?.id ?? Infinity;
+        if (eventId <= _snapshotEventId) {
+            console.log(`[AML Engine] DRM event ${eventId} skipped (predates snapshot ${_snapshotEventId})`);
+            return;
+        }
+
         const snap = msg?.payload;  // DRMSnapshot: {state:{session,...}, capabilities:{alac,...}}
         const wasLossless = _engineCaps.lossless;
         const sess = snap?.state?.session ?? 'unknown';
@@ -970,18 +977,10 @@ async function setup() {
         // DRM just became lossless-capable — reset so the next track gets a wait window.
         if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
 
-        // Seamless lossless upgrade: DRM just became valid while an AAC session is live.
-        // Schedule the changeType() splice only when native ALAC MSE is available —
-        // the transcode path doesn't support mid-track switching (no ?t= on the AAC output).
-        if (!wasLossless && _engineCaps.lossless && _sessionId && !_sessionLossless && _flacSupported && !_upgradeInFlight) {
-            const mkInst = window.MusicKit?.getInstance?.();
-            if (mkInst) {
-                scheduleLosslessUpgrade(mkInst).catch(e => {
-                    if (e.name !== 'AbortError') console.warn('[AML Engine] Upgrade error:', e.message);
-                    _upgradeInFlight = false;
-                });
-            }
-        }
+        // Note: mid-track seamless lossless upgrade is intentionally not attempted here.
+        // FLAC transcode streams start at position 0 with no seek support, making a
+        // buffer-safe splice impossible. The next track will start in FLAC via
+        // waitForLossless() at the top of handleTrackChange.
     });
 
     const mk = await waitForMusicKit();
