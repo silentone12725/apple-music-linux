@@ -6,6 +6,7 @@ let _flacSupported = false;
 let _sessionLossless = false;
 let _upgradeInFlight = false;
 let _losslessWaitDone = false;
+let _snapshotEventId = -1;
 function stubDRM() {
   if (window.__amlDRMStubbed) return;
   window.__amlDRMStubbed = true;
@@ -758,14 +759,20 @@ async function setup() {
     const snap = msg?.payload?.snapshot;
     const gen = msg?.meta?.generation ?? "?";
     const why = msg?.meta?.reason ?? "?";
+    _snapshotEventId = msg?.meta?.id ?? -1;
     if (snap?.capabilities) {
       _engineCaps = { lossless: !!snap.capabilities.lossless, atmos: !!snap.capabilities.atmos };
     }
-    console.log(`[AML Engine] Engine ready \u2014 drm.session=${snap?.drm?.session ?? "unknown"} lossless=${_engineCaps.lossless} gen=${gen} reason=${why}`);
+    console.log(`[AML Engine] Engine ready \u2014 drm.session=${snap?.drm?.session ?? "unknown"} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
   } catch (e) {
     console.warn("[AML Engine] Engine snapshot timeout:", e.message, "\u2014 continuing");
   }
   window._amlEngine?.on("drm", (msg) => {
+    const eventId = msg?.meta?.id ?? Infinity;
+    if (eventId <= _snapshotEventId) {
+      console.log(`[AML Engine] DRM event ${eventId} skipped (predates snapshot ${_snapshotEventId})`);
+      return;
+    }
     const snap = msg?.payload;
     const wasLossless = _engineCaps.lossless;
     const sess = snap?.state?.session ?? "unknown";
@@ -774,15 +781,6 @@ async function setup() {
     }
     console.log(`[AML Engine] DRM state \u2192 session=${sess} lossless=${_engineCaps.lossless}`);
     if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
-    if (!wasLossless && _engineCaps.lossless && _sessionId && !_sessionLossless && _flacSupported && !_upgradeInFlight) {
-      const mkInst = window.MusicKit?.getInstance?.();
-      if (mkInst) {
-        scheduleLosslessUpgrade(mkInst).catch((e) => {
-          if (e.name !== "AbortError") console.warn("[AML Engine] Upgrade error:", e.message);
-          _upgradeInFlight = false;
-        });
-      }
-    }
   });
   const mk = await waitForMusicKit();
   console.log("[AML Engine] MusicKit ready");
