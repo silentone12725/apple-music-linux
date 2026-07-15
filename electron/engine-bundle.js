@@ -2,7 +2,7 @@ const ENGINE = "aml-engine:/";
 let _nativeSrcSet = null;
 let _nativePlay = null;
 let _engineCaps = { lossless: false, atmos: false };
-let _alacSupported = false;
+let _flacSupported = false;
 let _sessionLossless = false;
 let _upgradeInFlight = false;
 let _losslessWaitDone = false;
@@ -410,7 +410,7 @@ async function scheduleLosslessUpgrade(mk) {
   }
   const adamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
   const sf = mk.storefrontId ?? "us";
-  console.log(`[AML Engine] Lossless upgrade: opening ALAC session, seam=${seam.toFixed(1)}s`);
+  console.log(`[AML Engine] Lossless upgrade: opening FLAC session, seam=${seam.toFixed(1)}s`);
   let newSess;
   try {
     const r = await fetch(`${ENGINE}/api/v1/playback`, {
@@ -444,8 +444,8 @@ async function scheduleLosslessUpgrade(mk) {
     return;
   }
   const audioPath = newSess.streams?.audio ?? `/api/v1/playback/${newSess.sessionId}/audio`;
-  const newBase = `${ENGINE}${audioPath}?raw=1`;
-  const seamUrl = `${newBase}&t=${seam.toFixed(3)}`;
+  const newBase = `${ENGINE}${audioPath}?transcode=flac`;
+  const seamUrl = `${newBase}`;
   let seamResp;
   try {
     seamResp = await fetch(seamUrl, { signal: ctrl?.signal });
@@ -456,8 +456,8 @@ async function scheduleLosslessUpgrade(mk) {
     _upgradeInFlight = false;
     return;
   }
-  const actualStart = parseFloat(seamResp.headers.get("X-Actual-Start") ?? seam);
-  console.log(`[AML Engine] Lossless upgrade: ALAC stream starts at actualStart=${actualStart.toFixed(2)}s`);
+  const actualStart = seam;
+  console.log(`[AML Engine] Lossless upgrade: FLAC stream ready, splice at ${actualStart.toFixed(2)}s`);
   await new Promise((resolve) => {
     const check = () => {
       if (myGen !== _generation || ctrl?.signal.aborted || audio.currentTime >= actualStart - 2) resolve();
@@ -494,9 +494,9 @@ async function scheduleLosslessUpgrade(mk) {
     return;
   }
   try {
-    sb.changeType('audio/mp4; codecs="alac"');
+    sb.changeType('audio/mp4; codecs="flac"');
   } catch (e) {
-    console.warn('[AML Engine] changeType("alac") failed:', e.message, "\u2014 resuming AAC");
+    console.warn('[AML Engine] changeType("flac") failed:', e.message, "\u2014 resuming AAC");
     seamResp.body?.cancel();
     deleteSession(newSess.sessionId);
     if (_activeStreamBase && ms.readyState === "open") {
@@ -518,14 +518,14 @@ async function scheduleLosslessUpgrade(mk) {
   _sessionId = newSess.sessionId;
   _sessionLossless = true;
   _activeStreamBase = newBase;
-  _seekable = true;
+  _seekable = false;
   _pipeCtrl = new AbortController();
   const pipeCtrl = _pipeCtrl;
   pipeToSourceBuffer(sb, audio, seamResp, pipeCtrl.signal, ms, _durationSec, performance.now()).catch((e) => {
-    if (!pipeCtrl.signal.aborted) console.error("[AML Engine] ALAC upgrade pipe error:", e.message);
+    if (!pipeCtrl.signal.aborted) console.error("[AML Engine] FLAC upgrade pipe error:", e.message);
   });
   showQualityBadge("alac", newSess.sampleRate, newSess.bitDepth);
-  console.log(`[AML Engine] Lossless upgrade complete \u2192 ALAC ${newSess.sampleRate}Hz/${newSess.bitDepth}bit`);
+  console.log(`[AML Engine] Lossless upgrade complete \u2192 FLAC ${newSess.sampleRate}Hz/${newSess.bitDepth}bit`);
   deleteSession(oldSessionId);
   _upgradeInFlight = false;
 }
@@ -657,13 +657,15 @@ async function handleTrackChange(mk) {
     _seekable = sess.capabilities?.seekable ?? false;
     console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s seekable=${_seekable} +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
     showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth);
-    const useRawLossless = sess.codec === "alac" && _alacSupported;
-    const needsTranscode = (sess.codec === "alac" || sess.codec === "atmos") && !useRawLossless;
+    const useFlacLossless = sess.codec === "alac" && _flacSupported;
     const audioPath = sess.streams?.audio ?? `/api/v1/playback/${_sessionId}/audio`;
-    const streamBase = `${ENGINE}${audioPath}${needsTranscode ? "?transcode=aac" : "?raw=1"}`;
-    const mime = useRawLossless ? 'audio/mp4; codecs="alac"' : 'audio/mp4; codecs="mp4a.40.2"';
-    _sessionLossless = useRawLossless;
-    if (useRawLossless) _seekable = true;
+    let transcodeTarget = "aac";
+    if (useFlacLossless) transcodeTarget = "flac";
+    const needsTranscode = sess.codec === "alac" || sess.codec === "atmos";
+    const streamBase = `${ENGINE}${audioPath}${needsTranscode ? `?transcode=${transcodeTarget}` : "?raw=1"}`;
+    const mime = useFlacLossless ? 'audio/mp4; codecs="flac"' : 'audio/mp4; codecs="mp4a.40.2"';
+    _sessionLossless = useFlacLossless;
+    if (useFlacLossless) _seekable = false;
     _abortCtrl = new AbortController();
     const ctrl = _abortCtrl;
     if (!mkAudio) throw new Error("MK audio element not found");
@@ -749,8 +751,8 @@ async function setup() {
   window.__amlEngineMounted = true;
   stubDRM();
   blockAppleCDN();
-  _alacSupported = MediaSource.isTypeSupported('audio/mp4; codecs="alac"');
-  console.log(`[AML Engine] ALAC MSE: ${_alacSupported ? "native (no transcode)" : "not supported \u2014 will transcode to AAC"}`);
+  _flacSupported = MediaSource.isTypeSupported('audio/mp4; codecs="flac"');
+  console.log(`[AML Engine] FLAC MSE: ${_flacSupported ? "supported \u2014 lossless via FLAC transcode" : "not supported \u2014 will transcode to AAC"}`);
   try {
     const msg = await window._amlEngine?.waitFor("engine.snapshot", 8e3);
     const snap = msg?.payload?.snapshot;
@@ -771,7 +773,7 @@ async function setup() {
     }
     console.log(`[AML Engine] DRM state \u2192 session=${sess} lossless=${_engineCaps.lossless}`);
     if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
-    if (!wasLossless && _engineCaps.lossless && _sessionId && !_sessionLossless && _alacSupported && !_upgradeInFlight) {
+    if (!wasLossless && _engineCaps.lossless && _sessionId && !_sessionLossless && _flacSupported && !_upgradeInFlight) {
       const mkInst = window.MusicKit?.getInstance?.();
       if (mkInst) {
         scheduleLosslessUpgrade(mkInst).catch((e) => {
