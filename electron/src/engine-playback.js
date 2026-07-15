@@ -24,7 +24,11 @@ let _nativePlay   = null; // saved when play() proxy is installed on the element
 
 // ── Engine capability snapshot (from SSE) ─────────────────────────────────────
 
-let _engineCaps = { lossless: false, atmos: false };
+let _engineCaps      = { lossless: false, atmos: false };
+let _alacSupported    = false;  // MediaSource.isTypeSupported('audio/mp4; codecs="alac"') at setup()
+let _sessionLossless  = false;  // true when current session is streaming raw ALAC (not transcoded)
+let _upgradeInFlight  = false;  // guard: only one seamless lossless upgrade at a time
+let _losslessWaitDone = false;  // true after waitForLossless has timed out once — skip future waits
 
 // ── DRM key system stub (prevents MKError mk-140 in Electron) ─────────────────
 // Electron doesn't ship Widevine/FairPlay CDM. MusicKit probes for a key system
@@ -297,6 +301,26 @@ function deleteSession(id) {
     if (id) fetch(`${ENGINE}/api/v1/playback/${id}`, { method: 'DELETE' }).catch(() => {});
 }
 
+// Polls _engineCaps.lossless every 100 ms until true or timeoutMs elapses.
+// Only waits on the first call after startup (or after a DRM re-auth resets
+// _losslessWaitDone). Once it times out once we skip all future waits — CBCS
+// state won't flip mid-session and we can't pay +2.5 s per track when unavailable.
+function waitForLossless(timeoutMs) {
+    if (_engineCaps.lossless || _losslessWaitDone) return Promise.resolve();
+    return new Promise(resolve => {
+        const deadline = Date.now() + timeoutMs;
+        const tick = () => {
+            if (_engineCaps.lossless || Date.now() >= deadline) {
+                _losslessWaitDone = true;
+                resolve();
+            } else {
+                setTimeout(tick, 100);
+            }
+        };
+        tick();
+    });
+}
+
 // ── MSE streaming ─────────────────────────────────────────────────────────────
 
 // streamUrlOrResp can be a URL string (normal playback) or a pre-fetched
@@ -465,6 +489,170 @@ async function seekToTime(seekSec, audio, sb, ms) {
     }, { once: true });
 }
 
+// ── Seamless lossless upgrade ─────────────────────────────────────────────────
+//
+// When DRM becomes valid after an AAC session is already playing, splice in a
+// native ALAC stream at a future "seam" point via SourceBuffer.changeType().
+// The existing AAC data before the seam keeps playing without interruption;
+// ALAC replaces everything from the seam onward.
+//
+// Requires: _alacSupported (Chromium 116+), an active MSE session, and enough
+// track remaining (≥20 s). The ALAC session's CBCSSeekableSource supports ?t=
+// (same as AAC's HLSSeekableSource), so we can pre-fetch from the exact segment
+// boundary reported in X-Actual-Start before touching the SourceBuffer.
+async function scheduleLosslessUpgrade(mk) {
+    if (_upgradeInFlight) return;
+    _upgradeInFlight = true;
+
+    const myGen = _generation;
+    const ctrl  = _abortCtrl;
+    const audio = getMKAudio();
+    const sb    = _activeSb;
+    const ms    = _activeMs;
+
+    if (!audio || !sb || !ms || ms.readyState !== 'open') {
+        _upgradeInFlight = false; return;
+    }
+
+    // Need ≥20 s of track remaining so the splice is worth the overhead.
+    const seam = audio.currentTime + 10;
+    if (!_durationSec || seam >= _durationSec - 10) {
+        _upgradeInFlight = false; return;
+    }
+
+    const item = mk.nowPlayingItem;
+    if (!item) { _upgradeInFlight = false; return; }
+    const adamId = item.playParams?.catalogId
+        ?? item.attributes?.playParams?.catalogId
+        ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
+    const sf = mk.storefrontId ?? 'us';
+
+    console.log(`[AML Engine] Lossless upgrade: opening ALAC session, seam=${seam.toFixed(1)}s`);
+
+    // Open a parallel lossless session for the same track.
+    let newSess;
+    try {
+        const r = await fetch(`${ENGINE}/api/v1/playback`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                assetId: adamId, storefront: sf,
+                capabilities: { lossless: true, video: false, atmos: false },
+                token: mk.developerToken ?? '',
+                mediaUserToken: getMUT(),
+            }),
+            signal: ctrl?.signal,
+        });
+        if (!r.ok) throw new Error(`Session ${r.status}: ${await r.text()}`);
+        newSess = await r.json();
+    } catch (e) {
+        if (e.name !== 'AbortError') console.warn('[AML Engine] Lossless upgrade: session failed:', e.message);
+        _upgradeInFlight = false; return;
+    }
+
+    if (myGen !== _generation || ctrl?.signal.aborted) {
+        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
+    }
+
+    // If the engine still returned AAC (DRM not fully ready despite the SSE event),
+    // there's nothing to upgrade to — bail out cleanly.
+    if (newSess.codec !== 'alac') {
+        console.log('[AML Engine] Lossless upgrade: engine returned non-ALAC codec — skipping');
+        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
+    }
+
+    const audioPath = newSess.streams?.audio ?? `/api/v1/playback/${newSess.sessionId}/audio`;
+    const newBase   = `${ENGINE}${audioPath}?raw=1`;
+    const seamUrl   = `${newBase}&t=${seam.toFixed(3)}`;
+
+    // Pre-fetch the ALAC stream starting at the seam BEFORE touching the SourceBuffer.
+    // If this fetch fails the existing AAC session remains intact.
+    // X-Actual-Start carries the real HLS segment boundary the engine started from.
+    let seamResp;
+    try {
+        seamResp = await fetch(seamUrl, { signal: ctrl?.signal });
+        if (!seamResp.ok) throw new Error(`Stream ${seamResp.status}`);
+    } catch (e) {
+        if (e.name !== 'AbortError') console.warn('[AML Engine] Lossless upgrade: seam fetch failed:', e.message);
+        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
+    }
+
+    const actualStart = parseFloat(seamResp.headers.get('X-Actual-Start') ?? seam);
+    console.log(`[AML Engine] Lossless upgrade: ALAC stream starts at actualStart=${actualStart.toFixed(2)}s`);
+
+    // Wait until playback is within 2 s of the splice point.
+    await new Promise(resolve => {
+        const check = () => {
+            if (myGen !== _generation || ctrl?.signal.aborted || audio.currentTime >= actualStart - 2) resolve();
+            else setTimeout(check, 200);
+        };
+        check();
+    });
+
+    if (myGen !== _generation || ctrl?.signal.aborted) {
+        seamResp.body?.cancel();
+        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
+    }
+
+    const oldSessionId = _sessionId;
+    const waitSBIdle = () => new Promise((res, rej) => {
+        if (!sb.updating) return res();
+        sb.addEventListener('updateend', res, { once: true });
+        sb.addEventListener('error', rej, { once: true });
+    });
+
+    // Abort the current AAC pipe; clear the SourceBuffer from actualStart onward.
+    if (_pipeCtrl) { _pipeCtrl.abort(); _pipeCtrl = null; }
+    try {
+        await waitSBIdle();
+        if (ms.readyState === 'open') sb.remove(actualStart, Infinity);
+        await waitSBIdle();
+    } catch (_) {}
+
+    if (myGen !== _generation || ctrl?.signal.aborted) {
+        seamResp.body?.cancel();
+        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
+    }
+
+    // Switch the SourceBuffer decoder context to ALAC.
+    // Existing AAC data before actualStart stays buffered and decodable; the browser
+    // transitions cleanly at the segment boundary when it encounters the ALAC init segment.
+    try {
+        sb.changeType('audio/mp4; codecs="alac"');
+    } catch (e) {
+        console.warn('[AML Engine] changeType("alac") failed:', e.message, '— resuming AAC');
+        seamResp.body?.cancel();
+        deleteSession(newSess.sessionId);
+        // Resume the old AAC stream from actualStart so playback isn't interrupted.
+        if (_activeStreamBase && ms.readyState === 'open') {
+            _pipeCtrl = new AbortController();
+            pipeToSourceBuffer(sb, audio, `${_activeStreamBase}&t=${actualStart.toFixed(3)}`,
+                _pipeCtrl.signal, ms, _durationSec, performance.now()).catch(() => {});
+        }
+        _upgradeInFlight = false; return;
+    }
+
+    // Promote the new ALAC session to be the active session.
+    // seekToTime() reads _activeStreamBase and _sessionId, so update them now.
+    _sessionId        = newSess.sessionId;
+    _sessionLossless  = true;
+    _activeStreamBase = newBase;
+    _seekable         = true;  // CBCSSeekableSource supports ?t=
+
+    // Pipe the pre-fetched response body — avoids a second round-trip to the engine.
+    _pipeCtrl = new AbortController();
+    const pipeCtrl = _pipeCtrl;
+    pipeToSourceBuffer(sb, audio, seamResp, pipeCtrl.signal, ms, _durationSec, performance.now()).catch(e => {
+        if (!pipeCtrl.signal.aborted) console.error('[AML Engine] ALAC upgrade pipe error:', e.message);
+    });
+
+    showQualityBadge('alac', newSess.sampleRate, newSess.bitDepth);
+    console.log(`[AML Engine] Lossless upgrade complete → ALAC ${newSess.sampleRate}Hz/${newSess.bitDepth}bit`);
+
+    deleteSession(oldSessionId);
+    _upgradeInFlight = false;
+}
+
 // ── MV video injection ────────────────────────────────────────────────────────
 
 // Injects the engine's video stream into the MK video element using the same
@@ -552,9 +740,13 @@ async function handleTrackChange(mk) {
     _activeSb = null; _activeMs = null; _activeStreamBase = '';
     unbridgeDuration();
     deleteSession(_sessionId);
-    _sessionId   = null;
-    _durationSec = 0;
-    _seekable    = false;
+    _sessionId        = null;
+    _durationSec      = 0;
+    _seekable         = false;
+    _sessionLossless  = false;
+    _upgradeInFlight  = false;
+    // Do NOT reset _losslessWaitDone here — it's a one-shot per DRM state change,
+    // not per track. Resetting it would re-enable the 2.5 s wait on every skip.
     showQualityBadge(null);
 
     // Library tracks have an `i.` prefixed id; the engine needs the catalog id.
@@ -580,6 +772,12 @@ async function handleTrackChange(mk) {
         // Install play() proxy on first use.
         installPlayProxy(mkAudio);
     }
+
+    // Wait up to 2.5 s for DRM to report lossless capability before opening the session.
+    // Prevents locking in a degraded AAC session when FairPlay is seconds from ready
+    // (common on first startup and after re-auth). No-op if already lossless or AAC-only track.
+    await waitForLossless(2500);
+    if (myGen !== _generation) return;
 
     try {
         const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
@@ -610,12 +808,17 @@ async function handleTrackChange(mk) {
 
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth);
 
-        const needsTranscode = sess.codec === 'alac' || sess.codec === 'atmos';
-        const audioPath = sess.streams?.audio ?? `/api/v1/playback/${_sessionId}/audio`;
-        // Base URL — no ?t= so it streams from the beginning; ?t= is appended for seeks.
-        // AAC uses ?raw=1 (passthrough); ALAC/Atmos transcode to AAC for Chromium.
+        // Native ALAC path: Chromium 116+ (Electron 38) can decode ALAC fMP4 in MSE
+        // without transcoding. ?raw=1 passes the encrypted-then-decrypted ALAC fMP4
+        // straight to the SourceBuffer; CBCSSeekableSource also supports ?t= seeking.
+        // Fall back to ?transcode=aac when ALAC MSE is not available.
+        const useRawLossless = sess.codec === 'alac' && _alacSupported;
+        const needsTranscode = (sess.codec === 'alac' || sess.codec === 'atmos') && !useRawLossless;
+        const audioPath  = sess.streams?.audio ?? `/api/v1/playback/${_sessionId}/audio`;
         const streamBase = `${ENGINE}${audioPath}${needsTranscode ? '?transcode=aac' : '?raw=1'}`;
-        const mime       = 'audio/mp4; codecs="mp4a.40.2"';
+        const mime       = useRawLossless ? 'audio/mp4; codecs="alac"' : 'audio/mp4; codecs="mp4a.40.2"';
+        _sessionLossless = useRawLossless;
+        if (useRawLossless) _seekable = true;  // CBCSSeekableSource always supports ?t=
 
         _abortCtrl = new AbortController();
         const ctrl = _abortCtrl;
@@ -730,6 +933,13 @@ async function setup() {
     stubDRM();
     blockAppleCDN();
 
+    // Feature-detect native ALAC MSE support (Chromium 116+ / Electron 38+).
+    // When available we feed raw ALAC fMP4 directly to the SourceBuffer instead of
+    // transcoding through ffmpeg, which preserves true lossless quality and enables
+    // ?t= seeking via CBCSSeekableSource.
+    _alacSupported = MediaSource.isTypeSupported('audio/mp4; codecs="alac"');
+    console.log(`[AML Engine] ALAC MSE: ${_alacSupported ? 'native (no transcode)' : 'not supported — will transcode to AAC'}`);
+
     // Wait for the engine's SSE snapshot instead of polling GET /api/v1/status.
     // _amlEngine is injected by engine-sse-bundle.js which loads before us.
     try {
@@ -745,13 +955,31 @@ async function setup() {
         console.warn('[AML Engine] Engine snapshot timeout:', e.message, '— continuing');
     }
 
-    // React to DRM state changes pushed over SSE (session lost, re-auth needed).
+    // React to DRM state changes pushed over SSE (session lost, re-auth, lossless ready).
     window._amlEngine?.on('drm', (snap) => {
+        const wasLossless = _engineCaps.lossless;
         const sess = snap?.state?.session ?? 'unknown';
         if (snap?.capabilities) {
-            _engineCaps = { lossless: !!snap.capabilities.lossless, atmos: !!snap.capabilities.atmos };
+            // SSE drm events carry the raw DRMSnapshot: field is "alac", not "lossless"
+            _engineCaps = { lossless: !!(snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
         }
         console.log(`[AML Engine] DRM state → session=${sess} lossless=${_engineCaps.lossless}`);
+
+        // DRM just became lossless-capable — reset so the next track gets a wait window.
+        if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
+
+        // Seamless lossless upgrade: DRM just became valid while an AAC session is live.
+        // Schedule the changeType() splice only when native ALAC MSE is available —
+        // the transcode path doesn't support mid-track switching (no ?t= on the AAC output).
+        if (!wasLossless && _engineCaps.lossless && _sessionId && !_sessionLossless && _alacSupported && !_upgradeInFlight) {
+            const mkInst = window.MusicKit?.getInstance?.();
+            if (mkInst) {
+                scheduleLosslessUpgrade(mkInst).catch(e => {
+                    if (e.name !== 'AbortError') console.warn('[AML Engine] Upgrade error:', e.message);
+                    _upgradeInFlight = false;
+                });
+            }
+        }
     });
 
     const mk = await waitForMusicKit();
