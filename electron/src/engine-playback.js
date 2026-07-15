@@ -957,11 +957,12 @@ async function setup() {
     }
 
     // React to DRM state changes pushed over SSE (session lost, re-auth, lossless ready).
-    window._amlEngine?.on('drm', (snap) => {
+    // SSE events arrive as {meta:{id,generation,...}, payload:<DRMSnapshot>} — unwrap payload.
+    window._amlEngine?.on('drm', (msg) => {
+        const snap = msg?.payload;  // DRMSnapshot: {state:{session,...}, capabilities:{alac,...}}
         const wasLossless = _engineCaps.lossless;
         const sess = snap?.state?.session ?? 'unknown';
         if (snap?.capabilities) {
-            // SSE drm events carry the raw DRMSnapshot: field is "alac", not "lossless"
             _engineCaps = { lossless: !!(snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
         }
         console.log(`[AML Engine] DRM state → session=${sess} lossless=${_engineCaps.lossless}`);
