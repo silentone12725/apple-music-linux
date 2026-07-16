@@ -1,8 +1,11 @@
-var EnginePlayback = (() => {
+(() => {
   const ENGINE = "aml-engine:/";
   let _nativeSrcSet = null;
   let _nativePlay = null;
   let _ourBlobUrl = null;
+  let _vlcMode = false;
+  let _vlcPosMs = 0;
+  let _vlcPollTimer = null;
   let _engineCaps = { lossless: false, atmos: false };
   let _flacSupported = false;
   let _losslessWaitDone = false;
@@ -102,6 +105,10 @@ var EnginePlayback = (() => {
       batch.forEach((r) => r());
     });
     mkAudio.play = () => {
+      if (_vlcMode) {
+        fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
+        });
+      }
       if (_sessionId) _nativePlay().catch(() => {
       });
       return new Promise(() => {
@@ -116,7 +123,19 @@ var EnginePlayback = (() => {
     const _nativeCTSet = window.__amlNativeCTSet || Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "currentTime")?.set;
     mk.seekToTime = async function(seekSec) {
       const audio = getMKAudio();
-      if (audio && _nativeCTSet && _activeSb && _activeMs) {
+      if (_vlcMode) {
+        _vlcPosMs = Math.round(seekSec * 1e3);
+        if (audio) {
+          audio.dispatchEvent(new Event("seeking"));
+          audio.dispatchEvent(new Event("seeked"));
+        }
+        fetch(`${ENGINE}/api/v1/vlc/seek`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ posMs: _vlcPosMs })
+        }).catch(() => {
+        });
+      } else if (audio && _nativeCTSet && _activeSb && _activeMs) {
         _ourSeekPending = true;
         _ourSeekTarget = seekSec;
         _nativeCTSet.call(audio, seekSec);
@@ -129,34 +148,6 @@ var EnginePlayback = (() => {
   }
   function getMKAudio() {
     return document.getElementById("apple-music-player") || document.querySelector("audio") || null;
-  }
-  function getMKVideo() {
-    for (const v of document.querySelectorAll("video")) {
-      if (!v.closest(".editorial-video")) return v;
-    }
-    return null;
-  }
-  function waitForMKVideo(signal, timeoutMs = 1e4) {
-    const immediate = getMKVideo();
-    if (immediate) return Promise.resolve(immediate);
-    return new Promise((resolve) => {
-      const obs = new MutationObserver(() => {
-        const el = getMKVideo();
-        if (el) {
-          obs.disconnect();
-          resolve(el);
-        }
-      });
-      obs.observe(document.body, { childList: true, subtree: true });
-      signal.addEventListener("abort", () => {
-        obs.disconnect();
-        resolve(null);
-      }, { once: true });
-      setTimeout(() => {
-        obs.disconnect();
-        resolve(null);
-      }, timeoutMs);
-    });
   }
   function waitForMusicKit() {
     return new Promise((resolve) => {
@@ -255,6 +246,29 @@ var EnginePlayback = (() => {
     if (id) fetch(`${ENGINE}/api/v1/playback/${id}`, { method: "DELETE" }).catch(() => {
     });
   }
+  function stopVLCPoll() {
+    if (_vlcPollTimer) {
+      clearInterval(_vlcPollTimer);
+      _vlcPollTimer = null;
+    }
+  }
+  function startVLCPoll(mkAudio) {
+    stopVLCPoll();
+    _vlcPollTimer = setInterval(async () => {
+      try {
+        const r = await fetch(`${ENGINE}/api/v1/vlc/time`);
+        if (!r.ok) return;
+        const { posMs, state } = await r.json();
+        _vlcPosMs = posMs;
+        mkAudio.dispatchEvent(new Event("timeupdate"));
+        if (state === "ended") {
+          stopVLCPoll();
+          mkAudio.dispatchEvent(new Event("ended"));
+        }
+      } catch (_) {
+      }
+    }, 50);
+  }
   function waitForLossless(timeoutMs) {
     if (_engineCaps.lossless || _losslessWaitDone) return Promise.resolve();
     return new Promise((resolve) => {
@@ -269,362 +283,6 @@ var EnginePlayback = (() => {
       };
       tick();
     });
-  }
-  async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durationSec, t0) {
-    const localSessionId = _sessionId;
-    let resp;
-    if (typeof streamUrlOrResp === "string") {
-      resp = await fetch(streamUrlOrResp, { signal });
-      if (!resp.ok) throw new Error(`Engine stream ${resp.status}`);
-      console.log(`[AML Engine] Stream open +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-    } else {
-      resp = streamUrlOrResp;
-      console.log(`[AML Engine] Stream open (seek) +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-    }
-    const reader = resp.body.getReader();
-    let chunks = 0;
-    try {
-      const waitUpdate = () => new Promise((res, rej) => {
-        if (!sb.updating) return res();
-        const done = () => {
-          sb.removeEventListener("updateend", done);
-          sb.removeEventListener("error", fail);
-          res();
-        };
-        const fail = () => {
-          sb.removeEventListener("updateend", done);
-          sb.removeEventListener("error", fail);
-          rej(new Error(`SB error chunk ${chunks}`));
-        };
-        sb.addEventListener("updateend", done, { once: true });
-        sb.addEventListener("error", fail, { once: true });
-      });
-      const sbRemove = async (start, end) => {
-        if (ms.readyState !== "open" || end <= start) return;
-        await waitUpdate();
-        if (ms.readyState !== "open") return;
-        await new Promise((res, rej) => {
-          sb.addEventListener("updateend", res, { once: true });
-          sb.addEventListener("error", rej, { once: true });
-          sb.remove(start, end);
-        });
-      };
-      const FORWARD_SECS = 900;
-      const BACKWARD_SECS = 900;
-      const evictPlayed = async (aggressiveSecs = BACKWARD_SECS) => {
-        if (ms.readyState !== "open" || sb.buffered.length === 0) return;
-        const evictEnd = Math.max(0, audio.currentTime - aggressiveSecs);
-        if (evictEnd > sb.buffered.start(0) + 1) {
-          await sbRemove(sb.buffered.start(0), evictEnd);
-        }
-      };
-      while (true) {
-        if (signal.aborted) throw new Error("aborted");
-        const { done, value } = await reader.read();
-        if (done) {
-          console.log(`[AML Engine] Stream done (${chunks} chunks) +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-          break;
-        }
-        chunks++;
-        if (ms.readyState !== "open" || audio.error) throw new Error("MediaSource closed or audio error");
-        if (_chunkCache && _chunkCache.sessionId === localSessionId && _chunkCache.byteSize < 80 * 1024 * 1024) {
-          const copy = new Uint8Array(value.byteLength);
-          copy.set(value);
-          _chunkCache.chunks.push(copy);
-          _chunkCache.byteSize += value.byteLength;
-        }
-        if (sb.buffered.length > 0 && audio.currentTime > sb.buffered.start(0) + BACKWARD_SECS + 1) {
-          await evictPlayed();
-        }
-        while (ms.readyState === "open" && sb.buffered.length > 0 && sb.buffered.end(sb.buffered.length - 1) - audio.currentTime > FORWARD_SECS) {
-          if (signal.aborted) throw new Error("aborted");
-          await new Promise((r) => setTimeout(r, 500));
-        }
-        await waitUpdate();
-        if (sb.updating) await waitUpdate();
-        if (signal.aborted) throw new Error("aborted");
-        if (ms.readyState !== "open" || audio.error) throw new Error("MediaSource closed or audio error");
-        try {
-          sb.appendBuffer(value);
-        } catch (e) {
-          if (e.name === "QuotaExceededError") {
-            let appended = false;
-            for (let attempt = 0; !appended; attempt++) {
-              await new Promise((r) => setTimeout(r, 300));
-              if (signal.aborted) throw new Error("aborted");
-              const fallbackSecs = attempt >= 2 ? 30 : BACKWARD_SECS;
-              await evictPlayed(fallbackSecs);
-              await waitUpdate();
-              try {
-                sb.appendBuffer(value);
-                appended = true;
-              } catch (e2) {
-                if (e2.name !== "QuotaExceededError") throw e2;
-              }
-            }
-          } else {
-            throw e;
-          }
-        }
-      }
-      await waitUpdate();
-      if (!signal.aborted && ms.readyState === "open") {
-        if (durationSec > 0) {
-          try {
-            ms.duration = durationSec;
-          } catch (_) {
-          }
-        }
-        ms.endOfStream();
-        _streamComplete = true;
-        console.log(`[AML Engine] Stream complete +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-      }
-    } finally {
-      reader.cancel().catch(() => {
-      });
-    }
-  }
-  async function seekToTime(seekSec, audio, sb, ms) {
-    if (ms.readyState === "closed") return;
-    const bufferedRanges = Array.from({ length: sb.buffered.length }, (_, i) => `[${sb.buffered.start(i).toFixed(1)},${sb.buffered.end(i).toFixed(1)}]`).join(" ");
-    console.log(`[AML Engine] seekToTime(${seekSec.toFixed(2)}) ct=${audio.currentTime.toFixed(2)} buffered=${bufferedRanges || "(empty)"} seekable=${_seekable} seekTarget=${_seekTarget}`);
-    for (let i = 0; i < sb.buffered.length; i++) {
-      if (seekSec >= sb.buffered.start(i) - 1 && seekSec < sb.buffered.end(i) + 1) {
-        console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s \u2192 native (buffered)`);
-        _seekTarget = -Infinity;
-        const wasPlaying2 = !audio.paused;
-        audio.addEventListener("seeked", () => {
-          if (wasPlaying2 && audio.paused) _nativePlay().catch(() => {
-          });
-        }, { once: true });
-        return;
-      }
-    }
-    if (_chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
-      if (Math.abs(_seekTarget - seekSec) < 0.5) {
-        console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s \u2192 cache guard (in-progress)`);
-        return;
-      }
-      _seekTarget = seekSec;
-      const wasPlaying2 = !audio.paused;
-      const cacheSnap = _chunkCache;
-      const wasStreamComplete = _streamComplete;
-      _streamComplete = false;
-      if (_seekFetchCtrl) {
-        _seekFetchCtrl.abort();
-      }
-      _seekFetchCtrl = new AbortController();
-      const mySC = _seekFetchCtrl;
-      if (_pipeCtrl) {
-        _pipeCtrl.abort();
-        _pipeCtrl = null;
-      }
-      _pipeCtrl = new AbortController();
-      const pipeCtrl2 = _pipeCtrl;
-      console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s \u2192 cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB, ${cacheSnap.chunks.length} chunks)`);
-      const waitSBIdleC = () => new Promise((res) => {
-        if (!sb.updating) return res();
-        sb.addEventListener("updateend", res, { once: true });
-        sb.addEventListener("error", res, { once: true });
-      });
-      (async () => {
-        try {
-          await waitSBIdleC();
-          if (pipeCtrl2.signal.aborted || ms.readyState !== "open") return;
-          if (sb.buffered.length > 0) sb.remove(0, Infinity);
-          await waitSBIdleC();
-          for (const chunk of cacheSnap.chunks) {
-            if (pipeCtrl2.signal.aborted) return;
-            await waitSBIdleC();
-            if (pipeCtrl2.signal.aborted || ms.readyState !== "open") return;
-            try {
-              sb.appendBuffer(chunk);
-            } catch (e) {
-              if (e.name === "QuotaExceededError") {
-                console.warn("[AML Engine] Cache re-inject: quota exceeded, stopping");
-              }
-              return;
-            }
-          }
-          if (pipeCtrl2.signal.aborted || _seekFetchCtrl !== mySC) return;
-          await waitSBIdleC();
-          if (wasStreamComplete) {
-            if (ms.readyState === "open") {
-              if (_durationSec > 0) {
-                try {
-                  ms.duration = _durationSec;
-                } catch (_) {
-                }
-              }
-              ms.endOfStream();
-              _streamComplete = true;
-              console.log("[AML Engine] Cache re-inject: re-applied endOfStream");
-            }
-          } else if (_seekable && _activeStreamBase) {
-            const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : seekSec;
-            console.log(`[AML Engine] Cache re-inject done \u2192 resuming engine from ${bufEnd.toFixed(2)}s`);
-            let resumeResp;
-            try {
-              resumeResp = await fetch(`${_activeStreamBase}&t=${bufEnd.toFixed(3)}`, { signal: pipeCtrl2.signal });
-            } catch (_) {
-              return;
-            }
-            if (!resumeResp.ok || pipeCtrl2.signal.aborted || _seekFetchCtrl !== mySC) {
-              resumeResp?.body?.cancel();
-              return;
-            }
-            await pipeToSourceBuffer(sb, audio, resumeResp, pipeCtrl2.signal, ms, _durationSec, performance.now());
-          }
-        } catch (e) {
-          if (!pipeCtrl2.signal.aborted) console.error("[AML Engine] Cache re-inject error:", e.message);
-        }
-      })();
-      audio.addEventListener("canplay", () => {
-        if (pipeCtrl2.signal.aborted) return;
-        _seekTarget = -Infinity;
-        if (wasPlaying2) _nativePlay().catch(() => {
-        });
-      }, { once: true });
-      return;
-    }
-    if (!_seekable) {
-      console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s \u2192 not seekable`);
-      return;
-    }
-    if (_streamComplete) {
-      console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s \u2192 completed-mode re-fetch`);
-      _seekTarget = -Infinity;
-      _streamComplete = false;
-    }
-    if (Math.abs(_seekTarget - seekSec) < 0.5) {
-      console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s \u2192 guard (in-progress)`);
-      return;
-    }
-    _seekTarget = seekSec;
-    const wasPlaying = !audio.paused;
-    if (_seekFetchCtrl) {
-      _seekFetchCtrl.abort();
-    }
-    _seekFetchCtrl = new AbortController();
-    const mySeekCtrl = _seekFetchCtrl;
-    const seekUrl = `${_activeStreamBase}&t=${seekSec.toFixed(3)}`;
-    let resp;
-    try {
-      const signals = [mySeekCtrl.signal];
-      if (_abortCtrl?.signal) signals.push(_abortCtrl.signal);
-      resp = await fetch(seekUrl, { signal: AbortSignal.any(signals) });
-    } catch (e) {
-      if (e.name !== "AbortError") console.warn("[AML Engine] Seek fetch error:", e.message);
-      return;
-    }
-    if (!resp.ok) {
-      console.warn(`[AML Engine] Seek not supported for this stream (${resp.status}) \u2014 seeking only within buffered range`);
-      return;
-    }
-    if (_abortCtrl?.signal.aborted || _seekFetchCtrl !== mySeekCtrl) {
-      resp.body?.cancel();
-      return;
-    }
-    const actualStartHdr = resp.headers.get("X-Actual-Start");
-    const actualStart = actualStartHdr ? parseFloat(actualStartHdr) : seekSec;
-    console.log(`[AML Engine] Seek \u2192 ${seekSec.toFixed(2)}s (actual=${actualStart.toFixed(2)}s)`);
-    if (_pipeCtrl) {
-      _pipeCtrl.abort();
-      _pipeCtrl = null;
-    }
-    const waitSBIdle = () => new Promise((res, rej) => {
-      if (!sb.updating) return res();
-      const done = () => {
-        sb.removeEventListener("updateend", done);
-        sb.removeEventListener("error", fail);
-        res();
-      };
-      const fail = () => {
-        sb.removeEventListener("updateend", done);
-        sb.removeEventListener("error", fail);
-        rej(new Error("SB error during seek"));
-      };
-      sb.addEventListener("updateend", done, { once: true });
-      sb.addEventListener("error", fail, { once: true });
-    });
-    try {
-      await waitSBIdle();
-      if (ms.readyState === "open") sb.remove(0, Infinity);
-      await waitSBIdle();
-    } catch (_) {
-    }
-    _pipeCtrl = new AbortController();
-    const pipeCtrl = _pipeCtrl;
-    pipeToSourceBuffer(sb, audio, resp, pipeCtrl.signal, ms, _durationSec, performance.now()).catch((e) => {
-      if (!pipeCtrl.signal.aborted) console.error("[AML Engine] Seek pipe error:", e.message);
-    });
-    audio.addEventListener("canplay", () => {
-      if (pipeCtrl.signal.aborted) return;
-      _seekTarget = -Infinity;
-      const buf = sb.buffered;
-      const bStart = buf.length > 0 ? buf.start(0).toFixed(2) : "?";
-      const bEnd = buf.length > 0 ? buf.end(buf.length - 1).toFixed(2) : "?";
-      console.log(
-        `[AML Engine] Seek ready \u2014 requested=${seekSec.toFixed(2)}s actualStart=${actualStart.toFixed(2)}s buffered=[${bStart},${bEnd}] currentTime=${audio.currentTime.toFixed(2)}s readyState=${audio.readyState} networkState=${audio.networkState}`
-      );
-      if (wasPlaying) _nativePlay().catch((e) => console.warn("[AML Engine] seek play():", e));
-    }, { once: true });
-  }
-  async function startMVVideoInjection(videoStreamPath, ctrl, mkAudio, t0) {
-    const VIDEO_MIME = 'video/mp4; codecs="avc1.42E01E"';
-    const videoEl = await waitForMKVideo(ctrl.signal, 1e4);
-    if (!videoEl || ctrl.signal.aborted) {
-      console.log("[AML Engine] MV: no video element found \u2014 video stream skipped");
-      return;
-    }
-    console.log(`[AML Engine] MV: injecting video +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-    videoEl.muted = true;
-    videoEl.defaultMuted = true;
-    videoEl.load = () => {
-    };
-    const ms = new MediaSource();
-    const blobUrl = URL.createObjectURL(ms);
-    _nativeSrcSet.call(videoEl, blobUrl);
-    delete videoEl.load;
-    HTMLMediaElement.prototype.load.call(videoEl);
-    videoEl.load = () => {
-    };
-    await new Promise((resolve, reject) => {
-      ctrl.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-      ms.addEventListener("sourceopen", resolve, { once: true });
-    });
-    URL.revokeObjectURL(blobUrl);
-    const sb = ms.addSourceBuffer(VIDEO_MIME);
-    _videoPipeCtrl = new AbortController();
-    const pipeCtrl = _videoPipeCtrl;
-    pipeToSourceBuffer(sb, videoEl, `${ENGINE}${videoStreamPath}?raw=1`, pipeCtrl.signal, ms, _durationSec, t0).catch((e) => {
-      if (!pipeCtrl.signal.aborted) console.error("[AML Engine] Video pipe error:", e.message);
-    });
-    const onPlaying = () => videoEl.paused && videoEl.play().catch(() => {
-    });
-    const onPause = () => !videoEl.paused && videoEl.pause();
-    const onSeeking = () => {
-      videoEl.currentTime = mkAudio.currentTime;
-    };
-    mkAudio.addEventListener("playing", onPlaying);
-    mkAudio.addEventListener("pause", onPause);
-    mkAudio.addEventListener("seeking", onSeeking);
-    ctrl.signal.addEventListener("abort", () => {
-      mkAudio.removeEventListener("playing", onPlaying);
-      mkAudio.removeEventListener("pause", onPause);
-      mkAudio.removeEventListener("seeking", onSeeking);
-      videoEl.pause();
-      delete videoEl.load;
-      if (_videoPipeCtrl) {
-        _videoPipeCtrl.abort();
-        _videoPipeCtrl = null;
-      }
-    }, { once: true });
-    videoEl.addEventListener("canplay", () => {
-      if (ctrl.signal.aborted) return;
-      if (!mkAudio.paused) videoEl.play().catch(() => {
-      });
-    }, { once: true });
   }
   async function handleTrackChange(mk) {
     const item = mk.nowPlayingItem;
@@ -646,6 +304,9 @@ var EnginePlayback = (() => {
     _activeMs = null;
     _activeStreamBase = "";
     _ourBlobUrl = null;
+    _vlcMode = false;
+    _vlcPosMs = 0;
+    stopVLCPoll();
     unbridgeDuration();
     deleteSession(_sessionId);
     _sessionId = null;
@@ -707,95 +368,64 @@ var EnginePlayback = (() => {
       _chunkCache = { sessionId: _sessionId, chunks: [], byteSize: 0 };
       console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s seekable=${_seekable} +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
       showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth);
-      const useFlacLossless = sess.codec === "alac" && _flacSupported;
-      const audioPath = sess.streams?.audio ?? `/api/v1/playback/${_sessionId}/audio`;
-      let transcodeTarget = "aac";
-      if (useFlacLossless) transcodeTarget = "flac";
-      const needsTranscode = sess.codec === "alac" || sess.codec === "atmos";
-      const streamBase = `${ENGINE}${audioPath}${needsTranscode ? `?transcode=${transcodeTarget}` : "?raw=1"}`;
-      const mime = useFlacLossless ? 'audio/mp4; codecs="flac"' : 'audio/mp4; codecs="mp4a.40.2"';
+      if (!mkAudio) throw new Error("MK audio element not found");
       _abortCtrl = new AbortController();
       const ctrl = _abortCtrl;
-      if (!mkAudio) throw new Error("MK audio element not found");
-      const ms = new MediaSource();
-      const blobUrl = URL.createObjectURL(ms);
-      _ourBlobUrl = blobUrl;
-      _nativeSrcSet.call(mkAudio, blobUrl);
+      showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth);
+      bridgeDuration(mk, _durationSec);
+      _vlcMode = true;
+      const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+      _nativeSrcSet.call(mkAudio, SILENT_WAV);
       delete mkAudio.load;
       HTMLMediaElement.prototype.load.call(mkAudio);
       mkAudio.load = () => {
       };
-      await new Promise((resolve, reject) => {
-        ctrl.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-        ms.addEventListener("sourceopen", resolve, { once: true });
+      _vlcPosMs = 0;
+      Object.defineProperty(mkAudio, "currentTime", {
+        get: () => _vlcPosMs / 1e3,
+        set: () => {
+        },
+        // seeks routed through mk.seekToTime interceptor
+        configurable: true
       });
-      URL.revokeObjectURL(blobUrl);
-      console.log(`[AML Engine] MSE sourceopen +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-      if (_durationSec > 0) {
-        try {
-          ms.duration = _durationSec;
-        } catch (_) {
-        }
-      }
-      const sb = ms.addSourceBuffer(mime);
-      ms.addEventListener("sourceclose", () => console.error("[AML Engine] MediaSource CLOSED unexpectedly"));
-      ms.addEventListener("sourceended", () => console.log("[AML Engine] MediaSource ended"));
-      bridgeDuration(mk, _durationSec);
-      sb.addEventListener("error", (e) => {
-        console.error(`[AML Engine] SourceBuffer error readyState=${mkAudio.readyState} buffered.length=${sb.buffered.length}`, e);
+      const _volDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "volume");
+      let _vlcVolume = Math.round((_volDesc.get.call(mkAudio) ?? 1) * 100);
+      Object.defineProperty(mkAudio, "volume", {
+        get: () => _vlcVolume / 100,
+        set: (v) => {
+          _vlcVolume = Math.max(0, Math.min(200, Math.round(v * 100)));
+          fetch(`${ENGINE}/api/v1/vlc/volume`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ vol: _vlcVolume })
+          }).catch(() => {
+          });
+        },
+        configurable: true
       });
-      mkAudio.addEventListener("loadedmetadata", function onMeta() {
-        const snapToBuffer = (attempt) => {
-          if (ctrl.signal.aborted || ms.readyState === "closed") return;
-          try {
-            const blen = sb.buffered.length;
-            if (blen > 0) {
-              const bufStart = sb.buffered.start(0);
-              if (bufStart > mkAudio.currentTime + 0.1) {
-                mkAudio.currentTime = bufStart;
-              }
-            } else {
-              sb.addEventListener("updateend", () => snapToBuffer(attempt + 1), { once: true });
-            }
-          } catch (_) {
-          }
-        };
-        snapToBuffer(0);
-      }, { once: true });
-      _activeSb = sb;
-      _activeMs = ms;
-      _activeStreamBase = streamBase;
-      _pipeCtrl = new AbortController();
-      const pipeCtrl = _pipeCtrl;
-      pipeToSourceBuffer(sb, mkAudio, streamBase, pipeCtrl.signal, ms, _durationSec, t0).catch((e) => {
-        if (!pipeCtrl.signal.aborted) console.error("[AML Engine] MSE error:", e.message);
-      });
-      if (sess.type === "mv" && sess.streams?.video) {
-        startMVVideoInjection(sess.streams.video, ctrl, mkAudio, t0).catch((e) => {
-          if (!ctrl.signal.aborted) console.error("[AML Engine] MV video error:", e.message);
+      const _origPause = HTMLMediaElement.prototype.pause.bind(mkAudio);
+      mkAudio.pause = () => {
+        _origPause();
+        fetch(`${ENGINE}/api/v1/vlc/pause`, { method: "POST" }).catch(() => {
         });
-      }
-      const onSeeking = () => {
-        if (ctrl.signal.aborted) return;
-        if (!_ourSeekPending) return;
-        _ourSeekPending = false;
-        seekToTime(_ourSeekTarget, mkAudio, sb, ms);
       };
-      const tryPlay = () => {
-        console.log(`[AML Engine] tryPlay aborted=${ctrl.signal.aborted} readyState=${mkAudio.readyState} +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-        if (ctrl.signal.aborted) return;
-        console.log(`[AML Engine] canplay \u2192 play() +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-        mkAudio.addEventListener("seeking", onSeeking);
-        _nativePlay().catch((e) => console.warn("[AML Engine] play():", e));
-      };
-      if (mkAudio.readyState >= 3) {
-        tryPlay();
-      } else {
-        mkAudio.addEventListener("canplay", tryPlay, { once: true });
-      }
+      const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: _sessionId, startMs: 0 }),
+        signal: ctrl.signal
+      });
+      if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
+      if (ctrl.signal.aborted) return;
+      mkAudio.addEventListener("canplay", () => {
+        if (!ctrl.signal.aborted) _nativePlay().catch((e) => console.warn("[AML Engine] play():", e));
+      }, { once: true });
+      mkAudio.dispatchEvent(new Event("canplay"));
+      startVLCPoll(mkAudio);
+      console.log(`[AML Engine] VLC playing +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
       ctrl.signal.addEventListener("abort", () => {
-        mkAudio.removeEventListener("seeking", onSeeking);
         unbridgeDuration();
+        stopVLCPoll();
       }, { once: true });
     } catch (err) {
       if (!_abortCtrl?.signal.aborted) console.error("[AML Engine] Playback error:", err);
