@@ -1,3 +1,11 @@
+*.so filter=lfs diff=lfs merge=lfs -text
+*.dat filter=lfs diff=lfs merge=lfs -text
+*.db filter=lfs diff=lfs merge=lfs -text
+*.pb filter=lfs diff=lfs merge=lfs -text
+electron/dist/electron filter=lfs diff=lfs merge=lfs -text
+internal/embedded/apple-music-cli_* filter=lfs diff=lfs merge=lfs -text
+Wrapper.x86_64.latest/rootfs/system/** filter=lfs diff=lfs merge=lfs -text
+Wrapper.arm64.latest/rootfs/system/** filter=lfs diff=lfs merge=lfs -text
 /wrapper/rootfs/system/lib64/libCoreADI.so filter=lfs diff=lfs merge=lfs -text
 /wrapper/rootfs/system/lib64/libCoreFP.so filter=lfs diff=lfs merge=lfs -text
 /wrapper/rootfs/system/lib64/libCoreFoundation.so filter=lfs diff=lfs merge=lfs -text
