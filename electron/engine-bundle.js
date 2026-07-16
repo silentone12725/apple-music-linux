@@ -376,6 +376,7 @@
       _vlcMode = true;
       const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
       _nativeSrcSet.call(mkAudio, SILENT_WAV);
+      mkAudio.loop = true;
       delete mkAudio.load;
       HTMLMediaElement.prototype.load.call(mkAudio);
       mkAudio.load = () => {

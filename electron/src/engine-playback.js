@@ -939,6 +939,7 @@ async function handleTrackChange(mk) {
         // 44-byte silent WAV (1 channel, 44100 Hz, 0 samples).
         const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
         _nativeSrcSet.call(mkAudio, SILENT_WAV);
+        mkAudio.loop = true; // 0-sample WAV ends immediately; loop prevents premature 'ended' firing
         delete mkAudio.load;
         HTMLMediaElement.prototype.load.call(mkAudio);
         mkAudio.load = () => {};
