@@ -929,6 +929,21 @@ async function handleTrackChange(mk) {
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth);
         bridgeDuration(mk, _durationSec);
 
+        // Sync MK's queue to the engine so it can pre-warm lossless sessions
+        // for upcoming tracks. Fire-and-forget; never blocks track start.
+        const queuePos    = mk.queue?.position ?? 0;
+        const queueTracks = (mk.queue?.items ?? []).map(t => ({
+            assetId:    t.id ?? t.playParams?.id ?? t.attributes?.playParams?.id,
+            storefront: mk.storefrontId ?? 'us',
+        })).filter(t => t.assetId);
+        if (queueTracks.length) {
+            fetch(`${ENGINE}/api/v1/vlc/queue`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tracks: queueTracks, currentIndex: queuePos }),
+            }).catch(() => {});
+        }
+
         // ── VLC path: bypass MSE, pipe raw ALAC to libvlc in the engine process ──
 
         _vlcMode = true;
