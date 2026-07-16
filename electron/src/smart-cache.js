@@ -119,12 +119,8 @@ class SmartCache {
                         favorite:          t?.attributes?.loved        ?? false,
                         applePopularity:   t?.attributes?.popularity   ?? 0,
                         playCount:         entry.count                 ?? 0,
-                        skipCount:         0,
                         lastPlayed:        entry.lastPlayed            ?? 0,
                         queueDistance:     currentIndex >= 0 ? Math.abs(i - currentIndex) : i,
-                        visible:           true,
-                        explicitSelection: false,
-                        recentInteraction: false,
                     },
                 };
             }).filter(Boolean),
@@ -182,21 +178,6 @@ class SmartCache {
         } catch (e) {
             console.warn('[AML Cache] onPlaylistOpen:', e.message);
         }
-    }
-
-    // Speculative: user hovering on album art — warm only the first track cheaply.
-    async onAlbumHover(id, mk) {
-        try {
-            const r = await fetch(`${ENGINE}/api/v1/catalog/albums/${id}?sf=${mk?.storefrontId ?? 'us'}`);
-            if (!r.ok) return;
-            const data = await r.json();
-            const tracks = (data?.data?.[0]?.relationships?.tracks?.data ?? data?.tracks ?? []).slice(0, 1);
-            if (tracks.length === 0) return;
-            await this.sendContext({
-                type: 'album', id, reason: 'hover-preview', slot: 'album',
-                tracks, currentIndex: -1, mk,
-            });
-        } catch {}
     }
 
     // ── Queue lookahead ────────────────────────────────────────────────────────

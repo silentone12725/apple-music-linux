@@ -66,15 +66,6 @@ class EngineSSE {
         });
     }
 
-    /** True once the fetch stream has opened and the server acknowledged it. */
-    get connected() { return this._connected; }
-
-    /**
-     * The current snapshot generation.  Any event with a lower generation
-     * arrived from a previous connection cycle and should be discarded.
-     */
-    get generation() { return this._generation; }
-
     // ── Internals ──────────────────────────────────────────────────────────────
 
     _dispatch(type, data) {
