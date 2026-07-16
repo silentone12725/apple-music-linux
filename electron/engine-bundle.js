@@ -373,6 +373,19 @@
       const ctrl = _abortCtrl;
       showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth);
       bridgeDuration(mk, _durationSec);
+      const queuePos = mk.queue?.position ?? 0;
+      const queueTracks = (mk.queue?.items ?? []).map((t) => ({
+        assetId: t.id ?? t.playParams?.id ?? t.attributes?.playParams?.id,
+        storefront: mk.storefrontId ?? "us"
+      })).filter((t) => t.assetId);
+      if (queueTracks.length) {
+        fetch(`${ENGINE}/api/v1/vlc/queue`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tracks: queueTracks, currentIndex: queuePos })
+        }).catch(() => {
+        });
+      }
       _vlcMode = true;
       const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
       _nativeSrcSet.call(mkAudio, SILENT_WAV);
