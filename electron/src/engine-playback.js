@@ -21,13 +21,12 @@ const ENGINE = 'aml-engine:/';
 
 let _nativeSrcSet = null; // saved by blockAppleCDN() for our own src writes
 let _nativePlay   = null; // saved when play() proxy is installed on the element
+let _ourBlobUrl   = null; // current blob URL we own; blocks MK from replacing it
 
 // ── Engine capability snapshot (from SSE) ─────────────────────────────────────
 
 let _engineCaps      = { lossless: false, atmos: false };
 let _flacSupported    = false;  // MediaSource.isTypeSupported('audio/mp4; codecs="flac"') at setup()
-let _sessionLossless  = false;  // true when current session is streaming FLAC or raw lossless
-let _upgradeInFlight  = false;  // guard: only one seamless lossless upgrade at a time
 let _losslessWaitDone = false;  // true after waitForLossless has timed out once — skip future waits
 let _snapshotEventId  = -1;     // SSE meta.id of the last engine.snapshot — drm events older than this are stale replays
 
@@ -98,6 +97,7 @@ function blockAppleCDN() {
         get: desc.get,
         set(val) {
             if (isAppleCDN(val)) { console.log('[AML Engine] Blocked CDN src:', val.slice(0, 80)); return; }
+            if (val?.startsWith('blob:') && _ourBlobUrl && val !== _ourBlobUrl) { return; }
             desc.set.call(this, val);
         },
         configurable: true,
@@ -150,13 +150,59 @@ function installPlayProxy(mkAudio) {
         //
         // Before MSE is ready the canplay handler in handleTrackChange calls
         // _nativePlay() instead, so we leave it pending here too.
-        if (_sessionId && mkAudio.readyState >= 3) {
-            _nativePlay().catch(() => {});
-        }
+        // Always forward to _nativePlay so the user can resume at any readyState.
+        // The browser will start audio as soon as data arrives in the buffer.
+        if (_sessionId) _nativePlay().catch(() => {});
         return new Promise(() => {}); // intentionally never resolves
     };
 
     console.log('[AML Engine] Play proxy installed');
+}
+
+/**
+ * Intercept mk.seekToTime() because MK's own implementation crashes in
+ * PlayActivity.scrub ("A method was called without a previous descriptor")
+ * before it ever sets audio.currentTime — so the native 'seeking' DOM event
+ * never fires and our onSeeking listener is never called.
+ *
+ * Fix: wrap mk.seekToTime to set audio.currentTime via the native prototype
+ * setter (bypassing any MK-level Object.defineProperty shims), which fires
+ * the 'seeking' event and triggers our existing onSeeking handler.
+ */
+function installMKSeekInterceptor(mk) {
+    if (mk.__amlSeekIntercepted) return;
+    mk.__amlSeekIntercepted = true;
+
+    const _origSeek    = mk.seekToTime.bind(mk);
+    // Use the setter captured before MK had a chance to override
+    // HTMLMediaElement.prototype.currentTime — if MK overrides it, our captured
+    // version would be MK's setter which silently drops backward seeks.
+    const _nativeCTSet = window.__amlNativeCTSet
+        || Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime')?.set;
+
+    mk.seekToTime = async function(seekSec) {
+        const audio = getMKAudio();
+        if (audio && _nativeCTSet && _activeSb && _activeMs) {
+            // Setting via the prototype setter fires the native 'seeking' event,
+            // which our onSeeking listener picks up to run seekToTime().
+            // We do NOT call MK's original seekToTime — it crashes in PlayActivity.scrub
+            // and before doing so may replace our MediaSource (causing addSourceBuffer
+            // failures). MK's UI updates naturally from the DOM events our MSE fires
+            // (seeking → canplay → timeupdate → playing).
+            //
+            // Store seekSec in _ourSeekTarget so onSeeking can use the exact target
+            // rather than re-reading mkAudio.currentTime (MK's getter may return the
+            // old position if it hasn't updated its internal state yet).
+            _ourSeekPending = true;
+            _ourSeekTarget  = seekSec;
+            _nativeCTSet.call(audio, seekSec); // fires 'seeking' synchronously; onSeeking clears the flag
+        } else {
+            // No active MSE session — let MK handle it.
+            return _origSeek(seekSec).catch(() => {});
+        }
+    };
+
+    console.log('[AML Engine] MK seek interceptor installed');
 }
 
 // ── MusicKit helpers ──────────────────────────────────────────────────────────
@@ -243,6 +289,12 @@ let _abortCtrl   = null;   // session-level abort — killed on track change
 let _pipeCtrl    = null;   // pipe-level abort — killed on seek OR track change
 let _generation  = 0;
 let _seekable    = false;  // whether the engine stream supports ?t= restart
+let _seekTarget      = -Infinity; // target of in-progress seek; guards re-entrant seeking events
+let _ourSeekPending  = false;     // true only when OUR interceptor set currentTime; clears after onSeeking fires
+let _ourSeekTarget   = -Infinity; // exact seekSec from our interceptor (avoids stale MK getter in onSeeking)
+let _streamComplete  = false;     // true after endOfStream(); cleared when a new engine fetch starts
+let _seekFetchCtrl   = null;      // aborted when a newer seek starts; ensures only one seek pipeline runs
+let _chunkCache      = null;      // { sessionId, chunks: Uint8Array[], byteSize: number } — re-injected on backward seeks
 
 // Live MSE state — needed by seekToTime() which runs outside handleTrackChange.
 let _activeSb          = null;  // current SourceBuffer
@@ -328,6 +380,9 @@ function waitForLossless(timeoutMs) {
 // Response object (seek path, where we need to inspect headers before clearing
 // the SourceBuffer).
 async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durationSec, t0) {
+    // Capture at pipe-start so cross-session upgrades or track changes cannot
+    // corrupt the new session's chunk cache with stale data from this pipe.
+    const localSessionId = _sessionId;
     let resp;
     if (typeof streamUrlOrResp === 'string') {
         resp = await fetch(streamUrlOrResp, { signal });
@@ -340,6 +395,7 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
 
     const reader = resp.body.getReader();
     let chunks = 0;
+    try {
 
     const waitUpdate = () => new Promise((res, rej) => {
         if (!sb.updating) return res();
@@ -360,18 +416,21 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
         });
     };
 
-    const evictPlayed = async () => {
-        if (sb.buffered.length === 0) return;
-        const ct       = audio.currentTime;
-        const bufStart = sb.buffered.start(0);
+    // Large buffer targets — keep the whole song (and neighbours) in the SourceBuffer
+    // so backward seeking hits the buffer and requires no engine re-fetch.
+    // ffmpeg transcodes at 2-4× realtime, so the song is fully buffered well before
+    // it finishes playing.  If the MSE quota is exhausted (system-dependent; typically
+    // 100-150 MB for audio in modern Chromium/Electron), the two-tier QuotaExceeded
+    // handler below falls back gracefully: first tries to evict only very old data
+    // (> BACKWARD_SECS behind), and if still over quota, drops to a 30 s window.
+    const FORWARD_SECS  = 900;  // buffer up to 15 min ahead (~3 songs)
+    const BACKWARD_SECS = 900;  // preserve up to 15 min behind for backward seeks
 
-        // Drop data more than 30 s behind current position.
-        // Keeping 30 s allows backward seeks without a re-request.
-        // We no longer cap look-ahead: the entire track can buffer ahead,
-        // which lets forward seeks find data without restarting the stream.
-        const evictEnd = Math.max(0, ct - 30);
-        if (evictEnd > bufStart + 1) {
-            await sbRemove(bufStart, evictEnd);
+    const evictPlayed = async (aggressiveSecs = BACKWARD_SECS) => {
+        if (ms.readyState !== 'open' || sb.buffered.length === 0) return;
+        const evictEnd = Math.max(0, audio.currentTime - aggressiveSecs);
+        if (evictEnd > sb.buffered.start(0) + 1) {
+            await sbRemove(sb.buffered.start(0), evictEnd);
         }
     };
 
@@ -383,24 +442,73 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
             break;
         }
         chunks++;
+
+        // Early-exit if the MediaSource was closed while the read was in-flight.
+        // This guards all sb.buffered accesses below (eviction, throttle, appendBuffer).
+        if (ms.readyState !== 'open' || audio.error) throw new Error('MediaSource closed or audio error');
+
+        // Store a copy in the session chunk cache (80 MB cap) so backward seeks
+        // outside the MSE buffer can be satisfied without a new engine round-trip.
+        // localSessionId (captured at pipe-start) prevents old-pipe chunks from
+        // leaking into a new session's cache after a track change or upgrade.
+        if (_chunkCache && _chunkCache.sessionId === localSessionId &&
+                _chunkCache.byteSize < 80 * 1024 * 1024) {
+            const copy = new Uint8Array(value.byteLength);
+            copy.set(value);
+            _chunkCache.chunks.push(copy);
+            _chunkCache.byteSize += value.byteLength;
+        }
+
+        // Proactive backward eviction — only removes data older than BACKWARD_SECS.
+        if (sb.buffered.length > 0 && audio.currentTime > sb.buffered.start(0) + BACKWARD_SECS + 1) {
+            await evictPlayed();
+        }
+
+        // Throttle: pause piping when the forward buffer exceeds FORWARD_SECS.
+        // ffmpeg finishes the whole song in ~durationSec/3 wall seconds, so without
+        // the throttle the buffer would fill to the MSE quota instantly.
+        while (ms.readyState === 'open' && sb.buffered.length > 0 &&
+               (sb.buffered.end(sb.buffered.length - 1) - audio.currentTime) > FORWARD_SECS) {
+            if (signal.aborted) throw new Error('aborted');
+            await new Promise(r => setTimeout(r, 500));
+        }
+
         await waitUpdate();
-        if (sb.updating) await waitUpdate(); // guard against appendBuffer overlap
+        if (sb.updating) await waitUpdate();
+        if (signal.aborted) throw new Error('aborted');
+        if (ms.readyState !== 'open' || audio.error) throw new Error('MediaSource closed or audio error');
         try {
             sb.appendBuffer(value);
         } catch (e) {
             if (e.name === 'QuotaExceededError') {
-                await evictPlayed();
-                await waitUpdate();
-                sb.appendBuffer(value);
+                // Two-tier recovery:
+                //   Attempt 1-2: evict only data older than BACKWARD_SECS (preserves seeks).
+                //   Attempt 3+:  fall back to aggressive 30 s eviction so the pipe
+                //                never stalls permanently on constrained systems.
+                let appended = false;
+                for (let attempt = 0; !appended; attempt++) {
+                    await new Promise(r => setTimeout(r, 300));
+                    if (signal.aborted) throw new Error('aborted');
+                    const fallbackSecs = attempt >= 2 ? 30 : BACKWARD_SECS;
+                    await evictPlayed(fallbackSecs);
+                    await waitUpdate();
+                    try { sb.appendBuffer(value); appended = true; } catch (e2) {
+                        if (e2.name !== 'QuotaExceededError') throw e2;
+                    }
+                }
             } else { throw e; }
         }
     }
 
     await waitUpdate();
-    if (ms.readyState === 'open') {
+    if (!signal.aborted && ms.readyState === 'open') {
         if (durationSec > 0) { try { ms.duration = durationSec; } catch (_) {} }
         ms.endOfStream();
+        _streamComplete = true;
         console.log(`[AML Engine] Stream complete +${((performance.now()-t0)/1000).toFixed(2)}s`);
+    }
+    } finally {
+        reader.cancel().catch(() => {});
     }
 }
 
@@ -414,23 +522,147 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
  * flush the SourceBuffer, and restart the stream from the engine's ?t= endpoint.
  */
 async function seekToTime(seekSec, audio, sb, ms) {
+    if (ms.readyState === 'closed') return; // MS was closed by MK before seek arrived
+    const bufferedRanges = Array.from({length: sb.buffered.length}, (_, i) =>
+        `[${sb.buffered.start(i).toFixed(1)},${sb.buffered.end(i).toFixed(1)}]`).join(' ');
+    console.log(`[AML Engine] seekToTime(${seekSec.toFixed(2)}) ct=${audio.currentTime.toFixed(2)} buffered=${bufferedRanges||'(empty)'} seekable=${_seekable} seekTarget=${_seekTarget}`);
+
     // If seek target is already buffered, let the browser handle it natively.
+    // 1 s tolerance on both ends: catches segment-boundary rounding and the common
+    // case where a lyric seek lands just before the start of a freshly-evicted window.
     for (let i = 0; i < sb.buffered.length; i++) {
-        if (seekSec >= sb.buffered.start(i) - 0.5 && seekSec < sb.buffered.end(i)) return;
+        if (seekSec >= sb.buffered.start(i) - 1.0 && seekSec < sb.buffered.end(i) + 1.0) {
+            console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s → native (buffered)`);
+            _seekTarget = -Infinity; // target is now buffered, seek complete
+            // After the native seek resolves, resume playback if the element ended up
+            // paused (MK may pause during seeking and our play proxy must restart it).
+            const wasPlaying = !audio.paused;
+            audio.addEventListener('seeked', () => {
+                if (wasPlaying && audio.paused) _nativePlay().catch(() => {});
+            }, { once: true });
+            return;
+        }
     }
 
-    // Engine advertises whether ?t= restart is supported for this codec.
-    // For ALAC/Atmos (transcoded), the engine can't seek mid-stream.
-    if (!_seekable) return;
+    // If the seek target missed the MSE buffer but we have cached chunks for this
+    // session, re-inject them directly — no engine round-trip, no re-transcode.
+    // Works for both seekable and non-seekable (FLAC) streams.
+    if (_chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
+        if (Math.abs(_seekTarget - seekSec) < 0.5) {
+            console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s → cache guard (in-progress)`);
+            return;
+        }
+        _seekTarget = seekSec;
 
-    // Fetch first — before touching the SourceBuffer.
-    // If the stream isn't seekable (ALAC/Atmos transcode path), the engine
-    // returns a non-2xx response.  In that case we bail out with the buffer
-    // intact so the user can still seek within already-buffered data.
+        const wasPlaying        = !audio.paused;
+        const cacheSnap         = _chunkCache;
+        const wasStreamComplete = _streamComplete;
+        _streamComplete = false;
+
+        if (_seekFetchCtrl) { _seekFetchCtrl.abort(); }
+        _seekFetchCtrl = new AbortController();
+        const mySC = _seekFetchCtrl;
+
+        if (_pipeCtrl) { _pipeCtrl.abort(); _pipeCtrl = null; }
+        _pipeCtrl = new AbortController();
+        const pipeCtrl = _pipeCtrl;
+
+        console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s → cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB, ${cacheSnap.chunks.length} chunks)`);
+
+        const waitSBIdleC = () => new Promise((res) => {
+            if (!sb.updating) return res();
+            sb.addEventListener('updateend', res, { once: true });
+            sb.addEventListener('error',     res, { once: true });
+        });
+
+        (async () => {
+            try {
+                await waitSBIdleC();
+                if (pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
+                if (sb.buffered.length > 0) sb.remove(0, Infinity);
+                await waitSBIdleC();
+
+                for (const chunk of cacheSnap.chunks) {
+                    if (pipeCtrl.signal.aborted) return;
+                    await waitSBIdleC();
+                    if (pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
+                    try { sb.appendBuffer(chunk); } catch (e) {
+                        if (e.name === 'QuotaExceededError') {
+                            console.warn('[AML Engine] Cache re-inject: quota exceeded, stopping');
+                        }
+                        return;
+                    }
+                }
+
+                if (pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) return;
+                await waitSBIdleC();
+
+                if (wasStreamComplete) {
+                    if (ms.readyState === 'open') {
+                        if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
+                        ms.endOfStream();
+                        _streamComplete = true;
+                        console.log('[AML Engine] Cache re-inject: re-applied endOfStream');
+                    }
+                } else if (_seekable && _activeStreamBase) {
+                    const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : seekSec;
+                    console.log(`[AML Engine] Cache re-inject done → resuming engine from ${bufEnd.toFixed(2)}s`);
+                    let resumeResp;
+                    try {
+                        resumeResp = await fetch(`${_activeStreamBase}&t=${bufEnd.toFixed(3)}`, { signal: pipeCtrl.signal });
+                    } catch (_) { return; }
+                    if (!resumeResp.ok || pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) {
+                        resumeResp?.body?.cancel(); return;
+                    }
+                    await pipeToSourceBuffer(sb, audio, resumeResp, pipeCtrl.signal, ms, _durationSec, performance.now());
+                }
+            } catch (e) {
+                if (!pipeCtrl.signal.aborted) console.error('[AML Engine] Cache re-inject error:', e.message);
+            }
+        })();
+
+        audio.addEventListener('canplay', () => {
+            if (pipeCtrl.signal.aborted) return;
+            _seekTarget = -Infinity;
+            if (wasPlaying) _nativePlay().catch(() => {});
+        }, { once: true });
+
+        return;
+    }
+
+    if (!_seekable) { console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s → not seekable`); return; }
+
+    // Stream-complete mode: endOfStream() was called and no pipe is active.
+    // The re-entrancy guard may hold a stale _seekTarget from the last mid-stream
+    // seek that triggered the final download; clear it so any position is reachable.
+    // Also clear the flag so it re-arms once the re-fetch pipe completes.
+    if (_streamComplete) {
+        console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s → completed-mode re-fetch`);
+        _seekTarget     = -Infinity;
+        _streamComplete = false;
+    }
+
+    // Guard against re-entrant seeks for the same target.  When the SourceBuffer
+    // is cleared mid-seek the browser re-fires 'seeking' with the same currentTime;
+    // without this guard we'd abort our own in-progress pipe and loop forever.
+    if (Math.abs(_seekTarget - seekSec) < 0.5) { console.log(`[AML Engine] Seek ${seekSec.toFixed(2)}s → guard (in-progress)`); return; }
+    _seekTarget = seekSec;
+
+    const wasPlaying = !audio.paused;
+
+    // Abort any previous in-flight seek fetch so only ONE seek pipeline runs at a time.
+    // Two seeks with different targets both pass the |_seekTarget-seekSec|<0.5 guard and
+    // can race to write the SourceBuffer concurrently, causing "SB error chunk N".
+    if (_seekFetchCtrl) { _seekFetchCtrl.abort(); }
+    _seekFetchCtrl = new AbortController();
+    const mySeekCtrl = _seekFetchCtrl;
+
     const seekUrl = `${_activeStreamBase}&t=${seekSec.toFixed(3)}`;
     let resp;
     try {
-        resp = await fetch(seekUrl, { signal: _abortCtrl?.signal });
+        const signals = [mySeekCtrl.signal];
+        if (_abortCtrl?.signal) signals.push(_abortCtrl.signal);
+        resp = await fetch(seekUrl, { signal: AbortSignal.any(signals) });
     } catch (e) {
         if (e.name !== 'AbortError') console.warn('[AML Engine] Seek fetch error:', e.message);
         return;
@@ -440,8 +672,11 @@ async function seekToTime(seekSec, audio, sb, ms) {
         return;
     }
 
-    // Guard: track may have changed while the fetch was in flight.
-    if (_abortCtrl?.signal.aborted) return;
+    // Guard: track changed OR a newer seek started while this fetch was in flight.
+    if (_abortCtrl?.signal.aborted || _seekFetchCtrl !== mySeekCtrl) {
+        resp.body?.cancel();
+        return;
+    }
 
     // Engine may start at a slightly earlier segment boundary.
     const actualStartHdr = resp.headers.get('X-Actual-Start');
@@ -475,7 +710,7 @@ async function seekToTime(seekSec, audio, sb, ms) {
 
     audio.addEventListener('canplay', () => {
         if (pipeCtrl.signal.aborted) return;
-        // Diagnostic: verify engine segment, MSE timeline, and playhead agree.
+        _seekTarget = -Infinity; // seek complete
         const buf = sb.buffered;
         const bStart = buf.length > 0 ? buf.start(0).toFixed(2) : '?';
         const bEnd   = buf.length > 0 ? buf.end(buf.length - 1).toFixed(2) : '?';
@@ -486,167 +721,9 @@ async function seekToTime(seekSec, audio, sb, ms) {
             ` currentTime=${audio.currentTime.toFixed(2)}s` +
             ` readyState=${audio.readyState} networkState=${audio.networkState}`
         );
-        _nativePlay().catch(e => console.warn('[AML Engine] seek play():', e));
+        // Only resume playback if audio was playing before the seek.
+        if (wasPlaying) _nativePlay().catch(e => console.warn('[AML Engine] seek play():', e));
     }, { once: true });
-}
-
-// ── Seamless lossless upgrade ─────────────────────────────────────────────────
-//
-// Splices a FLAC-transcode stream into a live AAC session via changeType().
-// Kept for future use — currently not triggered because FLAC transcode streams
-// start at position 0 with no ?t= seek support, making a buffer-safe seam
-// impossible. The drm handler resets _losslessWaitDone on lossless transition
-// so the NEXT track starts in FLAC directly via waitForLossless().
-async function scheduleLosslessUpgrade(mk) {
-    if (_upgradeInFlight) return;
-    _upgradeInFlight = true;
-
-    const myGen = _generation;
-    const ctrl  = _abortCtrl;
-    const audio = getMKAudio();
-    const sb    = _activeSb;
-    const ms    = _activeMs;
-
-    if (!audio || !sb || !ms || ms.readyState !== 'open') {
-        _upgradeInFlight = false; return;
-    }
-
-    // Need ≥20 s of track remaining so the splice is worth the overhead.
-    const seam = audio.currentTime + 10;
-    if (!_durationSec || seam >= _durationSec - 10) {
-        _upgradeInFlight = false; return;
-    }
-
-    const item = mk.nowPlayingItem;
-    if (!item) { _upgradeInFlight = false; return; }
-    const adamId = item.playParams?.catalogId
-        ?? item.attributes?.playParams?.catalogId
-        ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
-    const sf = mk.storefrontId ?? 'us';
-
-    console.log(`[AML Engine] Lossless upgrade: opening FLAC session, seam=${seam.toFixed(1)}s`);
-
-    // Open a parallel lossless session for the same track.
-    let newSess;
-    try {
-        const r = await fetch(`${ENGINE}/api/v1/playback`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                assetId: adamId, storefront: sf,
-                capabilities: { lossless: true, video: false, atmos: false },
-                token: mk.developerToken ?? '',
-                mediaUserToken: getMUT(),
-            }),
-            signal: ctrl?.signal,
-        });
-        if (!r.ok) throw new Error(`Session ${r.status}: ${await r.text()}`);
-        newSess = await r.json();
-    } catch (e) {
-        if (e.name !== 'AbortError') console.warn('[AML Engine] Lossless upgrade: session failed:', e.message);
-        _upgradeInFlight = false; return;
-    }
-
-    if (myGen !== _generation || ctrl?.signal.aborted) {
-        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
-    }
-
-    // If the engine still returned AAC (DRM not fully ready despite the SSE event),
-    // there's nothing to upgrade to — bail out cleanly.
-    if (newSess.codec !== 'alac') {
-        console.log('[AML Engine] Lossless upgrade: engine returned non-ALAC codec — skipping');
-        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
-    }
-
-    const audioPath = newSess.streams?.audio ?? `/api/v1/playback/${newSess.sessionId}/audio`;
-    const newBase   = `${ENGINE}${audioPath}?transcode=flac`;
-    const seamUrl   = `${newBase}`;  // FLAC transcode starts from beginning; we seek via remove()
-
-    // Pre-fetch the FLAC stream BEFORE touching the SourceBuffer.
-    // If this fetch fails the existing AAC session remains intact.
-    let seamResp;
-    try {
-        seamResp = await fetch(seamUrl, { signal: ctrl?.signal });
-        if (!seamResp.ok) throw new Error(`Stream ${seamResp.status}`);
-    } catch (e) {
-        if (e.name !== 'AbortError') console.warn('[AML Engine] Lossless upgrade: seam fetch failed:', e.message);
-        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
-    }
-
-    const actualStart = seam;  // FLAC transcode has no X-Actual-Start; use intended seam
-    console.log(`[AML Engine] Lossless upgrade: FLAC stream ready, splice at ${actualStart.toFixed(2)}s`);
-
-    // Wait until playback is within 2 s of the splice point.
-    await new Promise(resolve => {
-        const check = () => {
-            if (myGen !== _generation || ctrl?.signal.aborted || audio.currentTime >= actualStart - 2) resolve();
-            else setTimeout(check, 200);
-        };
-        check();
-    });
-
-    if (myGen !== _generation || ctrl?.signal.aborted) {
-        seamResp.body?.cancel();
-        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
-    }
-
-    const oldSessionId = _sessionId;
-    const waitSBIdle = () => new Promise((res, rej) => {
-        if (!sb.updating) return res();
-        sb.addEventListener('updateend', res, { once: true });
-        sb.addEventListener('error', rej, { once: true });
-    });
-
-    // Abort the current AAC pipe; clear the SourceBuffer from actualStart onward.
-    if (_pipeCtrl) { _pipeCtrl.abort(); _pipeCtrl = null; }
-    try {
-        await waitSBIdle();
-        if (ms.readyState === 'open') sb.remove(actualStart, Infinity);
-        await waitSBIdle();
-    } catch (_) {}
-
-    if (myGen !== _generation || ctrl?.signal.aborted) {
-        seamResp.body?.cancel();
-        deleteSession(newSess.sessionId); _upgradeInFlight = false; return;
-    }
-
-    // Switch the SourceBuffer decoder context to FLAC.
-    // Existing AAC data before actualStart stays buffered and decodable; the browser
-    // transitions cleanly at the splice point when it encounters the FLAC init segment.
-    try {
-        sb.changeType('audio/mp4; codecs="flac"');
-    } catch (e) {
-        console.warn('[AML Engine] changeType("flac") failed:', e.message, '— resuming AAC');
-        seamResp.body?.cancel();
-        deleteSession(newSess.sessionId);
-        // Resume the old AAC stream from actualStart so playback isn't interrupted.
-        if (_activeStreamBase && ms.readyState === 'open') {
-            _pipeCtrl = new AbortController();
-            pipeToSourceBuffer(sb, audio, `${_activeStreamBase}&t=${actualStart.toFixed(3)}`,
-                _pipeCtrl.signal, ms, _durationSec, performance.now()).catch(() => {});
-        }
-        _upgradeInFlight = false; return;
-    }
-
-    // Promote the new FLAC session to be the active session.
-    // seekToTime() reads _activeStreamBase and _sessionId, so update them now.
-    _sessionId        = newSess.sessionId;
-    _sessionLossless  = true;
-    _activeStreamBase = newBase;
-    _seekable         = false;  // FLAC transcode doesn't support ?t=
-
-    // Pipe the pre-fetched response body — avoids a second round-trip to the engine.
-    _pipeCtrl = new AbortController();
-    const pipeCtrl = _pipeCtrl;
-    pipeToSourceBuffer(sb, audio, seamResp, pipeCtrl.signal, ms, _durationSec, performance.now()).catch(e => {
-        if (!pipeCtrl.signal.aborted) console.error('[AML Engine] FLAC upgrade pipe error:', e.message);
-    });
-
-    showQualityBadge('alac', newSess.sampleRate, newSess.bitDepth);
-    console.log(`[AML Engine] Lossless upgrade complete → FLAC ${newSess.sampleRate}Hz/${newSess.bitDepth}bit`);
-
-    deleteSession(oldSessionId);
-    _upgradeInFlight = false;
 }
 
 // ── MV video injection ────────────────────────────────────────────────────────
@@ -734,13 +811,18 @@ async function handleTrackChange(mk) {
     if (_pipeCtrl)      { _pipeCtrl.abort();      _pipeCtrl      = null; }
     if (_abortCtrl)     { _abortCtrl.abort();     _abortCtrl     = null; }
     _activeSb = null; _activeMs = null; _activeStreamBase = '';
+    _ourBlobUrl = null;
     unbridgeDuration();
     deleteSession(_sessionId);
     _sessionId        = null;
     _durationSec      = 0;
     _seekable         = false;
-    _sessionLossless  = false;
-    _upgradeInFlight  = false;
+    _seekTarget       = -Infinity;
+    _ourSeekPending   = false;
+    _ourSeekTarget    = -Infinity;
+    _streamComplete   = false;
+    if (_seekFetchCtrl) { _seekFetchCtrl.abort(); _seekFetchCtrl = null; }
+    _chunkCache       = null;
     // Do NOT reset _losslessWaitDone here — it's a one-shot per DRM state change,
     // not per track. Resetting it would re-enable the 2.5 s wait on every skip.
     showQualityBadge(null);
@@ -761,7 +843,7 @@ async function handleTrackChange(mk) {
 
     const mkAudio = getMKAudio();
     if (mkAudio) {
-        mkAudio.pause();
+        if (!mkAudio.paused) mkAudio.pause(); // skip if already paused — avoids poking MK state machine needlessly
         // Absorb MK's load() calls so it can't reset our MSE stream.
         // We lift this shadow for our own controlled _nativeLoad() call below.
         mkAudio.load = () => {};
@@ -800,6 +882,7 @@ async function handleTrackChange(mk) {
         _sessionId   = sess.sessionId;
         _durationSec = (sess.durationMs ?? 0) / 1000;
         _seekable    = sess.capabilities?.seekable ?? false;
+        _chunkCache  = { sessionId: _sessionId, chunks: [], byteSize: 0 };
         console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s seekable=${_seekable} +${((performance.now()-t0)/1000).toFixed(2)}s`);
 
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth);
@@ -815,9 +898,6 @@ async function handleTrackChange(mk) {
         const needsTranscode = sess.codec === 'alac' || sess.codec === 'atmos';
         const streamBase = `${ENGINE}${audioPath}${needsTranscode ? `?transcode=${transcodeTarget}` : '?raw=1'}`;
         const mime       = useFlacLossless ? 'audio/mp4; codecs="flac"' : 'audio/mp4; codecs="mp4a.40.2"';
-        _sessionLossless = useFlacLossless;
-        if (useFlacLossless) _seekable = false;  // FLAC transcode doesn't support ?t=
-
         _abortCtrl = new AbortController();
         const ctrl = _abortCtrl;
 
@@ -825,6 +905,7 @@ async function handleTrackChange(mk) {
 
         const ms      = new MediaSource();
         const blobUrl = URL.createObjectURL(ms);
+        _ourBlobUrl = blobUrl;
         _nativeSrcSet.call(mkAudio, blobUrl);
 
         // Lift load() shadow for our one controlled call, then re-block.
@@ -842,13 +923,10 @@ async function handleTrackChange(mk) {
         if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
 
         const sb = ms.addSourceBuffer(mime);
+        ms.addEventListener('sourceclose', () => console.error('[AML Engine] MediaSource CLOSED unexpectedly'));
+        ms.addEventListener('sourceended', () => console.log('[AML Engine] MediaSource ended'));
         bridgeDuration(mk, _durationSec);
 
-        // Apple Music HLS fMP4 segments carry a non-zero initial baseMediaDecodeTime.
-        // MSE won't advance readyState past HAVE_METADATA (1) until currentTime is
-        // inside the buffered range. After loadedmetadata (init segment processed,
-        // no media data yet), wait for the first media segment to land, then snap
-        // currentTime to the buffer start if it would otherwise sit below it.
         // Log SourceBuffer errors — these fire when appendBuffer data is rejected
         // (wrong codec string, malformed fMP4, etc.) but don't throw to caller.
         sb.addEventListener('error', (e) => {
@@ -857,16 +935,18 @@ async function handleTrackChange(mk) {
 
         mkAudio.addEventListener('loadedmetadata', function onMeta() {
             const snapToBuffer = (attempt) => {
-                if (ctrl.signal.aborted) return;
-                const blen = sb.buffered.length;
-                if (blen > 0) {
-                    const bufStart = sb.buffered.start(0);
-                    if (bufStart > mkAudio.currentTime + 0.1) {
-                        mkAudio.currentTime = bufStart;
+                if (ctrl.signal.aborted || ms.readyState === 'closed') return;
+                try {
+                    const blen = sb.buffered.length;
+                    if (blen > 0) {
+                        const bufStart = sb.buffered.start(0);
+                        if (bufStart > mkAudio.currentTime + 0.1) {
+                            mkAudio.currentTime = bufStart;
+                        }
+                    } else {
+                        sb.addEventListener('updateend', () => snapToBuffer(attempt + 1), { once: true });
                     }
-                } else {
-                    sb.addEventListener('updateend', () => snapToBuffer(attempt + 1), { once: true });
-                }
+                } catch (_) {}
             };
             snapToBuffer(0);
         }, { once: true });
@@ -891,9 +971,20 @@ async function handleTrackChange(mk) {
 
         // Seeking handler — installed only after canplay so that MK's internal
         // currentTime adjustments during MSE setup never abort the initial pipe.
+        //
+        // Only processes seeks that came through our interceptor (_ourSeekPending=true).
+        // MK's error-recovery code calls resetMediaElement() which sets audio.currentTime=0
+        // directly (not via mk.seekToTime), firing the native 'seeking' event without going
+        // through our interceptor. Without this guard those internal resets would trigger a
+        // new engine fetch while a seek is already in flight, causing a cascade of SB errors.
         const onSeeking = () => {
             if (ctrl.signal.aborted) return;
-            seekToTime(mkAudio.currentTime, mkAudio, sb, ms);
+            if (!_ourSeekPending) return; // MK internal reset — not a user/lyric seek, ignore
+            _ourSeekPending = false;
+            // Use _ourSeekTarget (set by our interceptor) rather than mkAudio.currentTime:
+            // MK's currentTime getter may still return the old position at this point
+            // if MK overrides the prototype setter and hasn't yet synced its internal state.
+            seekToTime(_ourSeekTarget, mkAudio, sb, ms);
         };
 
         // _nativePlay() bypasses our play() proxy and starts audio directly.
@@ -985,6 +1076,8 @@ async function setup() {
 
     const mk = await waitForMusicKit();
     console.log('[AML Engine] MusicKit ready');
+
+    installMKSeekInterceptor(mk);
 
     mk.addEventListener('nowPlayingItemDidChange', () => {
         handleTrackChange(mk);

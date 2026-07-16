@@ -13,6 +13,8 @@ const { contextBridge, ipcRenderer } = require('electron');
     const patchCode = `(function(){
   if (window.__amlDRMPatch) return;
   window.__amlDRMPatch = true;
+  // Capture BEFORE MusicKit overrides HTMLMediaElement.prototype.currentTime.set
+  window.__amlNativeCTSet = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime')?.set;
   var _origRMKSA = navigator.requestMediaKeySystemAccess && navigator.requestMediaKeySystemAccess.bind(navigator);
   navigator.requestMediaKeySystemAccess = function(ks, cfgs) {
     var real = _origRMKSA ? Promise.resolve().then(function(){ return _origRMKSA(ks, cfgs); }) : Promise.reject(new Error('none'));
