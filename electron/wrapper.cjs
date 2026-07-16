@@ -6,12 +6,14 @@ const os   = require('os');
 const path = require('path');
 const net  = require('net');
 
-const WRAPPER_SRC = process.resourcesPath
-    ? path.join(process.resourcesPath, 'wrapper')
-    : path.join(__dirname, '..', 'Wrapper.x86_64.latest', 'wrapper-rootless');
+const WRAPPER_SRC = (() => {
+    const pkgBin = path.join(process.resourcesPath, 'wrapper');
+    if (fs.existsSync(pkgBin)) return pkgBin;
+    return path.join(__dirname, '..', 'Wrapper.x86_64.latest', 'wrapper-rootless');
+})();
 
 const DATA_DIR    = path.join(os.homedir(), '.config', 'apple-music-linux', 'wrapper-data');
-const PROXY_PORTS = [10020, 20020, 30020]; // decrypt / m3u8 / account ports
+const PROXY_PORT = 10020;
 
 // Health statuses exposed to the menu and renderer.
 const STATUS = { STARTING: 'starting', RUNNING: 'running', OFFLINE: 'offline' };
@@ -98,7 +100,7 @@ class WrapperProc {
 
     async _checkHealth() {
         if (!this._pty) return;
-        const alive = await probePort(PROXY_PORTS[0]);
+        const alive = await probePort(PROXY_PORT);
         this._setStatus(alive ? STATUS.RUNNING : STATUS.STARTING);
     }
 
