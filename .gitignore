@@ -5,3 +5,5 @@ internal/embedded/wrapper
 internal/embedded/wrapper.exe
 internal/embedded/wrapper_amd64
 internal/embedded/wrapper_arm64
+internal/embedded/ffmpeg
+internal/embedded/mp4box

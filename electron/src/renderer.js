@@ -115,7 +115,6 @@ const DIM    = '\x1b[38;5;145m'; // medium grey for decorative elements
 const RESET  = '\x1b[0m';
 const WHITE  = '\x1b[38;5;234m'; // near-black — primary text on white bg
 const GREEN  = '\x1b[32m';       // dark green — readable on white
-const YELLOW = '\x1b[33m';       // dark amber
 const RED    = '\x1b[31m';       // dark red
 const GREY   = '\x1b[38;5;240m'; // mid-grey — secondary text
 

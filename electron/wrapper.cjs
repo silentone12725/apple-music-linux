@@ -13,7 +13,7 @@ const WRAPPER_SRC = (() => {
 })();
 
 const DATA_DIR    = path.join(os.homedir(), '.config', 'apple-music-linux', 'wrapper-data');
-const PROXY_PORTS = [10020, 20020, 30020]; // decrypt / m3u8 / account ports
+const PROXY_PORT = 10020;
 
 // Health statuses exposed to the menu and renderer.
 const STATUS = { STARTING: 'starting', RUNNING: 'running', OFFLINE: 'offline' };
@@ -100,7 +100,7 @@ class WrapperProc {
 
     async _checkHealth() {
         if (!this._pty) return;
-        const alive = await probePort(PROXY_PORTS[0]);
+        const alive = await probePort(PROXY_PORT);
         this._setStatus(alive ? STATUS.RUNNING : STATUS.STARTING);
     }
 
