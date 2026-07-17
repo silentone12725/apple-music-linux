@@ -384,7 +384,7 @@ function startVLCPoll(mkAudio) {
                 mkAudio.dispatchEvent(new Event('ended'));
             }
         } catch (_) {}
-    }, 50);
+    }, 250);
 }
 
 // Polls _engineCaps.lossless every 100 ms until true or timeoutMs elapses.
@@ -1045,7 +1045,7 @@ async function setup() {
         const why  = msg?.meta?.reason     ?? '?';
         _snapshotEventId = msg?.meta?.id ?? -1;  // used to filter stale replayed drm events
         if (snap?.capabilities) {
-            _engineCaps = { lossless: !!snap.capabilities.lossless, atmos: !!snap.capabilities.atmos };
+            _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
         }
         console.log(`[AML Engine] Engine ready — drm.session=${snap?.drm?.session ?? 'unknown'} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
     } catch (e) {
@@ -1068,7 +1068,7 @@ async function setup() {
         const wasLossless = _engineCaps.lossless;
         const sess = snap?.state?.session ?? 'unknown';
         if (snap?.capabilities) {
-            _engineCaps = { lossless: !!(snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
+            _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
         }
         console.log(`[AML Engine] DRM state → session=${sess} lossless=${_engineCaps.lossless}`);
 
@@ -1186,4 +1186,429 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         }
     });
     bodyObs.observe(document.body, { childList: true });
+})();
+
+
+// ── Engine Settings Panel ──────────────────────────────────────────────────
+// Adds "Engine Settings" to the account context menu.
+// Opens as a native <dialog> (macOS-sheet style).
+// All engine state comes from /api/v1/drm/status — no wrapper IPC.
+(function setupEngineSettings() {
+    if (!window.amlBridge) return;
+
+    let injected = false;
+    const FF = 'font-family:-apple-system,SF Pro Text,system-ui,sans-serif;';
+
+    function dot(ok) {
+        const d = document.createElement('span');
+        d.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:50%;` +
+            `flex-shrink:0;background:${ok ? '#34c759' : '#ff3b30'};`;
+        return d;
+    }
+
+    function makeSection(title) {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'margin-top:32px;';
+        const h = document.createElement('h2');
+        h.textContent = title;
+        h.style.cssText = FF + 'font-size:11px;font-weight:600;text-transform:uppercase;' +
+            'letter-spacing:0.06em;color:rgba(255,255,255,0.4);margin:0 0 8px;';
+        const body = document.createElement('div');
+        body.style.cssText = 'background:rgba(255,255,255,0.08);border-radius:10px;padding:0 14px;';
+        wrap.appendChild(h);
+        wrap.appendChild(body);
+        return { wrap, body };
+    }
+
+    function makeRow(label, val, subtitle, isLast) {
+        const r = document.createElement('div');
+        r.style.cssText = 'display:flex;align-items:center;padding:11px 0;' +
+            (isLast ? '' : 'border-bottom:0.5px solid rgba(255,255,255,0.07);');
+        const lbl = document.createElement('div');
+        lbl.style.cssText = 'flex:1;';
+        const m = document.createElement('div');
+        m.style.cssText = FF + 'font-size:13px;color:rgba(255,255,255,0.85);';
+        m.textContent = label;
+        lbl.appendChild(m);
+        if (subtitle) {
+            const s = document.createElement('div');
+            s.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;';
+            s.textContent = subtitle;
+            lbl.appendChild(s);
+        }
+        r.appendChild(lbl);
+        r.appendChild(val);
+        return r;
+    }
+
+    function statusVal(text, ok) {
+        const v = document.createElement('div');
+        v.style.cssText = FF + 'display:flex;align-items:center;gap:6px;font-size:13px;color:rgba(255,255,255,0.5);';
+        if (ok !== undefined) v.appendChild(dot(ok));
+        v.appendChild(document.createTextNode(text));
+        return v;
+    }
+
+    function makeBtn(text) {
+        const b = document.createElement('button');
+        b.textContent = text;
+        b.style.cssText = FF + 'padding:5px 13px;border-radius:6px;border:none;font-size:12px;' +
+            'cursor:pointer;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.85);white-space:nowrap;';
+        return b;
+    }
+
+    function makeInput(type, placeholder) {
+        const inp = document.createElement('input');
+        inp.type = type; inp.placeholder = placeholder;
+        inp.style.cssText = FF + 'width:100%;box-sizing:border-box;padding:8px 10px;margin-top:8px;' +
+            'border-radius:6px;border:0.5px solid rgba(255,255,255,0.2);' +
+            'background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.85);font-size:13px;outline:none;';
+        return inp;
+    }
+
+    async function fetchDRM() {
+        const r = await fetch(`${ENGINE}api/v1/drm/status`);
+        return r.json();
+    }
+
+    // ── Engine Account section (self-contained, mutates its own body) ─────
+    function buildAccountSection(drm, onRefresh) {
+        const { wrap, body } = makeSection('Engine Account');
+        const drmState = drm?.state ?? drm ?? {};
+        const isSignedIn = drmState?.session === 'valid'
+            || drmState?.authentication === 'logged_in'
+            || drmState?.fairplay === 'ready'
+            || drm?.capabilities?.cbcs === true;
+
+        function renderState() {
+            body.innerHTML = '';
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:11px 0;';
+            row.appendChild(dot(isSignedIn));
+            const text = document.createElement('div');
+            text.style.cssText = 'flex:1;';
+            const main = document.createElement('div');
+            main.style.cssText = FF + 'font-size:13px;color:rgba(255,255,255,0.85);';
+            main.textContent = isSignedIn ? 'Signed in' : 'Not signed in';
+            text.appendChild(main);
+            if (!isSignedIn) {
+                const sub = document.createElement('div');
+                sub.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;';
+                sub.textContent = 'Sign in to enable lossless and hi-res playback';
+                text.appendChild(sub);
+            }
+            row.appendChild(text);
+            const btn = makeBtn(isSignedIn ? 'Sign Out' : 'Sign In…');
+            btn.onclick = isSignedIn ? async () => {
+                btn.disabled = true; btn.textContent = 'Signing out…';
+                await fetch(`${ENGINE}api/v1/drm/logout`, { method: 'POST' }).catch(() => {});
+                onRefresh();
+            } : renderSignIn;
+            row.appendChild(btn);
+            body.appendChild(row);
+        }
+
+        function renderSignIn() {
+            body.innerHTML = '';
+            const emailInp = makeInput('email', 'Apple ID (email)');
+            const passInp  = makeInput('password', 'Password');
+            const msgEl    = document.createElement('div');
+            msgEl.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.5);padding:4px 0;min-height:16px;';
+            const btnRow   = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;gap:8px;padding:10px 0 4px;';
+            const cancelBtn = makeBtn('Cancel');
+            const goBtn     = makeBtn('Sign In');
+            goBtn.style.cssText += 'background:#fc3c44;color:#fff;';
+            btnRow.appendChild(cancelBtn); btnRow.appendChild(goBtn);
+            body.appendChild(emailInp); body.appendChild(passInp);
+            body.appendChild(msgEl); body.appendChild(btnRow);
+
+            cancelBtn.onclick = renderState;
+            goBtn.onclick = async () => {
+                const email = emailInp.value.trim();
+                const password = passInp.value;
+                if (!email || !password) { msgEl.textContent = 'Email and password required.'; return; }
+                goBtn.disabled = true; goBtn.textContent = 'Signing in…'; msgEl.textContent = '';
+                const r = await fetch(`${ENGINE}api/v1/drm/authenticate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password }),
+                }).catch(e => { msgEl.textContent = e.message; });
+                if (!r) { goBtn.disabled = false; goBtn.textContent = 'Sign In'; return; }
+                if (!r.ok) {
+                    msgEl.textContent = await r.text().catch(() => `HTTP ${r.status}`);
+                    goBtn.disabled = false; goBtn.textContent = 'Sign In'; return;
+                }
+                msgEl.textContent = 'Contacting Apple servers…';
+                pollForAuth(msgEl);
+            };
+        }
+
+        function pollForAuth(msgEl) {
+            let n = 0;
+            const t = setInterval(async () => {
+                if (++n > 60) { clearInterval(t); msgEl.textContent = 'Timed out. Refresh to check status.'; return; }
+                const status = await fetchDRM().catch(() => null);
+                if (!status) return;
+                const auth = status.state?.authentication;
+                const session = status.state?.session;
+                if (session === 'valid' || auth === 'logged_in' || status.state?.fairplay === 'ready' || status.capabilities?.cbcs === true) { clearInterval(t); onRefresh(); return; }
+                if (auth === 'challenging') { clearInterval(t); renderChallenge(); return; }
+                if (auth === 'failed') { clearInterval(t); msgEl.textContent = status.message || 'Authentication failed.'; return; }
+            }, 1000);
+        }
+
+        function renderChallenge() {
+            body.innerHTML = '';
+            const note = document.createElement('div');
+            note.style.cssText = FF + 'font-size:13px;color:rgba(255,255,255,0.85);padding:10px 0 4px;';
+            note.textContent = 'Two-factor authentication — enter the code sent to your device.';
+            const codeInp = makeInput('text', '6-digit code');
+            codeInp.maxLength = 8;
+            const errEl   = document.createElement('div');
+            errEl.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.5);padding:4px 0;min-height:16px;';
+            const submitBtn = makeBtn('Submit');
+            submitBtn.style.cssText += 'margin-top:6px;';
+            body.appendChild(note); body.appendChild(codeInp); body.appendChild(errEl); body.appendChild(submitBtn);
+            submitBtn.onclick = async () => {
+                const reply = codeInp.value.trim();
+                if (!reply) return;
+                submitBtn.disabled = true;
+                const r = await fetch(`${ENGINE}api/v1/drm/challenge`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reply }),
+                }).catch(e => { errEl.textContent = e.message; });
+                if (!r) { submitBtn.disabled = false; return; }
+                if (!r.ok) { errEl.textContent = await r.text().catch(() => `HTTP ${r.status}`); submitBtn.disabled = false; return; }
+                pollForAuth(errEl);
+            };
+        }
+
+        renderState();
+        return wrap;
+    }
+
+    // ── Dialog (created once, reused) ─────────────────────────────────────
+    function getDialog() {
+        let dlg = document.getElementById('aml-settings-dialog');
+        if (dlg) return dlg;
+        dlg = document.createElement('dialog');
+        dlg.id = 'aml-settings-dialog';
+        const st = document.createElement('style');
+        st.textContent = `
+            #aml-settings-dialog {
+                position:fixed; inset:0; margin:auto;
+                width:min(660px,calc(100vw - 48px));
+                max-height:min(82vh,760px); overflow-y:auto;
+                border:0.5px solid rgba(255,255,255,0.14); border-radius:16px;
+                background:rgba(18,18,20,0.93);
+                backdrop-filter:blur(48px) saturate(1.9);
+                -webkit-backdrop-filter:blur(48px) saturate(1.9);
+                box-shadow:0 32px 80px rgba(0,0,0,0.8),0 0 0 0.5px rgba(255,255,255,0.07);
+                padding:0 32px 32px; color:rgba(255,255,255,0.9);
+                font-family:-apple-system,SF Pro Text,system-ui,sans-serif;
+            }
+            #aml-settings-dialog::backdrop {
+                background:rgba(0,0,0,0.4);
+                backdrop-filter:blur(6px);
+                -webkit-backdrop-filter:blur(6px);
+            }
+            #aml-settings-dialog::-webkit-scrollbar { width:4px; }
+            #aml-settings-dialog::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18);border-radius:2px; }
+            @keyframes _aml-pop-in  { from{opacity:0;transform:scale(0.88)} to{opacity:1;transform:scale(1)} }
+            @keyframes _aml-pop-out { from{opacity:1;transform:scale(1)}    to{opacity:0;transform:scale(0.88)} }
+            #aml-settings-dialog.aml-opening { animation:_aml-pop-in  .22s cubic-bezier(.34,1.4,.64,1) forwards; }
+            #aml-settings-dialog.aml-closing { animation:_aml-pop-out .16s ease-in forwards; }
+        `;
+        document.head.appendChild(st);
+        document.body.appendChild(dlg);
+        return dlg;
+    }
+
+    function closeSettings() {
+        const dlg = document.getElementById('aml-settings-dialog');
+        if (!dlg?.open) return;
+        dlg.classList.replace('aml-opening', 'aml-closing') || dlg.classList.add('aml-closing');
+        dlg.addEventListener('animationend', () => { dlg.classList.remove('aml-closing'); dlg.close(); }, { once: true });
+    }
+
+    // ── Open settings — anchored to the account button ─────────────────────
+    async function openSettings() {
+        const dlg = getDialog();
+        dlg.innerHTML = '';
+
+        const titleBar = document.createElement('div');
+        titleBar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:18px 0 4px;';
+        const title = document.createElement('h1');
+        title.textContent = 'AML Settings';
+        title.style.cssText = FF + 'font-size:15px;font-weight:600;margin:0;color:rgba(255,255,255,0.95);';
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = '✕';
+        closeBtn.style.cssText = FF +
+            'background:rgba(255,255,255,0.1);border:none;border-radius:50%;width:22px;height:22px;' +
+            'cursor:pointer;color:rgba(255,255,255,0.55);font-size:11px;display:flex;align-items:center;justify-content:center;';
+        closeBtn.onclick = closeSettings;
+        titleBar.appendChild(title); titleBar.appendChild(closeBtn);
+        dlg.appendChild(titleBar);
+
+        const drm   = await fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} }));
+        const prefs = await window.amlBridge.getPrefs().catch(() => ({}));
+        const s     = drm.state ?? {};
+
+        dlg.appendChild(buildAccountSection(drm, openSettings));
+
+        // ── Engine Status ──────────────────────────────────────────────────
+        const { wrap: stWrap, body: stBody } = makeSection('Engine Status');
+        [
+            { label: 'Wrapper process', ok: s.process === 'running',  text: s.process  ?? 'unknown' },
+            { label: 'FairPlay',        ok: s.fairplay === 'ready',   text: s.fairplay ?? 'unknown' },
+            { label: 'Session',         ok: s.session === 'valid' || drm?.capabilities?.cbcs === true,
+              text: s.session === 'valid' ? 'valid' : drm?.capabilities?.cbcs === true ? 'active (cbcs)' : s.session ?? 'unknown',
+              subtitle: 'Authentication lease with Apple servers' },
+            { label: 'Backend',         text: drm.backend?.selected ?? 'embedded', noDot: true },
+        ].forEach(({ label, ok, text, subtitle, noDot }, i, arr) => {
+            stBody.appendChild(makeRow(label, statusVal(text, noDot ? undefined : ok), subtitle, i === arr.length - 1));
+        });
+        const refreshRow = document.createElement('div');
+        refreshRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;';
+        const refreshBtn = makeBtn('Refresh');
+        refreshBtn.onclick = () => openSettings();
+        refreshRow.appendChild(refreshBtn);
+        stBody.appendChild(refreshRow);
+        dlg.appendChild(stWrap);
+
+        // ── Display ────────────────────────────────────────────────────────
+        const { wrap: dWrap, body: dBody } = makeSection('Display');
+
+        const blurVal = document.createElement('span');
+        blurVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
+        blurVal.textContent = `${prefs.glassBlur ?? 48}px`;
+        const blurSl = document.createElement('input');
+        blurSl.type = 'range'; blurSl.min = 0; blurSl.max = 80; blurSl.step = 4; blurSl.value = prefs.glassBlur ?? 48;
+        blurSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
+        blurSl.oninput = () => { blurVal.textContent = `${blurSl.value}px`; window.amlBridge.setGlassBlur(+blurSl.value); };
+        const blurR = document.createElement('div');
+        blurR.style.cssText = 'display:flex;align-items:center;flex:1;';
+        blurR.appendChild(blurSl); blurR.appendChild(blurVal);
+        dBody.appendChild(makeRow('Background blur', blurR, null, false));
+
+        const zoomVal = document.createElement('span');
+        zoomVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
+        zoomVal.textContent = `${Math.round((prefs.zoomFactor ?? 1) * 100)}%`;
+        const zoomSl = document.createElement('input');
+        zoomSl.type = 'range'; zoomSl.min = 75; zoomSl.max = 150; zoomSl.step = 25; zoomSl.value = Math.round((prefs.zoomFactor ?? 1) * 100);
+        zoomSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
+        zoomSl.oninput = () => { zoomVal.textContent = `${zoomSl.value}%`; window.amlBridge.setZoom(+zoomSl.value / 100); };
+        const zoomR = document.createElement('div');
+        zoomR.style.cssText = 'display:flex;align-items:center;flex:1;';
+        zoomR.appendChild(zoomSl); zoomR.appendChild(zoomVal);
+        dBody.appendChild(makeRow('Zoom', zoomR, null, false));
+
+        const toggle = document.createElement('input');
+        toggle.type = 'checkbox'; toggle.checked = prefs.hideUpsell !== false;
+        toggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
+        toggle.onchange = () => window.amlBridge.setTweak('hideUpsell', toggle.checked);
+        dBody.appendChild(makeRow('Hide upsell banners', toggle, null, true));
+
+        dlg.appendChild(dWrap);
+
+        if (!dlg.open) {
+            dlg.classList.remove('aml-closing');
+            dlg.classList.add('aml-opening');
+            dlg.showModal();
+            dlg.addEventListener('animationend', () => dlg.classList.remove('aml-opening'), { once: true });
+        }
+    }
+
+    // ── Inject "AML Settings" into account context menu ────────────────────
+    // The dropdown is appended to <body> as a div.contextual-menu__overlay when opened.
+    // We identify the account menu's overlay by the presence of a "Sign Out" item.
+    function injectAMLMenuItem(list) {
+        if (!list || list.querySelector('#aml-menu-item')) return;
+        const isAccount = [...list.querySelectorAll('.contextual-menu-item__option-text')]
+            .some(el => el.textContent.trim() === 'Sign Out');
+        if (!isAccount) return;
+
+        // Clone classes from a native item so our entry inherits Apple Music's
+        // own hover/active/focus CSS exactly — no manual colour matching needed.
+        const nativeLi  = list.querySelector('li.contextual-menu-item');
+        const nativeBtn = nativeLi?.querySelector('button');
+
+        const li = document.createElement('li');
+        li.id = 'aml-menu-item';
+        li.className = nativeLi?.className || 'contextual-menu-item';
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = nativeBtn?.className || 'contextual-menu-item__option';
+        btn.style.cssText = 'width:100%;background:none;border:none;cursor:pointer;padding:0;color:inherit;font:inherit;text-align:left;';
+
+        const wrapper = document.createElement('span');
+        wrapper.className = 'contextual-menu-item__option-wrapper';
+        const text = document.createElement('span');
+        text.className = 'contextual-menu-item__option-text';
+        text.textContent = 'AML Settings';
+        wrapper.appendChild(text);
+        btn.appendChild(wrapper);
+        li.appendChild(btn);
+
+        btn.addEventListener('click', () => {
+            document.querySelector('.account-menu--expanded .contextual-menu__trigger')?.click();
+            openSettings();
+        });
+
+        const sep = document.createElement('li');
+        sep.setAttribute('aria-hidden', 'true');
+        sep.style.cssText = 'height:0.5px;background:rgba(255,255,255,0.12);margin:4px 8px;padding:0;list-style:none;pointer-events:none;';
+        list.prepend(sep);
+        list.prepend(li);
+    }
+
+    function tryInjectInOverlay(overlay) {
+        const list = overlay.querySelector('ul.contextual-menu__list');
+        if (list) { injectAMLMenuItem(list); return; }
+        // ul not yet populated — watch this overlay until it appears (or closes)
+        const obs = new MutationObserver(() => {
+            const l = overlay.querySelector('ul.contextual-menu__list');
+            if (l) { obs.disconnect(); injectAMLMenuItem(l); }
+        });
+        obs.observe(overlay, { childList: true, subtree: true });
+        setTimeout(() => obs.disconnect(), 3000);
+    }
+
+    new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            for (const node of m.addedNodes) {
+                if (node.nodeType !== 1) continue;
+                if (node.classList?.contains('contextual-menu__overlay')) {
+                    tryInjectInOverlay(node);
+                } else {
+                    const overlay = node.querySelector?.('.contextual-menu__overlay');
+                    if (overlay) tryInjectInOverlay(overlay);
+                }
+            }
+        }
+    }).observe(document.body, { childList: true });
+
+    // Handle case where account menu was already open when bundle injected
+    document.querySelectorAll('.contextual-menu__overlay')
+        .forEach(tryInjectInOverlay);
+
+    window.__amlOpenEngineSettings = openSettings;
+
+    // Kill gradient/vignette overlay elements that CSS selectors miss
+    (function nukeGradients() {
+        function kill(el) {
+            const cs = getComputedStyle(el);
+            if ((cs.position === 'absolute' || cs.position === 'fixed') &&
+                cs.backgroundImage.includes('gradient') &&
+                !el.textContent.trim() && el.tagName !== 'BUTTON') {
+                el.style.setProperty('display', 'none', 'important');
+            }
+        }
+        const scan = () => document.querySelectorAll('*').forEach(kill);
+        scan();
+        new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+    })();
 })();

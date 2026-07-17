@@ -31,13 +31,9 @@ import os from 'os';
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const { WrapperProc, STATUS } = require('./wrapper.cjs');
-
 // ── Persistence ──────────────────────────────────────────────────────────────
 const CONFIG_DIR = path.join(os.homedir(), '.config', 'apple-music-linux');
 const PREF_FILE  = path.join(CONFIG_DIR, 'electron-prefs.json');
-const SESSION_DB = path.join(CONFIG_DIR, 'wrapper-data', 'rootfs', 'data',
-    'data', 'com.apple.android.music', 'files', 'mpl_db', 'accounts.sqlitedb');
 
 function loadPrefs() {
     try { return JSON.parse(readFile(PREF_FILE, 'utf8')); } catch { return {}; }
@@ -45,21 +41,6 @@ function loadPrefs() {
 function savePrefs(p) {
     mkdirSync(CONFIG_DIR, { recursive: true });
     writeFileSync(PREF_FILE, JSON.stringify(p, null, 2));
-}
-
-// Session detection — two signals required:
-//  1. accounts.sqlitedb exists and is >8 KB (has content beyond empty schema)
-//  2. WAL file also exists (written only during/after an actual write transaction)
-// A corrupt database that's large but never had a real write won't have a WAL,
-// making this more robust than size alone.
-function hasSession() {
-    try {
-        if (!existsSync(SESSION_DB)) return false;
-        if (statSync(SESSION_DB).size <= 8192) return false;
-        // WAL file written only after a successful account write transaction.
-        const wal = SESSION_DB + '-wal';
-        return existsSync(wal) || statSync(SESSION_DB).size > 32768;
-    } catch { return false; }
 }
 
 // ── Chromium flags ──────────────────────────────────────────────────────────
@@ -85,7 +66,6 @@ app.commandLine.appendSwitch('enable-transparent-visuals');
 
 let win    = null;
 let tray   = null;
-let wrapper = null;
 let engineProc = null;
 let isQuitting = false;
 
@@ -281,12 +261,6 @@ function createWindow() {
         if (typeof msg === 'string' && msg.startsWith('[AML')) console.log('[renderer]', msg);
     });
 
-    // Inject the terminal renderer bundle directly from the main process into
-    // world 0 — webContents.executeJavaScript() is guaranteed to target the
-    // page's main world, unlike webFrame.executeJavaScriptInIsolatedWorld
-    // which behaves inconsistently across Electron versions.
-    const bundlePath  = path.join(__dirname, 'renderer-bundle.js');
-    const bundleCode  = readFileSync(bundlePath, 'utf8');
     const visionPath  = path.join(__dirname, 'vision-bundle.js');
     const visionCode  = existsSync(visionPath) ? readFileSync(visionPath, 'utf8') : '';
     // engine-sse-bundle must load first — it creates window._amlEngine which
@@ -317,7 +291,7 @@ function createWindow() {
 
     // macOS Sonoma-style context menus.
     // Selectors discovered via DOM spy — BEM names are stable across app updates.
-    // Structure: div.contextual-menu__overlay > amp-contextual-menu >
+    // Structure: body > div.contextual-menu__overlay > amp-contextual-menu >
     //   div.contextual-menu > ul.contextual-menu__list > li.contextual-menu-item
     const contextMenuCss = `
         /* ── Context menus ──────────────────────────────────────────────── */
@@ -536,6 +510,32 @@ function createWindow() {
             box-shadow: 0 8px 36px rgba(0,0,0,0.65), 0 2px 6px rgba(0,0,0,0.4) !important;
         }
 
+        /* ── Search / media page vignettes ──────────────────────────────── */
+        /* Nuke every gradient/ambient overlay the app may render */
+        .media-page__gradient, .media-page__gradient-overlay,
+        amp-ambient-video-gradient,
+        [class*="ambient-gradient"], [class*="AmbientGradient"],
+        [class*="gradient-overlay"], [class*="GradientOverlay"],
+        [class*="page-gradient"], [class*="PageGradient"],
+        [class*="hero-gradient"], [class*="HeroGradient"],
+        [class*="scope-bar"]::before, [class*="scope-bar"]::after,
+        [class*="search"] > [class*="gradient"] { display: none !important; background: none !important; }
+        /* Search input — transparent + blur */
+        [data-testid="search-input"], [class*="search-input-wrapper"] {
+            background: rgba(255,255,255,0.08) !important;
+            backdrop-filter: blur(12px) !important;
+            -webkit-backdrop-filter: blur(12px) !important;
+            border: 0.5px solid rgba(255,255,255,0.15) !important;
+            border-radius: 10px !important;
+            box-shadow: none !important;
+        }
+        [data-testid="search-input"]:focus-within, [class*="search-input-wrapper"]:focus-within {
+            border-color: rgba(255,255,255,0.3) !important;
+        }
+        /* Remove auto-pink focus rings and selection highlight globally */
+        :focus { outline: none !important; box-shadow: none !important; }
+        ::selection { background: rgba(255,255,255,0.18) !important; color: inherit !important; }
+
         /* ── Bubble-tip cards (incl. "Find Concerts Nearby" card) ───────── */
         /* Static page elements: backdrop-filter is safe here (no popup jank) */
         div.bubble-tip {
@@ -612,41 +612,20 @@ function createWindow() {
         bundleInjected = true;
         console.log('[AML] Injecting bundles into world 0');
 
-        if (visionCode) {
-            await win.webContents.executeJavaScript(visionCode)
-                .catch(e => console.error('[AML] vision bundle error:', e));
-        }
+        // SSE must run first (creates window._amlEngine); cache+engine subscribe to it.
+        // Vision is independent. Combine into one executeJavaScript call to avoid
+        // 4 separate round-trips adding ~2-3s of sequential injection delay.
+        const combined = [
+            sseCode    ? `try{${sseCode}}catch(e){console.error('[AML sse]',e.message)}`    : '',
+            visionCode ? `try{${visionCode}}catch(e){console.error('[AML vision]',e.message)}` : '',
+            cacheCode  ? `try{${cacheCode}}catch(e){console.error('[AML cache]',e.name,e.message,e.stack)}`  : '',
+            engineCode ? `try{${engineCode}}catch(e){console.error('[AML engine]',e.name,e.message,e.stack)}` : '',
+        ].filter(Boolean).join(';');
 
-        // SSE connection first — subsequent bundles subscribe to window._amlEngine
-        // in their own top-level constructors and must see it already present.
-        if (sseCode) {
-            await win.webContents.executeJavaScript(sseCode)
-                .catch(e => console.error('[AML] engine-sse bundle error:', e));
-        }
+        await win.webContents.executeJavaScript(combined)
+            .catch(e => console.error('[AML] bundle injection error:', e));
 
-        if (cacheCode) {
-            // Wrap in try-catch so the script always evaluates to undefined.
-            // Without it, Electron 38's executeJavaScript spuriously rejects when
-            // the last expression is a class-instance assignment.
-            await win.webContents.executeJavaScript(
-                `try{${cacheCode}}catch(e){console.error('[AML cache runtime]',e.name,e.message,e.stack);}`
-            ).catch(e => console.error('[AML] smart-cache bundle error:', e));
-        }
-
-        if (engineCode) {
-            await win.webContents.executeJavaScript(
-                `try{${engineCode}}catch(e){console.error('[AML engine runtime]',e.name,e.message,e.stack);}`
-            ).catch(e => console.error('[AML] engine bundle error:', e));
-        }
-
-        await win.webContents.executeJavaScript(bundleCode)
-            .then(() => applyPersistedViewSettings())
-            .catch((err) => {
-                if (String(err).includes('__aml:already_mounted'))
-                    applyPersistedViewSettings();
-                else
-                    console.error('[AML] bundle inject error:', err);
-            });
+        applyPersistedViewSettings();
     }
 
     win.webContents.on('did-frame-finish-load', injectBundles);
@@ -691,12 +670,6 @@ function setZoom(factor) {
     if (!win) return;
     win.webContents.setZoomFactor(factor);
     const p = loadPrefs(); p.zoomFactor = factor; savePrefs(p);
-    // Update the radio group checked state without rebuilding the whole menu.
-    const menu = Menu.getApplicationMenu();
-    for (const f of [0.75, 1.0, 1.25, 1.5]) {
-        const item = menu?.getMenuItemById(`zoom-${f}`);
-        if (item) item.checked = Math.abs(f - factor) < 0.01;
-    }
 }
 
 function applyTweak(key, value) {
@@ -722,42 +695,6 @@ function buildTweakCSS(p) {
     ].join('\n');
 }
 
-// ── Terminal appearance (opacity + blur, configurable from View menu) ─────────
-
-const OPACITY_STEPS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
-const BLUR_STEPS    = [0, 10, 20, 30, 40, 50];
-
-function applyTerminalAppearance(opacity, blur) {
-    if (!win) return;
-    const p = loadPrefs();
-    p.termOpacity = opacity;
-    p.termBlur    = blur;
-    savePrefs(p);
-
-    // Update checked state on all appearance menu items live.
-    const menu = Menu.getApplicationMenu();
-    for (const s of OPACITY_STEPS) {
-        const item = menu?.getMenuItemById(`term-opacity-${s}`);
-        if (item) item.checked = Math.abs(s - opacity) < 0.01;
-    }
-    for (const b of BLUR_STEPS) {
-        const item = menu?.getMenuItemById(`term-blur-${b}`);
-        if (item) item.checked = b === blur;
-    }
-
-    // Terminal is translucent-only (no backdrop-filter) to avoid
-    // blur-over-blur with the page content behind it. Only opacity is live.
-    win.webContents.executeJavaScript(`
-        (function() {
-            const el = document.getElementById('aml-term-overlay');
-            if (!el) return;
-            el.style.background = 'rgba(255,255,255,' + ${opacity} + ')';
-            el.style.backdropFilter = 'none';
-            el.style.webkitBackdropFilter = 'none';
-        })();
-    `).catch(() => {});
-}
-
 // ── Glass effect controls (visionOS panels) ───────────────────────────────────
 // Writes CSS variables that vision-glass.js reads via var().
 // No direct style conflicts — the glass CSS owns its rules, we just tune vars.
@@ -767,17 +704,6 @@ function applyGlassEffect(blur, opacity) {
     p.glassBlur    = blur;
     p.glassOpacity = opacity;
     savePrefs(p);
-
-    const menu = Menu.getApplicationMenu();
-    for (const b of BLUR_STEPS) {
-        const item = menu?.getMenuItemById(`glass-blur-${b}`);
-        if (item) item.checked = b === blur;
-    }
-    for (const s of OPACITY_STEPS) {
-        const item = menu?.getMenuItemById(`glass-opacity-${s}`);
-        if (item) item.checked = Math.abs(s - opacity) < 0.01;
-    }
-
     win.webContents.executeJavaScript(`
         document.documentElement.style.setProperty('--aml-glass-blur', '${blur}px');
         document.documentElement.style.setProperty('--aml-glass-opacity', '${opacity}');
@@ -788,248 +714,16 @@ function applyPersistedViewSettings() {
     const p = loadPrefs();
     if (p.zoomFactor && p.zoomFactor !== 1.0)
         win?.webContents.setZoomFactor(p.zoomFactor);
-    applyTerminalAppearance(p.termOpacity ?? 0.88, p.termBlur ?? 50);
     applyGlassEffect(p.glassBlur ?? 48, p.glassOpacity ?? 0.07);
     applyTweak('__noop', null);
 }
 
-function makeWrapper() {
-    return new WrapperProc(
-        // onData
-        (data) => { if (win) win.webContents.send('pty:data', data); },
-        // onExit — keep xterm alive, notify renderer with exit code
-        (code) => { if (win) win.webContents.send('pty:exit', code); buildAppMenu(); },
-        // onHealth — update menu label + notify renderer
-        (status) => {
-            if (win) win.webContents.send('wrapper:health', status);
-            buildAppMenu();
-        }
-    );
-}
+// ── IPC: prefs + view controls (used by settings panel) ─────────────────────
+ipcMain.handle('prefs:get', () => loadPrefs());
+ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));
+ipcMain.on('view:glass-blur', (_, b) => { const p = loadPrefs(); applyGlassEffect(parseInt(b), p.glassOpacity ?? 0.07); });
+ipcMain.on('view:tweak',      (_, k, v) => applyTweak(k, v));
 
-function startWrapper(login = '') {
-    wrapper = makeWrapper();
-    wrapper.start(login);
-}
-
-// ── IPC: terminal overlay ────────────────────────────────────────────────────
-ipcMain.handle('wrapper:has-session', () => hasSession());
-ipcMain.handle('wrapper:health',      () => wrapper?.status ?? STATUS.OFFLINE);
-
-function doLogout() {
-    if (wrapper) { wrapper.stop(); wrapper = null; }
-    clearSession();
-    if (win) win.webContents.send('wrapper:logged-out');
-}
-ipcMain.handle('wrapper:logout', doLogout);
-
-// ── Input validation ──────────────────────────────────────────────────────────
-function validateLogin(raw) {
-    if (typeof raw !== 'string') return null;
-    const login = raw.trim().slice(0, 256); // max 256 chars
-    const colonIdx = login.indexOf(':');
-    if (colonIdx < 1 || colonIdx === login.length - 1) return null; // must have email:pass
-    return login;
-}
-
-function validateResize(cols, rows) {
-    return (
-        Number.isInteger(cols) && cols >= 10 && cols <= 300 &&
-        Number.isInteger(rows) && rows >= 5  && rows <= 100
-    );
-}
-
-ipcMain.on('pty:start', () => { if (!wrapper) startWrapper(); });
-
-ipcMain.on('pty:input', (event, data) => {
-    if (typeof data !== 'string' || data.length > 4096) return;
-    if (!wrapper) startWrapper();
-    wrapper.write(data);
-});
-
-ipcMain.on('pty:resize', (event, cols, rows) => {
-    if (!validateResize(cols, rows)) return;
-    if (wrapper) wrapper.resize(cols, rows);
-});
-
-ipcMain.on('pty:restart', () => {
-    if (wrapper) wrapper.stop();
-    startWrapper();
-});
-
-ipcMain.on('pty:login', (event, raw) => {
-    const login = validateLogin(raw);
-    if (!login) return; // silently drop invalid format
-    if (wrapper) wrapper.stop();
-    startWrapper(login);
-});
-
-function buildAppMenu() {
-    const prefs = loadPrefs();
-    const autoLaunch    = prefs.autoLaunch    !== false;
-    const curOpacity    = prefs.termOpacity   ?? 0.4;
-    const curBlur       = prefs.termBlur      ?? 30;
-
-    const isMac = process.platform === 'darwin';
-    const template = [
-        ...(isMac ? [{ role: 'appMenu' }] : []),
-        { role: 'fileMenu' },
-        { role: 'editMenu' },
-        {
-            label: 'View',
-            submenu: [
-                { role: 'reload' },
-                { role: 'forceReload' },
-                { type: 'separator' },
-
-                // ── Zoom (radio group, persisted, checked state auto-syncs) ──
-                { label: 'Zoom', enabled: false },   // section header
-                ...[0.75, 1.0, 1.25, 1.5].map((factor) => ({
-                    id: `zoom-${factor}`,
-                    label: `${Math.round(factor * 100)}%`,
-                    type: 'radio',
-                    checked: Math.abs((prefs.zoomFactor ?? 1.0) - factor) < 0.01,
-                    click: () => setZoom(factor),
-                })),
-                { type: 'separator' },
-
-                // ── Visual tweaks (checkboxes, applied via CSS injection) ────
-                { label: 'Visual Tweaks', enabled: false },
-                {
-                    id: 'hide-upsell',
-                    label: 'Hide "Open in App" Banners',
-                    type: 'checkbox',
-                    checked: prefs.hideUpsell !== false,
-                    click: (item) => applyTweak('hideUpsell', item.checked),
-                },
-                {
-                    id: 'hide-preview-badge',
-                    label: 'Hide Preview Badge',
-                    type: 'checkbox',
-                    checked: prefs.hidePreviewBadge !== false,
-                    click: (item) => applyTweak('hidePreviewBadge', item.checked),
-                },
-                { type: 'separator' },
-
-                // ── Terminal panel: opacity + blur with 10-step submenus ──────
-                {
-                    label: 'Terminal Panel',
-                    submenu: [
-                        {
-                            label: 'Background Opacity',
-                            submenu: OPACITY_STEPS.map((s) => ({
-                                id: `term-opacity-${s}`,
-                                label: `${Math.round(s * 100)}%`,
-                                type: 'radio',
-                                checked: Math.abs(curOpacity - s) < 0.01,
-                                click: () => applyTerminalAppearance(
-                                    s, loadPrefs().termBlur ?? 30),
-                            })),
-                        },
-                        {
-                            label: 'Blur Strength',
-                            submenu: BLUR_STEPS.map((b) => ({
-                                id: `term-blur-${b}`,
-                                label: b === 0 ? 'None' : `${b}px`,
-                                type: 'radio',
-                                checked: curBlur === b,
-                                click: () => applyTerminalAppearance(
-                                    loadPrefs().termOpacity ?? 0.4, b),
-                            })),
-                        },
-                    ],
-                },
-
-                // ── Glass Effect — tunes CSS vars read by vision-glass.js ─────
-                // Separate from Terminal Panel so the two don't fight each other.
-                {
-                    label: 'Glass Effect',
-                    submenu: [
-                        {
-                            label: 'Blur Strength',
-                            submenu: BLUR_STEPS.map((b) => ({
-                                id: `glass-blur-${b}`,
-                                label: b === 0 ? 'None' : `${b}px`,
-                                type: 'radio',
-                                checked: (prefs.glassBlur ?? 48) === b,
-                                click: () => applyGlassEffect(
-                                    b, loadPrefs().glassOpacity ?? 0.07),
-                            })),
-                        },
-                        {
-                            label: 'Panel Opacity',
-                            submenu: OPACITY_STEPS.map((s) => ({
-                                id: `glass-opacity-${s}`,
-                                label: `${Math.round(s * 100)}%`,
-                                type: 'radio',
-                                checked: Math.abs((prefs.glassOpacity ?? 0.07) - s) < 0.01,
-                                click: () => applyGlassEffect(
-                                    loadPrefs().glassBlur ?? 48, s),
-                            })),
-                        },
-                    ],
-                },
-
-                { type: 'separator' },
-                { role: 'togglefullscreen' },
-                { type: 'separator' },
-                {
-                    label: 'Developer Tools',
-                    accelerator: 'CmdOrCtrl+Shift+I',
-                    click: () => win?.webContents.toggleDevTools(),
-                },
-            ],
-        },
-        { role: 'windowMenu' },
-        {
-            label: 'Wrapper',
-            submenu: [
-                {
-                    label: 'Toggle Terminal',
-                    accelerator: 'CmdOrCtrl+`',
-                    click: () => { if (win) win.webContents.send('terminal:toggle'); },
-                },
-                { type: 'separator' },
-                // Health status — label updates via buildAppMenu() on every change.
-                {
-                    label: (() => {
-                        const icons = { [STATUS.RUNNING]: '🟢', [STATUS.STARTING]: '🟡', [STATUS.OFFLINE]: '🔴' };
-                        const s = wrapper?.status ?? STATUS.OFFLINE;
-                        return `${icons[s] ?? '⚪'} ${s.charAt(0).toUpperCase() + s.slice(1)}`;
-                    })(),
-                    enabled: false,
-                },
-                { type: 'separator' },
-                {
-                    label: 'Auto-launch on Startup',
-                    type: 'checkbox',
-                    checked: autoLaunch,
-                    click: (menuItem) => {
-                        const p = loadPrefs();
-                        p.autoLaunch = menuItem.checked;
-                        savePrefs(p);
-                    },
-                },
-                { type: 'separator' },
-                {
-                    label: 'Log Out / Switch Account',
-                    click: () => { doLogout(); if (win) win.webContents.send('terminal:toggle'); },
-                },
-                { type: 'separator' },
-                {
-                    label: 'Restart Wrapper',
-                    click: () => { if (wrapper) wrapper.stop(); startWrapper(); },
-                },
-                {
-                    label: 'Kill Wrapper',
-                    click: () => { if (wrapper) { wrapper.stop(); wrapper = null; } },
-                },
-            ],
-        },
-        { role: 'help' },
-    ];
-    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
-}
 
 function createTray() {
     // White music-note icon — works on dark and light system trays.
@@ -1211,21 +905,9 @@ app.whenReady().then(() => {
     protocol.handle('aml-engine', amlEngineHandler);
     s.protocol.handle('aml-engine', amlEngineHandler);
 
-    buildAppMenu();
+    Menu.setApplicationMenu(null);
     createWindow();
     createTray();
-
-    // Auto-launch: if a stored session exists AND auto-launch is enabled,
-    // start the wrapper silently in the background on every launch.
-    // First-time users have no session yet — the renderer detects this and
-    // opens the terminal automatically with a login prompt instead.
-    const prefs = loadPrefs();
-    if (prefs.autoLaunch !== false && hasSession()) {
-        console.log('[AML] Session found — auto-launching wrapper');
-        startWrapper();
-    } else if (!hasSession()) {
-        console.log('[AML] No session — terminal will prompt for login');
-    }
 
     // Always attempt to start the engine API server.  engine-playback.js checks
     // reachability at startup and silently falls back to the Apple CDN if the
@@ -1238,7 +920,6 @@ app.whenReady().then(() => {
 // Actual quit goes through the tray "Quit" item which sets isQuitting = true.
 app.on('window-all-closed', () => {
     if (isQuitting) {
-        if (wrapper) wrapper.stop();
         stopEngine();
         app.quit();
     }
