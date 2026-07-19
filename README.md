@@ -28,7 +28,6 @@ An unofficial native-feeling Apple Music desktop client for Linux — Electron s
 
 ## Contents
 
-- [How it works](#how-it-works)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Download](#download)
@@ -37,23 +36,6 @@ An unofficial native-feeling Apple Music desktop client for Linux — Electron s
 - [Build AppImage](#build-appimage)
 - [Project structure](#project-structure)
 - [Referenced projects](#referenced-projects)
-
-## How it works
-
-```
-music.apple.com (web UI)
-       │  Electron window with CSS/JS injection
-       ▼
-  electron/main.mjs       ← window, MPRIS2, tray, IPC
-       │  HTTP + SSE
-       ▼
-  apple-music-cli --api   ← Go engine: FairPlay DRM, HLS decrypt, stream proxy
-       │  libvlc in-process
-       ▼
-  PulseAudio / PipeWire
-```
-
-The Apple Music web UI runs inside Electron. A Go engine (`apple-music-cli`) handles FairPlay DRM via an embedded Android wrapper, decrypts HLS streams, and feeds audio to libvlc. No Electron audio stack is used — libvlc renders directly to PulseAudio/PipeWire.
 
 ## Features
 
@@ -143,6 +125,7 @@ Wrapper.x86_64.latest/  Android wrapper binary + rootfs (FairPlay DRM)
 
 ## Referenced projects
 
+- [apple-music-engine](https://github.com/silentone12725/apple-music-engine-dev) — Go backend: FairPlay DRM, HLS decryption, lossless streaming, SSE event bus, smart prefetch cache
 - [Electron](https://electronjs.org) — desktop shell
 - [libvlc](https://www.videolan.org/vlc/libvlc.html) — audio playback
 - [mpris-service](https://github.com/dbkr/mpris-service) — MPRIS2 D-Bus
