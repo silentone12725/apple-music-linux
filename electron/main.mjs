@@ -1,26 +1,11 @@
 import * as electronMain from 'electron/main';
-const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, protocol, net } = electronMain;
-import { spawn, execFileSync } from 'child_process';
+const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage } = electronMain;
+import { spawn, execFileSync, execFile } from 'child_process';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
 process.stdout.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
 process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
 
-// Register aml-engine:// scheme before app is ready.
-// This proxies http://127.0.0.1:20025 through a privileged Electron protocol
-// so the renderer can reach the engine without hitting Chromium's Private
-// Network Access block (public origin → localhost is blocked by default).
-protocol.registerSchemesAsPrivileged([{
-    scheme: 'aml-engine',
-    privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        corsEnabled: true,
-        bypassCSP: true,
-        stream: true,
-    },
-}]);
 
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
@@ -46,13 +31,16 @@ function savePrefs(p) {
 // ── Chromium flags ──────────────────────────────────────────────────────────
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 app.commandLine.appendSwitch('enable-features',
-    'UseOzonePlatform,WaylandWindowDecorations,VaapiVideoDecoder,CanvasOopRasterization');
-app.commandLine.appendSwitch('disable-features', 'ExplicitSync');
+    'UseOzonePlatform,WaylandWindowDecorations');
+// MediaSessionService: Chromium's built-in MPRIS implementation runs on the
+// same D-Bus session bus. When it tears down (e.g. on navigation), it disrupts
+// the dbus-next socket that mpris-service owns → EPIPE on every property write.
+// AudioServiceOutOfProcess: keep audio in-process so PulseAudio stream identity
+// matches the desktop name we set.
+app.commandLine.appendSwitch('disable-features',
+    'ExplicitSync,MediaSessionService,AudioServiceOutOfProcess');
+app.setDesktopName('apple-music-linux.desktop');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('enable-zero-copy');
-// Remove Chromium's internal 60 fps cap — lets the Wayland compositor drive
-// the actual display refresh rate (120 Hz, 144 Hz, etc.) instead of 60 Hz.
-app.commandLine.appendSwitch('disable-frame-rate-limit');
 // Music player: allow audio.play() without a live user gesture. Without this,
 // _nativePlay() called from the async canplay handler is blocked by Chromium's
 // autoplay policy when the engine takes >5 s to start streaming.
@@ -82,6 +70,12 @@ const _resPkgBin  = path.join(process.resourcesPath, 'apple-music-cli');
 const _resDevBin  = path.join(__dirname, 'dist', 'resources', 'apple-music-cli');
 const ENGINE_BIN  = process.env.AML_ENGINE_BIN ||
     (app.isPackaged ? _resPkgBin : (existsSync(_resDevBin) ? _resDevBin : _resPkgBin));
+
+// Bundled VLC libs shipped alongside the engine binary so a system VLC
+// upgrade/removal can't break audio playback.
+const _vlcPkgDir  = path.join(process.resourcesPath, 'vlc');
+const _vlcDevDir  = path.join(__dirname, 'dist', 'resources', 'vlc');
+const _vlcDir     = app.isPackaged ? _vlcPkgDir : (existsSync(_vlcDevDir) ? _vlcDevDir : _vlcPkgDir);
 
 const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
 const ENGINE_PORT = 20025;
@@ -131,18 +125,22 @@ function ensureEngineConfig() {
     if (changed) writeFileSync(cfgPath, content);
 }
 
-function killStaleEngine(port) {
+function execFileAsync(cmd, args, opts = {}) {
+    return new Promise(resolve => {
+        execFile(cmd, args, { encoding: 'utf8', ...opts }, (err, stdout) => resolve(err ? '' : stdout));
+    });
+}
+
+async function killStaleEngine(port) {
     // SIGKILL anything on the port — no graceful shutdown needed for a stale engine.
-    try {
-        const out = execFileSync('ss', ['-tlnpH', `sport = :${port}`],
-            { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-        const m = out.match(/pid=(\d+)/);
-        if (m) {
-            const pid = parseInt(m[1], 10);
-            console.log(`[AML] Killing stale engine on port ${port} (pid ${pid})`);
-            try { process.kill(pid, 'SIGKILL'); } catch (_) {}
-        }
-    } catch (_) {}
+    const out = await execFileAsync('ss', ['-tlnpH', `sport = :${port}`],
+        { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = out.match(/pid=(\d+)/);
+    if (m) {
+        const pid = parseInt(m[1], 10);
+        console.log(`[AML] Killing stale engine on port ${port} (pid ${pid})`);
+        try { process.kill(pid, 'SIGKILL'); } catch (_) {}
+    }
 
     // Kill the lock-file owner and remove the lock unconditionally.
     const lockPath = path.join(
@@ -160,12 +158,9 @@ function killStaleEngine(port) {
     } catch (_) {}
 }
 
-function isPortFree(port) {
-    try {
-        const out = execFileSync('ss', ['-tlnH', `sport = :${port}`],
-            { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
-        return out.trim() === '';
-    } catch (_) { return true; }
+async function isPortFree(port) {
+    const out = await execFileAsync('ss', ['-tlnH', `sport = :${port}`], { timeout: 1000 });
+    return out.trim() === '';
 }
 
 async function startEngine() {
@@ -174,19 +169,23 @@ async function startEngine() {
         console.log('[AML] Engine binary not found at', ENGINE_BIN, '— skipping engine start');
         return;
     }
-    killStaleEngine(ENGINE_PORT);
+    await killStaleEngine(ENGINE_PORT);
     // Wait up to 2 s for the port to be released after SIGKILL.
     for (let i = 0; i < 20; i++) {
-        if (isPortFree(ENGINE_PORT)) break;
+        if (await isPortFree(ENGINE_PORT)) break;
         await new Promise(r => setTimeout(r, 100));
     }
     ensureEngineConfig();
+    const vlcEnv = existsSync(_vlcDir) ? {
+        LD_LIBRARY_PATH: [_vlcDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
+        VLC_PLUGIN_PATH: path.join(_vlcDir, 'plugins'),
+    } : {};
     engineProc = spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
         cwd: ENGINE_DATA_DIR,
         stdio: ['ignore', 'pipe', 'pipe'],
         // Force Go's pure-Go DNS resolver to avoid CGO getaddrinfo SIGSEGV
         // when the engine makes HTTP requests to Apple's API servers.
-        env: { ...process.env, GODEBUG: 'netdns=go' },
+        env: { ...process.env, GODEBUG: 'netdns=go', ...vlcEnv },
     });
     const onOut = (d) => console.log('[engine]', d.toString().trimEnd());
     const onErr = (d) => console.error('[engine]', d.toString().trimEnd());
@@ -253,13 +252,15 @@ function createWindow() {
         clearTimeout(showFallback);
         showWindow();
     });
-    win.webContents.openDevTools({ mode: 'detach' });
-
-    // Relay renderer [AML Engine] console messages to the terminal for easy debugging.
-    win.webContents.on('console-message', (event) => {
-        const msg = event.message ?? event;
-        if (typeof msg === 'string' && msg.startsWith('[AML')) console.log('[renderer]', msg);
-    });
+    // DevTools instruments the entire JS runtime — only open when explicitly requested.
+    // Launch with: AML_DEVTOOLS=1 electron .
+    if (process.env.AML_DEVTOOLS) {
+        win.webContents.openDevTools({ mode: 'detach' });
+        win.webContents.on('console-message', (event) => {
+            const msg = event.message ?? event;
+            if (typeof msg === 'string' && msg.startsWith('[AML')) console.log('[renderer]', msg);
+        });
+    }
 
     const visionPath  = path.join(__dirname, 'vision-bundle.js');
     const visionCode  = existsSync(visionPath) ? readFileSync(visionPath, 'utf8') : '';
@@ -283,8 +284,8 @@ function createWindow() {
         .section--alternate, [class*="section--alternate"] { background: transparent !important; }
         nav.navigation {
             background: rgba(255,255,255,var(--aml-glass-opacity)) !important;
-            backdrop-filter: blur(var(--aml-glass-blur)) saturate(2) brightness(1.08) !important;
-            -webkit-backdrop-filter: blur(var(--aml-glass-blur)) saturate(2) brightness(1.08) !important;
+            backdrop-filter: blur(var(--aml-glass-blur)) !important;
+            -webkit-backdrop-filter: blur(var(--aml-glass-blur)) !important;
             border-right: 1px solid rgba(255,255,255,0.12) !important;
         }
     `;
@@ -540,8 +541,8 @@ function createWindow() {
         /* Static page elements: backdrop-filter is safe here (no popup jank) */
         div.bubble-tip {
             background: rgba(0, 0, 0, 0.45) !important;
-            backdrop-filter: blur(32px) saturate(1.6) brightness(0.85) !important;
-            -webkit-backdrop-filter: blur(32px) saturate(1.6) brightness(0.85) !important;
+            backdrop-filter: blur(32px) !important;
+            -webkit-backdrop-filter: blur(32px) !important;
             border-radius: 14px !important;
             border: 0.5px solid rgba(255, 255, 255, 0.15) !important;
             box-shadow: 0 4px 24px rgba(0,0,0,0.3), 0 1px 4px rgba(0,0,0,0.2) !important;
@@ -583,8 +584,8 @@ function createWindow() {
         .page-footer,
         [class*="web-footer"] {
             background: rgba(255, 255, 255, 0.05) !important;
-            backdrop-filter: blur(20px) saturate(1.5) !important;
-            -webkit-backdrop-filter: blur(20px) saturate(1.5) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
             border-top: 0.5px solid rgba(255, 255, 255, 0.08) !important;
         }
     `;
@@ -720,17 +721,191 @@ function applyPersistedViewSettings() {
 
 // ── IPC: prefs + view controls (used by settings panel) ─────────────────────
 ipcMain.handle('prefs:get', () => loadPrefs());
+ipcMain.on('pref:set',        (_, k, v) => { const p = loadPrefs(); p[k] = v; savePrefs(p); });
 ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));
 ipcMain.on('view:glass-blur', (_, b) => { const p = loadPrefs(); applyGlassEffect(parseInt(b), p.glassOpacity ?? 0.07); });
 ipcMain.on('view:tweak',      (_, k, v) => applyTweak(k, v));
 
+// ── MPRIS2 media integration ─────────────────────────────────────────────────
+// Exposes Now Playing info to the system (taskbars, media keys, GNOME shell,
+// KDE Connect, etc.) via the org.mpris.MediaPlayer2 D-Bus interface.
+let mprisPlayer = null;
+let _MprisService = null;
+try {
+    const _require = createRequire(import.meta.url);
+    _MprisService = _require('mpris-service');
+} catch (e) {
+    console.warn('[AML] mpris-service not available:', e.message);
+}
+
+// dbus-next throws "Cannot send message, stream is closed" asynchronously from
+// inside its socket data handler — outside any try/catch. Intercept it here
+// so it doesn't crash the app, and null mprisPlayer so the next update reconnects.
+process.on('uncaughtException', (err) => {
+    if (err?.message?.includes('stream is closed') || err?.code === 'EPIPE') {
+        console.warn('[AML] MPRIS D-Bus uncaught (suppressed):', err.message);
+        _destroyMprisPlayer();
+        return;
+    }
+    // Re-throw anything unrelated to D-Bus.
+    console.error('Uncaught exception:', err);
+    app.exit(1);
+});
+
+// Properly release the D-Bus service name before nulling the player.
+// Without this, the old player holds the name and retries are rejected (EPIPE).
+function _destroyMprisPlayer() {
+    const old = mprisPlayer;
+    mprisPlayer = null;
+    if (!old) return;
+    try { old._bus?.disconnect(); } catch (_) {}
+}
+
+function _mprisReady() {
+    // D-Bus session bus must be available.
+    return !!process.env.DBUS_SESSION_BUS_ADDRESS || !!process.env.XDG_RUNTIME_DIR;
+}
+
+let _mprisRetryTimer = null;
+function createMprisPlayer() {
+    if (!_MprisService || !_mprisReady()) return null;
+    try {
+        const player = _MprisService({
+            name: 'apple-music-linux',
+            identity: 'Apple Music',
+            supportedUriSchemes: [],
+            supportedMimeTypes: ['audio/mpeg', 'audio/flac'],
+            supportedInterfaces: ['player'],
+            desktopEntry: 'apple-music-linux',
+        });
+        // Don't set any properties here. Every setter emits PropertiesChanged
+        // over D-Bus. sessionBus() connects synchronously but the D-Bus auth
+        // handshake completes asynchronously — writing before it finishes
+        // causes EPIPE / "stream is closed". Defaults are already correct
+        // (Stopped, can*=true, empty metadata).
+
+        // Override getPosition() so D-Bus GetPosition returns the live position.
+        // _lastMprisPosition is updated by mpris:update IPC every ~1s.
+        player.getPosition = () => _lastMprisPosition;
+
+        const sendCmd = (cmd) => win?.webContents.send('mpris:cmd', cmd);
+        player.on('play',      () => sendCmd('play'));
+        player.on('pause',     () => sendCmd('pause'));
+        player.on('playpause', () => sendCmd('playpause'));
+        player.on('next',      () => sendCmd('next'));
+        player.on('previous',  () => sendCmd('previous'));
+        player.on('stop',      () => sendCmd('pause'));
+
+        // MPRIS → app: Seek (delta µs) and SetPosition (absolute µs).
+        // dbus-next returns int64 as BigInt; convert to Number before dividing.
+        player.on('seek', (offset) => {
+            win?.webContents.send('mpris:cmd', { type: 'seek', deltaMs: Number(offset) / 1000 });
+        });
+        player.on('position', (event) => {
+            win?.webContents.send('mpris:cmd', { type: 'setPosition', ms: Number(event.position) / 1000 });
+        });
+
+        // When D-Bus signals an error, null the player and schedule a reconnect
+        // so the next mpris:update (or the retry timer) re-registers the service.
+        player.on('error', (err) => {
+            console.warn('[AML] MPRIS D-Bus error:', err?.message ?? err);
+            // Disconnect the old bus before nulling so D-Bus releases the name.
+            // Without this, retries are rejected (EPIPE) because the zombie
+            // player still holds org.mpris.MediaPlayer2.apple-music-linux.
+            if (mprisPlayer === player) _destroyMprisPlayer();
+            if (!_mprisRetryTimer) {
+                _mprisRetryTimer = setTimeout(() => {
+                    _mprisRetryTimer = null;
+                    if (!mprisPlayer) {
+                        mprisPlayer = createMprisPlayer();
+                        if (mprisPlayer) replayMprisState();
+                    }
+                }, 2000);
+            }
+        });
+
+        console.log('[AML] MPRIS2 service registered');
+        return player;
+    } catch (e) {
+        console.warn('[AML] MPRIS2 init failed:', e.message);
+        return null;
+    }
+}
+
+let _lastMprisStatus   = null;
+let _lastMprisMetadata = null;
+let _lastMprisPosition = 0; // µs
+
+function applyMprisData(data) {
+    // Snapshot player — the error event handler may null mprisPlayer
+    // synchronously during a property set, causing null-dereference below.
+    const p = mprisPlayer;
+    if (!p) return;
+    if (data.status) {
+        p.playbackStatus = data.status;
+        p.canSeek = true;
+    }
+    if (data.metadata) {
+        const meta = { ...data.metadata };
+        // mprisTrackId() already returns a valid D-Bus object path
+        // (/com/apple/music/track/…). Do NOT pass through p.objectPath() —
+        // that prepends /org/node/mediaplayer/apple-music-linux/ whose
+        // "apple-music-linux" segment contains hyphens, which are illegal
+        // in D-Bus object path elements ([A-Za-z0-9_] only). The daemon
+        // rejects the malformed message and closes the socket, causing every
+        // subsequent write to EPIPE.
+        p.metadata = meta;
+        p.canSeek = true;
+    }
+    if (data.position != null) {
+        try { p.position = data.position; } catch (_) {}
+    }
+}
+
+function replayMprisState() {
+    if (!mprisPlayer) return;
+    // Give the D-Bus auth handshake a moment to complete before the first write.
+    setTimeout(() => {
+        if (!mprisPlayer) return;
+        try {
+            if (_lastMprisStatus)   applyMprisData({ status: _lastMprisStatus });
+            if (_lastMprisMetadata) applyMprisData({ metadata: _lastMprisMetadata });
+            if (_lastMprisPosition) applyMprisData({ position: _lastMprisPosition });
+        } catch (_) {}
+    }, 400);
+}
+
+ipcMain.on('mpris:update', (_, data) => {
+    // Track each field independently so all survive across reconnects.
+    if (data.status)     _lastMprisStatus   = data.status;
+    if (data.metadata)   _lastMprisMetadata = data.metadata;
+    if (data.position != null) _lastMprisPosition = data.position;
+
+    const wasNull = !mprisPlayer;
+    if (!mprisPlayer) mprisPlayer = createMprisPlayer();
+    if (!mprisPlayer) return;
+
+    if (wasNull) {
+        // Fresh player — D-Bus handshake is async; defer all property writes.
+        replayMprisState();
+        return;
+    }
+    try {
+        applyMprisData(data);
+        // Emit the Seeked signal whenever the renderer requests it (after an
+        // actual seek or on resume so clients re-anchor their position display).
+        if (data.seeked && _lastMprisPosition) {
+            try { mprisPlayer.seeked(_lastMprisPosition); } catch (_) {}
+        }
+    } catch (e) {
+        console.warn('[AML] MPRIS update failed, will reconnect:', e.message);
+        _destroyMprisPlayer();
+    }
+});
+
 
 function createTray() {
-    // White music-note icon — works on dark and light system trays.
-    const svg = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
-        <path d="M8 16.5a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zm9-2a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zM8 16.5V6l9-2v8.5" stroke="white" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>`);
-    const icon = nativeImage.createFromBuffer(svg, { scaleFactor: 1 });
+    const icon = nativeImage.createFromPath(path.join(__dirname, '../tray-icon.png'));
 
     tray = new Tray(icon);
     tray.setToolTip('Apple Music');
@@ -768,6 +943,11 @@ function createTray() {
 }
 
 app.whenReady().then(() => {
+    // Defer MPRIS init by 1.5 s — Electron's D-Bus socket access isn't
+    // reliable the instant app is ready; a short delay avoids the EPIPE
+    // that fires when the auth handshake races the first property write.
+    setTimeout(() => { if (!mprisPlayer) mprisPlayer = createMprisPlayer(); }, 1500);
+
     console.log('[AML] Electron ready, process.type:', process.type);
     // Keep Chromium session data in its own subfolder so it doesn't
     // pollute the same directory as our app prefs/wrapper data.
@@ -848,63 +1028,6 @@ app.whenReady().then(() => {
         callback({ cancel: false, responseHeaders: h });
     });
 
-    // ── aml-engine:// protocol — proxies to the local engine API ─────────────
-    // Protocol handlers are per-session. The global protocol.handle() only covers
-    // the default session; BrowserWindows on a named partition (persist:apple-music)
-    // must register on that session explicitly.
-    const amlEngineHandler = async (request) => {
-        // CORS preflight: browser sends OPTIONS before non-simple requests.
-        if (request.method === 'OPTIONS') {
-            return new Response(null, {
-                status: 204,
-                headers: {
-                    'Access-Control-Allow-Origin':  '*',
-                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control, Last-Event-ID',
-                    'Access-Control-Max-Age':       '86400',
-                },
-            });
-        }
-
-        try {
-            // URL is aml-engine://host/path?query. With standard:true the URL is
-            // parsed normally: host = first path component (e.g. "api"),
-            // pathname = the rest. Reconstruct the full engine path from both.
-            const parsed = new URL(request.url);
-            const engineUrl = `http://127.0.0.1:20025/${parsed.host}${parsed.pathname}${parsed.search}`;
-            console.log(`[AML Protocol] ${request.method} ${engineUrl.replace('http://127.0.0.1:20025', '')}`);
-            const body = ['GET', 'HEAD'].includes(request.method)
-                ? undefined
-                : await request.arrayBuffer();
-            const upstream = await net.fetch(engineUrl, {
-                method:  request.method,
-                headers: Object.fromEntries(request.headers),
-                body,
-            });
-            // Inject CORS header so the renderer (https://music.apple.com) can
-            // read the response — required when corsEnabled:true on the scheme.
-            const headers = new Headers(upstream.headers);
-            headers.set('Access-Control-Allow-Origin', '*');
-            return new Response(upstream.body, {
-                status:     upstream.status,
-                statusText: upstream.statusText,
-                headers,
-            });
-        } catch (e) {
-            console.error(`[AML Protocol] ERROR: ${e.message}`);
-            return new Response(JSON.stringify({ error: e.message }), {
-                status:  502,
-                headers: {
-                    'Content-Type':                'application/json',
-                    'Access-Control-Allow-Origin': '*',
-                },
-            });
-        }
-    };
-
-    protocol.handle('aml-engine', amlEngineHandler);
-    s.protocol.handle('aml-engine', amlEngineHandler);
-
     Menu.setApplicationMenu(null);
     createWindow();
     createTray();
@@ -927,3 +1050,11 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => { isQuitting = true; });
+
+// Ctrl+C in the launch terminal sends SIGINT. Without this handler Electron
+// ignores it (the window-close override keeps the process alive).
+process.on('SIGINT', () => {
+    isQuitting = true;
+    stopEngine();
+    app.quit();
+});

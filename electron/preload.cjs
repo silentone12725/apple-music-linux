@@ -73,9 +73,12 @@ contextBridge.exposeInMainWorld('amlReady', () => ipcRenderer.send('app:ui-ready
 contextBridge.exposeInMainWorld('amlBridge', {
     // ── Prefs / view (settings panel) ────────────────────────────────────────
     getPrefs:       ()          => ipcRenderer.invoke('prefs:get'),
+    setPref:        (k, v)      => ipcRenderer.send('pref:set', k, v),
     setZoom:        (f)         => ipcRenderer.send('view:zoom', f),
     setGlassBlur:   (b)         => ipcRenderer.send('view:glass-blur', b),
     setTweak:       (k, v)      => ipcRenderer.send('view:tweak', k, v),
+    mprisUpdate:    (d)         => ipcRenderer.send('mpris:update', d),
+    onMprisCmd:     (cb)        => ipcRenderer.on('mpris:cmd', (_, cmd) => cb(cmd)),
 });
 
 // ── Apple Music page setup ────────────────────────────────────────────────────
