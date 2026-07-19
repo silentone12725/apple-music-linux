@@ -905,7 +905,10 @@ ipcMain.on('mpris:update', (_, data) => {
 
 
 function createTray() {
-    const icon = nativeImage.createFromPath(path.join(__dirname, '../tray-icon.png'));
+    const iconPath = app.isPackaged
+        ? path.join(process.resourcesPath, 'tray-icon.png')
+        : path.join(__dirname, '..', 'tray-icon.png');
+    const icon = nativeImage.createFromPath(iconPath);
 
     tray = new Tray(icon);
     tray.setToolTip('Apple Music');
