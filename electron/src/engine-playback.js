@@ -1226,16 +1226,26 @@ window.addEventListener('unhandledrejection', (e) => {
 
         // ── Engine Status ──────────────────────────────────────────────────
         const { wrap: stWrap, body: stBody } = makeSection('Engine Status');
-        [
-            { label: 'Wrapper process', ok: s.process === 'running',  text: s.process  ?? 'unknown' },
-            { label: 'FairPlay',        ok: s.fairplay === 'ready',   text: s.fairplay ?? 'unknown' },
-            { label: 'Session',         ok: s.session === 'valid' || drm?.capabilities?.cbcs === true,
-              text: s.session === 'valid' ? 'valid' : drm?.capabilities?.cbcs === true ? 'active (cbcs)' : s.session ?? 'unknown',
-              subtitle: 'Authentication lease with Apple servers' },
-            { label: 'Backend',         text: drm.backend?.selected ?? 'embedded', noDot: true },
-        ].forEach(({ label, ok, text, subtitle, noDot }, i, arr) => {
-            stBody.appendChild(makeRow(label, statusVal(text, noDot ? undefined : ok), subtitle, i === arr.length - 1));
+
+        function renderStatusRows(d) {
+            const st = d.state ?? {};
+            return [
+                { label: 'Wrapper process', ok: st.process === 'running',  text: st.process  ?? 'unknown' },
+                { label: 'FairPlay',        ok: st.fairplay === 'ready',   text: st.fairplay ?? 'unknown' },
+                { label: 'Session',         ok: st.session === 'valid' || d?.capabilities?.cbcs === true,
+                  text: st.session === 'valid' ? 'valid' : d?.capabilities?.cbcs === true ? 'active (cbcs)' : st.session ?? 'unknown',
+                  subtitle: 'Authentication lease with Apple servers' },
+                { label: 'Backend',         text: d.backend?.selected ?? 'embedded', noDot: true },
+            ];
+        }
+
+        const valEls = [];
+        renderStatusRows(drm).forEach(({ label, ok, text, subtitle, noDot }, i, arr) => {
+            const v = statusVal(text, noDot ? undefined : ok);
+            valEls.push({ el: v, noDot: !!noDot });
+            stBody.appendChild(makeRow(label, v, subtitle, i === arr.length - 1));
         });
+
         const refreshRow = document.createElement('div');
         refreshRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;';
         const refreshBtn = makeBtn('Refresh');
@@ -1243,6 +1253,27 @@ window.addEventListener('unhandledrejection', (e) => {
         refreshRow.appendChild(refreshBtn);
         stBody.appendChild(refreshRow);
         dlg.appendChild(stWrap);
+
+        // Poll until all statuses resolve or dialog closes
+        const isResolved = d => {
+            const st = d.state ?? {};
+            return (st.process === 'running') && (st.fairplay === 'ready') &&
+                   (st.session === 'valid' || d?.capabilities?.cbcs === true);
+        };
+        if (!isResolved(drm)) {
+            const poll = setInterval(async () => {
+                if (!dlg.isConnected) { clearInterval(poll); return; }
+                const d = await fetchDRM().catch(() => null);
+                if (!d) return;
+                renderStatusRows(d).forEach(({ ok, text, noDot }, i) => {
+                    const v = valEls[i].el;
+                    v.innerHTML = '';
+                    if (!noDot) v.appendChild(dot(ok));
+                    v.appendChild(document.createTextNode(text));
+                });
+                if (isResolved(d)) clearInterval(poll);
+            }, 2000);
+        }
 
         // ── Display ────────────────────────────────────────────────────────
         const { wrap: dWrap, body: dBody } = makeSection('Display');
