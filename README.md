@@ -7,7 +7,7 @@
 [![GitHub downloads](https://img.shields.io/github/downloads/silentone12725/apple-music-linux/total?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases)
 [![Platform](https://img.shields.io/badge/platform-linux%20x86__64-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 
-An unofficial native-feeling Apple Music desktop client for Linux — Electron shell over music.apple.com, Go engine for DRM, libvlc for audio.
+An unofficial Apple Music desktop client for Linux with Lossless support
 
 </div>
 
@@ -36,16 +36,14 @@ An unofficial native-feeling Apple Music desktop client for Linux — Electron s
 - [Dev](#dev)
 - [Build AppImage](#build-appimage)
 - [Project structure](#project-structure)
-- [Referenced projects](#referenced-projects)
+- [References](#referenced-projects)
 
 ## Features
 
 - **Lossless & Hi-Res** — ALAC up to 192kHz, Dolby Atmos via FairPlay-decrypted HLS
-- **libvlc playback** — in-process audio, no ffmpeg/mpv subprocess
 - **MPRIS2** — bidirectional D-Bus media control: play/pause/next/prev/seek from any media key handler or taskbar widget
 - **Frosted glass UI** — transparent window with compositor blur-behind (Hyprland/KWin)
 - **Smart prefetch cache** — tracks pre-warmed before you hit play; configurable size
-- **SSE event bus** — engine pushes DRM state, queue, and playback events to the frontend in real time
 - **System tray** — minimize to tray with playback controls in the context menu
 - **Wayland + X11** — tested on Hyprland and KDE Plasma
 
@@ -63,7 +61,7 @@ An unofficial native-feeling Apple Music desktop client for Linux — Electron s
 - PulseAudio or PipeWire
 - Apple Music subscription
 
-Wayland compositor with blur support (Hyprland, KWin) is recommended for the glass UI — X11 works without blur.
+Wayland compositor with blur support (Hyprland, KWin) is recommended for the glass UI — X11 works without blur(may add software compositing in future).
 
 ## Download
 
@@ -132,7 +130,7 @@ cli/
 Wrapper.x86_64.latest/  Android wrapper binary + rootfs (FairPlay DRM)
 ```
 
-## Referenced projects
+## References
 
 - [apple-music-engine](https://github.com/silentone12725/apple-music-engine-dev) — Go backend: FairPlay DRM, HLS decryption, lossless streaming, SSE event bus, smart prefetch cache
 - [Electron](https://electronjs.org) — desktop shell
