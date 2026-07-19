@@ -1,32 +1,150 @@
-# Apple Music Linux Client
+<div align="center">
 
-A native-feeling Linux desktop client for Apple Music built with Go and the [Wails](https://wails.io) framework.
+# Apple Music Linux
+
+[![GitHub release](https://img.shields.io/github/release/silentone12725/apple-music-linux.svg?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
+[![GitHub license](https://img.shields.io/github/license/silentone12725/apple-music-linux.svg?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/blob/main/LICENSE)
+[![GitHub downloads](https://img.shields.io/github/downloads/silentone12725/apple-music-linux/total?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases)
+[![Platform](https://img.shields.io/badge/platform-linux%20x86__64-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
+
+An unofficial native-feeling Apple Music desktop client for Linux — Electron shell over music.apple.com, Go engine for DRM, libvlc for audio.
+
+</div>
+
+> [!IMPORTANT]
+> **Disclaimer**
+>
+> **No Affiliation**
+>
+> This project and its contributors are not affiliated with, authorized by, endorsed by, or in any way officially connected with Apple Inc. or any of its subsidiaries or affiliates. This is an independent, unofficial client developed for personal use.
+>
+> **Trademarks**
+>
+> "Apple Music", "Apple", and related names, marks, and logos are registered trademarks of Apple Inc. Any use of these trademarks is for identification and reference purposes only and does not imply any association with the trademark holder.
+>
+> **Limitation of Liability**
+>
+> This application is provided "AS IS". The developers are not liable for any claim, damages, or legal consequences arising from its use. You use it entirely at your own risk. An active Apple Music subscription is required.
+
+## Contents
+
+- [How it works](#how-it-works)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Download](#download)
+- [Login](#login)
+- [Dev](#dev)
+- [Build AppImage](#build-appimage)
+- [Project structure](#project-structure)
+- [Referenced projects](#referenced-projects)
+
+## How it works
+
+```
+music.apple.com (web UI)
+       │  Electron window with CSS/JS injection
+       ▼
+  electron/main.mjs       ← window, MPRIS2, tray, IPC
+       │  HTTP + SSE
+       ▼
+  apple-music-cli --api   ← Go engine: FairPlay DRM, HLS decrypt, stream proxy
+       │  libvlc in-process
+       ▼
+  PulseAudio / PipeWire
+```
+
+The Apple Music web UI runs inside Electron. A Go engine (`apple-music-cli`) handles FairPlay DRM via an embedded Android wrapper, decrypts HLS streams, and feeds audio to libvlc. No Electron audio stack is used — libvlc renders directly to PulseAudio/PipeWire.
 
 ## Features
 
-- **Frameless Window**: Blends seamlessly into Linux desktop environments using the native WebKit2GTK renderer.
-- **Glassmorphism Support**: GPU hardware acceleration enabled by default for beautiful UI blurring.
-- **Dynamic CSS Injection**: Automatically eradicates "Open in App" upsell banners and buttons from the live Apple Music DOM.
-- **CLI Hardware Acceleration**: The underlying CLI (`apple-music-cli`) utilizes `ffmpeg` and `mpv` for media processing and playback. Hardware decoding (`-hwaccel auto` and `--hwdec=auto`) is strictly enabled in the CLI to offload processing to the GPU. This minimizes CPU usage, prevents stuttering during high-res lossless streaming, and reduces battery drain.
+- **Lossless & Hi-Res** — ALAC up to 192kHz, Dolby Atmos via FairPlay-decrypted HLS
+- **libvlc playback** — in-process audio, no ffmpeg/mpv subprocess
+- **MPRIS2** — bidirectional D-Bus media control: play/pause/next/prev/seek from any media key handler or taskbar widget
+- **Frosted glass UI** — transparent window with compositor blur-behind (Hyprland/KWin)
+- **Smart prefetch cache** — tracks pre-warmed before you hit play; configurable size
+- **SSE event bus** — engine pushes DRM state, queue, and playback events to the frontend in real time
+- **System tray** — minimize to tray with playback controls in the context menu
+- **Wayland + X11** — tested on Hyprland and KDE Plasma
 
-## Development
+## Requirements
 
-To run the application in live development mode (which provides hot-reloading for both Go and frontend changes):
+- Linux x86_64
+- PulseAudio or PipeWire
+- Apple Music subscription
+
+Wayland compositor with blur support (Hyprland, KWin) is recommended for the glass UI — X11 works without blur.
+
+## Download
+
+Download `apple-music-linux.AppImage` from the [latest release](https://github.com/silentone12725/apple-music-linux/releases/latest):
 
 ```bash
-# On Ubuntu 24.04 / Zorin OS 18, you must install the WebKit 4.1 dev libraries:
-# sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential pkg-config
-
-# Run with the webkit2_41 tag
-wails dev -tags webkit2_41
+chmod +x apple-music-linux.AppImage
+./apple-music-linux.AppImage
 ```
 
-## Building
+[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) integrates it into your app menu automatically on first run.
 
-To build a standalone executable for production:
+## Login
+
+Two separate sign-ins are required:
+
+1. **Apple Music web session** — sign in via the web UI on first launch, the same as music.apple.com in a browser
+2. **Engine DRM account** — open **AML Settings** (top-left gear icon) → Engine Account → Sign In with your Apple ID. This authenticates the FairPlay layer for lossless and hi-res. Without it, playback falls back to AAC 256.
+
+## Dev
 
 ```bash
-wails build -tags webkit2_41
+git clone https://github.com/silentone12725/apple-music-linux
+cd apple-music-linux/electron
+bash build.sh
 ```
 
-The compiled binary will be placed in `build/bin/`.
+`build.sh` installs npm deps, bundles system VLC libs into `dist/resources/vlc`, and launches the app.
+
+Requires: `node`, `npm`, `vlc` (provides `libvlc`)
+
+```bash
+# Arch
+sudo pacman -S vlc nodejs npm
+
+# Ubuntu/Debian
+sudo apt install vlc nodejs npm
+```
+
+## Build AppImage
+
+```bash
+cd electron
+bash build.sh          # bundle VLC libs first
+NODE_ENV=production npm run dist
+# → dist/apple-music-linux.AppImage
+```
+
+## Project structure
+
+```
+electron/
+  src/
+    engine-playback.js  MusicKit bridge, VLC control, settings UI
+    engine-sse.js       SSE client for engine push events
+    smart-cache.js      prefetch scheduler and disk cache
+  main.mjs              app lifecycle, window, tray, MPRIS2, IPC
+  preload.cjs           context bridge (window.amlBridge)
+
+cli/
+  engine/drm/           FairPlay session management
+  engine/hls/           HLS decrypt and stream proxy
+  engine/playback/      VLC HTTP control
+  apiserver.go          HTTP API server (/api/v1/*)
+
+Wrapper.x86_64.latest/  Android wrapper binary + rootfs (FairPlay DRM)
+```
+
+## Referenced projects
+
+- [Electron](https://electronjs.org) — desktop shell
+- [libvlc](https://www.videolan.org/vlc/libvlc.html) — audio playback
+- [mpris-service](https://github.com/dbkr/mpris-service) — MPRIS2 D-Bus
+- [MusicKit JS](https://developer.apple.com/documentation/musickitjs) — Apple's web playback SDK (loaded from music.apple.com)
+- [electron-builder](https://www.electron.build) — AppImage packaging

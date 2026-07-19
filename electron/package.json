@@ -7,16 +7,49 @@
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "mpris-service": "^2.1.2",
     "node-pty": "^1.1.0"
   },
   "allowScripts": {
     "node-pty@1.1.0": true,
-    "esbuild@0.28.1": true
+    "esbuild@0.28.1": true,
+    "abstract-socket@2.1.1": true
   },
+  "scripts": {
+    "dist": "electron-builder --linux AppImage"
+  },
+  "desktopName": "apple-music-linux.desktop",
   "devDependencies": {
-    "@electron/rebuild": "^4.0.6",
     "electron": "^43.1.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1"
+  },
+  "build": {
+    "appId": "com.apple.android.music",
+    "productName": "Apple Music",
+    "copyright": "Apple Inc.",
+    "files": [
+      "**/*",
+      "!node_modules/.bin",
+      "!**/*.map",
+      "!test-*.html",
+      "!dist/resources/apple-music-cli",
+      "!dist/resources/wrapper",
+      "!dist/resources/vlc"
+    ],
+    "extraResources": [
+      { "from": "dist/resources/apple-music-cli", "to": "apple-music-cli" },
+      { "from": "dist/resources/wrapper", "to": "wrapper" },
+      { "from": "dist/resources/vlc", "to": "vlc" },
+      { "from": "../tray-icon.png", "to": "tray-icon.png" }
+    ],
+    "linux": {
+      "target": "AppImage",
+      "icon": "icon.png",
+      "category": "AudioVideo",
+      "description": "Apple Music desktop client for Linux",
+      "executableName": "apple-music-linux",
+      "syncDesktopName": true
+    }
   }
 }

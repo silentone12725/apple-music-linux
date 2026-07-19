@@ -15,7 +15,7 @@
  *   window._amlEngine.waitFor('engine.hello', 8000).then(data => ...)
  */
 
-const ENGINE = 'aml-engine:/';
+const ENGINE = 'http://127.0.0.1:20025';
 
 class EngineSSE {
     constructor(base) {

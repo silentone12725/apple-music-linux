@@ -71,26 +71,14 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('amlReady', () => ipcRenderer.send('app:ui-ready'));
 
 contextBridge.exposeInMainWorld('amlBridge', {
-    // ── PTY ──────────────────────────────────────────────────────────────────
-    ptyStart:       ()          => ipcRenderer.send('pty:start'),
-    ptyInput:       (data)      => ipcRenderer.send('pty:input', data),
-    ptyResize:      (c, r)      => ipcRenderer.send('pty:resize', c, r),
-    ptyLogin:       (login)     => ipcRenderer.send('pty:login', login),
-    ptyRestart:     ()          => ipcRenderer.send('pty:restart'),
-
-    // ── Session ───────────────────────────────────────────────────────────────
-    hasSession:     ()          => ipcRenderer.invoke('wrapper:has-session'),
-    logout:         ()          => ipcRenderer.invoke('wrapper:logout'),
-
-    // ── Health ────────────────────────────────────────────────────────────────
-    getHealth:      ()          => ipcRenderer.invoke('wrapper:health'),
-
-    // ── Events ───────────────────────────────────────────────────────────────
-    onPtyData:      (cb)        => ipcRenderer.on('pty:data',           (_, d)      => cb(d)),
-    onPtyExit:      (cb)        => ipcRenderer.on('pty:exit',           (_, code)   => cb(code)),
-    onToggle:       (cb)        => ipcRenderer.on('terminal:toggle',    ()          => cb()),
-    onLoggedOut:    (cb)        => ipcRenderer.on('wrapper:logged-out', ()          => cb()),
-    onHealthChange: (cb)        => ipcRenderer.on('wrapper:health',     (_, status) => cb(status)),
+    // ── Prefs / view (settings panel) ────────────────────────────────────────
+    getPrefs:       ()          => ipcRenderer.invoke('prefs:get'),
+    setPref:        (k, v)      => ipcRenderer.send('pref:set', k, v),
+    setZoom:        (f)         => ipcRenderer.send('view:zoom', f),
+    setGlassBlur:   (b)         => ipcRenderer.send('view:glass-blur', b),
+    setTweak:       (k, v)      => ipcRenderer.send('view:tweak', k, v),
+    mprisUpdate:    (d)         => ipcRenderer.send('mpris:update', d),
+    onMprisCmd:     (cb)        => ipcRenderer.on('mpris:cmd', (_, cmd) => cb(cmd)),
 });
 
 // ── Apple Music page setup ────────────────────────────────────────────────────
@@ -145,7 +133,7 @@ function setupAppleMusicPage() {
 
     injectAppleMusicStyles();
 
-    // Debounced MutationObserver for lossless icon.
+    // Lossless icon: inject once player bar appears, re-inject if SPA nav removes it.
     const LOSSLESS_ID = 'aml-lossless-icon';
     let debounce = null;
     const observer = new MutationObserver(() => {
@@ -154,12 +142,12 @@ function setupAppleMusicPage() {
             if (document.getElementById(LOSSLESS_ID)) return;
             observer.disconnect();
             injectLosslessIcon();
-            if (document.getElementById(LOSSLESS_ID)) {
+            const icon = document.getElementById(LOSSLESS_ID);
+            if (icon) {
+                // Watch only the icon's direct parent — no subtree scan on every DOM change.
                 new MutationObserver((_, obs) => {
-                    if (!document.getElementById(LOSSLESS_ID)) {
-                        obs.disconnect(); startObserver();
-                    }
-                }).observe(document.body, { childList: true, subtree: true });
+                    if (!icon.isConnected) { obs.disconnect(); startObserver(); }
+                }).observe(icon.parentElement || document.body, { childList: true });
             } else {
                 startObserver();
             }
