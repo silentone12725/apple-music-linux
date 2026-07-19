@@ -2,9 +2,8 @@
 
 # Apple Music Linux
 
-[![GitHub release](https://img.shields.io/github/release/silentone12725/apple-music-linux.svg?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
-[![GitHub license](https://img.shields.io/github/license/silentone12725/apple-music-linux.svg?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/blob/main/LICENSE)
-[![GitHub downloads](https://img.shields.io/github/downloads/silentone12725/apple-music-linux/total?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases)
+[![GitHub release](https://img.shields.io/github/v/release/silentone12725/apple-music-linux?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20x86__64-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 
 An unofficial Apple Music desktop client for Linux with Lossless support
