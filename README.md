@@ -29,6 +29,7 @@ An unofficial native-feeling Apple Music desktop client for Linux — Electron s
 ## Contents
 
 - [Features](#features)
+- [Roadmap](#roadmap)
 - [Requirements](#requirements)
 - [Download](#download)
 - [Login](#login)
@@ -47,6 +48,14 @@ An unofficial native-feeling Apple Music desktop client for Linux — Electron s
 - **SSE event bus** — engine pushes DRM state, queue, and playback events to the frontend in real time
 - **System tray** — minimize to tray with playback controls in the context menu
 - **Wayland + X11** — tested on Hyprland and KDE Plasma
+
+## Roadmap
+
+- **Music video playback** — MV streaming with hardware-accelerated decode
+- **Download support** — save lossless tracks, albums, and playlists to disk via the engine CLI
+- **Consistent native UI** — custom title bar, unified controls, and sidebar that match on all desktop environments
+- **Notifications** — now-playing OSD with artwork on track change
+- **arm64 support** — packaging and wrapper binary for Apple Silicon / Raspberry Pi
 
 ## Requirements
 
