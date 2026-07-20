@@ -27,6 +27,7 @@ build/bin/apple-music-linux
 # CLI / engine build artefacts (compiled by `go build ./cli`)
 apple-music-cli
 cli/apple-music-cli
+cli/main
 cli/bench
 cli/startupbench
 cli/drmcheck
