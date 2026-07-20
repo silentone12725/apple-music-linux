@@ -54,6 +54,10 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 - **System tray** — minimize to tray with playback controls in the context menu
 - **Wayland + X11** — tested on Hyprland and KDE Plasma
 
+<div align="center">
+  <img src="assets/MPRIS_integration.png" alt="MPRIS2 integration" width="600"/>
+</div>
+
 ## Roadmap
 
 - **Music video playback** — MV streaming with hardware-accelerated decode
