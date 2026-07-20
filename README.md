@@ -2,7 +2,7 @@
 
 # Apple Music Linux
 
-[![GitHub release](https://img.shields.io/github/v/release/silentone12725/apple-music-linux?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/silentone12725/apple-music-linux?include_prereleases&style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20x86__64-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 
