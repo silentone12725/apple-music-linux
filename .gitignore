@@ -84,3 +84,6 @@ verification/output-hashes/*.json
 # ── Claude Code workspace ─────────────────────────────────────────────────────
 .claude/
 electron/.claude/
+
+# ── Docs (design notes, investigation logs — not part of the shipped product) ──
+docs/

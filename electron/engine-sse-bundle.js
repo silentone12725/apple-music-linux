@@ -1,5 +1,6 @@
-const ENGINE = "http://127.0.0.1:20025";
-class EngineSSE {
+// src/engine-sse.js
+var ENGINE = window._amlEngineURL || "http://127.0.0.1:20025";
+var EngineSSE = class {
   constructor(base) {
     this._base = base;
     this._listeners = /* @__PURE__ */ new Map();
@@ -154,5 +155,5 @@ class EngineSSE {
     }, delay);
     if (delay > 1500) console.log(`[AML SSE] Reconnecting in ${Math.round(delay)}ms`);
   }
-}
+};
 window._amlEngine = new EngineSSE(ENGINE);

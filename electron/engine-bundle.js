@@ -1,5 +1,5 @@
 // src/engine-playback.js
-var ENGINE = "http://127.0.0.1:20025";
+var ENGINE = window._amlEngineURL || "http://127.0.0.1:20025";
 var _nativeSrcSet = null;
 var _nativePlay = null;
 var _ourBlobUrl = null;
