@@ -25,6 +25,8 @@ package main
 //   DELETE /api/v1/jobs/{id}             → cancel cache-warm job (navigation away)
 //
 //   PUT    /api/v1/cache/config          → push user-configured cache limits
+//   GET    /api/v1/cache/stats           → prewarm / persistent cache usage
+//   DELETE /api/v1/cache/playback        → clear all pre-warmed sessions
 //
 //   GET    /api/v1/metadata/{id}?sf=     → track info + available qualities
 //   GET    /api/v1/artwork/{id}?sf=&size=
@@ -454,8 +456,10 @@ func NewAPIServer(port int) *APIServer {
 	// Playback context — renderer signals user intent; scheduler decides what to warm.
 	mux.HandleFunc("PUT /api/v1/playback/context", cors(s.handlePlaybackContext))
 
-	// Cache config — frontend pushes user-configured limits (prewarmLimitMB, etc.).
+	// Cache endpoints — config, stats, and clear.
 	mux.HandleFunc("PUT /api/v1/cache/config", cors(s.handleCacheConfig))
+	mux.HandleFunc("GET /api/v1/cache/stats", cors(s.handleCacheStats))
+	mux.HandleFunc("DELETE /api/v1/cache/playback", cors(s.handleCachePlaybackDelete))
 
 	// Job status and cancellation for cache-warming jobs.
 	mux.HandleFunc("GET /api/v1/jobs/{id}", cors(s.handleJobStatus))
@@ -1241,6 +1245,30 @@ func (s *APIServer) handleCacheConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	s.scheduler.SetCacheConfig(cfg)
 	writeJSON(w, http.StatusOK, s.scheduler.GetCacheConfig())
+}
+
+func (s *APIServer) handleCacheStats(w http.ResponseWriter, r *http.Request) {
+	cfg := s.scheduler.GetCacheConfig()
+	prewarmLimitBytes := cfg.PrewarmLimitMB * 1024 * 1024
+	if prewarmLimitBytes == 0 {
+		prewarmLimitBytes = 1024 * 1024 * 1024 // 1 GB default shown in UI
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		// No disk-persist cache implemented yet — hide that section in UI.
+		"persistent": map[string]any{"available": false},
+		"prewarm": map[string]any{
+			// Each pre-warmed session is a live stream handle; byte size is
+			// unknown without probing the backend, so we report entry count only.
+			"entries":    s.scheduler.PrewarmCount(),
+			"sizeBytes":  0,
+			"limitBytes": prewarmLimitBytes,
+		},
+	})
+}
+
+func (s *APIServer) handleCachePlaybackDelete(w http.ResponseWriter, r *http.Request) {
+	s.scheduler.ClearPreWarmed()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleJobStatus returns a snapshot of a cache-warming job.
