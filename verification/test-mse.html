@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MSE Playback Test</title>
+<style>
+  body { font-family: monospace; font-size: 12px; background: #1a1a1a; color: #e0e0e0; padding: 12px; margin: 0; }
+  #log { white-space: pre-wrap; }
+  .ok  { color: #4caf50; }
+  .err { color: #f44336; }
+  .hd  { color: #2196f3; font-weight: bold; }
+</style>
+</head>
+<body><pre id="log"></pre>
+<script>
+const logEl = document.getElementById('log');
+function log(msg, cls) {
+    console.log(msg);
+    const span = document.createElement('span');
+    span.className = cls ?? '';
+    span.textContent = msg + '\n';
+    logEl.appendChild(span);
+    window.testBridge?.sendLog(msg);
+}
+
+// ── Pipe helpers ──────────────────────────────────────────────────────────────
+async function waitSBIdle(sb) {
+    if (!sb.updating) return;
+    return new Promise((res, rej) => {
+        sb.addEventListener('updateend', res, { once: true });
+        sb.addEventListener('error', rej, { once: true });
+    });
+}
+
+async function pipeStream(audio, sb, ms, streamUrl, report) {
+    const t0 = performance.now();
+    const resp = await fetch(streamUrl);
+    if (!resp.ok) throw new Error(`Stream ${resp.status}: ${await resp.text()}`);
+    log(`  Stream open +${((performance.now()-t0)/1000).toFixed(2)}s`);
+
+    const reader = resp.body.getReader();
+    let chunks = 0;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await waitSBIdle(sb);
+        try {
+            sb.appendBuffer(value);
+        } catch (e) {
+            log(`  appendBuffer error chunk ${chunks}: ${e.message}`, 'err');
+            report.appendErrors = (report.appendErrors ?? 0) + 1;
+        }
+        chunks++;
+    }
+
+    report.chunks = chunks;
+    const bl = sb.buffered.length;
+    report.finalBuffered = bl > 0
+        ? `[${sb.buffered.start(0).toFixed(3)}, ${sb.buffered.end(bl-1).toFixed(3)}]`
+        : '[]';
+    report.finalReadyState = audio.readyState;
+    log(`  Stream done (${chunks} chunks) +${((performance.now()-t0)/1000).toFixed(2)}s`);
+    log(`  Final buffered=${report.finalBuffered} readyState=${audio.readyState}`);
+
+    if (ms.readyState === 'open') {
+        try { ms.endOfStream(); } catch (_) {}
+    }
+    return t0;
+}
+
+// ── Main test ─────────────────────────────────────────────────────────────────
+async function runTest({ assetId, storefront, engineUrl, devToken, mut }) {
+    const t0 = performance.now();
+    const ts  = () => `+${((performance.now()-t0)/1000).toFixed(2)}s`;
+    const report = { assetId, storefront, success: false, failReason: null, events: [] };
+
+    log('=== MSE Playback Test ===', 'hd');
+    log(`Track: ${assetId} / ${storefront}`);
+    log(`Engine: ${engineUrl}`);
+
+    // ── 1. Create session ───────────────────────────────────────────────────
+    log(`\n[1] Creating session ${ts()}`, 'hd');
+    const sessResp = await fetch(`${engineUrl}/api/v1/playback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            assetId, storefront,
+            capabilities: { lossless: false, video: false, atmos: false },
+            token: devToken,
+            mediaUserToken: mut,
+        }),
+    });
+    if (!sessResp.ok) {
+        report.failReason = `Session ${sessResp.status}: ${await sessResp.text()}`;
+        log(`  FAIL: ${report.failReason}`, 'err');
+        window.testBridge?.sendResult(report);
+        return;
+    }
+    const sess = await sessResp.json();
+    Object.assign(report, {
+        sessionId: sess.sessionId, codec: sess.codec,
+        sampleRate: sess.sampleRate, bitDepth: sess.bitDepth,
+        seekable: sess.capabilities?.seekable,
+    });
+    log(`  Session: ${sess.sessionId}`, 'ok');
+    log(`  codec=${sess.codec} sampleRate=${sess.sampleRate} seekable=${sess.capabilities?.seekable} ${ts()}`);
+
+    // ── 2. MIME type support matrix ─────────────────────────────────────────
+    log(`\n[2] MediaSource.isTypeSupported:`, 'hd');
+    const mimes = ['audio/mp4','audio/mp4; codecs="mp4a.40.2"','audio/mp4; codecs="mp4a.40.5"'];
+    for (const m of mimes) {
+        log(`  ${MediaSource.isTypeSupported(m) ? '✓' : '✗'} ${m}`);
+    }
+
+    // ── 3. MSE test loop — try each MIME type ───────────────────────────────
+    const streamBase = `${engineUrl}${sess.streams.audio}?raw=1`;
+
+    for (const mimeType of ['audio/mp4', 'audio/mp4; codecs="mp4a.40.2"']) {
+        if (!MediaSource.isTypeSupported(mimeType)) continue;
+
+        log(`\n[3] Testing MIME: ${mimeType}`, 'hd');
+        report.mimeType = mimeType;
+        report.events   = [];
+
+        const audio = new Audio();
+        const ms    = new MediaSource();
+        audio.src   = URL.createObjectURL(ms);
+
+        const ev = (name) => {
+            const entry = { name, readyState: audio.readyState,
+                currentTime: +audio.currentTime.toFixed(3),
+                ts: +((performance.now()-t0)/1000).toFixed(2) };
+            report.events.push(entry);
+            const cls = (name === 'canplay' || name === 'playing') ? 'ok'
+                      : (name === 'error' || name === 'stalled')   ? 'err' : '';
+            log(`  EVENT ${name} readyState=${audio.readyState} ct=${audio.currentTime.toFixed(3)} ${ts()}`, cls);
+        };
+
+        for (const name of ['loadstart','loadedmetadata','loadeddata','canplay',
+                             'canplaythrough','playing','waiting','stalled','error','ended']) {
+            audio.addEventListener(name, () => ev(name));
+        }
+
+        const canplayPromise = new Promise(res => {
+            audio.addEventListener('canplay', () => res(true), { once: true });
+            setTimeout(() => res(false), 90_000);
+        });
+
+        let sbReady;
+        const sourceOpenP = new Promise(res => { sbReady = res; });
+        ms.addEventListener('sourceopen', () => {
+            URL.revokeObjectURL(audio.src);
+            const sb = ms.addSourceBuffer(mimeType);
+
+            sb.addEventListener('error', () => {
+                log(`  SourceBuffer ERROR readyState=${audio.readyState}`, 'err');
+                report.sbError = true;
+            });
+
+            // Timestamp correction (same as production code)
+            audio.addEventListener('loadedmetadata', () => {
+                const fix = (attempt) => {
+                    const blen = sb.buffered.length;
+                    log(`  advance#${attempt} buffered.length=${blen} readyState=${audio.readyState}`);
+                    if (blen > 0) {
+                        const bs = sb.buffered.start(0), be = sb.buffered.end(blen-1);
+                        log(`  buffered=[${bs.toFixed(3)},${be.toFixed(3)}] ct=${audio.currentTime.toFixed(3)}`);
+                        if (bs > audio.currentTime + 0.1) {
+                            log(`  → snapping currentTime to ${bs.toFixed(3)}`);
+                            audio.currentTime = bs;
+                        }
+                    } else {
+                        sb.addEventListener('updateend', () => fix(attempt+1), { once: true });
+                    }
+                };
+                fix(0);
+            }, { once: true });
+
+            sbReady(sb);
+        });
+
+        audio.load();
+
+        const sb = await sourceOpenP;
+
+        let pipeT0;
+        try {
+            pipeT0 = await pipeStream(audio, sb, ms, streamBase, report);
+        } catch (e) {
+            log(`  pipeStream error: ${e.message}`, 'err');
+            report.pipeError = e.message;
+        }
+
+        log(`  Waiting for canplay (up to 90s total)...`);
+        const canplayFired = await canplayPromise;
+
+        if (canplayFired) {
+            log(`\n  ✓ canplay FIRED! readyState=${audio.readyState} ${ts()}`, 'ok');
+            report.success = true;
+
+            // Try play
+            try {
+                await audio.play();
+                log(`  ✓ play() succeeded`, 'ok');
+                // Wait 3 seconds and check currentTime
+                await new Promise(res => setTimeout(res, 3000));
+                report.playedSeconds = +audio.currentTime.toFixed(3);
+                report.actuallyPlayed = audio.currentTime > 0.5;
+                log(`  currentTime after 3s = ${audio.currentTime.toFixed(3)}s` +
+                    ` (actuallyPlayed=${report.actuallyPlayed})`,
+                    report.actuallyPlayed ? 'ok' : 'err');
+                audio.pause();
+            } catch (e) {
+                log(`  play() error: ${e.message}`, 'err');
+                report.playError = e.message;
+            }
+            break;
+        } else {
+            log(`  ✗ canplay never fired with ${mimeType}`, 'err');
+            report.failReason = `canplay never fired (readyState=${audio.readyState}, buffered=${report.finalBuffered})`;
+            audio.src = '';
+        }
+    }
+
+    await fetch(`${engineUrl}/api/v1/playback/${sess.sessionId}`, { method: 'DELETE' }).catch(()=>{});
+    log(`\n[done] Session cleaned up`, 'hd');
+
+    window.testBridge?.sendResult(report);
+}
+
+window.testBridge?.onStartTest((params) => {
+    runTest(params).catch(err => {
+        console.error('Test crashed:', err);
+        window.testBridge?.sendResult({ success: false, failReason: `crash: ${err.message}`, events: [] });
+    });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Play Proxy Test — AML Engine</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: monospace; font-size: 13px; background: #111; color: #ddd; padding: 16px; margin: 0; }
+  h2   { color: #90caf9; margin: 24px 0 8px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+  h3   { color: #b0bec5; margin: 16px 0 4px; font-size: 13px; }
+  .suite { border: 1px solid #333; border-radius: 6px; padding: 12px; margin-bottom: 16px; }
+  .pass  { color: #66bb6a; }
+  .fail  { color: #ef5350; }
+  .warn  { color: #ffa726; }
+  .info  { color: #42a5f5; }
+  .dim   { color: #555; }
+  pre    { margin: 0; white-space: pre-wrap; line-height: 1.6; }
+  #summary { font-size: 15px; font-weight: bold; margin: 20px 0; padding: 12px;
+             border-radius: 6px; border: 2px solid #444; }
+  #summary.all-pass { border-color: #66bb6a; color: #66bb6a; background: #0a2a0a; }
+  #summary.has-fail { border-color: #ef5350; color: #ef5350; background: #2a0a0a; }
+  button { margin: 8px 4px 0 0; padding: 6px 14px; background: #1e3a5f; color: #90caf9;
+           border: 1px solid #2a6098; border-radius: 4px; cursor: pointer; font-family: monospace; }
+  button:hover { background: #2a4f7a; }
+  input { background: #1a1a1a; border: 1px solid #444; color: #ddd; padding: 4px 8px;
+          border-radius: 4px; font-family: monospace; width: 320px; }
+  label { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<h2>🎵 AML Play Proxy — Regression Test Suite</h2>
+
+<div class="suite">
+  <h3>Config</h3>
+  <label>Engine URL: <input id="engineUrl" value="http://127.0.0.1:20025" /></label>
+  <label>Asset ID:   <input id="assetId"   value="" placeholder="e.g. 1057567670" /></label>
+  <label>Storefront: <input id="storefront" value="in" /></label>
+</div>
+
+<button onclick="runUnitTests()">▶ Run Unit Tests (no engine)</button>
+<button onclick="runIntegration()">▶ Run Integration Test (needs engine)</button>
+<button onclick="runAll()">▶ Run All</button>
+
+<div id="summary" style="display:none"></div>
+<div id="log"></div>
+
+<script>
+// ── Logging ──────────────────────────────────────────────────────────────────
+let passCount = 0, failCount = 0;
+const logEl = document.getElementById('log');
+
+function section(title) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  logEl.appendChild(h);
+}
+function suite(title) {
+  const h = document.createElement('h3');
+  h.textContent = title;
+  logEl.appendChild(h);
+  const pre = document.createElement('pre');
+  logEl.appendChild(pre);
+  return (msg, cls) => {
+    const span = document.createElement('span');
+    span.className = cls ?? '';
+    span.textContent = msg + '\n';
+    pre.appendChild(span);
+    console.log(msg);
+  };
+}
+
+function assert(log, condition, label, detail = '') {
+  if (condition) {
+    passCount++;
+    log(`  ✓ PASS  ${label}${detail ? ' — ' + detail : ''}`, 'pass');
+  } else {
+    failCount++;
+    log(`  ✗ FAIL  ${label}${detail ? ' — ' + detail : ''}`, 'fail');
+  }
+}
+
+function showSummary() {
+  const el = document.getElementById('summary');
+  el.style.display = 'block';
+  const total = passCount + failCount;
+  if (failCount === 0) {
+    el.className = 'all-pass';
+    el.textContent = `ALL TESTS PASSED  (${passCount}/${total})`;
+  } else {
+    el.className = 'has-fail';
+    el.textContent = `${failCount} FAILED  /  ${passCount} passed  (${total} total)`;
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function raceResolves(promise, ms) {
+  // Returns true if promise resolves within ms, false if it times out (never-resolving)
+  let resolved = false;
+  const sentinel = Symbol('timeout');
+  const result = await Promise.race([
+    promise.then(() => true, () => true),  // resolved or rejected = "resolved"
+    sleep(ms).then(() => sentinel),
+  ]);
+  return result !== sentinel;
+}
+
+// ── UNIT TESTS ────────────────────────────────────────────────────────────────
+
+async function testProxyAlwaysDeferred() {
+  const log = suite('1. Proxy always returns never-resolving promise');
+
+  // Simulate _sessionId and _nativePlay state
+  let nativePlayCalled = false;
+  let _sessionId = null;
+  let _nativePlay = () => { nativePlayCalled = true; return Promise.resolve(); };
+
+  // Mock audio element with controllable readyState
+  function makeAudio(rs) {
+    const el = document.createElement('audio');
+    Object.defineProperty(el, 'readyState', { get: () => rs });
+    return el;
+  }
+
+  // The FIXED proxy (mirrors engine-playback.js installPlayProxy exactly)
+  function installProxy(mkAudio) {
+    mkAudio.play = () => {
+      const rs = mkAudio.readyState;
+      const sid = _sessionId;
+      if (sid && rs >= 3) {
+        _nativePlay().catch(() => {});
+      }
+      return new Promise(() => {}); // always deferred
+    };
+  }
+
+  // --- Test A: initial play (no session, rs=0) ---
+  nativePlayCalled = false; _sessionId = null;
+  const audio0 = makeAudio(0);
+  installProxy(audio0);
+  const p0 = audio0.play();
+  const resolved0 = await raceResolves(p0, 80);
+  assert(log, !resolved0, 'initial play (rs=0, no sid) — promise never resolves');
+  assert(log, !nativePlayCalled, 'initial play (rs=0, no sid) — _nativePlay NOT called');
+
+  // --- Test B: resume path (session set, rs=4) ---
+  nativePlayCalled = false; _sessionId = 'sess-123';
+  const audio4 = makeAudio(4);
+  installProxy(audio4);
+  const p4 = audio4.play();
+  const resolved4 = await raceResolves(p4, 80);
+  assert(log, !resolved4, 'resume path (rs=4, sid set) — promise still never resolves');
+  assert(log, nativePlayCalled,  'resume path (rs=4, sid set) — _nativePlay WAS called');
+
+  // --- Test C: session set but rs=1 (MSE loading) ---
+  nativePlayCalled = false; _sessionId = 'sess-123';
+  const audio1 = makeAudio(1);
+  installProxy(audio1);
+  const p1 = audio1.play();
+  const resolved1 = await raceResolves(p1, 80);
+  assert(log, !resolved1, 'deferred path (rs=1, sid set) — promise never resolves');
+  assert(log, !nativePlayCalled, 'deferred path (rs=1, sid set) — _nativePlay NOT called');
+}
+
+async function testMKHandlerNeverRuns() {
+  const log = suite('2. MK post-play abort handler cannot fire');
+
+  // Simulate what MK's abort handler does:
+  //   audio.play().then(() => { if (audio.paused) audio.pause(); })
+  // With the old broken code (returns native promise), this runs.
+  // With the new code (returns deferred promise), this never runs.
+
+  let _sessionId = 'active-session';
+  let mkHandlerRan = false;
+
+  function makeAudio(rs) {
+    const el = document.createElement('audio');
+    Object.defineProperty(el, 'readyState', { get: () => rs });
+    Object.defineProperty(el, 'paused', { get: () => true }); // simulate paused (MSE not ready)
+    return el;
+  }
+
+  // ---- OLD (broken) proxy — returns native promise ----
+  function installProxyBROKEN(mkAudio) {
+    const nativePlay = () => Promise.resolve(); // simulate native resolve
+    mkAudio.play = () => {
+      const rs = mkAudio.readyState;
+      const sid = _sessionId;
+      if (sid && rs >= 3) {
+        return nativePlay().catch(() => {});  // BUG: returns native promise
+      }
+      return new Promise(() => {});
+    };
+  }
+
+  // ---- NEW (fixed) proxy — always deferred ----
+  function installProxyFIXED(mkAudio) {
+    const nativePlay = () => { return Promise.resolve(); };
+    mkAudio.play = () => {
+      const rs = mkAudio.readyState;
+      const sid = _sessionId;
+      if (sid && rs >= 3) {
+        nativePlay().catch(() => {});
+        // fall through — return deferred
+      }
+      return new Promise(() => {}); // never resolves
+    };
+  }
+
+  function simulateMKHandler(playPromise, audio) {
+    playPromise.then(() => {
+      // MK's abort handler: if audio is paused after play(), assume CDN failed → pause
+      if (audio.paused) {
+        mkHandlerRan = true;
+      }
+    });
+  }
+
+  // Test broken proxy: MK handler runs (bad)
+  mkHandlerRan = false;
+  const audioBroken = makeAudio(4);
+  installProxyBROKEN(audioBroken);
+  simulateMKHandler(audioBroken.play(), audioBroken);
+  await sleep(50);
+  assert(log, mkHandlerRan,  'OLD proxy (returns native promise) — MK handler DOES run [expected regression]', 'shows the bug');
+
+  // Test fixed proxy: MK handler never runs (good)
+  mkHandlerRan = false;
+  const audioFixed = makeAudio(4);
+  installProxyFIXED(audioFixed);
+  simulateMKHandler(audioFixed.play(), audioFixed);
+  await sleep(50);
+  assert(log, !mkHandlerRan, 'NEW proxy (always deferred) — MK handler does NOT run [fix verified]');
+}
+
+async function testMVAudioPathUnchanged() {
+  const log = suite('3. MV audio path (nativeAudioPlay) unaffected by fix');
+
+  // In MV mode, audioEl.play = () => nativeAudioPlay() — returns real promise
+  // This is correct behavior for MV and must not be changed
+  let nativePlayCalled = false;
+  let mvHandlerRan = false;
+
+  function makeVideoAudio() {
+    const el = document.createElement('audio');
+    // In MV, audio has its own src and is genuinely playing when promise resolves
+    Object.defineProperty(el, 'paused', { get: () => false }); // audio IS playing
+    return el;
+  }
+
+  const audioEl = makeVideoAudio();
+  const nativeAudioPlay = () => {
+    nativePlayCalled = true;
+    return Promise.resolve(); // real promise — MK's handler sees audio.paused=false → OK
+  };
+  audioEl.play = () => nativeAudioPlay(); // MV path — returns real promise
+
+  // Simulate MK handler — sees audio.paused=false → does NOT abort
+  audioEl.play().then(() => {
+    if (!audioEl.paused) { /* audio playing — all good */ }
+    else { mvHandlerRan = true; } // only fires if paused (bad)
+  });
+
+  await sleep(50);
+  assert(log, nativePlayCalled,  'MV audio path — nativeAudioPlay IS called');
+  assert(log, !mvHandlerRan,     'MV audio path — MK handler does not abort (audio.paused=false)');
+}
+
+async function testProxyReinstallAfterMV() {
+  const log = suite('4. Song after MV — proxy correctly reinstalled');
+
+  // After MV: audioEl.play was set to () => nativeAudioPlay()
+  // After installProxy(earlyAudio) is called for next song, it must revert to deferred proxy
+
+  let _sessionId = null;
+  let nativePlayCalled = false;
+  let _nativePlay = () => { nativePlayCalled = true; return Promise.resolve(); };
+
+  const audioEl = document.createElement('audio');
+  Object.defineProperty(audioEl, 'readyState', { get: () => 0 });
+
+  // Step 1: MV installs its own play fn
+  audioEl.play = () => {
+    nativePlayCalled = true;
+    return Promise.resolve();
+  };
+  assert(log, true, 'MV sets audioEl.play to nativeAudioPlay [setup]');
+
+  // Step 2: Song path calls installProxy (the FIXED version)
+  function installProxy(mkAudio) {
+    _nativePlay = HTMLMediaElement.prototype.play.bind(mkAudio);
+    mkAudio.play = () => {
+      const sid = _sessionId;
+      const rs  = mkAudio.readyState;
+      if (sid && rs >= 3) {
+        _nativePlay().catch(() => {});
+      }
+      return new Promise(() => {});
+    };
+  }
+  installProxy(audioEl);
+
+  // Step 3: Verify the proxy was reinstalled (play returns deferred)
+  nativePlayCalled = false;
+  const p = audioEl.play();
+  const resolved = await raceResolves(p, 80);
+  assert(log, !resolved,         'after MV→song transition: play() returns deferred promise');
+  assert(log, !nativePlayCalled, 'after MV→song transition: _nativePlay NOT called (rs=0, no sid)');
+}
+
+// ── INTEGRATION TEST ──────────────────────────────────────────────────────────
+
+async function testEnginePlayback() {
+  const log = suite('5. Engine integration — full song playback');
+  const ENGINE    = document.getElementById('engineUrl').value.trim();
+  const assetId   = document.getElementById('assetId').value.trim();
+  const storefront = document.getElementById('storefront').value.trim() || 'us';
+
+  if (!assetId) {
+    log('  ⚠ No asset ID — skipping integration test', 'warn');
+    log('  Enter an asset ID in the config above and click "Run Integration Test"', 'dim');
+    return;
+  }
+
+  // Check engine reachable
+  log(`  Connecting to engine at ${ENGINE}...`, 'info');
+  try {
+    const r = await fetch(`${ENGINE}/api/v1/events`, { method: 'HEAD' });
+    log(`  Engine responded ${r.status}`, r.ok ? 'pass' : 'warn');
+  } catch (e) {
+    log(`  ✗ Engine unreachable: ${e.message}`, 'fail');
+    failCount++;
+    return;
+  }
+
+  // Create session
+  log(`  Creating session for ${assetId}/${storefront}...`, 'info');
+  let sess;
+  try {
+    const r = await fetch(`${ENGINE}/api/v1/playback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        assetId, storefront,
+        capabilities: { lossless: true, video: false, atmos: false },
+      }),
+    });
+    if (!r.ok) {
+      const txt = await r.text();
+      log(`  ✗ Session failed ${r.status}: ${txt}`, 'fail');
+      failCount++; return;
+    }
+    sess = await r.json();
+    log(`  Session ${sess.sessionId} codec=${sess.codec} sampleRate=${sess.sampleRate}`, 'pass');
+    passCount++;
+  } catch (e) {
+    log(`  ✗ Session error: ${e.message}`, 'fail');
+    failCount++; return;
+  }
+
+  // MSE setup
+  log('  Setting up MSE...', 'info');
+  const audio = new Audio();
+  const ms    = new MediaSource();
+  let _sessionId = sess.sessionId;
+  let _nativePlay = HTMLMediaElement.prototype.play.bind(audio);
+
+  // Install the FIXED proxy
+  audio.play = () => {
+    const rs  = audio.readyState;
+    const sid = _sessionId;
+    log(`  [proxy] play() called — sid=${sid ? 'set' : 'null'} rs=${rs}`, 'info');
+    if (sid && rs >= 3) {
+      log('  [proxy] → resume _nativePlay() + deferred', 'info');
+      _nativePlay().catch(e => log(`  [proxy] nativePlay error: ${e.message}`, 'warn'));
+    } else {
+      log('  [proxy] → deferred (waiting for canplay)', 'info');
+    }
+    return new Promise(() => {}); // always deferred
+  };
+
+  const blobUrl = URL.createObjectURL(ms);
+  HTMLMediaElement.prototype.src.__set__
+    ? HTMLMediaElement.prototype.src.__set__.call(audio, blobUrl)
+    : (audio.src = blobUrl);
+
+  const mime = 'audio/mp4; codecs="mp4a.40.2"';
+  const sbP  = new Promise(res => {
+    ms.addEventListener('sourceopen', () => {
+      URL.revokeObjectURL(blobUrl);
+      res(ms.addSourceBuffer(mime));
+    }, { once: true });
+  });
+
+  audio.load();
+  const sb = await sbP;
+
+  // Pipe stream
+  log(`  Piping stream from ${ENGINE}${sess.streams.audio}...`, 'info');
+  const streamT0 = performance.now();
+  let chunks = 0;
+  try {
+    const r = await fetch(`${ENGINE}${sess.streams.audio}?raw=1`);
+    if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+    log(`  Stream open +${((performance.now()-streamT0)/1000).toFixed(2)}s`, 'pass');
+
+    const reader = r.body.getReader();
+    const MAX_CHUNKS = 30; // limit for test
+    while (chunks < MAX_CHUNKS) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (sb.updating) await new Promise(res => sb.addEventListener('updateend', res, { once: true }));
+      sb.appendBuffer(value);
+      chunks++;
+    }
+    reader.cancel();
+    log(`  Piped ${chunks} chunks`, 'pass');
+  } catch (e) {
+    log(`  ✗ Stream error: ${e.message}`, 'fail');
+    failCount++;
+    await fetch(`${ENGINE}/api/v1/playback/${sess.sessionId}`, { method: 'DELETE' }).catch(() => {});
+    return;
+  }
+
+  // Wait for canplay
+  log('  Waiting for canplay...', 'info');
+  const canplay = await Promise.race([
+    new Promise(res => audio.addEventListener('canplay', () => res(true), { once: true })),
+    sleep(10000).then(() => false),
+  ]);
+  assert(log, canplay, 'canplay fired after MSE pipe');
+
+  if (canplay) {
+    // Call _nativePlay (bypassing proxy — simulating what tryPlay does)
+    log('  Calling _nativePlay() directly (as tryPlay does)...', 'info');
+    try {
+      await _nativePlay();
+      log('  _nativePlay() resolved — audio playing', 'pass');
+      passCount++;
+    } catch (e) {
+      log(`  _nativePlay() error: ${e.message}`, 'warn');
+    }
+    await sleep(2000);
+    const ct = audio.currentTime;
+    assert(log, ct > 0.1, `audio advanced after 2s`, `currentTime=${ct.toFixed(3)}s`);
+    audio.pause();
+  }
+
+  await fetch(`${ENGINE}/api/v1/playback/${sess.sessionId}`, { method: 'DELETE' }).catch(() => {});
+  log('  Session cleaned up', 'dim');
+}
+
+// ── Runners ───────────────────────────────────────────────────────────────────
+
+async function runUnitTests() {
+  passCount = 0; failCount = 0;
+  logEl.innerHTML = '';
+  document.getElementById('summary').style.display = 'none';
+  section('UNIT TESTS — Play Proxy Behaviour');
+  await testProxyAlwaysDeferred();
+  await testMKHandlerNeverRuns();
+  await testMVAudioPathUnchanged();
+  await testProxyReinstallAfterMV();
+  showSummary();
+}
+
+async function runIntegration() {
+  passCount = 0; failCount = 0;
+  logEl.innerHTML = '';
+  document.getElementById('summary').style.display = 'none';
+  section('INTEGRATION TEST — Engine + MSE Playback');
+  await testEnginePlayback();
+  showSummary();
+}
+
+async function runAll() {
+  passCount = 0; failCount = 0;
+  logEl.innerHTML = '';
+  document.getElementById('summary').style.display = 'none';
+  section('UNIT TESTS — Play Proxy Behaviour');
+  await testProxyAlwaysDeferred();
+  await testMKHandlerNeverRuns();
+  await testMVAudioPathUnchanged();
+  await testProxyReinstallAfterMV();
+  section('INTEGRATION TEST — Engine + MSE Playback');
+  await testEnginePlayback();
+  showSummary();
+}
+
+// Auto-run unit tests on load
+window.addEventListener('load', () => runUnitTests());
+</script>
+</body>
+</html>

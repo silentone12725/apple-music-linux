@@ -9,8 +9,8 @@
 An unofficial Apple Music desktop client for Linux with Lossless support
 
 <div align="center">
-  <img src="Assets/Preview_logged_out.png" alt="Logged out" width="49%"/>
-  <img src="Assets/Preview_logged_in.png" alt="Logged in" width="49%"/>
+  <img src="assets/screenshots/Preview_logged_out.png" alt="Logged out" width="49%"/>
+  <img src="assets/screenshots/Preview_logged_in.png" alt="Logged in" width="49%"/>
 </div>
 
 </div>
@@ -48,7 +48,7 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 - **MPRIS2** — bidirectional D-Bus media control: play/pause/next/prev/seek from any media key handler or taskbar widget
 
 <div align="center">
-  <img src="Assets/MPRIS_integration.png" alt="MPRIS2 integration" width="600"/>
+  <img src="assets/screenshots/MPRIS_integration.png" alt="MPRIS2 integration" width="600"/>
 </div>
   
 - **Frosted glass UI** — compositor blur-behind on Hyprland/KWin; software blur fallback on X11, GNOME, and Sway
@@ -127,7 +127,7 @@ Two separate sign-ins are required.
 Sign in via the web UI on first launch, the same as signing into music.apple.com in a browser.
 
 <div align="center">
-  <img src="Assets/electron_login.png" alt="Apple Music web login" width="600"/>
+  <img src="assets/screenshots/electron_login.png" alt="Apple Music web login" width="600"/>
 </div>
 
 ### 2. Engine DRM account (lossless & hi-res)
@@ -139,7 +139,7 @@ This authenticates the FairPlay layer. Without it, playback falls back to AAC 25
 3. Click **Sign In** and enter your Apple ID credentials wait for it to authentiacate and fetch the key in the backend should take about 20 seconds.
 
 <div align="center">
-  <img src="Assets/engine_login.png" alt="AML Settings — Engine Account login" width="600"/>
+  <img src="assets/screenshots/engine_login.png" alt="AML Settings — Engine Account login" width="600"/>
 </div>
 
 ## Dev
