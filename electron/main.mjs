@@ -51,6 +51,11 @@ app.commandLine.appendSwitch('enable-smooth-scrolling');
 // Hyprland/KWin handle the compositor-level blur-behind on the desktop
 // side; Chromium just needs to render RGBA frames correctly.
 app.commandLine.appendSwitch('enable-transparent-visuals');
+// On kernels where unprivileged user namespaces are restricted (Ubuntu 23.10+,
+// Debian 12+ with AppArmor), Electron's sandbox also fails to start.
+// Detect and disable sandbox only when namespaces are unavailable.
+try { execFileSync('unshare', ['--user', '--pid', 'true'], { stdio: 'ignore' }); }
+catch { app.commandLine.appendSwitch('no-sandbox'); }
 
 let win    = null;
 let tray   = null;
@@ -188,7 +193,21 @@ async function startEngine() {
         env: { ...process.env, GODEBUG: 'netdns=go', ...vlcEnv },
     });
     const onOut = (d) => console.log('[engine]', d.toString().trimEnd());
-    const onErr = (d) => console.error('[engine]', d.toString().trimEnd());
+    const onErr = (d) => {
+        const line = d.toString().trimEnd();
+        console.error('[engine]', line);
+        // Unprivileged user namespaces disabled (Ubuntu 23.10+, Debian 12+ with AppArmor).
+        // The wrapper needs clone(CLONE_NEWUSER|CLONE_NEWPID) — surface this clearly.
+        if (line.includes('operation not permitted') || line.includes('unshare') ||
+            line.includes('clone') || line.includes('user namespace')) {
+            dialog.showErrorBox(
+                'Kernel restriction detected',
+                'The FairPlay wrapper requires unprivileged user namespaces, which are disabled on this system.\n\n' +
+                'To fix:\n  sudo sysctl -w kernel.unprivileged_userns_clone=1\n\n' +
+                'Or permanently in /etc/sysctl.d/99-userns.conf:\n  kernel.unprivileged_userns_clone = 1'
+            );
+        }
+    };
     engineProc.stdout.on('data', onOut);
     engineProc.stderr.on('data', onErr);
     engineProc.on('exit', (code) => {
