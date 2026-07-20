@@ -1,5 +1,5 @@
 import * as electronMain from 'electron/main';
-const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage } = electronMain;
+const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
@@ -223,6 +223,29 @@ function stopEngine() {
     engineProc = null;
 }
 
+// ── Software compositing blur fallback ───────────────────────────────────────
+// Used on X11 or Wayland compositors that don't support blur-behind (GNOME/Sway).
+// Captures a desktop screenshot, sends it to the renderer as a blurred CSS background.
+const _isWayland = !!process.env.WAYLAND_DISPLAY;
+const _desktop   = (process.env.XDG_CURRENT_DESKTOP || '').toLowerCase();
+const _useSoftBlur = !_isWayland ||
+    ['gnome', 'sway', 'unity', 'cosmic', 'budgie'].some(d => _desktop.includes(d));
+
+let _bgTimer = null;
+async function refreshBlurBg() {
+    if (!win || !_useSoftBlur) return;
+    const { width, height } = win.getBounds();
+    const sources = await desktopCapturer.getSources({
+        types: ['screen'], thumbnailSize: { width, height }
+    }).catch(() => []);
+    if (!sources.length) return;
+    const dataUrl = sources[0].thumbnail.toDataURL();
+    win.webContents.executeJavaScript(
+        `document.documentElement.style.setProperty('--aml-fallback-bg','url("${dataUrl.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}")');` +
+        `document.documentElement.classList.add('aml-sw-blur');`
+    ).catch(() => {});
+}
+
 function createWindow() {
     win = new BrowserWindow({
         width: 1200,
@@ -264,7 +287,13 @@ function createWindow() {
             win.setOpacity(op);
             if (op >= 1) clearInterval(step);
         }, 16);
+        // Capture desktop behind window for software blur fallback (X11 / GNOME).
+        if (_useSoftBlur) refreshBlurBg();
     };
+    win.on('move', () => {
+        clearTimeout(_bgTimer);
+        _bgTimer = setTimeout(refreshBlurBg, 500);
+    });
     const showFallback = setTimeout(showWindow, 12000);
 
     ipcMain.once('app:ui-ready', () => {
@@ -297,7 +326,7 @@ function createWindow() {
     // before the page renders, unlike executeJavaScript which needs dom-ready.
     const { glassBlur = 48, glassOpacity = 0.07 } = loadPrefs();
     const earlyCss = `
-        :root { --aml-glass-blur: ${glassBlur}px; --aml-glass-opacity: ${glassOpacity}; --aml-art-tint: rgba(255,255,255,0); }
+        :root { --aml-glass-blur: ${glassBlur}px; --aml-glass-opacity: ${glassOpacity}; --aml-art-tint: rgba(255,255,255,0); --aml-fallback-bg: none; }
         html, body { background: transparent !important; overscroll-behavior: none !important; }
         /* Strip grey tint from alternating content sections — let album art / wallpaper show through */
         .section--alternate, [class*="section--alternate"] { background: transparent !important; }
@@ -306,6 +335,25 @@ function createWindow() {
             backdrop-filter: blur(var(--aml-glass-blur)) !important;
             -webkit-backdrop-filter: blur(var(--aml-glass-blur)) !important;
             border-right: 1px solid rgba(255,255,255,0.12) !important;
+        }
+        /* Software compositing blur fallback (X11 / GNOME / Sway).
+           Activated by adding .aml-sw-blur to <html> and setting --aml-fallback-bg. */
+        html.aml-sw-blur::before {
+            content: '';
+            position: fixed;
+            inset: -40px;
+            background: var(--aml-fallback-bg) center / cover no-repeat;
+            filter: blur(var(--aml-glass-blur));
+            z-index: -1;
+            pointer-events: none;
+        }
+        html.aml-sw-blur body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: rgba(10, 10, 12, 0.5);
+            z-index: -1;
+            pointer-events: none;
         }
     `;
 
