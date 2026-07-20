@@ -67,10 +67,45 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 ## Requirements
 
 - Linux x86_64
+- glibc ≥ 2.28 (Ubuntu 20.04+, Fedora 34+, Debian 11+)
 - PulseAudio or PipeWire
 - Apple Music subscription
 
-Wayland compositor with blur support (Hyprland, KWin) is recommended for the glass UI — X11 works without blur(may add software compositing in future).
+Wayland compositor with blur support (Hyprland, KWin) is recommended for the glass UI — X11 works without blur.
+
+### FUSE (AppImage)
+
+AppImages require `libfuse2`. Ubuntu 22.04+ ships FUSE 3 by default:
+
+```bash
+# Ubuntu 22.04+
+sudo apt install libfuse2
+
+# Fedora
+sudo dnf install fuse
+```
+
+Or run without FUSE:
+```bash
+./apple-music-linux.AppImage --appimage-extract-and-run
+```
+
+### Unprivileged user namespaces (Ubuntu 23.10+, Debian 12+)
+
+The FairPlay wrapper requires unprivileged user namespaces. Some newer distros restrict this via AppArmor. The app will show an error dialog if this is the case. To fix:
+
+```bash
+# Temporary
+sudo sysctl -w kernel.unprivileged_userns_clone=1
+
+# Permanent
+echo 'kernel.unprivileged_userns_clone = 1' | sudo tee /etc/sysctl.d/99-userns.conf
+sudo sysctl -p /etc/sysctl.d/99-userns.conf
+```
+
+### GNOME
+
+The system tray requires the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/). The glass blur UI is not available on GNOME (Mutter does not support the blur-behind protocol).
 
 ## Download
 
