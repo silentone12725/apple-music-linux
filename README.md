@@ -8,6 +8,11 @@
 
 An unofficial Apple Music desktop client for Linux with Lossless support
 
+<div align="center">
+  <img src="Assets/Preview_logged_out.png" alt="Logged out" width="49%"/>
+  <img src="Assets/Preview_logged_in.png" alt="Logged in" width="49%"/>
+</div>
+
 </div>
 
 > [!IMPORTANT]
@@ -27,7 +32,6 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 
 ## Contents
 
-- [Preview](#preview)
 - [Features](#features)
 - [Roadmap](#roadmap)
 - [Requirements](#requirements)
@@ -36,27 +40,21 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 - [Dev](#dev)
 - [Build AppImage](#build-appimage)
 - [Project structure](#project-structure)
-- [References](#referenced-projects)
-
-## Preview
-
-<div align="center">
-  <img src="Assets/Preview_logged_out.png" alt="Logged out" width="49%"/>
-  <img src="Assets/Preview_logged_in.png" alt="Logged in" width="49%"/>
-</div>
+- [References](#references)
 
 ## Features
 
 - **Lossless & Hi-Res** — ALAC up to 192kHz, Dolby Atmos via FairPlay-decrypted HLS
 - **MPRIS2** — bidirectional D-Bus media control: play/pause/next/prev/seek from any media key handler or taskbar widget
-- **Frosted glass UI** — transparent window with compositor blur-behind (Hyprland/KWin)
-- **Smart prefetch cache** — tracks pre-warmed before you hit play; configurable size
-- **System tray** — minimize to tray with playback controls in the context menu
-- **Wayland + X11** — tested on Hyprland and KDE Plasma
 
 <div align="center">
   <img src="Assets/MPRIS_integration.png" alt="MPRIS2 integration" width="600"/>
 </div>
+  
+- **Frosted glass UI** — transparent window with compositor blur-behind (Hyprland/KWin)
+- **Smart prefetch cache** — tracks pre-warmed before you hit play; configurable size
+- **System tray** — minimize to tray with playback controls in the context menu
+- **Wayland + X11** — tested on Hyprland and KDE Plasma
 
 ## Roadmap
 
@@ -101,9 +99,9 @@ Sign in via the web UI on first launch, the same as signing into music.apple.com
 
 This authenticates the FairPlay layer. Without it, playback falls back to AAC 256 kbps.
 
-1. Click the **gear icon** in the top-left corner of the app to open **AML Settings**
-2. Go to the **Engine Account** tab
-3. Click **Sign In** and enter your Apple ID credentials
+1. Click the **User Account** button in the bottom-left corner of the app , close it and open it a second time 
+2. open **AML Settings**
+3. Click **Sign In** and enter your Apple ID credentials wait for it to authentiacate and fetch the key in the backend should take about 20 seconds.
 
 <div align="center">
   <img src="Assets/engine_login.png" alt="AML Settings — Engine Account login" width="600"/>
