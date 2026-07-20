@@ -304,13 +304,14 @@ function createWindow() {
         clearTimeout(showFallback);
         showWindow();
     });
-    // DevTools instruments the entire JS runtime — only open when explicitly requested.
-    // Launch with: AML_DEVTOOLS=1 electron .
-    if (process.env.AML_DEVTOOLS) {
+    // DevTools: open when AML_DEVTOOLS env var is set OR when debug pref is true.
+    // Toggle via AML Settings → Developer → Enable debug mode (persists across restarts).
+    const { debug: debugPref = false } = loadPrefs();
+    if (process.env.AML_DEVTOOLS || debugPref) {
         win.webContents.openDevTools({ mode: 'detach' });
         win.webContents.on('console-message', (event) => {
             const msg = event.message ?? event;
-            if (typeof msg === 'string' && msg.startsWith('[AML')) console.log('[renderer]', msg);
+            if (typeof msg === 'string') console.log('[renderer]', msg);
         });
     }
 

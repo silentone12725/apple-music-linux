@@ -1247,6 +1247,16 @@ window.addEventListener("unhandledrejection", (e) => {
     pwSzRow.appendChild(pwSzVal);
     cBody.appendChild(makeRow("Pre-warm size limit", pwSzRow, null, true));
     dlg.appendChild(cWrap);
+    const { wrap: devWrap, body: devBody } = makeSection("Developer");
+    const debugToggle = document.createElement("input");
+    debugToggle.type = "checkbox";
+    debugToggle.checked = !!prefs.debug;
+    debugToggle.style.cssText = "width:16px;height:16px;accent-color:#0a84ff;cursor:pointer;";
+    debugToggle.onchange = () => {
+      window.amlBridge?.setPref("debug", debugToggle.checked);
+    };
+    devBody.appendChild(makeRow("Enable debug mode", debugToggle, "Opens DevTools and full console on next launch", true));
+    dlg.appendChild(devWrap);
     if (!dlg.open) {
       dlg.classList.remove("aml-closing");
       dlg.classList.add("aml-opening");
