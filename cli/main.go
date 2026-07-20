@@ -45,7 +45,6 @@ var (
 	dl_aac             bool
 	dl_select          bool
 	dl_song            bool
-	debug_mode         bool
 	play_stream        bool
 	stream_player      string
 	save_m3u8_playlist bool
@@ -1012,48 +1011,6 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 		return err
 	}
 	meta := album.Resp
-	if debug_mode {
-		fmt.Println(meta.Data[0].Attributes.ArtistName)
-		fmt.Println(meta.Data[0].Attributes.Name)
-
-		for trackNum, track := range meta.Data[0].Relationships.Tracks.Data {
-			trackNum++
-			fmt.Printf("\nTrack %d of %d:\n", trackNum, len(meta.Data[0].Relationships.Tracks.Data))
-			fmt.Printf("%02d. %s\n", trackNum, track.Attributes.Name)
-
-			manifest, err := ampapi.GetSongResp(storefront, track.ID, album.Language, token)
-			if err != nil {
-				fmt.Printf("Failed to get manifest for track %d: %v\n", trackNum, err)
-				continue
-			}
-
-			var m3u8Url string
-			if manifest.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls != "" {
-				m3u8Url = manifest.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls
-			}
-			needCheck := false
-			if Config.GetM3u8Mode == "all" {
-				needCheck = true
-			} else if Config.GetM3u8Mode == "hires" && contains(track.Attributes.AudioTraits, "hi-res-lossless") {
-				needCheck = true
-			}
-			if needCheck {
-				fullM3u8Url, err := checkM3u8(track.ID, "song")
-				if err == nil && strings.HasSuffix(fullM3u8Url, ".m3u8") {
-					m3u8Url = fullM3u8Url
-				} else {
-					fmt.Println("Failed to get best quality m3u8 from device m3u8 port, will use m3u8 from Web API")
-				}
-			}
-
-			_, _, err = extractMedia(m3u8Url)
-			if err != nil {
-				fmt.Printf("Failed to extract quality info for track %d: %v\n", trackNum, err)
-				continue
-			}
-		}
-		return nil
-	}
 	var Codec string
 	if dl_atmos {
 		Codec = "ATMOS"
@@ -1263,7 +1220,6 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 						if err != nil {
 							fmt.Println("Playback error:", err)
 						} else {
-							_ = album.Tracks[i].Resp.Attributes.Name
 							session.WaitDone()
 						}
 						ResetStreamPlaylist()
@@ -1311,7 +1267,6 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 		if err != nil {
 			fmt.Println("Playback error:", err)
 		} else {
-			_ = album.Name
 			session.WaitDone()
 		}
 		ResetStreamPlaylist()
@@ -1332,48 +1287,6 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 		return err
 	}
 	meta := playlist.Resp
-	if debug_mode {
-		fmt.Println(meta.Data[0].Attributes.ArtistName)
-		fmt.Println(meta.Data[0].Attributes.Name)
-
-		for trackNum, track := range meta.Data[0].Relationships.Tracks.Data {
-			trackNum++
-			fmt.Printf("\nTrack %d of %d:\n", trackNum, len(meta.Data[0].Relationships.Tracks.Data))
-			fmt.Printf("%02d. %s\n", trackNum, track.Attributes.Name)
-
-			manifest, err := ampapi.GetSongResp(storefront, track.ID, playlist.Language, token)
-			if err != nil {
-				fmt.Printf("Failed to get manifest for track %d: %v\n", trackNum, err)
-				continue
-			}
-
-			var m3u8Url string
-			if manifest.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls != "" {
-				m3u8Url = manifest.Data[0].Attributes.ExtendedAssetUrls.EnhancedHls
-			}
-			needCheck := false
-			if Config.GetM3u8Mode == "all" {
-				needCheck = true
-			} else if Config.GetM3u8Mode == "hires" && contains(track.Attributes.AudioTraits, "hi-res-lossless") {
-				needCheck = true
-			}
-			if needCheck {
-				fullM3u8Url, err := checkM3u8(track.ID, "song")
-				if err == nil && strings.HasSuffix(fullM3u8Url, ".m3u8") {
-					m3u8Url = fullM3u8Url
-				} else {
-					fmt.Println("Failed to get best quality m3u8 from device m3u8 port, will use m3u8 from Web API")
-				}
-			}
-
-			_, _, err = extractMedia(m3u8Url)
-			if err != nil {
-				fmt.Printf("Failed to extract quality info for track %d: %v\n", trackNum, err)
-				continue
-			}
-		}
-		return nil
-	}
 	var Codec string
 	if dl_atmos {
 		Codec = "ATMOS"
@@ -1581,7 +1494,6 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 		if err != nil {
 			fmt.Println("Playback error:", err)
 		} else {
-			_ = playlist.Name
 			session.WaitDone()
 		}
 		ResetStreamPlaylist()
