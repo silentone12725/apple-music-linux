@@ -266,6 +266,7 @@ function createWindow() {
             contextIsolation: true,
             nodeIntegration: false,
             partition: 'persist:apple-music',
+            devTools: true,
         },
     });
 
