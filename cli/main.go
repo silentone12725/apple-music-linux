@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +32,6 @@ import (
 	"main/utils/structs"
 	"main/utils/task"
 
-	"github.com/fatih/color"
 	"github.com/grafov/m3u8"
 	"github.com/spf13/pflag"
 
@@ -1265,9 +1263,7 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 						if err != nil {
 							fmt.Println("Playback error:", err)
 						} else {
-							if term.IsTerminal(int(os.Stdin.Fd())) {
-								tuiNowPlaying(album.Tracks[i].Resp.Attributes.Name, session)
-							}
+							_ = album.Tracks[i].Resp.Attributes.Name
 							session.WaitDone()
 						}
 						ResetStreamPlaylist()
@@ -1315,9 +1311,7 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 		if err != nil {
 			fmt.Println("Playback error:", err)
 		} else {
-			if term.IsTerminal(int(os.Stdin.Fd())) {
-				tuiNowPlaying(album.Name, session)
-			}
+			_ = album.Name
 			session.WaitDone()
 		}
 		ResetStreamPlaylist()
@@ -1587,9 +1581,7 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 		if err != nil {
 			fmt.Println("Playback error:", err)
 		} else {
-			if term.IsTerminal(int(os.Stdin.Fd())) {
-				tuiNowPlaying(playlist.Name, session)
-			}
+			_ = playlist.Name
 			session.WaitDone()
 		}
 		ResetStreamPlaylist()
