@@ -41,8 +41,8 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 ## Preview
 
 <div align="center">
-  <img src="assets/preview-loggedout.png" alt="Logged out" width="49%"/>
-  <img src="assets/preview-loggedin.png" alt="Logged in" width="49%"/>
+  <img src="Assets/Preview_logged_out.png" alt="Logged out" width="49%"/>
+  <img src="Assets/Preview_logged_in.png" alt="Logged in" width="49%"/>
 </div>
 
 ## Features
@@ -55,7 +55,7 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 - **Wayland + X11** — tested on Hyprland and KDE Plasma
 
 <div align="center">
-  <img src="assets/MPRIS_integration.png" alt="MPRIS2 integration" width="600"/>
+  <img src="Assets/MPRIS_integration.png" alt="MPRIS2 integration" width="600"/>
 </div>
 
 ## Roadmap
@@ -94,7 +94,7 @@ Two separate sign-ins are required.
 Sign in via the web UI on first launch, the same as signing into music.apple.com in a browser.
 
 <div align="center">
-  <img src="assets/login-electron.png" alt="Apple Music web login" width="600"/>
+  <img src="Assets/electron_login.png" alt="Apple Music web login" width="600"/>
 </div>
 
 ### 2. Engine DRM account (lossless & hi-res)
@@ -106,7 +106,7 @@ This authenticates the FairPlay layer. Without it, playback falls back to AAC 25
 3. Click **Sign In** and enter your Apple ID credentials
 
 <div align="center">
-  <img src="assets/login-aml.png" alt="AML Settings — Engine Account login" width="600"/>
+  <img src="Assets/engine_login.png" alt="AML Settings — Engine Account login" width="600"/>
 </div>
 
 ## Dev
