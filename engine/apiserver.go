@@ -1589,7 +1589,7 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "https://music.apple.com")
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range, Last-Event-ID")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range, Last-Event-ID, Cache-Control")
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Type, Content-Length")
 	if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
 		w.Header().Set("Access-Control-Allow-Private-Network", "true")
