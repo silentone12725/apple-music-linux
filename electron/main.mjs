@@ -118,12 +118,16 @@ function ensureEngineConfig() {
         return;
     }
 
-    // Patch existing config: add wrapper paths if absent (old installs lacked them).
+    // Patch existing config: add missing wrapper paths or update stale ones.
     let content = readFile(cfgPath, 'utf8');
     let changed = false;
     for (const [key, val] of [['wrapper-binary-path', wrapperBin], ['wrapper-base-dir', wrapperBase]]) {
+        const line = `${key}: "${val}"`;
         if (!content.includes(`${key}:`)) {
-            content += `${key}: "${val}"\n`;
+            content += `${line}\n`;
+            changed = true;
+        } else if (!content.includes(line)) {
+            content = content.replace(new RegExp(`${key}:.*`), line);
             changed = true;
         }
     }
