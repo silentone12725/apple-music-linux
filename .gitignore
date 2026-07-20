@@ -16,58 +16,58 @@ electron/dist/resources/app/*.mjs
 electron/dist/resources/app/*.cjs
 
 # ── Go binaries ───────────────────────────────────────────────────────────────
-# CLI / engine build artefacts (compiled by `go build ./cli`)
+# Engine build artefacts (compiled by `go build ./engine`)
 apple-music-cli
-cli/apple-music-cli
-cli/main
-cli/bench
-cli/startupbench
-cli/drmcheck
-cli/drminspect
-cli/hlscompare
-cli/mvcompare
-cli/parity
-cli/qacompare
-cli/playcheck
-cli/protoinspect
-cli/mockwrapper
-cli/test-server
+engine/apple-music-cli
+engine/main
+engine/bench
+engine/startupbench
+engine/drmcheck
+engine/drminspect
+engine/hlscompare
+engine/mvcompare
+engine/parity
+engine/qacompare
+engine/playcheck
+engine/protoinspect
+engine/mockwrapper
+engine/test-server
 # Any stray test binary at repo root
 test_bin
 
 # Go workspace sum (generated, not source of truth)
 go.work.sum
 
-# ── Engine CLI config ─────────────────────────────────────────────────────────
+# ── Engine config ─────────────────────────────────────────────────────────────
 # config.yaml.example IS committed; the live file with tokens is not
-cli/config.yaml
+engine/config.yaml
 
 # ── Wrapper / Android container runtime state ─────────────────────────────────
 # These files are written by the running wrapper and must not be committed.
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/MUSIC_TOKEN
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/STOREFRONT_ID
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/fsi.pdat
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/IC-Info.sids
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/531EA4BB8D4B206263577F83ADB3948181F99DA3
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/mpl_db/cookies.sqlitedb-shm
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/mpl_db/cookies.sqlitedb-wal
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/mpl_db/httpcache.sqlitedb
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/mpl_db/httpcache.sqlitedb-shm
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/mpl_db/httpcache.sqlitedb-wal
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/mpl_db/kvs.sqlitedb-shm
-Wrapper.x86_64.latest/rootfs/data/data/com.apple.android.music/files/mpl_db/kvs.sqlitedb-wal
-Wrapper.x86_64.latest/rootfs/home/
-Wrapper.x86_64.latest/rootfs/tmp/
-Wrapper.x86_64.latest/rootfs/my_test_env/
+wrapper/rootfs/data/data/com.apple.android.music/files/MUSIC_TOKEN
+wrapper/rootfs/data/data/com.apple.android.music/files/STOREFRONT_ID
+wrapper/rootfs/data/data/com.apple.android.music/files/fsi.pdat
+wrapper/rootfs/data/data/com.apple.android.music/files/IC-Info.sids
+wrapper/rootfs/data/data/com.apple.android.music/files/531EA4BB8D4B206263577F83ADB3948181F99DA3
+wrapper/rootfs/data/data/com.apple.android.music/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA
+wrapper/rootfs/data/data/com.apple.android.music/files/mpl_db/cookies.sqlitedb-shm
+wrapper/rootfs/data/data/com.apple.android.music/files/mpl_db/cookies.sqlitedb-wal
+wrapper/rootfs/data/data/com.apple.android.music/files/mpl_db/httpcache.sqlitedb
+wrapper/rootfs/data/data/com.apple.android.music/files/mpl_db/httpcache.sqlitedb-shm
+wrapper/rootfs/data/data/com.apple.android.music/files/mpl_db/httpcache.sqlitedb-wal
+wrapper/rootfs/data/data/com.apple.android.music/files/mpl_db/kvs.sqlitedb-shm
+wrapper/rootfs/data/data/com.apple.android.music/files/mpl_db/kvs.sqlitedb-wal
+wrapper/rootfs/home/
+wrapper/rootfs/tmp/
+wrapper/rootfs/my_test_env/
 
 # Same for arm64 if it is ever reinstated
-Wrapper.arm64.latest/rootfs/data/data/com.apple.android.music/files/MUSIC_TOKEN
-Wrapper.arm64.latest/rootfs/data/data/com.apple.android.music/files/STOREFRONT_ID
-Wrapper.arm64.latest/rootfs/data/data/com.apple.android.music/files/fsi.pdat
-Wrapper.arm64.latest/rootfs/data/data/com.apple.android.music/files/IC-Info.sids
-Wrapper.arm64.latest/rootfs/home/
-Wrapper.arm64.latest/rootfs/tmp/
+wrapper-arm64/rootfs/data/data/com.apple.android.music/files/MUSIC_TOKEN
+wrapper-arm64/rootfs/data/data/com.apple.android.music/files/STOREFRONT_ID
+wrapper-arm64/rootfs/data/data/com.apple.android.music/files/fsi.pdat
+wrapper-arm64/rootfs/data/data/com.apple.android.music/files/IC-Info.sids
+wrapper-arm64/rootfs/home/
+wrapper-arm64/rootfs/tmp/
 
 # ── Verification artefacts ────────────────────────────────────────────────────
 verification/wire-traces/*.txt
