@@ -234,6 +234,11 @@ const _useSoftBlur = !_isWayland ||
 let _bgTimer = null;
 async function refreshBlurBg() {
     if (!win || !_useSoftBlur) return;
+    // Always activate the class — dark tint + CSS backdrop-filter works even
+    // without a screenshot. Background URL is best-effort on top.
+    win.webContents.executeJavaScript(
+        `document.documentElement.classList.add('aml-sw-blur');`
+    ).catch(() => {});
     const { width, height } = win.getBounds();
     const sources = await desktopCapturer.getSources({
         types: ['screen'], thumbnailSize: { width, height }
@@ -241,8 +246,7 @@ async function refreshBlurBg() {
     if (!sources.length) return;
     const dataUrl = sources[0].thumbnail.toDataURL();
     win.webContents.executeJavaScript(
-        `document.documentElement.style.setProperty('--aml-fallback-bg','url("${dataUrl.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}")');` +
-        `document.documentElement.classList.add('aml-sw-blur');`
+        `document.documentElement.style.setProperty('--aml-fallback-bg','url("${dataUrl.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}") ');`
     ).catch(() => {});
 }
 
