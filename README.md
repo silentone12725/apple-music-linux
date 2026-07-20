@@ -51,10 +51,10 @@ An unofficial Apple Music desktop client for Linux with Lossless support
   <img src="Assets/MPRIS_integration.png" alt="MPRIS2 integration" width="600"/>
 </div>
   
-- **Frosted glass UI** — transparent window with compositor blur-behind (Hyprland/KWin)
+- **Frosted glass UI** — compositor blur-behind on Hyprland/KWin; software blur fallback on X11, GNOME, and Sway
 - **Smart prefetch cache** — tracks pre-warmed before you hit play; configurable size
 - **System tray** — minimize to tray with playback controls in the context menu
-- **Wayland + X11** — tested on Hyprland and KDE Plasma
+- **Wayland + X11** — tested on Hyprland, KDE Plasma, GNOME, and Sway
 
 ## Roadmap
 
@@ -71,7 +71,7 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 - PulseAudio or PipeWire
 - Apple Music subscription
 
-Wayland compositor with blur support (Hyprland, KWin) is recommended for the glass UI — X11 works without blur.
+Wayland compositor with blur support (Hyprland, KWin) gives the best glass UI. X11, GNOME, and Sway use a software blur fallback (blurred desktop screenshot as background).
 
 ### FUSE (AppImage)
 
@@ -105,7 +105,7 @@ sudo sysctl -p /etc/sysctl.d/99-userns.conf
 
 ### GNOME
 
-The system tray requires the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/). The glass blur UI is not available on GNOME (Mutter does not support the blur-behind protocol).
+The system tray requires the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/). The glass UI uses a software blur fallback on GNOME — compositor blur-behind is not supported by Mutter.
 
 ## Download
 
