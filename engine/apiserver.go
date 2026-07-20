@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"main/engine/apple"
+	"main/engine/diskcache"
 	"main/engine/drm"
 	"main/engine/export"
 	"main/engine/pipeline"
@@ -332,6 +333,7 @@ type APIServer struct {
 	backendName string               // configured preferred backend (single-backend case)
 	backendSel  drm.BackendSelection // non-nil when a fallback composite is in use
 	scheduler   *prefetch.Scheduler  // background cache-warming scheduler
+	diskCache   *diskcache.Cache     // per-track decrypted audio disk cache
 }
 
 // NewAPIServer wires all routes.
@@ -438,6 +440,22 @@ func NewAPIServer(port int) *APIServer {
 			s.scheduler.PruneExpiredPreWarmed()
 		}
 	}()
+
+	// Disk cache — decrypted per-track audio; falls back gracefully on error.
+	// Limits (persistLimitMB, persistTTLDays) are pushed by the frontend on
+	// startup via PUT /api/v1/cache/config; zero means unlimited / no TTL.
+	if cacheBase, err := os.UserCacheDir(); err == nil {
+		if dc, err := diskcache.New(filepath.Join(cacheBase, "apple-music-linux", "playback")); err == nil {
+			s.diskCache = dc
+			go func() {
+				t := time.NewTicker(time.Hour)
+				defer t.Stop()
+				for range t.C {
+					s.diskCache.EvictExpired()
+				}
+			}()
+		}
+	}
 
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
@@ -1007,6 +1025,32 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Disk cache: only for full-track raw streams (no transcode, no seek).
+	// Seeked requests go directly to the pipeline; cached files support natural
+	// byte-range seeking so the client can seek without a new session.
+	if !needsAAC && !needsFLAC && seekSec == 0 && s.diskCache != nil {
+		qualifier := sess.Codec
+		if rawMode {
+			qualifier += "_raw"
+		}
+		if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
+			defer f.Close()
+			w.Header().Set("Content-Type", "audio/mp4")
+			http.ServeContent(w, r, "", time.Time{}, f)
+			return
+		}
+		// Cache miss: stream and tee to disk.
+		pw, _ := s.diskCache.BeginPut(sess.AssetID, qualifier)
+		tee := diskcache.NewTee(nil, pw) // dst set per-write below
+		streamMedia(w, r, func(dst io.Writer) error {
+			tee.SetDst(dst)
+			err := s.pm.Stream(r.Context(), id, pipeline.KindAudio, tee)
+			tee.Finish(err)
+			return err
+		}, "audio/mp4")
+		return
+	}
+
 	if seekSec > 0 {
 		// Pre-compute and set X-Actual-Start before the first byte is written.
 		// GetSeekStart is pure arithmetic on the already-fetched playlist —
@@ -1244,6 +1288,9 @@ func (s *APIServer) handleCacheConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.scheduler.SetCacheConfig(cfg)
+	if s.diskCache != nil {
+		s.diskCache.SetConfig(cfg.PersistLimitMB, cfg.PersistTTLDays)
+	}
 	writeJSON(w, http.StatusOK, s.scheduler.GetCacheConfig())
 }
 
@@ -1253,12 +1300,26 @@ func (s *APIServer) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 	if prewarmLimitBytes == 0 {
 		prewarmLimitBytes = 1024 * 1024 * 1024 // 1 GB default shown in UI
 	}
+
+	persistSection := map[string]any{"available": false}
+	if s.diskCache != nil {
+		sizeBytes, count := s.diskCache.Stats()
+		limitBytes := cfg.PersistLimitMB * 1024 * 1024
+		if limitBytes == 0 {
+			limitBytes = 500 * 1024 * 1024 // 500 MB default shown in UI
+		}
+		persistSection = map[string]any{
+			"available":  true,
+			"sizeBytes":  sizeBytes,
+			"limitBytes": limitBytes,
+			"ttlDays":    cfg.PersistTTLDays,
+			"count":      count,
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		// No disk-persist cache implemented yet — hide that section in UI.
-		"persistent": map[string]any{"available": false},
+		"persistent": persistSection,
 		"prewarm": map[string]any{
-			// Each pre-warmed session is a live stream handle; byte size is
-			// unknown without probing the backend, so we report entry count only.
 			"entries":    s.scheduler.PrewarmCount(),
 			"sizeBytes":  0,
 			"limitBytes": prewarmLimitBytes,
@@ -1268,6 +1329,9 @@ func (s *APIServer) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *APIServer) handleCachePlaybackDelete(w http.ResponseWriter, r *http.Request) {
 	s.scheduler.ClearPreWarmed()
+	if s.diskCache != nil {
+		s.diskCache.Clear()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
