@@ -10,7 +10,7 @@ process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync } from 'fs';
+import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream } from 'fs';
 import os from 'os';
 
 const require = createRequire(import.meta.url);
@@ -309,6 +309,17 @@ function createWindow() {
     // Toggle via AML Settings → Developer → Enable debug mode (persists across restarts).
     const { debug: debugPref = false } = loadPrefs();
     if (process.env.AML_DEVTOOLS || debugPref) {
+        // Log file: new file per run, in ~/.config/apple-music-linux/logs/
+        const logsDir = path.join(CONFIG_DIR, 'logs');
+        mkdirSync(logsDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const logStream = createWriteStream(path.join(logsDir, `debug-${stamp}.log`));
+        const _write = (tag, args) => logStream.write(`[${new Date().toISOString()}] ${tag} ${args.join(' ')}\n`);
+        const origLog = console.log, origError = console.error, origWarn = console.warn;
+        console.log   = (...a) => { origLog(...a);   _write('LOG  ', a); };
+        console.error = (...a) => { origError(...a); _write('ERROR', a); };
+        console.warn  = (...a) => { origWarn(...a);  _write('WARN ', a); };
+
         win.webContents.openDevTools({ mode: 'detach' });
         win.webContents.on('console-message', (event) => {
             const msg = event.message ?? event;
