@@ -95,10 +95,10 @@ function ensureEngineConfig() {
         os.homedir(), '.config', 'apple-music-linux', 'wrapper-data',
         'rootfs', 'data', 'data', 'com.apple.android.music', 'files'
     );
-    // Wrapper binary: packaged at <resources>/wrapper, dev fallback beside Wrapper.x86_64.latest/
+    // Wrapper binary: packaged at <resources>/wrapper, dev fallback beside wrapper/
     const wrapperBin = app.isPackaged && existsSync(path.join(process.resourcesPath, 'wrapper'))
         ? path.join(process.resourcesPath, 'wrapper')
-        : path.join(__dirname, '..', 'Wrapper.x86_64.latest', 'wrapper-rootless');
+        : path.join(__dirname, '..', 'wrapper', 'wrapper-rootless');
 
     if (!existsSync(cfgPath)) {
         const stub = [
