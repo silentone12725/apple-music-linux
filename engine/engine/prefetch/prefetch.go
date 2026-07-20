@@ -570,6 +570,28 @@ func (s *Scheduler) PruneExpiredPreWarmed() {
 	}
 }
 
+// PrewarmCount returns the number of currently pre-warmed sessions.
+func (s *Scheduler) PrewarmCount() int {
+	s.mu.RLock()
+	n := len(s.preWarmed)
+	s.mu.RUnlock()
+	return n
+}
+
+// ClearPreWarmed releases all pre-warmed sessions and removes them from the map.
+func (s *Scheduler) ClearPreWarmed() {
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.preWarmed))
+	for _, entry := range s.preWarmed {
+		ids = append(ids, entry.sessionID)
+	}
+	s.preWarmed = make(map[string]preWarmedEntry)
+	s.mu.Unlock()
+	for _, id := range ids {
+		s.pm.Release(id)
+	}
+}
+
 // ── Workers ───────────────────────────────────────────────────────────────────
 
 func (s *Scheduler) worker() {
