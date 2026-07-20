@@ -705,6 +705,7 @@ function createWindow() {
         // Vision is independent. Combine into one executeJavaScript call to avoid
         // 4 separate round-trips adding ~2-3s of sequential injection delay.
         const combined = [
+            `window._amlEngineURL='http://127.0.0.1:${ENGINE_PORT}';`,
             sseCode    ? `try{${sseCode}}catch(e){console.error('[AML sse]',e.message)}`    : '',
             visionCode ? `try{${visionCode}}catch(e){console.error('[AML vision]',e.message)}` : '',
             cacheCode  ? `try{${cacheCode}}catch(e){console.error('[AML cache]',e.name,e.message,e.stack)}`  : '',

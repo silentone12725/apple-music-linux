@@ -45,8 +45,6 @@ var (
 	dl_aac             bool
 	dl_select          bool
 	dl_song            bool
-	play_stream        bool
-	stream_player      string
 	save_m3u8_playlist bool
 	api_port           int
 	Config             structs.ConfigSet
@@ -113,23 +111,6 @@ func checkUrl(url string) (string, string) {
 	} else {
 		return matches[0][1], matches[0][2]
 	}
-}
-
-// resolvePlayer picks a player binary for streaming.
-// Explicit --player flag wins; otherwise auto-detects mpv → vlc → ffplay.
-func resolvePlayer() string {
-	if stream_player != "" {
-		if _, err := exec.LookPath(stream_player); err == nil {
-			return stream_player
-		}
-		fmt.Printf("⚠ Player %q not found, falling back to auto-detect\n", stream_player)
-	}
-	for _, p := range []string{"mpv", "vlc", "ffplay"} {
-		if _, err := exec.LookPath(p); err == nil {
-			return p
-		}
-	}
-	return ""
 }
 
 func writeCover(sanAlbumFolder, name string, url string) (string, error) {
@@ -499,113 +480,6 @@ func ripTrack(track *task.Track, token string, mediaUserToken string) {
 		considerConverted = true
 	}
 	// Existence check now considers converted output (if original was deleted)
-	// ── STREAMING ADDITIONS ────────────────────────────────────────────────────
-	if play_stream {
-		var playPath string
-		if res, ok := takePrefetchResult(track.ID); ok {
-			if res.err != nil {
-				fmt.Println("⚠ Prefetch failed, downloading...", res.err)
-			} else if res.path != "" {
-				playPath = saveToDiskCache(res.path, track.ID, false)
-				fmt.Println("▶️  Queued from prefetch:", playPath)
-				AddToStreamPlaylist(playPath, track.Resp.Attributes.AudioTraits)
-				return
-			}
-		}
-		if needDlAacLc {
-			fmt.Println("\n▶️ Starting AAC stream...")
-			// Check disk cache first
-			if cached := checkDiskCache(track.ID, true); cached != "" {
-				fmt.Println("▶️  Queued from cache:", cached)
-				AddToStreamPlaylist(cached, track.Resp.Attributes.AudioTraits)
-				return
-			}
-			pr, pw := io.Pipe()
-			cachePath := streamDiskCachePath(track.ID, true)
-			cacheFile, cacheErr := os.Create(cachePath)
-			go func() {
-				var w io.Writer = pw
-				if cacheErr == nil {
-					w = io.MultiWriter(pw, cacheFile)
-				}
-				err := runv3.RunStream(track.ID, token, mediaUserToken, w)
-				if cacheErr == nil {
-					cacheFile.Close()
-				}
-				pw.CloseWithError(err)
-			}()
-			var aacCmd *exec.Cmd
-			switch resolvePlayer() {
-			case "mpv":
-				sampleRate, audioFormat := traitsToFormat(track.Resp.Attributes.AudioTraits)
-				aacCmd = exec.Command("mpv",
-					"--hwdec=auto",
-					"--audio-device=pipewire",
-					fmt.Sprintf("--audio-samplerate=%s", sampleRate),
-					fmt.Sprintf("--audio-format=%s", audioFormat),
-					"--no-terminal",
-					"-",
-				)
-			case "vlc":
-				aacCmd = exec.Command("vlc", "--intf", "dummy", "--play-and-exit", "-")
-			case "ffplay":
-				aacCmd = exec.Command("ffplay", "-i", "pipe:0", "-nodisp", "-autoexit")
-			default:
-				fmt.Println("Missing media player (mpv, vlc, or ffplay)")
-				pr.Close()
-				return
-			}
-			aacCmd.Stdin = pr
-			aacCmd.Stdout = os.Stdout
-			aacCmd.Stderr = os.Stderr
-			if err := aacCmd.Run(); err != nil {
-				fmt.Println("Playback error:", err)
-			}
-			// Note: AAC live stream can't be queued in playlist mode
-			// For playlist support, use ALAC quality
-			return
-		}
-		// Check disk cache first for ALAC
-		if cached := checkDiskCache(track.ID, false); cached != "" {
-			fmt.Println("▶️  Queued from cache:", cached)
-			AddToStreamPlaylist(cached, track.Resp.Attributes.AudioTraits)
-			return
-		}
-		trackM3u8Url, _, err := extractMedia(track.M3u8)
-		if err != nil {
-			fmt.Println("Failed to extract info from manifest:", err)
-			return
-		}
-		tmpDir := "/dev/shm"
-		if _, serr := os.Stat(tmpDir); serr != nil {
-			tmpDir = os.TempDir()
-		}
-		tf, err := os.CreateTemp(tmpDir, "am-stream-*.m4a")
-		if err != nil {
-			fmt.Println("Temp file error:", err)
-			return
-		}
-		tempPath := tf.Name()
-		tf.Close()
-		os.Remove(tempPath)
-		if decErr := runv2.Run(track.ID, trackM3u8Url, tempPath, Config); decErr != nil {
-			fmt.Println("Decrypt error:", decErr)
-			os.Remove(tempPath)
-			return
-		}
-		// MP4Box converts fMP4 → regular m4a so mpv sees the full duration.
-		// Without this, mpv plays only the first fragment and stops.
-		mp4boxCmd := exec.Command("MP4Box", "-noprog", "-itags", "tool=", tempPath)
-		mp4boxCmd.Stderr = io.Discard
-		mp4boxCmd.Stdout = io.Discard
-		mp4boxCmd.Run()
-		playPath = saveToDiskCache(tempPath, track.ID, false)
-		fmt.Println("▶️  Queued:", playPath)
-		AddToStreamPlaylist(playPath, track.Resp.Attributes.AudioTraits)
-		return
-	}
-	// ── END STREAMING ADDITIONS ─────────────────────────────────────────────────
-
 	existsOriginal, err := fileExists(trackPath)
 	if err != nil {
 		fmt.Println("Failed to check if track exists.")
@@ -826,11 +700,6 @@ func ripStation(albumId string, token string, storefront string, mediaUserToken 
 	alacFolder := Config.AlacSaveFolder
 	atmosFolder := Config.AtmosSaveFolder
 	aacFolder := Config.AacSaveFolder
-	if play_stream {
-		alacFolder = Config.AlacStreamFolder
-		atmosFolder = Config.AtmosStreamFolder
-		aacFolder = Config.AacStreamFolder
-	}
 	singerFolder := filepath.Join(alacFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
 	if dl_atmos {
 		singerFolder = filepath.Join(atmosFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
@@ -1044,11 +913,6 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 	alacFolder := Config.AlacSaveFolder
 	atmosFolder := Config.AtmosSaveFolder
 	aacFolder := Config.AacSaveFolder
-	if play_stream {
-		alacFolder = Config.AlacStreamFolder
-		atmosFolder = Config.AtmosStreamFolder
-		aacFolder = Config.AacStreamFolder
-	}
 	singerFolder := filepath.Join(alacFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
 	if dl_atmos {
 		singerFolder = filepath.Join(atmosFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
@@ -1214,16 +1078,6 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 			for i := range album.Tracks {
 				if urlArg_i == album.Tracks[i].ID {
 					ripTrack(&album.Tracks[i], token, mediaUserToken)
-					if play_stream && len(streamPlaylistPaths) > 0 {
-						fmt.Printf("\n▶️  Starting song: %d tracks\n", len(streamPlaylistPaths))
-						session, err := PlayMediaPlaylist(streamPlaylistPaths, streamPlaylistTraits)
-						if err != nil {
-							fmt.Println("Playback error:", err)
-						} else {
-							session.WaitDone()
-						}
-						ResetStreamPlaylist()
-					}
 					return nil
 				}
 			}
@@ -1237,7 +1091,6 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 		selected = album.ShowSelect()
 	}
 	startIdx := len(AddedTracks)
-	ResetStreamPlaylist()
 	// Kick off metadata prefetch for the first few tracks before the loop.
 	PrefetchAlbumMeta(context.Background(), album.Tracks, token, mediaUserToken)
 
@@ -1254,22 +1107,8 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 			if lookahead <= len(album.Tracks) {
 				PrefetchMeta(context.Background(), &album.Tracks[lookahead-1], token, mediaUserToken)
 			}
-			// Prefetch audio download for next track (ALAC stream mode).
-			if play_stream && i < len(album.Tracks) && isInArray(selected, i+1) {
-				startPrefetchTrack(&album.Tracks[i], token, mediaUserToken)
-			}
 			ripTrack(&album.Tracks[i-1], token, mediaUserToken)
 		}
-	}
-	if play_stream && len(streamPlaylistPaths) > 0 {
-		fmt.Printf("\n▶️  Starting album: %d tracks\n", len(streamPlaylistPaths))
-		session, err := PlayMediaPlaylist(streamPlaylistPaths, streamPlaylistTraits)
-		if err != nil {
-			fmt.Println("Playback error:", err)
-		} else {
-			session.WaitDone()
-		}
-		ResetStreamPlaylist()
 	}
 	if len(AddedTracks) > startIdx {
 		if err := writeM3UPlaylist(albumFolderPath, albumFolderName, AddedTracks[startIdx:]); err != nil {
@@ -1312,11 +1151,6 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 	alacFolder := Config.AlacSaveFolder
 	atmosFolder := Config.AtmosSaveFolder
 	aacFolder := Config.AacSaveFolder
-	if play_stream {
-		alacFolder = Config.AlacStreamFolder
-		atmosFolder = Config.AtmosStreamFolder
-		aacFolder = Config.AacStreamFolder
-	}
 	singerFolder := filepath.Join(alacFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
 	if dl_atmos {
 		singerFolder = filepath.Join(atmosFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
@@ -1472,7 +1306,6 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 		selected = playlist.ShowSelect()
 	}
 	startIdx := len(AddedTracks)
-	ResetStreamPlaylist()
 	PrefetchAlbumMeta(context.Background(), playlist.Tracks, token, mediaUserToken)
 	for i := range playlist.Tracks {
 		i++
@@ -1487,16 +1320,6 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 			}
 			ripTrack(&playlist.Tracks[i-1], token, mediaUserToken)
 		}
-	}
-	if play_stream && len(streamPlaylistPaths) > 0 {
-		fmt.Printf("\n▶️  Starting playlist: %d tracks\n", len(streamPlaylistPaths))
-		session, err := PlayMediaPlaylist(streamPlaylistPaths, streamPlaylistTraits)
-		if err != nil {
-			fmt.Println("Playback error:", err)
-		} else {
-			session.WaitDone()
-		}
-		ResetStreamPlaylist()
 	}
 	if len(AddedTracks) > startIdx {
 		if err := writeM3UPlaylist(playlistFolderPath, playlistFolder, AddedTracks[startIdx:]); err != nil {
@@ -1862,315 +1685,6 @@ func mvDownloader(adamID string, saveDir string, token string, storefront string
 	})
 
 	return mvOutPath, nil
-}
-
-// mvStreamToPlayer streams a music video to the player without waiting for the
-// full download. Architecture:
-//
-//	Video segments → decrypt → named pipe ─┐
-//	                                        ├─ ffmpeg mux → HTTP server → player
-//	Audio segments → decrypt → named pipe ─┘
-//
-// Video is typically tiny (2-4 MB) and downloads in ~1-2s. ffmpeg buffers all
-// video frames and interleaves them with audio frames as audio arrives.  The
-// player connects immediately and begins playback once ffmpeg has enough data.
-func mvStreamToPlayer(adamID, token, storefront, mediaUserToken string) error {
-	mvm3u8url, _, _, _ := runv3.GetWebplayback(adamID, token, mediaUserToken, true)
-	if mvm3u8url == "" {
-		return errors.New("media-user-token may be wrong or expired")
-	}
-	videom3u8url, err := extractVideo(mvm3u8url)
-	if err != nil {
-		return fmt.Errorf("extract video stream: %w", err)
-	}
-	audiom3u8url, err := extractMvAudio(mvm3u8url)
-	if err != nil {
-		return fmt.Errorf("extract audio stream: %w", err)
-	}
-
-	// Fetch decryption keys for video and audio in parallel.
-	type keyRes struct {
-		kau string
-		err error
-	}
-	vidCh, audCh := make(chan keyRes, 1), make(chan keyRes, 1)
-	go func() {
-		kau, e := runv3.Run(adamID, videom3u8url, token, mediaUserToken, true, "")
-		vidCh <- keyRes{kau, e}
-	}()
-	go func() {
-		kau, e := runv3.Run(adamID, audiom3u8url, token, mediaUserToken, true, "")
-		audCh <- keyRes{kau, e}
-	}()
-	vidKey := <-vidCh
-	audKey := <-audCh
-	if vidKey.err != nil {
-		return fmt.Errorf("video key: %w", vidKey.err)
-	}
-	if audKey.err != nil {
-		return fmt.Errorf("audio key: %w", audKey.err)
-	}
-
-	// ── Download video to temp file ───────────────────────────────────────────
-	// VLC handles fragmented MP4 (fMP4) natively, so no MP4Box post-processing
-	// is needed.  We prefer VLC for MV streaming; mpv needs a separate MP4Box
-	// pass first (fMP4 duration=0 causes mpv to stop after the first fragment).
-	// Audio is served via HTTP so the player can begin audio immediately; VLC
-	// syncs both tracks by PTS.
-	//
-	// Video is written to a temp file so VLC gets a seekable backing store.
-	// VLC can open the file while it's still growing — it uses the demuxer's
-	// caching window, so playback begins after a few seconds of buffering.
-	player := ""
-	for _, p := range []string{"vlc", "mpv", "ffplay"} {
-		if _, err := exec.LookPath(p); err == nil {
-			player = p
-			break
-		}
-	}
-	if player == "" {
-		return errors.New("no supported player found (vlc, mpv, or ffplay)")
-	}
-
-	tmpVidDir := "/dev/shm"
-	if _, serr := os.Stat(tmpVidDir); serr != nil {
-		tmpVidDir = os.TempDir()
-	}
-	tmpVid, err := os.CreateTemp(tmpVidDir, "am-vid-*.mp4")
-	if err != nil {
-		return fmt.Errorf("tmp video: %w", err)
-	}
-	tmpVidPath := tmpVid.Name()
-	defer os.Remove(tmpVidPath)
-
-	// Signal when the first 4 MiB are on disk so the player can open the file
-	// before the download finishes (VLC buffers via its file-caching window).
-	const vidReadyThreshold = 4 << 20 // 4 MiB
-	vidReady := make(chan struct{})
-	tw := &thresholdWriter{w: tmpVid, threshold: vidReadyThreshold, ch: vidReady}
-
-	vidCtx, cancelVid := context.WithCancel(context.Background())
-	defer cancelVid()
-	vidErrCh := make(chan error, 1)
-	go func() {
-		err := runv3.StreamMvData(vidCtx, vidKey.kau, tw)
-		tmpVid.Close()
-		vidErrCh <- err
-	}()
-
-	// ── Audio HTTP server ─────────────────────────────────────────────────────
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		os.Remove(tmpVidPath)
-		return fmt.Errorf("listen: %w", err)
-	}
-	audioURL := fmt.Sprintf("http://127.0.0.1:%d/audio", listener.Addr().(*net.TCPAddr).Port)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/audio", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "audio/mp4")
-		if err := runv3.StreamMvData(r.Context(), audKey.kau, w); err != nil && r.Context().Err() == nil {
-			fmt.Println("audio stream:", err)
-		}
-	})
-	srv := &http.Server{Handler: mux}
-	go srv.Serve(listener)
-	defer srv.Close()
-
-	// ── Wait for enough video, then launch player ─────────────────────────────
-	fmt.Print("Buffering video...")
-	select {
-	case <-vidReady:
-		fmt.Println(" ready")
-	case err := <-vidErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("video download: %w", err)
-		}
-		fmt.Println(" done (short clip)")
-	case <-time.After(60 * time.Second):
-		return fmt.Errorf("video download timed out after 60s")
-	}
-
-	fmt.Printf("▶️  Streaming MV via %s\n", player)
-
-	var playerCmd *exec.Cmd
-	switch player {
-	case "vlc":
-		playerCmd = exec.Command("vlc",
-			"--play-and-exit",
-			"--no-repeat",
-			"--no-loop",
-			fmt.Sprintf("--input-slave=%s", audioURL),
-			tmpVidPath,
-		)
-	case "mpv":
-		// mpv cannot play fMP4 without MP4Box post-processing (duration=0 in
-		// moov causes mpv to stop after the first fragment).  Run MP4Box on
-		// the completed file before handing it to mpv.
-		select {
-		case err := <-vidErrCh:
-			if err != nil && !errors.Is(err, context.Canceled) {
-				return fmt.Errorf("video download: %w", err)
-			}
-		case <-time.After(5 * time.Minute):
-			return fmt.Errorf("video download timed out")
-		}
-		mp4boxFix := exec.Command("MP4Box", "-noprog", "-itags", "tool=", tmpVidPath)
-		mp4boxFix.Stdout = io.Discard
-		mp4boxFix.Stderr = io.Discard
-		if mp4boxFix.Run() != nil {
-			fixed := tmpVidPath + ".fixed.mp4"
-			ffCmd := exec.Command("ffmpeg", "-y", "-loglevel", "quiet",
-				"-i", tmpVidPath, "-c", "copy", "-movflags", "+faststart", fixed)
-			if ffCmd.Run() == nil {
-				os.Rename(fixed, tmpVidPath)
-			} else {
-				os.Remove(fixed)
-			}
-		}
-		playerCmd = exec.Command("mpv",
-			"--hwdec=auto",
-			"--really-quiet",
-			"--input-terminal=yes",
-			"--terminal=yes",
-			fmt.Sprintf("--audio-file=%s", audioURL),
-			tmpVidPath,
-		)
-	default:
-		playerCmd = exec.Command("ffplay",
-			"-i", tmpVidPath,
-		)
-	}
-	playerCmd.Stdin = os.Stdin
-	playerCmd.Stdout = os.Stdout
-	playerCmd.Stderr = os.Stderr
-	if err := playerCmd.Start(); err != nil {
-		return fmt.Errorf("launch player: %w", err)
-	}
-
-	playerCmd.Wait()
-	// Let the download goroutine drain before deferred cleanup removes the file.
-	select {
-	case <-vidErrCh:
-	case <-time.After(2 * time.Second):
-	}
-	return nil
-}
-
-// mvPipeToPlayer streams a music video by piping the decrypted fMP4 directly
-// to the player's stdin.  No temp file is created.
-//
-// When a player reads from a non-seekable pipe it cannot seek to read mvhd
-// duration, so it processes fragments linearly until EOF — this sidesteps the
-// fMP4 duration=0 issue that causes mpv to stop early when playing a file.
-// Audio is still served via HTTP so both tracks can be decoded concurrently.
-func mvPipeToPlayer(adamID, token, storefront, mediaUserToken string) error {
-	mvm3u8url, _, _, _ := runv3.GetWebplayback(adamID, token, mediaUserToken, true)
-	if mvm3u8url == "" {
-		return errors.New("media-user-token may be wrong or expired")
-	}
-	videom3u8url, err := extractVideo(mvm3u8url)
-	if err != nil {
-		return fmt.Errorf("extract video stream: %w", err)
-	}
-	audiom3u8url, err := extractMvAudio(mvm3u8url)
-	if err != nil {
-		return fmt.Errorf("extract audio stream: %w", err)
-	}
-
-	type keyRes struct {
-		kau string
-		err error
-	}
-	vidCh, audCh := make(chan keyRes, 1), make(chan keyRes, 1)
-	go func() {
-		kau, e := runv3.Run(adamID, videom3u8url, token, mediaUserToken, true, "")
-		vidCh <- keyRes{kau, e}
-	}()
-	go func() {
-		kau, e := runv3.Run(adamID, audiom3u8url, token, mediaUserToken, true, "")
-		audCh <- keyRes{kau, e}
-	}()
-	vidKey := <-vidCh
-	audKey := <-audCh
-	if vidKey.err != nil {
-		return fmt.Errorf("video key: %w", vidKey.err)
-	}
-	if audKey.err != nil {
-		return fmt.Errorf("audio key: %w", audKey.err)
-	}
-
-	// ── Audio HTTP server ─────────────────────────────────────────────────────
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("listen: %w", err)
-	}
-	audioURL := fmt.Sprintf("http://127.0.0.1:%d/audio", listener.Addr().(*net.TCPAddr).Port)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/audio", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "audio/mp4")
-		if err := runv3.StreamMvData(r.Context(), audKey.kau, w); err != nil && r.Context().Err() == nil {
-			fmt.Println("audio stream:", err)
-		}
-	})
-	srv := &http.Server{Handler: mux}
-	go srv.Serve(listener)
-	defer srv.Close()
-
-	// ── Video pipe ────────────────────────────────────────────────────────────
-	pr, pw := io.Pipe()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		if err := runv3.StreamMvData(ctx, vidKey.kau, pw); err != nil {
-			pw.CloseWithError(err)
-		} else {
-			pw.Close()
-		}
-	}()
-
-	// Prefer VLC for pipe: VLC probes the ftyp magic from the first bytes and
-	// selects its MP4 demuxer even on a non-seekable stdin.  mpv exits
-	// immediately on fMP4 pipe input because libavformat can't seek to
-	// probe the moov box.
-	player := ""
-	for _, p := range []string{"vlc", "mpv", "ffplay"} {
-		if _, err := exec.LookPath(p); err == nil {
-			player = p
-			break
-		}
-	}
-	if player == "" {
-		return errors.New("no supported player found (mpv, vlc, or ffplay)")
-	}
-
-	var playerCmd *exec.Cmd
-	switch player {
-	case "mpv":
-		playerCmd = exec.Command("mpv",
-			"--hwdec=auto",
-			"--really-quiet",
-			"--input-terminal=yes",
-			"--terminal=yes",
-			fmt.Sprintf("--audio-file=%s", audioURL),
-			"-",
-		)
-	case "vlc":
-		playerCmd = exec.Command("vlc",
-			"--play-and-exit",
-			"--no-repeat",
-			"--no-loop",
-			fmt.Sprintf("--input-slave=%s", audioURL),
-			"-",
-		)
-	default:
-		playerCmd = exec.Command("ffplay", "-i", "pipe:0")
-	}
-	playerCmd.Stdin = pr
-	playerCmd.Stdout = os.Stdout
-	playerCmd.Stderr = os.Stderr
-
-	fmt.Printf("▶️  Streaming MV via %s (pipe)\n", player)
-	return playerCmd.Run()
 }
 
 func extractMvAudio(c string) (string, error) {

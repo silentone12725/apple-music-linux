@@ -1,10 +1,7 @@
-const ENGINE = "http://127.0.0.1:20025";
-const PLAY_COUNTS_KEY = "aml_play_counts";
-const MAX_STORED_TRACKS = 200;
-function getMUT() {
-  const c = document.cookie.split(";").find((s) => s.trim().startsWith("media-user-token="));
-  return c ? decodeURIComponent(c.trim().slice("media-user-token=".length)) : "";
-}
+// src/smart-cache.js
+var ENGINE = window._amlEngineURL || "http://127.0.0.1:20025";
+var PLAY_COUNTS_KEY = "aml_play_counts";
+var MAX_STORED_TRACKS = 200;
 function parseContentUrl(url) {
   const path = new URL(url, "https://music.apple.com").pathname;
   let m;
@@ -44,7 +41,7 @@ function savePlayCounts(counts) {
   } catch {
   }
 }
-class SmartCache {
+var SmartCache = class {
   constructor() {
     this._jobs = {};
     this._counts = loadPlayCounts();
@@ -224,5 +221,5 @@ class SmartCache {
     window.addEventListener("popstate", () => onNavigate(location.href));
     onNavigate(location.href);
   }
-}
+};
 window._amlSmartCache = new SmartCache();

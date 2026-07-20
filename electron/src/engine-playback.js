@@ -15,7 +15,7 @@
  *     machine follows DOM events (play, playing, pause, timeupdate) naturally.
  */
 
-const ENGINE = 'http://127.0.0.1:20025';
+const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
 
 // ── Native handles ─────────────────────────────────────────────────────────────
 
