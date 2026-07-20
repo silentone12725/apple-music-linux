@@ -27,6 +27,7 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 
 ## Contents
 
+- [Preview](#preview)
 - [Features](#features)
 - [Roadmap](#roadmap)
 - [Requirements](#requirements)
@@ -36,6 +37,13 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 - [Build AppImage](#build-appimage)
 - [Project structure](#project-structure)
 - [References](#referenced-projects)
+
+## Preview
+
+<div align="center">
+  <img src="assets/preview-loggedout.png" alt="Logged out" width="49%"/>
+  <img src="assets/preview-loggedin.png" alt="Logged in" width="49%"/>
+</div>
 
 ## Features
 
@@ -75,10 +83,27 @@ chmod +x apple-music-linux.AppImage
 
 ## Login
 
-Two separate sign-ins are required:
+Two separate sign-ins are required.
 
-1. **Apple Music web session** — sign in via the web UI on first launch, the same as music.apple.com in a browser
-2. **Engine DRM account** — open **AML Settings** (top-left gear icon) → Engine Account → Sign In with your Apple ID. This authenticates the FairPlay layer for lossless and hi-res. Without it, playback falls back to AAC 256.
+### 1. Apple Music web session
+
+Sign in via the web UI on first launch, the same as signing into music.apple.com in a browser.
+
+<div align="center">
+  <img src="assets/login-electron.png" alt="Apple Music web login" width="600"/>
+</div>
+
+### 2. Engine DRM account (lossless & hi-res)
+
+This authenticates the FairPlay layer. Without it, playback falls back to AAC 256 kbps.
+
+1. Click the **gear icon** in the top-left corner of the app to open **AML Settings**
+2. Go to the **Engine Account** tab
+3. Click **Sign In** and enter your Apple ID credentials
+
+<div align="center">
+  <img src="assets/login-aml.png" alt="AML Settings — Engine Account login" width="600"/>
+</div>
 
 ## Dev
 
