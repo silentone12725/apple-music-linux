@@ -24,6 +24,8 @@ package main
 //   GET    /api/v1/jobs/{id}             → cache-warm job status (debug/progress UI)
 //   DELETE /api/v1/jobs/{id}             → cancel cache-warm job (navigation away)
 //
+//   PUT    /api/v1/cache/config          → push user-configured cache limits
+//
 //   GET    /api/v1/metadata/{id}?sf=     → track info + available qualities
 //   GET    /api/v1/artwork/{id}?sf=&size=
 //   GET    /api/v1/lyrics/{id}?sf=
@@ -451,6 +453,9 @@ func NewAPIServer(port int) *APIServer {
 
 	// Playback context — renderer signals user intent; scheduler decides what to warm.
 	mux.HandleFunc("PUT /api/v1/playback/context", cors(s.handlePlaybackContext))
+
+	// Cache config — frontend pushes user-configured limits (prewarmLimitMB, etc.).
+	mux.HandleFunc("PUT /api/v1/cache/config", cors(s.handleCacheConfig))
 
 	// Job status and cancellation for cache-warming jobs.
 	mux.HandleFunc("GET /api/v1/jobs/{id}", cors(s.handleJobStatus))
@@ -1226,6 +1231,16 @@ func (s *APIServer) handlePlaybackContext(w http.ResponseWriter, r *http.Request
 	}
 	jobID := s.scheduler.Submit(payload)
 	writeJSON(w, http.StatusAccepted, map[string]string{"jobId": jobID})
+}
+
+func (s *APIServer) handleCacheConfig(w http.ResponseWriter, r *http.Request) {
+	var cfg prefetch.CacheConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.scheduler.SetCacheConfig(cfg)
+	writeJSON(w, http.StatusOK, s.scheduler.GetCacheConfig())
 }
 
 // handleJobStatus returns a snapshot of a cache-warming job.

@@ -364,6 +364,11 @@ type Scheduler struct {
 
 	wq *workQueue
 
+	// Cache config set by PUT /api/v1/cache/config; zero = unlimited/default.
+	prewarmLimitMB atomic.Int64
+	persistLimitMB atomic.Int64
+	persistTTLDays atomic.Int64
+
 	activeWorkers  atomic.Int64
 	dedupHits      atomic.Int64
 	totalCached    atomic.Int64
@@ -395,6 +400,36 @@ func NewScheduler(pm *playback.Manager, token, mut func() string, sink EventSink
 		go s.worker()
 	}
 	return s
+}
+
+// CacheConfig holds user-configurable cache limits from PUT /api/v1/cache/config.
+// Zero values mean unlimited/engine-default.
+type CacheConfig struct {
+	PrewarmLimitMB int64 `json:"prewarmLimitMB,omitempty"`
+	PersistLimitMB int64 `json:"persistLimitMB,omitempty"`
+	PersistTTLDays int64 `json:"persistTTLDays,omitempty"`
+}
+
+// SetCacheConfig atomically applies user-supplied cache limits.
+func (s *Scheduler) SetCacheConfig(cfg CacheConfig) {
+	if cfg.PrewarmLimitMB >= 0 {
+		s.prewarmLimitMB.Store(cfg.PrewarmLimitMB)
+	}
+	if cfg.PersistLimitMB >= 0 {
+		s.persistLimitMB.Store(cfg.PersistLimitMB)
+	}
+	if cfg.PersistTTLDays >= 0 {
+		s.persistTTLDays.Store(cfg.PersistTTLDays)
+	}
+}
+
+// GetCacheConfig returns the currently applied cache config.
+func (s *Scheduler) GetCacheConfig() CacheConfig {
+	return CacheConfig{
+		PrewarmLimitMB: s.prewarmLimitMB.Load(),
+		PersistLimitMB: s.persistLimitMB.Load(),
+		PersistTTLDays: s.persistTTLDays.Load(),
+	}
 }
 
 // Stats returns a point-in-time snapshot of internal scheduler metrics.
