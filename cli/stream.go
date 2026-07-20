@@ -179,7 +179,7 @@ func prepareAlacStreamFile(track *task.Track) (string, error) {
 	if needDlAacLc {
 		return "", nil
 	}
-	trackM3u8Url, _, err := extractMedia(track.M3u8, false)
+	trackM3u8Url, _, err := extractMedia(track.M3u8)
 	if err != nil {
 		return "", fmt.Errorf("extractMedia: %w", err)
 	}
