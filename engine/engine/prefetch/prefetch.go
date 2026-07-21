@@ -25,7 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"main/engine/playback"
+	"apple-music-cli/engine/playback"
 )
 
 const (

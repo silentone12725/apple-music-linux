@@ -3,7 +3,7 @@ package playback
 import (
 	"time"
 
-	"main/engine/pipeline"
+	"apple-music-cli/engine/pipeline"
 )
 
 // Session is the public session descriptor returned to API clients.

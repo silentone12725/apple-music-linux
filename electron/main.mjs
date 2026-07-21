@@ -51,11 +51,12 @@ app.commandLine.appendSwitch('enable-smooth-scrolling');
 // Hyprland/KWin handle the compositor-level blur-behind on the desktop
 // side; Chromium just needs to render RGBA frames correctly.
 app.commandLine.appendSwitch('enable-transparent-visuals');
-// On kernels where unprivileged user namespaces are restricted (Ubuntu 23.10+,
-// Debian 12+ with AppArmor), Electron's sandbox also fails to start.
-// Detect and disable sandbox only when namespaces are unavailable.
+// Sandbox detection: requires both unprivileged user namespaces AND a non-FUSE
+// root. AppImages use FUSE mounts that break the zygote sandbox startup even
+// when namespaces work, so we disable it whenever APPIMAGE is set.
+let _hasSandbox = !process.env.APPIMAGE;
 try { execFileSync('unshare', ['--user', '--pid', 'true'], { stdio: 'ignore' }); }
-catch { app.commandLine.appendSwitch('no-sandbox'); }
+catch { _hasSandbox = false; app.commandLine.appendSwitch('no-sandbox'); }
 
 let win    = null;
 let tray   = null;
@@ -85,20 +86,48 @@ const _vlcDir     = app.isPackaged ? _vlcPkgDir : (existsSync(_vlcDevDir) ? _vlc
 const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
 const ENGINE_PORT = 20025;
 
+// ── User DRM dir setup ────────────────────────────────────────────────────────
+// ProcessBackend sets cmd.Dir = dirname(drmBinaryPath), so the binary must
+// live next to rootfs/. In dev this is drm/ in the repo. In packaged AppImage
+// the bundled rootfs is read-only, so we copy it once to a writable user dir
+// and put a launcher script there as the "binary".
+function ensureUserDRM() {
+    const userDir    = path.join(CONFIG_DIR, 'drm');
+    const userBin    = path.join(userDir, 'drm-rootless');
+    const userRootfs = path.join(userDir, 'rootfs');
+    const realBin    = path.join(process.resourcesPath, 'drm');
+    const bundledRootfs = path.join(process.resourcesPath, 'rootfs');
+
+    mkdirSync(userDir, { recursive: true });
+
+    // Copy rootfs if the Android binary or its shared libs are missing
+    // (handles stale installs that got the dir created but not system/bin/ or lib64/).
+    const userMain   = path.join(userRootfs, 'system', 'bin', 'main');
+    const userLib64  = path.join(userRootfs, 'system', 'lib64');
+    if ((!existsSync(userMain) || !existsSync(userLib64)) && existsSync(bundledRootfs)) {
+        execFileSync('cp', ['-a', bundledRootfs, userDir], { stdio: 'ignore' });
+    }
+
+    // Launcher script: ProcessBackend cwd = userDir → binary finds rootfs there.
+    writeFileSync(userBin, `#!/bin/sh\nexec "${realBin}" "$@"\n`, { mode: 0o755 });
+
+    return { userBin, userRootfs };
+}
+
 function ensureEngineConfig() {
     mkdirSync(ENGINE_DATA_DIR, { recursive: true });
     const cfgPath = path.join(ENGINE_DATA_DIR, 'config.yaml');
 
-    // Derive the live credential directory — the engine must know this path to
-    // call ReadMusicToken() / ReadStorefrontID() for DRM authentication.
-    const wrapperBase = path.join(
-        os.homedir(), '.config', 'apple-music-linux', 'wrapper-data',
-        'rootfs', 'data', 'data', 'com.apple.android.music', 'files'
-    );
-    // Wrapper binary: packaged at <resources>/wrapper, dev fallback beside wrapper/
-    const wrapperBin = app.isPackaged && existsSync(path.join(process.resourcesPath, 'wrapper'))
-        ? path.join(process.resourcesPath, 'wrapper')
-        : path.join(__dirname, '..', 'wrapper', 'wrapper-rootless');
+    let drmBin, drmBase;
+    if (app.isPackaged) {
+        const { userBin, userRootfs } = ensureUserDRM();
+        drmBin  = userBin;
+        drmBase = path.join(userRootfs, 'data', 'data', 'com.apple.android.music', 'files');
+    } else {
+        // Dev: binary and rootfs already live together in drm/
+        drmBin  = path.join(__dirname, '..', 'drm', 'drm-rootless');
+        drmBase = path.join(__dirname, '..', 'drm', 'rootfs', 'data', 'data', 'com.apple.android.music', 'files');
+    }
 
     if (!existsSync(cfgPath)) {
         const stub = [
@@ -111,17 +140,17 @@ function ensureEngineConfig() {
             'get-m3u8-mode: hires',
             'aac-type: aac-lc',
             'alac-max: 192000',
-            `wrapper-binary-path: "${wrapperBin}"`,
-            `wrapper-base-dir: "${wrapperBase}"`,
+            `drm-binary-path: "${drmBin}"`,
+            `drm-base-dir: "${drmBase}"`,
         ].join('\n') + '\n';
         writeFileSync(cfgPath, stub);
         return;
     }
 
-    // Patch existing config: add missing wrapper paths or update stale ones.
+    // Patch existing config: add missing drm paths or update stale ones.
     let content = readFile(cfgPath, 'utf8');
     let changed = false;
-    for (const [key, val] of [['wrapper-binary-path', wrapperBin], ['wrapper-base-dir', wrapperBase]]) {
+    for (const [key, val] of [['drm-binary-path', drmBin], ['drm-base-dir', drmBase]]) {
         const line = `${key}: "${val}"`;
         if (!content.includes(`${key}:`)) {
             content += `${line}\n`;
@@ -152,10 +181,10 @@ async function killStaleEngine(port) {
     }
 
     // Kill the lock-file owner and remove the lock unconditionally.
-    const lockPath = path.join(
-        os.homedir(), '.config', 'apple-music-linux', 'wrapper-data',
-        'rootfs', 'data', 'data', 'com.apple.android.music', 'files', 'engine-session.lock'
-    );
+    const drmFilesDir = app.isPackaged
+        ? path.join(CONFIG_DIR, 'drm', 'rootfs', 'data', 'data', 'com.apple.android.music', 'files')
+        : path.join(__dirname, '..', 'drm', 'rootfs', 'data', 'data', 'com.apple.android.music', 'files');
+    const lockPath = path.join(drmFilesDir, 'engine-session.lock');
     try {
         const pidStr = readFileSync(lockPath, 'utf8').trim();
         const lockPid = parseInt(pidStr, 10);
@@ -201,12 +230,12 @@ async function startEngine() {
         const line = d.toString().trimEnd();
         console.error('[engine]', line);
         // Unprivileged user namespaces disabled (Ubuntu 23.10+, Debian 12+ with AppArmor).
-        // The wrapper needs clone(CLONE_NEWUSER|CLONE_NEWPID) — surface this clearly.
+        // The DRM binary needs clone(CLONE_NEWUSER|CLONE_NEWPID) — surface this clearly.
         if (line.includes('operation not permitted') || line.includes('unshare') ||
             line.includes('clone') || line.includes('user namespace')) {
             dialog.showErrorBox(
                 'Kernel restriction detected',
-                'The FairPlay wrapper requires unprivileged user namespaces, which are disabled on this system.\n\n' +
+                'The FairPlay DRM binary requires unprivileged user namespaces, which are disabled on this system.\n\n' +
                 'To fix:\n  sudo sysctl -w kernel.unprivileged_userns_clone=1\n\n' +
                 'Or permanently in /etc/sysctl.d/99-userns.conf:\n  kernel.unprivileged_userns_clone = 1'
             );
@@ -269,6 +298,7 @@ function createWindow() {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
             nodeIntegration: false,
+            sandbox: _hasSandbox,
             partition: 'persist:apple-music',
             devTools: true,
         },
@@ -743,7 +773,6 @@ function createWindow() {
     });
 
     // Hide on close instead of destroying — keeps the page alive in memory so
-    // the next show() is instant (zero load time).
     win.on('close', (e) => {
         if (!isQuitting) {
             e.preventDefault();
@@ -1042,7 +1071,7 @@ app.whenReady().then(() => {
 
     console.log('[AML] Electron ready, process.type:', process.type);
     // Keep Chromium session data in its own subfolder so it doesn't
-    // pollute the same directory as our app prefs/wrapper data.
+    // pollute the same directory as our app prefs/drm data.
     app.setPath('userData', path.join(CONFIG_DIR, 'electron-session'));
 
     const s = session.fromPartition('persist:apple-music');
@@ -1130,23 +1159,20 @@ app.whenReady().then(() => {
     startEngine();
 });
 
-// window-all-closed fires when the window is hidden too, but we don't want
-// to quit in that case — the window is just hidden, not destroyed.
-// Actual quit goes through the tray "Quit" item which sets isQuitting = true.
-app.on('window-all-closed', () => {
-    if (isQuitting) {
-        stopEngine();
-        app.quit();
-    }
-    // Otherwise: window was hidden, keep the process alive.
+// Stop engine and mark quitting before any window closes so the close handler
+// allows the window to actually be destroyed.
+app.on('before-quit', () => {
+    isQuitting = true;
+    stopEngine();
 });
 
-app.on('before-quit', () => { isQuitting = true; });
+// window-all-closed fires only when all windows are destroyed (not hidden).
+// On Linux Electron would quit automatically here, but we override it so the
+// hidden-window tray pattern works. The actual quit is already in progress
+// (triggered by app.quit() from the tray or SIGINT), so do nothing.
+app.on('window-all-closed', () => {});
 
 // Ctrl+C in the launch terminal sends SIGINT. Without this handler Electron
 // ignores it (the window-close override keeps the process alive).
-process.on('SIGINT', () => {
-    isQuitting = true;
-    stopEngine();
-    app.quit();
-});
+// SIGINT from terminal — before-quit will call stopEngine().
+process.on('SIGINT', () => { app.quit(); });

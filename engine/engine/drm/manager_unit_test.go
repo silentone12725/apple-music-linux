@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"main/engine/drm"
+	"apple-music-cli/engine/drm"
 )
 
 // ── Mock backend ──────────────────────────────────────────────────────────────

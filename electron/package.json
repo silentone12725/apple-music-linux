@@ -35,7 +35,7 @@
       "!**/*.map",
       "!test-*.html",
       "!dist/resources/apple-music-cli",
-      "!dist/resources/wrapper",
+      "!dist/resources/drm",
       "!dist/resources/vlc"
     ],
     "extraResources": [
@@ -44,8 +44,16 @@
         "to": "apple-music-cli"
       },
       {
-        "from": "dist/resources/wrapper",
-        "to": "wrapper"
+        "from": "../drm/drm-rootless",
+        "to": "drm"
+      },
+      {
+        "from": "../drm/rootfs",
+        "to": "rootfs",
+        "filter": [
+          "system/**",
+          "etc/**"
+        ]
       },
       {
         "from": "dist/resources/vlc",

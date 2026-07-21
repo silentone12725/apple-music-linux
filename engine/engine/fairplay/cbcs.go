@@ -12,10 +12,10 @@ import (
 
 	"github.com/itouakirai/mp4ff/mp4"
 
-	"main/engine/bench"
-	"main/engine/hls"
-	"main/engine/pipeline"
-	"main/utils/runv2"
+	"apple-music-cli/engine/bench"
+	"apple-music-cli/engine/hls"
+	"apple-music-cli/engine/pipeline"
+	"apple-music-cli/utils/runv2"
 )
 
 // DialerFromAddr returns a CBCSDialer that dials the given TCP address directly.
