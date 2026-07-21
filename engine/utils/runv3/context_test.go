@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"main/utils/runv3"
+	"apple-music-cli/utils/runv3"
 )
 
 // slowServer returns a test server that pauses 200 ms before sending each

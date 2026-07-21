@@ -14,7 +14,7 @@ package media
 import (
 	"context"
 
-	"main/engine/pipeline"
+	"apple-music-cli/engine/pipeline"
 )
 
 // Metadata holds the publicly-visible properties of a media item.

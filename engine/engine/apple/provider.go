@@ -20,12 +20,12 @@ import (
 	"strings"
 	"time"
 
-	"main/engine/bench"
-	"main/engine/fairplay"
-	"main/engine/hls"
-	"main/engine/media"
-	"main/engine/pipeline"
-	"main/utils/ampapi"
+	"apple-music-cli/engine/bench"
+	"apple-music-cli/engine/fairplay"
+	"apple-music-cli/engine/hls"
+	"apple-music-cli/engine/media"
+	"apple-music-cli/engine/pipeline"
+	"apple-music-cli/utils/ampapi"
 )
 
 // webplaybackClient is used for all Apple webplayback API calls.

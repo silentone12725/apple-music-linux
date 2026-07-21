@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"io"
 
-	"main/engine/bench"
-	"main/engine/hls"
-	"main/engine/pipeline"
-	"main/utils/runv3"
+	"apple-music-cli/engine/bench"
+	"apple-music-cli/engine/hls"
+	"apple-music-cli/engine/pipeline"
+	"apple-music-cli/utils/runv3"
 )
 
 // ── Licence acquisition ───────────────────────────────────────────────────────

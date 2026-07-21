@@ -18,8 +18,8 @@ import (
 	"sync"
 	"testing"
 
-	"main/engine/media"
-	"main/engine/pipeline"
+	"apple-music-cli/engine/media"
+	"apple-music-cli/engine/pipeline"
 )
 
 // fakeSource writes a fixed payload; no network.

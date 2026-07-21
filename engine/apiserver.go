@@ -52,15 +52,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"main/engine/apple"
-	"main/engine/diskcache"
-	"main/engine/drm"
-	"main/engine/export"
-	"main/engine/pipeline"
-	"main/engine/playback"
-	"main/engine/prefetch"
-	"main/utils/ampapi"
-	"main/utils/lyrics"
+	"apple-music-cli/engine/apple"
+	"apple-music-cli/engine/diskcache"
+	"apple-music-cli/engine/drm"
+	"apple-music-cli/engine/export"
+	"apple-music-cli/engine/pipeline"
+	"apple-music-cli/engine/playback"
+	"apple-music-cli/engine/prefetch"
+	"apple-music-cli/engine/vlc"
+	"apple-music-cli/utils/ampapi"
+	"apple-music-cli/utils/lyrics"
 )
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -326,14 +327,15 @@ type APIServer struct {
 	epoch       EngineEpoch         // shared engine epoch; advanced by subsystems
 	lifecycle   *engineLifecycle    // single coordinator for epoch advancement
 	events      *eventBus
-	drmReady    bool   // true when wrapper binary was found at startup
-	eagerStart  bool   // launch the wrapper at Start() when a session exists
+	drmReady    bool   // true when drm binary was found at startup
+	eagerStart  bool   // launch the drm binary at Start() when a session exists
 	sessionDir  string // session/credential directory guarded by sessionLock
 	sessionLock *drm.SessionLock
 	backendName string               // configured preferred backend (single-backend case)
 	backendSel  drm.BackendSelection // non-nil when a fallback composite is in use
 	scheduler   *prefetch.Scheduler  // background cache-warming scheduler
 	diskCache   *diskcache.Cache     // per-track decrypted audio disk cache
+	vlcPlayer   *vlc.Player          // nil when libvlc is not available
 }
 
 // NewAPIServer wires all routes.
@@ -350,47 +352,47 @@ func NewAPIServer(port int) *APIServer {
 	// as a fairplay.CBCSDialer so cbcs.go has no knowledge of the TCP transport.
 	// ProcessConfig owns all transport details (binary path, TCP addresses).
 	// BackendConfig carries only what both backends share (BaseDir, DeviceInfo).
-	// Resolve wrapper binary path: use config if set, otherwise auto-discover
-	// from wrapper/wrapper-rootless relative to the working directory.
+	// Resolve drm binary path: use config if set, otherwise auto-discover
+	// from drm/drm-rootless relative to the working directory.
 	// The binary lives inside the repo at a canonical location so no config
 	// entry is needed for the common case.
-	wrapperBinaryPath := Config.WrapperBinaryPath
-	if wrapperBinaryPath == "" {
-		if abs, err := filepath.Abs("wrapper/wrapper-rootless"); err == nil {
+	drmBinaryPath := Config.DRMBinaryPath
+	if drmBinaryPath == "" {
+		if abs, err := filepath.Abs("drm/drm-rootless"); err == nil {
 			if _, err := os.Stat(abs); err == nil {
-				wrapperBinaryPath = abs
+				drmBinaryPath = abs
 			}
 		}
 	}
 
-	// Derive the wrapper session directory from the binary path when not
+	// Derive the drm session directory from the binary path when not
 	// explicitly configured. With OmitBaseDir=true no --base-dir flag is passed,
-	// so the wrapper uses its compiled-in default:
+	// so the drm binary uses its compiled-in default:
 	//   /data/data/com.apple.android.music/files  (inside the chroot)
 	// From the host that resolves to rootfs/data/data/com.apple.android.music/files
 	// relative to the binary's parent directory.
-	wrapperBaseDir := Config.WrapperBaseDir
-	if wrapperBaseDir == "" && wrapperBinaryPath != "" {
-		wrapperBaseDir = filepath.Join(
-			filepath.Dir(wrapperBinaryPath),
+	drmBaseDir := Config.DRMBaseDir
+	if drmBaseDir == "" && drmBinaryPath != "" {
+		drmBaseDir = filepath.Join(
+			filepath.Dir(drmBinaryPath),
 			"rootfs", "data", "data", "com.apple.android.music", "files",
 		)
 	}
-	drmSession := drm.NewSessionManager(wrapperBaseDir)
+	drmSession := drm.NewSessionManager(drmBaseDir)
 
 	// Backend selection follows the backend policy (preferred + optional
 	// fallback). Default: prefer EmbeddedBackend (CGO launcher, no external
-	// wrapper-rootless binary needed at runtime) with an automatic startup
+	// drm-rootless binary needed at runtime) with an automatic startup
 	// fallback to ProcessBackend if Embedded can't start on this system.
 	// The benchmark (CLAUDE.md) showed no significant performance difference,
 	// so the choice is by architecture, not speed. Fallback is startup-only —
 	// no runtime hot-swap (see docs/design/backend-supervisor.md).
 	preferred, fallbackName := drm.ResolveBackendPolicy(
-		wrapperBinaryPath != "", Config.Backend.Preferred, Config.Backend.Fallback, Config.UseEmbeddedBackend)
+		drmBinaryPath != "", Config.Backend.Preferred, Config.Backend.Fallback, Config.UseEmbeddedBackend)
 	s.backendName = preferred
-	drmBackend := buildDRMBackend(preferred, wrapperBinaryPath)
+	drmBackend := buildDRMBackend(preferred, drmBinaryPath)
 	if fallbackName != "" && fallbackName != preferred {
-		if fb := buildDRMBackend(fallbackName, wrapperBinaryPath); fb != nil && drmBackend != nil {
+		if fb := buildDRMBackend(fallbackName, drmBinaryPath); fb != nil && drmBackend != nil {
 			composite := drm.NewFallbackBackend(drmBackend, preferred, fb, fallbackName)
 			drmBackend = composite
 			if sel, ok := composite.(drm.BackendSelection); ok {
@@ -409,20 +411,20 @@ func NewAPIServer(port int) *APIServer {
 			s.lifecycle.OnDRMStateChanged(snap.State.Session.String())
 			s.events.emit("drm", snap)
 		},
-		drm.BackendConfig{BaseDir: wrapperBaseDir},
+		drm.BackendConfig{BaseDir: drmBaseDir},
 		drm.DefaultRestartPolicy,
 	)
 	s.session = drmSession
-	s.drmReady = wrapperBinaryPath != ""
-	s.sessionDir = wrapperBaseDir
+	s.drmReady = drmBinaryPath != ""
+	s.sessionDir = drmBaseDir
 
 	// Eager-start decision (executed in Start(), after the session lock is held):
-	// if a session DB exists, launch the wrapper immediately so process/fairplay
+	// if a session DB exists, launch the drm binary immediately so process/fairplay
 	// state is visible without waiting for the first playback request.
 	s.eagerStart = s.drmReady && drmSession.HasSession()
 
 	// PlaybackManager receives DRMManager as the CBCSDialer for ALAC/Atmos.
-	// DRMManager.DialCBCS auto-starts the wrapper if a session exists, then
+	// DRMManager.DialCBCS auto-starts the drm binary if a session exists, then
 	// opens a TCP connection for the FairPlay wire protocol.
 	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(s.dm))
 
@@ -507,6 +509,17 @@ func NewAPIServer(port int) *APIServer {
 	mux.HandleFunc("GET /api/v1/catalog/albums/{id}", cors(s.handleCatalogAlbum))
 	mux.HandleFunc("GET /api/v1/catalog/playlists/{id}", cors(s.handleCatalogPlaylist))
 	mux.HandleFunc("GET /api/v1/catalog/artists/{id}", cors(s.handleCatalogArtist))
+
+	// VLC player — libvlc-backed playback for ALAC/Atmos that the browser cannot decode.
+	// Routes are no-ops when libvlc is not installed; frontend falls back to MSE.
+	s.vlcPlayer, _ = vlc.New() // nil if libvlc unavailable
+	mux.HandleFunc("PUT /api/v1/vlc/queue",  cors(s.handleVLCQueue))
+	mux.HandleFunc("POST /api/v1/vlc/load",  cors(s.handleVLCLoad))
+	mux.HandleFunc("POST /api/v1/vlc/pause", cors(s.handleVLCPause))
+	mux.HandleFunc("POST /api/v1/vlc/resume",cors(s.handleVLCResume))
+	mux.HandleFunc("GET /api/v1/vlc/time",   cors(s.handleVLCTime))
+	mux.HandleFunc("POST /api/v1/vlc/seek",  cors(s.handleVLCSeek))
+	mux.HandleFunc("POST /api/v1/vlc/volume",cors(s.handleVLCVolume))
 
 	// Benchmark/diagnostics surface (additive; no effect on playback).
 	// /api/v1/debug/runtime exposes scalar runtime metrics the harness samples
@@ -604,20 +617,20 @@ func (s *APIServer) Stop() {
 // (`go test .` fails: "module main" import restriction, see CLAUDE.md).
 
 // buildDRMBackend constructs a single backend by name. Both backends share the
-// same transport addresses; EmbeddedBackend needs the wrapper directory, while
-// ProcessBackend execs the wrapper-rootless binary at wrapperBinaryPath.
-func buildDRMBackend(name, wrapperBinaryPath string) drm.DRMBackend {
+// same transport addresses; EmbeddedBackend needs the drm directory, while
+// ProcessBackend execs the drm-rootless binary at drmBinaryPath.
+func buildDRMBackend(name, drmBinaryPath string) drm.DRMBackend {
 	if name == "embedded" {
 		return drm.NewEmbeddedBackend(drm.EmbedConfig{
-			WrapperDir:  filepath.Dir(wrapperBinaryPath),
+			WrapperDir:  filepath.Dir(drmBinaryPath),
 			OmitBaseDir: true,
 			DecryptAddr: Config.DecryptM3u8Port,
 			M3U8Addr:    Config.GetM3u8Port,
 		})
 	}
 	return drm.NewProcessBackend(drm.ProcessConfig{
-		BinaryPath:  wrapperBinaryPath,
-		OmitBaseDir: true, // real wrapper resolves BaseDir relative to its cwd; absolute path breaks anisette init
+		BinaryPath:  drmBinaryPath,
+		OmitBaseDir: true, // drm-rootless resolves BaseDir relative to its cwd; absolute path breaks anisette init
 		DecryptAddr: Config.DecryptM3u8Port,
 		M3U8Addr:    Config.GetM3u8Port,
 	})
@@ -721,7 +734,7 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !s.drmReady {
-		http.Error(w, "DRM backend not available — wrapper binary not found at startup", http.StatusServiceUnavailable)
+		http.Error(w, "DRM backend not available — drm binary not found at startup", http.StatusServiceUnavailable)
 		return
 	}
 	go func() {
@@ -1818,4 +1831,111 @@ func randID() string {
 	b := make([]byte, 8)
 	rand.Read(b) //nolint:errcheck
 	return hex.EncodeToString(b)
+}
+
+// ── VLC handlers ──────────────────────────────────────────────────────────────
+
+func (s *APIServer) handleVLCQueue(w http.ResponseWriter, r *http.Request) {
+	// Queue is advisory (pre-warm hints). The prefetch scheduler handles warming
+	// via the context endpoint; accept and acknowledge without processing.
+	if s.vlcPlayer == nil {
+		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
+	if s.vlcPlayer == nil {
+		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		SessionID string `json:"sessionId"`
+		AssetID   string `json:"assetId"`
+		StartMs   int64  `json:"startMs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.SessionID == "" {
+		http.Error(w, "sessionId required", http.StatusBadRequest)
+		return
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio?raw=1", s.port, req.SessionID)
+	if req.StartMs > 0 {
+		url += fmt.Sprintf("&t=%.3f", float64(req.StartMs)/1000.0)
+	}
+	if err := s.vlcPlayer.Load(url); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *APIServer) handleVLCPause(w http.ResponseWriter, r *http.Request) {
+	if s.vlcPlayer == nil {
+		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
+		return
+	}
+	s.vlcPlayer.Pause()
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *APIServer) handleVLCResume(w http.ResponseWriter, r *http.Request) {
+	if s.vlcPlayer == nil {
+		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
+		return
+	}
+	s.vlcPlayer.Resume()
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *APIServer) handleVLCTime(w http.ResponseWriter, r *http.Request) {
+	if s.vlcPlayer == nil {
+		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
+		return
+	}
+	posMs, lengthMs, state := s.vlcPlayer.Time()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"posMs":    posMs,
+		"lengthMs": lengthMs,
+		"state":    state,
+	})
+}
+
+func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
+	if s.vlcPlayer == nil {
+		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		PosMs int64 `json:"posMs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.vlcPlayer.Seek(req.PosMs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *APIServer) handleVLCVolume(w http.ResponseWriter, r *http.Request) {
+	if s.vlcPlayer == nil {
+		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		Volume int `json:"volume"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.vlcPlayer.SetVolume(req.Volume)
+	w.WriteHeader(http.StatusOK)
 }

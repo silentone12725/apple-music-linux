@@ -737,6 +737,13 @@ async function setup() {
         // DRM just became lossless-capable — reset so the next track gets a wait window.
         if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
 
+        // Binary needs credentials but none are stored — open the sign-in form
+        // automatically so the user doesn't have to navigate to Settings.
+        if (snap?.challenge?.type === 'credentials') {
+            console.log('[AML Engine] DRM credential challenge — opening sign-in form');
+            window.__amlOpenEngineSettings?.();
+        }
+
         // Note: mid-track seamless lossless upgrade is intentionally not attempted here.
         // FLAC transcode streams start at position 0 with no seek support, making a
         // buffer-safe splice impossible. The next track will start in FLAC via
@@ -1184,6 +1191,8 @@ window.addEventListener('unhandledrejection', (e) => {
             #aml-settings-dialog::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18);border-radius:2px; }
             @keyframes _aml-pop-in  { from{opacity:0;transform:scale(0.88)} to{opacity:1;transform:scale(1)} }
             @keyframes _aml-pop-out { from{opacity:1;transform:scale(1)}    to{opacity:0;transform:scale(0.88)} }
+            @keyframes _aml-spin    { to{transform:rotate(360deg)} }
+            ._aml-spinner { display:inline-block;width:10px;height:10px;border:1.5px solid rgba(255,255,255,0.18);border-top-color:rgba(255,255,255,0.6);border-radius:50%;animation:_aml-spin .7s linear infinite;flex-shrink:0; }
             #aml-settings-dialog.aml-opening { animation:_aml-pop-in  .22s cubic-bezier(.34,1.4,.64,1) forwards; }
             #aml-settings-dialog.aml-closing { animation:_aml-pop-out .16s ease-in forwards; }
         `;
@@ -1227,23 +1236,45 @@ window.addEventListener('unhandledrejection', (e) => {
         // ── Engine Status ──────────────────────────────────────────────────
         const { wrap: stWrap, body: stBody } = makeSection('Engine Status');
 
+        function spinner() {
+            const s = document.createElement('span');
+            s.className = '_aml-spinner';
+            return s;
+        }
+
         function renderStatusRows(d) {
             const st = d.state ?? {};
+            const proc = st.process ?? 'unknown';
+            const procOk = proc === 'running';
+            const procLoading = proc === 'starting';
+            const fp = st.fairplay ?? 'unknown';
+            const fpOk = fp === 'ready';
+            const fpLoading = fp === 'unknown' && procLoading;
+            const cbcs = d?.capabilities?.cbcs === true;
+            const sessOk = st.session === 'valid' || cbcs;
+            const sessText = st.session === 'valid' ? 'valid' : cbcs ? 'active (cbcs)' : st.session ?? 'unknown';
+            const sessLoading = !sessOk && (procLoading || proc === 'running');
             return [
-                { label: 'Wrapper process', ok: st.process === 'running',  text: st.process  ?? 'unknown' },
-                { label: 'FairPlay',        ok: st.fairplay === 'ready',   text: st.fairplay ?? 'unknown' },
-                { label: 'Session',         ok: st.session === 'valid' || d?.capabilities?.cbcs === true,
-                  text: st.session === 'valid' ? 'valid' : d?.capabilities?.cbcs === true ? 'active (cbcs)' : st.session ?? 'unknown',
+                { label: 'DRM process', ok: procOk, loading: procLoading, text: proc },
+                { label: 'FairPlay',    ok: fpOk,   loading: fpLoading,   text: fp },
+                { label: 'Session',     ok: sessOk, loading: sessLoading, text: sessText,
                   subtitle: 'Authentication lease with Apple servers' },
-                { label: 'Backend',         text: d.backend?.selected ?? 'embedded', noDot: true },
+                { label: 'Backend',     text: d.backend?.selected ?? 'embedded', noDot: true },
             ];
         }
 
+        function applyStatusRow(v, { ok, loading, text, noDot }) {
+            v.innerHTML = '';
+            if (!noDot) v.appendChild(loading ? spinner() : dot(ok));
+            v.appendChild(document.createTextNode(text));
+        }
+
         const valEls = [];
-        renderStatusRows(drm).forEach(({ label, ok, text, subtitle, noDot }, i, arr) => {
-            const v = statusVal(text, noDot ? undefined : ok);
-            valEls.push({ el: v, noDot: !!noDot });
-            stBody.appendChild(makeRow(label, v, subtitle, i === arr.length - 1));
+        renderStatusRows(drm).forEach((row, i, arr) => {
+            const v = statusVal('', row.noDot ? undefined : row.ok);
+            applyStatusRow(v, row);
+            valEls.push({ el: v, noDot: !!row.noDot });
+            stBody.appendChild(makeRow(row.label, v, row.subtitle, i === arr.length - 1));
         });
 
         const refreshRow = document.createElement('div');
@@ -1265,12 +1296,7 @@ window.addEventListener('unhandledrejection', (e) => {
                 if (!dlg.isConnected) { clearInterval(poll); return; }
                 const d = await fetchDRM().catch(() => null);
                 if (!d) return;
-                renderStatusRows(d).forEach(({ ok, text, noDot }, i) => {
-                    const v = valEls[i].el;
-                    v.innerHTML = '';
-                    if (!noDot) v.appendChild(dot(ok));
-                    v.appendChild(document.createTextNode(text));
-                });
+                renderStatusRows(d).forEach((row, i) => applyStatusRow(valEls[i].el, row));
                 if (isResolved(d)) clearInterval(poll);
             }, 2000);
         }

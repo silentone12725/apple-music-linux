@@ -7,7 +7,7 @@ import (
 
 	"github.com/grafov/m3u8"
 
-	"main/utils/structs"
+	"apple-music-cli/utils/structs"
 )
 
 // masterFixture is a synthetic EnhancedHls master with one variant per format,

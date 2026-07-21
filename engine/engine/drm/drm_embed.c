@@ -140,6 +140,20 @@ static void child_main(const DRMEmbedConfig *cfg, int errpipe) {
         /* non-fatal: Android binary may use getrandom() syscall instead */
     }
 
+    /* Write public DNS servers into the rootfs resolv.conf before chroot.
+     * The host /etc/resolv.conf often points to systemd-resolved (127.0.0.53)
+     * which is slow under load for cold domains; direct public resolvers are
+     * faster and more reliable for the Apple auth endpoints. */
+    mkdir("rootfs/etc", 0755); /* ignore EEXIST */
+    {
+        int fd = open("rootfs/etc/resolv.conf", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) {
+            const char *dns = "nameserver 1.1.1.1\nnameserver 1.0.0.1\nnameserver 8.8.8.8\n";
+            write(fd, dns, strlen(dns)); /* non-fatal if write fails */
+            close(fd);
+        }
+    }
+
     /* The Android linker and binary must be executable inside the namespace. */
     chmod("rootfs/system/bin/linker64", 0755);
     chmod("rootfs/system/bin/main",     0755);

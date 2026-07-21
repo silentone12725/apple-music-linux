@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"main/engine/pipeline"
+	"apple-music-cli/engine/pipeline"
 )
 
 // Compile-time assertions: the exported constructors satisfy the intended

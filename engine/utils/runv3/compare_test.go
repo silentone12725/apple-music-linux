@@ -26,7 +26,7 @@ import (
 	"os"
 	"testing"
 
-	"main/utils/runv3"
+	"apple-music-cli/utils/runv3"
 )
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

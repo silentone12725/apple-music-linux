@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"main/engine/pipeline"
-	"main/engine/playback"
-	"main/utils/ampapi"
-	"main/utils/lyrics"
+	"apple-music-cli/engine/pipeline"
+	"apple-music-cli/engine/playback"
+	"apple-music-cli/utils/ampapi"
+	"apple-music-cli/utils/lyrics"
 )
 
 const (
