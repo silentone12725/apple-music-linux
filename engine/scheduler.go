@@ -13,8 +13,8 @@ import (
 	"context"
 	"sync"
 
-	"main/utils/lyrics"
-	"main/utils/task"
+	"apple-music-cli/utils/lyrics"
+	"apple-music-cli/utils/task"
 )
 
 const (

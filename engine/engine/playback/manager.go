@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"main/engine/apple"
-	"main/engine/media"
-	"main/engine/pipeline"
+	"apple-music-cli/engine/apple"
+	"apple-music-cli/engine/media"
+	"apple-music-cli/engine/pipeline"
 )
 
 const sessionTTL = 4 * time.Hour

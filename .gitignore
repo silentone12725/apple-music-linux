@@ -7,6 +7,10 @@ electron/engine-sse-bundle.js
 electron/renderer-bundle.js
 electron/smart-cache-bundle.js
 electron/vision-bundle.js
+electron/engine-playback.bundle.js
+electron/engine-sse.bundle.js
+electron/smart-cache.bundle.js
+electron/vision-glass.bundle.js
 
 # Electron dist/resources/app: all JS/CJS/MJS are copies of source or generated
 # bundles. Only package.json is committed; everything else is produced by the
@@ -41,6 +45,18 @@ go.work.sum
 # ── Engine config ─────────────────────────────────────────────────────────────
 # config.yaml.example IS committed; the live file with tokens is not
 engine/config.yaml
+
+# ── DRM / Android container runtime state ─────────────────────────────────────
+# These files are written by the running DRM process and must not be committed.
+drm/rootfs/data/data/com.apple.android.music/files/MUSIC_TOKEN
+drm/rootfs/data/data/com.apple.android.music/files/STOREFRONT_ID
+drm/rootfs/data/data/com.apple.android.music/files/adi.pb
+drm/rootfs/data/data/com.apple.android.music/files/fsi.pdat
+drm/rootfs/data/data/com.apple.android.music/files/IC-Info.sids
+drm/rootfs/data/data/com.apple.android.music/files/engine-session.lock
+drm/rootfs/data/data/com.apple.android.music/files/mpl_db/
+drm/rootfs/home/
+drm/rootfs/tmp/
 
 # ── Wrapper / Android container runtime state ─────────────────────────────────
 # These files are written by the running wrapper and must not be committed.

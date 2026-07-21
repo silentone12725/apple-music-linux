@@ -3,7 +3,7 @@ package task
 import (
 	"context"
 
-	"main/utils/ampapi"
+	"apple-music-cli/utils/ampapi"
 )
 
 type Track struct {
