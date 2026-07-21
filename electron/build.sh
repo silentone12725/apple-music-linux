@@ -62,4 +62,4 @@ fi
 ELECTRON=node_modules/.bin/electron
 
 echo "Launching with bundled Electron $("$ELECTRON" --version 2>/dev/null)..."
-exec "$ELECTRON" . "$@"
+exec "$ELECTRON" --no-sandbox . "$@"

@@ -12,7 +12,7 @@ import (
 	//"github.com/fatih/color"
 	//"github.com/olekukonko/tablewriter"
 
-	"main/utils/ampapi"
+	"apple-music-cli/utils/ampapi"
 )
 
 type Station struct {

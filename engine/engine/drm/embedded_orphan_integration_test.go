@@ -39,7 +39,7 @@ import (
 	"testing"
 	"time"
 
-	"main/engine/drm"
+	"apple-music-cli/engine/drm"
 )
 
 func TestEmbeddedBackend_StopReapsWorker(t *testing.T) {

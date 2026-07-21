@@ -9,7 +9,7 @@ package structs
 //
 // Default (unset): preferred=embedded, fallback=process — the engine prefers the
 // CGO EmbeddedBackend and transparently falls back to ProcessBackend if it can't
-// start. Set `preferred: process` to force the legacy wrapper-launcher backend.
+// start. Set `preferred: process` to force the legacy drm-launcher backend.
 type BackendPolicy struct {
 	Preferred string `yaml:"preferred"`
 	Fallback  string `yaml:"fallback"`
@@ -49,9 +49,9 @@ type ConfigSet struct {
 	MaxMemoryLimit       int    `yaml:"max-memory-limit"`
 	DecryptM3u8Port      string `yaml:"decrypt-m3u8-port"`
 	GetM3u8Port          string `yaml:"get-m3u8-port"`
-	// DRM wrapper (engine/drm package)
-	WrapperBinaryPath          string        `yaml:"wrapper-binary-path"`  // path to wrapper-rootless binary
-	WrapperBaseDir             string        `yaml:"wrapper-base-dir"`     // mpl_db parent directory
+	// DRM binary (engine/drm package)
+	DRMBinaryPath              string        `yaml:"drm-binary-path"`      // path to drm-rootless binary
+	DRMBaseDir                 string        `yaml:"drm-base-dir"`         // mpl_db parent directory
 	UseEmbeddedBackend         bool          `yaml:"use-embedded-backend"` // DEPRECATED: use `backend.preferred`. true → prefer embedded.
 	Backend                    BackendPolicy `yaml:"backend"`              // preferred backend + automatic startup fallback
 	GetM3u8Mode                string        `yaml:"get-m3u8-mode"`

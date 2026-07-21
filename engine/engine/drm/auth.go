@@ -71,7 +71,20 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		email := a.stored.Email
 		pass := a.stored.Password
 		a.mu.Unlock()
-		return email + "\x00" + pass, nil
+		if email != "" {
+			return email + "\x00" + pass, nil
+		}
+		// No credentials stored — emit SSE so the frontend shows the sign-in
+		// form automatically, then return empty to let the binary's own auth
+		// error path fire. Authenticate() will restart with --login once the
+		// user submits credentials.
+		if a.emitter != nil {
+			a.emitter(DRMSnapshot{
+				State:     DRMState{Authentication: AuthChallenging},
+				Challenge: &req,
+			})
+		}
+		return "\x00", nil
 	}
 
 	// Emit challenge to SSE so the browser knows to prompt the user.
