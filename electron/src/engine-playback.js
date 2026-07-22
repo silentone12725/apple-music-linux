@@ -487,20 +487,6 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
     }
 }
 
-// After a seek pipe fills the buffer from actualStart (segment boundary),
-// the browser snaps currentTime to actualStart rather than the requested seekSec.
-// This snaps it back — _nativeCTSet fires 'seeking', but onSeeking ignores it
-// (_ourSeekPending=false) and the browser resolves it natively from the buffer.
-function snapToSeekSec(audio, seekSec, wasPlaying) {
-    const ct = audio.currentTime;
-    if (Math.abs(ct - seekSec) > 0.3) {
-        try { _nativeCTSet.call(audio, seekSec); } catch (_) {}
-        if (wasPlaying) audio.addEventListener('seeked', () => _nativePlay().catch(() => {}), { once: true });
-    } else {
-        if (wasPlaying) _nativePlay().catch(e => console.warn('[AML MSE] seek play():', e));
-    }
-}
-
 async function mseSeekToTime(seekSec, audio, sb, ms) {
     if (ms.readyState === 'closed') return;
     const bufferedRanges = Array.from({length: sb.buffered.length}, (_, i) =>
@@ -581,10 +567,14 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
             }
         })();
 
+        // Same as the ?t= path: set currentTime before re-inject so the browser
+        // positions itself once the buffer covers seekSec.
+        try { _nativeCTSet.call(audio, seekSec); } catch (_) {}
+
         audio.addEventListener('canplay', () => {
             if (pipeCtrl.signal.aborted) return;
             _seekTarget = -Infinity;
-            snapToSeekSec(audio, seekSec, wasPlaying);
+            if (wasPlaying) _nativePlay().catch(() => {});
         }, { once: true });
         return;
     }
@@ -628,6 +618,12 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
 
     try { await waitSBIdle(); if (ms.readyState === 'open') sb.remove(0, Infinity); await waitSBIdle(); } catch (_) {}
 
+    // Tell the browser where we want to resume BEFORE the pipe starts filling.
+    // It will fire 'seeking', wait for the buffer to cover seekSec, then resolve
+    // the seek and fire 'canplay' already positioned at the right place.
+    // onSeeking ignores this (_ourSeekPending=false) so no seek loop.
+    try { _nativeCTSet.call(audio, seekSec); } catch (_) {}
+
     _pipeCtrl = new AbortController();
     const pipeCtrl = _pipeCtrl;
 
@@ -639,7 +635,7 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
         if (pipeCtrl.signal.aborted) return;
         _seekTarget = -Infinity;
         console.log(`[AML MSE] Seek ready — req=${seekSec.toFixed(2)}s actual=${actualStart.toFixed(2)}s ct=${audio.currentTime.toFixed(2)}s`);
-        snapToSeekSec(audio, seekSec, wasPlaying);
+        if (wasPlaying) _nativePlay().catch(e => console.warn('[AML MSE] seek play():', e));
     }, { once: true });
 }
 
@@ -1081,6 +1077,10 @@ async function handleTrackChange(mk) {
                 _vlcLoading = false;
                 URL.revokeObjectURL(_silentUrl);
                 delete mkAudio.paused;
+                delete mkAudio.currentTime;
+                delete mkAudio.volume;
+                delete mkAudio.muted;
+                delete mkAudio.pause;
                 _vlcPaused = false;
             }, { once: true });
         }
