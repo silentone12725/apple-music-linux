@@ -39,11 +39,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	httppprof "net/http/pprof"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -336,6 +336,7 @@ type APIServer struct {
 	scheduler   *prefetch.Scheduler  // background cache-warming scheduler
 	diskCache   *diskcache.Cache     // per-track decrypted audio disk cache
 	vlcPlayer   *vlc.Player          // nil when libvlc is not available
+	vlcSessionID string              // session backing the current VLC stream
 }
 
 // NewAPIServer wires all routes.
@@ -984,6 +985,7 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 
 func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	log.Printf("[audio] GET id=%s t=%q Range=%q", id, r.URL.Query().Get("t"), r.Header.Get("Range"))
 	sess, ok := s.pm.GetSession(id)
 	if !ok {
 		http.Error(w, "session not found or expired", http.StatusNotFound)
@@ -994,18 +996,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// ?transcode=aac pipes the decrypted stream through ffmpeg → AAC fMP4.
-	// Required for browser playback of ALAC and Atmos: Chromium on Linux does
-	// not include ALAC or E-AC-3 (Atmos) decoders.  The raw streams are correct
-	// and can be verified with MP4Box or ffprobe; transcoding is only for the
-	// browser's <audio> element.
-	// ?raw=1 forces the native codec (ALAC fMP4 or E-AC-3 fMP4) — for VLC,
-	// ffprobe, MP4Box, or any player that handles these codecs natively.
-	rawMode := r.URL.Query().Get("raw") == "1"
-	transcodeParam := r.URL.Query().Get("transcode")
-
 	// ?t=<seconds> — seek to an approximate time offset.
-	// Only supported for AAC streams (SeekableSource); silently ignored for ALAC/Atmos.
 	// The response header X-Actual-Start reports the real segment start time so
 	// the frontend can set audio.currentTime accurately after a seek.
 	var seekSec float64
@@ -1015,64 +1006,50 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	needsAAC := !rawMode && (transcodeParam == "aac" ||
-		(transcodeParam == "" && (string(sess.Codec) == "alac" || string(sess.Codec) == "atmos")))
-
-	needsFLAC := !rawMode && transcodeParam == "flac"
-
-	if needsAAC {
-		// For native AAC content (CTR-encrypted AAC-LC) use stream copy to avoid
-		// a lossy re-encode (AAC→AAC).  For ALAC and Atmos the source codec is not
-		// AAC-LC, so a full transcode is required for Chromium compatibility.
-		codecCopy := string(sess.Codec) == "aac"
-		streamTranscodedAAC(w, r, codecCopy, func(src io.Writer) error {
-			return s.pm.Stream(r.Context(), id, pipeline.KindAudio, src)
-		})
-		return
-	}
-
-	if needsFLAC {
-		streamTranscodedFLAC(w, r, func(src io.Writer) error {
-			return s.pm.Stream(r.Context(), id, pipeline.KindAudio, src)
-		})
-		return
-	}
-
-	// Disk cache: only for full-track raw streams (no transcode, no seek).
-	// Seeked requests go directly to the pipeline; cached files support natural
-	// byte-range seeking so the client can seek without a new session.
-	if !needsAAC && !needsFLAC && seekSec == 0 && s.diskCache != nil {
+	// Disk cache: pre-download the full track so the response has
+	// Accept-Ranges: bytes and VLC can seek natively without a URL reload.
+	if seekSec == 0 && s.diskCache != nil {
 		qualifier := sess.Codec
-		if rawMode {
-			qualifier += "_raw"
-		}
 		if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
 			defer f.Close()
 			w.Header().Set("Content-Type", "audio/mp4")
 			http.ServeContent(w, r, "", time.Time{}, f)
 			return
 		}
-		// Cache miss: stream and tee to disk.
-		pw, _ := s.diskCache.BeginPut(sess.AssetID, qualifier)
-		tee := diskcache.NewTee(nil, pw) // dst set per-write below
+		// Cache miss: download the whole track to disk, then serve.
+		if pw, _ := s.diskCache.BeginPut(sess.AssetID, qualifier); pw != nil {
+			err := s.pm.Stream(r.Context(), id, pipeline.KindAudio, pw)
+			if err != nil {
+				pw.Discard()
+			} else if pw.Commit() == nil {
+				if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
+					defer f.Close()
+					w.Header().Set("Content-Type", "audio/mp4")
+					http.ServeContent(w, r, "", time.Time{}, f)
+					return
+				}
+			}
+		}
+		// Fallback: stream without caching (no byte-range seek support).
 		streamMedia(w, r, func(dst io.Writer) error {
-			tee.SetDst(dst)
-			err := s.pm.Stream(r.Context(), id, pipeline.KindAudio, tee)
-			tee.Finish(err)
-			return err
+			return s.pm.Stream(r.Context(), id, pipeline.KindAudio, dst)
 		}, "audio/mp4")
 		return
 	}
 
 	if seekSec > 0 {
-		// Pre-compute and set X-Actual-Start before the first byte is written.
-		// GetSeekStart is pure arithmetic on the already-fetched playlist —
-		// no I/O — so the header is available before streamMedia commits 200.
+		log.Printf("[engine] seek id=%s codec=%s seekSec=%.3f", id, sess.Codec, seekSec)
+		seekCtx := r.Context()
 		if actual, ok := s.pm.GetSeekStart(id, pipeline.KindAudio, seekSec); ok {
 			w.Header().Set("X-Actual-Start", strconv.FormatFloat(actual, 'f', 3, 64))
+			log.Printf("[engine] seek actualStart=%.3f (requested=%.3f)", actual, seekSec)
+			seekCtx = pipeline.ContextWithActualStart(seekCtx, actual)
+			// Pass the exact requested time so PassthroughStreaming can trim
+			// leading fragments within the segment for sub-segment accuracy.
+			seekCtx = pipeline.ContextWithSeekTarget(seekCtx, seekSec)
 		}
 		streamMedia(w, r, func(dst io.Writer) error {
-			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindAudio, seekSec, dst)
+			_, err := s.pm.StreamFrom(seekCtx, id, pipeline.KindAudio, seekSec, dst)
 			return err
 		}, "audio/mp4")
 		return
@@ -1151,126 +1128,6 @@ func (b *firstByteWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return n, err
-}
-
-// streamTranscodedAAC runs fn into an ffmpeg subprocess that produces AAC fMP4
-// suitable for MSE (MediaSource Extensions) playback in Chromium.
-//
-// If codecCopy is true the audio track is copied without re-encoding (stream
-// copy); use this when the source is already AAC-LC to avoid a lossy round-trip.
-// If codecCopy is false (ALAC, Atmos, E-AC-3 source), ffmpeg re-encodes to
-// AAC-LC at 256 kbps so Chromium can decode it.
-//
-// The -analyzeduration 0 -probesize 32768 flags minimise the time ffmpeg
-// spends probing the input before emitting the first output fragment — without
-// them ffmpeg waits up to 5 s at startup, delaying the first canplay event.
-func streamTranscodedAAC(w http.ResponseWriter, r *http.Request, codecCopy bool, fn func(io.Writer) error) {
-	audioCodec := "aac"
-	extraArgs := []string{"-b:a", "256k"}
-	if codecCopy {
-		audioCodec = "copy"
-		extraArgs = nil
-	}
-
-	args := []string{
-		"-analyzeduration", "0",
-		"-probesize", "32768",
-		"-i", "pipe:0",
-		"-c:a", audioCodec,
-	}
-	args = append(args, extraArgs...)
-	args = append(args,
-		// frag_keyframe alone does not fragment audio-only streams (no video keyframes).
-		// frag_duration forces a new fragment every 2 seconds so the browser's MSE
-		// SourceBuffer receives complete, decodable segments promptly.
-		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
-		"-frag_duration", "2000000",
-		"-f", "mp4",
-		"pipe:1",
-	)
-
-	cmd := exec.CommandContext(r.Context(), "ffmpeg", args...)
-
-	pr, pw := io.Pipe()
-	cmd.Stdin = pr
-
-	// Forward ffmpeg errors to the engine's stderr so they appear in the terminal.
-	cmd.Stderr = os.Stderr
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		http.Error(w, "transcode setup: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		pr.Close()
-		http.Error(w, "ffmpeg not available: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Feed the engine stream into ffmpeg stdin in a goroutine.
-	go func() {
-		err := fn(pw)
-		if err != nil {
-			pw.CloseWithError(err)
-		} else {
-			pw.Close()
-		}
-	}()
-
-	// Stream ffmpeg stdout → HTTP response.
-	bw := &firstByteWriter{w: w, ct: "audio/mp4"}
-	if _, err := io.Copy(bw, stdout); err != nil && r.Context().Err() == nil {
-		if !bw.started {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "transcode failed: " + err.Error()})
-		}
-	}
-	cmd.Wait() //nolint:errcheck
-}
-
-// streamTranscodedFLAC transcodes the stream to FLAC on the fly for lossless playback in Firefox/Zen.
-func streamTranscodedFLAC(w http.ResponseWriter, r *http.Request, fn func(io.Writer) error) {
-	cmd := exec.CommandContext(r.Context(), "ffmpeg",
-		"-i", "pipe:0",
-		"-c:a", "flac",
-		"-f", "flac",
-		"pipe:1",
-	)
-
-	pr, pw := io.Pipe()
-	cmd.Stdin = pr
-	cmd.Stderr = os.Stderr
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		http.Error(w, "transcode setup: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		pr.Close()
-		http.Error(w, "ffmpeg not available: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	go func() {
-		err := fn(pw)
-		fmt.Printf("FLAC source finished. err=%v\n", err)
-		if err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-		pw.Close()
-	}()
-
-	bw := &firstByteWriter{w: w, ct: "audio/flac"}
-	if _, err := io.Copy(bw, stdout); err != nil && r.Context().Err() == nil {
-		if !bw.started {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "transcode failed: " + err.Error()})
-		}
-	}
-	cmd.Wait() //nolint:errcheck
 }
 
 func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request) {
@@ -1871,6 +1728,7 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.vlcSessionID = req.SessionID
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -1911,7 +1769,8 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		PosMs int64 `json:"posMs"`
+		PosMs     int64  `json:"posMs"`
+		SessionID string `json:"sessionId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -1921,7 +1780,13 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	actualStartMs := req.PosMs
+	if req.SessionID != "" {
+		if actual, ok := s.pm.GetSeekStart(req.SessionID, pipeline.KindAudio, float64(req.PosMs)/1000.0); ok {
+			actualStartMs = int64(actual * 1000)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"actualStartMs": actualStartMs})
 }
 
 func (s *APIServer) handleVLCVolume(w http.ResponseWriter, r *http.Request) {

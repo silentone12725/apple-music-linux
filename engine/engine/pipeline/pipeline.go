@@ -136,6 +136,39 @@ type Stream struct {
 	Codec  Codec
 }
 
+// ── Seek context ─────────────────────────────────────────────────────────────
+
+// seekActualStartKey is the context key for the actual segment start time on
+// the seek path. PassthroughStreaming reads this to seed the tfdt accumulator
+// at the correct song position instead of from the native (segment-relative) 0.
+type seekActualStartKey struct{}
+
+// ContextWithActualStart returns a child context that carries the actual start
+// time (seconds) of the first segment in a seek stream.
+func ContextWithActualStart(ctx context.Context, sec float64) context.Context {
+	return context.WithValue(ctx, seekActualStartKey{}, sec)
+}
+
+// ActualStartFromContext extracts the seek actual-start set by ContextWithActualStart.
+// Returns (0, false) if not set.
+func ActualStartFromContext(ctx context.Context) (float64, bool) {
+	v, ok := ctx.Value(seekActualStartKey{}).(float64)
+	return v, ok
+}
+
+// seekTargetKey carries the user-requested seek time so PassthroughStreaming
+// can drop leading fragments before that position (sub-segment accuracy).
+type seekTargetKey struct{}
+
+func ContextWithSeekTarget(ctx context.Context, sec float64) context.Context {
+	return context.WithValue(ctx, seekTargetKey{}, sec)
+}
+
+func SeekTargetFromContext(ctx context.Context) (float64, bool) {
+	v, ok := ctx.Value(seekTargetKey{}).(float64)
+	return v, ok
+}
+
 // Run executes the stream pipeline into dst.
 // It chains: Source → Stages[0] → Stages[1] → … → dst
 // and blocks until the pipeline completes or ctx is cancelled.

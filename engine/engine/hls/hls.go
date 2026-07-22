@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -214,6 +215,7 @@ func (m *Media) AllURLs() []string {
 // Falls back to AllURLs() if no duration information is available.
 func (m *Media) URLsFrom(startSec float64) (urls []string, actualStart float64) {
 	if len(m.SegmentDurations) == 0 || startSec <= 0 {
+		log.Printf("[hls] URLsFrom startSec=%.3f → fallback AllURLs (nDurations=%d)", startSec, len(m.SegmentDurations))
 		return m.AllURLs(), 0
 	}
 	var cumulative float64
@@ -234,6 +236,14 @@ func (m *Media) URLsFrom(startSec float64) (urls []string, actualStart float64) 
 		out = append(out, m.InitURL)
 	}
 	out = append(out, m.SegmentURLs[idx:]...)
+	log.Printf("[hls] URLsFrom startSec=%.3f nSegs=%d nDurations=%d → idx=%d actualStart=%.3f firstSegURL=%s",
+		startSec, len(m.SegmentURLs), len(m.SegmentDurations), idx, cumulative,
+		func() string {
+			if len(out) > 1 {
+				return out[1]
+			}
+			return "(none)"
+		}())
 	return out, cumulative
 }
 
@@ -288,7 +298,7 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 	if pl.Map != nil && pl.Map.URI != "" {
 		u, err := base.Parse(pl.Map.URI)
 		if err == nil {
-			med.InitURL = u.String()
+			med.InitURL = byteRangeURL(u.String(), pl.Map.Offset, pl.Map.Limit)
 		}
 	}
 
@@ -310,11 +320,23 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 		if err != nil {
 			continue
 		}
-		med.SegmentURLs = append(med.SegmentURLs, u.String())
+		med.SegmentURLs = append(med.SegmentURLs, byteRangeURL(u.String(), seg.Offset, seg.Limit))
 		med.SegmentDurations = append(med.SegmentDurations, seg.Duration)
 	}
 
 	return med, nil
+}
+
+// byteRangeURL appends a "#bytes=<offset>-<end>" fragment to url when the
+// segment declares an EXT-X-BYTERANGE (Limit > 0). DownloadSegments in
+// utils/runv3 detects this fragment and issues a Range request instead of a
+// full GET, so byte-range playlists (like Apple Music AAC) start at the
+// correct position instead of always downloading from byte 0.
+func byteRangeURL(rawURL string, offset, length int64) string {
+	if length <= 0 {
+		return rawURL
+	}
+	return fmt.Sprintf("%s#bytes=%d-%d", rawURL, offset, offset+length-1)
 }
 
 // ─── CBCS media playlist ──────────────────────────────────────────────────────

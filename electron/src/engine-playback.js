@@ -17,6 +17,16 @@
 
 const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
 
+// Suppress MusicKit's high-frequency event-queue overflow spam so it doesn't
+// drown useful [AML *] diagnostic messages in the renderer console.
+(() => {
+    const _orig = console.log;
+    console.log = (...args) => {
+        if (typeof args[0] === 'string' && args[0].includes('eventQueue overflow')) return;
+        _orig.apply(console, args);
+    };
+})();
+
 // ── Native handles ─────────────────────────────────────────────────────────────
 
 let _nativeSrcSet = null; // saved by blockAppleCDN() for our own src writes
@@ -30,8 +40,12 @@ let _vlcPosMs      = 0;     // last polled VLC position (frozen during seek)
 let _vlcPaused     = false; // virtual paused state (overrides audio.paused in VLC mode)
 let _vlcPollTimer  = null;  // setInterval handle
 let _vlcSeekTimer  = null;  // debounce: actual VLC seek fires after scrubbing stops
-let _vlcSeekFrozen = false; // true during scrub → poll won't overwrite _vlcPosMs
-let _vlcRetryCount = 0;     // premature-end retries for current track (reset on track change)
+let _vlcSeekFrozen    = false; // true during scrub → poll won't overwrite _vlcPosMs
+let _vlcSeekOffsetMs  = 0;    // song-position base of current VLC HTTP stream (ms)
+let _vlcRetryCount    = 0;    // premature-end retries for current track (reset on track change)
+let _vlcPrevState     = null; // last VLC state seen by the poll (null forces re-emit after seek)
+let _vlcLoading       = false; // true from VLC.Load until VLC first enters 'playing' state
+let _seekBurstLog     = 0;    // ticks remaining in post-seek burst logging window
 
 // ── Engine capability snapshot (from SSE) ─────────────────────────────────────
 
@@ -158,6 +172,10 @@ function installPlayProxy(mkAudio) {
             _vlcPaused = false;
             const p = new Promise(resolve => _resolvers.push(resolve));
             mkAudio.dispatchEvent(new Event('playing')); // fires listener above synchronously → resolves p
+            // While VLC is still opening, follow with 'waiting' so MK shows a
+            // buffering indicator instead of the playing animation. The poll clears
+            // this by dispatching 'playing' once VLC enters 'playing' state.
+            if (_vlcLoading) mkAudio.dispatchEvent(new Event('waiting'));
             fetch(`${ENGINE}/api/v1/vlc/resume`, { method: 'POST' }).catch(() => {});
             return p;
         }
@@ -190,26 +208,37 @@ function installMKSeekInterceptor(mk) {
             _vlcSeekTimer = setTimeout(async () => {
                 _vlcSeekTimer = null;
                 console.log(`[AML VLC] seek FIRE  posMs=${_vlcPosMs}`);
+                // Signal MK to show a buffering/loading indicator while VLC loads
+                // the new segment stream. The poll will dispatch 'playing' once VLC
+                // actually starts playing at the seek position.
+                getMKAudio()?.dispatchEvent(new Event('waiting'));
+                const seekTarget = _vlcPosMs;
+                let actualStartMs = seekTarget;
                 try {
                     const t0 = performance.now();
-                    await fetch(`${ENGINE}/api/v1/vlc/seek`, {
+                    const seekResp = await fetch(`${ENGINE}/api/v1/vlc/seek`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ posMs: _vlcPosMs }),
+                        body: JSON.stringify({ posMs: seekTarget, sessionId: _sessionId }),
                     });
-                    console.log(`[AML VLC] seek DONE  posMs=${_vlcPosMs}  rtt=${(performance.now()-t0).toFixed(0)}ms`);
+                    const seekData = await seekResp.json().catch(() => ({}));
+                    actualStartMs = seekData.actualStartMs ?? seekTarget;
+                    console.log(`[AML VLC] seek DONE  target=${seekTarget}ms  actualStart=${actualStartMs}ms  rtt=${(performance.now()-t0).toFixed(0)}ms`);
+                    // Snap position to the actual segment boundary so UI and audio stay in sync.
+                    _vlcPosMs = actualStartMs;
                 } catch (e) {
                     console.warn(`[AML VLC] seek ERROR`, e);
                 }
+                // VLC always reports elapsed time from its first DTS frame, not the
+                // absolute tfdt position. Use actualStartMs (the true segment boundary)
+                // so _vlcPosMs = actualStartMs + elapsed tracks audio position accurately.
+                _vlcSeekOffsetMs = actualStartMs;
+                _vlcPrevState = null;          // force poll to re-emit 'playing', cancelling 'waiting'
                 _vlcSeekFrozen = false;
-                console.log(`[AML VLC] seek UNFREEZE`);
+                _seekBurstLog = 15;            // log every tick for 15 ticks (3.75s) after seek
+                console.log(`[AML VLC] seek UNFREEZE  offset=${_vlcSeekOffsetMs}ms`);
                 // Emit Seeked signal so MPRIS clients re-anchor their seek bar.
                 window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000, seeked: true });
-                // After pause→SetMediaTime→resume, VLC is playing but _prevState inside
-                // the poll was updated during the freeze window so it already reads
-                // 'playing' — no transition fires, MK is left showing the play button.
-                // Force a playing event to sync MK's UI.
-                getMKAudio()?.dispatchEvent(new Event('playing'));
             }, 150);
         } else {
             return _origSeek(seekSec).catch(() => {});
@@ -336,7 +365,7 @@ function stopVLCPoll() {
 
 function startVLCPoll(mkAudio) {
     stopVLCPoll();
-    let _prevState = null;
+    _vlcPrevState = null;
     let _errCount  = 0;
     let _tickCount = 0;
     let _vlcLengthSet = false;
@@ -355,17 +384,28 @@ function startVLCPoll(mkAudio) {
                 bridgeDuration(mk, _durationSec);
             }
             const prevPos = _vlcPosMs;
-            if (!_vlcSeekFrozen) _vlcPosMs = posMs;
+            // VLC counts elapsed time from the start of the current HTTP stream,
+            // not absolute PTS. Add _vlcSeekOffsetMs (set at seek UNFREEZE) so the
+            // displayed position stays anchored to the song timeline after seeks.
+            // Guard posMs > 0: VLC returns -1/0 briefly before first decode.
+            if (!_vlcSeekFrozen && posMs > 0) _vlcPosMs = _vlcSeekOffsetMs + posMs;
             if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event('timeupdate'));
             // Update MPRIS position every ~1s (every 4 ticks × 250ms).
             if (++_tickCount % 4 === 0) {
-                window.amlBridge?.mprisUpdate?.({ position: posMs * 1000 }); // ms → µs
+                window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000 }); // ms → µs
             }
-            // Log position every ~5 seconds so we can verify seeks actually moved.
-            if (_tickCount % 20 === 0) console.log(`[AML VLC] pos=${posMs}ms state=${state}`);
-            if (state === _prevState) return;
-            const prev = _prevState;
-            _prevState = state;
+            // Burst-log every tick for 15 ticks after a seek so we can diagnose
+            // exactly what VLC does immediately after loading the seek stream.
+            if (_seekBurstLog > 0) {
+                _seekBurstLog--;
+                console.log(`[AML VLC seek] tick posMs=${posMs} state=${state} offset=${_vlcSeekOffsetMs} pos=${_vlcPosMs} frozen=${_vlcSeekFrozen}`);
+            } else if (_tickCount % 20 === 0) {
+                // Log position every ~5 seconds during normal playback.
+                console.log(`[AML VLC] pos=${posMs}ms state=${state}`);
+            }
+            if (state === _vlcPrevState) return;
+            const prev = _vlcPrevState;
+            _vlcPrevState = state;
             console.log(`[AML VLC] state: ${prev ?? 'null'} → ${state}  posMs=${posMs}  frozen=${_vlcSeekFrozen}`);
             // Suppress playing/pause events while a seek is in-flight.
             // Go's pause→SetMediaTime→resume emits paused/playing transitions that
@@ -373,6 +413,7 @@ function startVLCPoll(mkAudio) {
             if (_vlcSeekFrozen) return;
             if (state === 'playing') {
                 _vlcPaused = false;
+                _vlcLoading = false; // VLC is actually playing; clear pre-warmup guard
                 // Only dispatch 'playing' for initial start (null/stopped → playing).
                 // Resume from pause is handled by _origMKPlay() — dispatching here
                 // causes PlayActivity.play() to be called twice and throws.
@@ -397,6 +438,7 @@ function startVLCPoll(mkAudio) {
                 // when the engine is genuinely broken.
                 if (posMs < 2000 && _durationSec > 5 && _vlcRetryCount < 2) {
                     _vlcRetryCount++;
+                    _vlcSeekOffsetMs = 0;
                     console.log(`[AML VLC] premature end at posMs=${posMs} — reload attempt ${_vlcRetryCount}`);
                     setTimeout(() => {
                         if (!_sessionId) return;
@@ -484,7 +526,7 @@ async function handleTrackChange(mk) {
 
     if (_abortCtrl) { _abortCtrl.abort(); _abortCtrl = null; }
     _ourBlobUrl = null;
-    _vlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _vlcSeekFrozen = false; _vlcRetryCount = 0;
+    _vlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0;
     if (_vlcSeekTimer) { clearTimeout(_vlcSeekTimer); _vlcSeekTimer = null; }
     stopVLCPoll();
     unbridgeDuration();
@@ -578,7 +620,9 @@ async function handleTrackChange(mk) {
             }).catch(() => {});
         }
 
-        // ── VLC path: bypass MSE, pipe raw ALAC to libvlc in the engine process ──
+        // ── VLC path: all codecs routed through libvlc ──
+        // AAC: raw fMP4 → VLC (no ffmpeg). ALAC/Atmos: raw fMP4 → VLC.
+        // VLC owns pause/play/seek/position; browser element stays silent.
 
         _vlcMode = true;
 
@@ -613,17 +657,30 @@ async function handleTrackChange(mk) {
             configurable: true,
         });
 
-        // Forward volume changes to VLC (MK sets mkAudio.volume on mute/unmute).
+        // Forward volume/mute changes to VLC.
         const _volDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
-        let _vlcVolume = Math.round((_volDesc.get.call(mkAudio) ?? 1) * 100);
+        let _vlcVolume = Math.round((_volDesc.get.call(mkAudio) ?? 1) * 100) || 100;
+        let _vlcMuted = false;
+        let _vlcPreMuteVol = _vlcVolume;
+        const _postVlcVol = (vol) => fetch(`${ENGINE}/api/v1/vlc/volume`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vol }),
+        }).catch(() => {});
         Object.defineProperty(mkAudio, 'volume', {
             get: () => _vlcVolume / 100,
             set: (v) => {
                 _vlcVolume = Math.max(0, Math.min(200, Math.round(v * 100)));
-                fetch(`${ENGINE}/api/v1/vlc/volume`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ vol: _vlcVolume }),
-                }).catch(() => {});
+                if (_vlcVolume > 0) _vlcMuted = false;
+                _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
+            },
+            configurable: true,
+        });
+        Object.defineProperty(mkAudio, 'muted', {
+            get: () => _vlcMuted,
+            set: (v) => {
+                _vlcMuted = !!v;
+                if (_vlcMuted) { _vlcPreMuteVol = _vlcVolume || 100; _postVlcVol(0); }
+                else { _vlcVolume = _vlcPreMuteVol; _postVlcVol(_vlcVolume); }
             },
             configurable: true,
         });
@@ -639,6 +696,7 @@ async function handleTrackChange(mk) {
         };
 
         // Load session into VLC and start playback.
+        _vlcLoading = true; // cleared by poll when VLC enters 'playing' state
         const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -646,6 +704,10 @@ async function handleTrackChange(mk) {
             signal: ctrl.signal,
         });
         if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
+
+        // Sync UI volume to VLC on every track load so WirePlumber's stale
+        // per-app value (which survives VLC restarts) can't silence playback.
+        _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
 
         if (ctrl.signal.aborted) return;
 
@@ -657,6 +719,10 @@ async function handleTrackChange(mk) {
             if (!ctrl.signal.aborted) {
                 _vlcPaused = false;
                 mkAudio.dispatchEvent(new Event('playing'));
+                // VLC is still opening; show buffering indicator until the poll
+                // dispatches 'playing' when VLC enters the actual playing state.
+                // This prevents the playing animation during the pre-warmup window.
+                if (_vlcLoading) mkAudio.dispatchEvent(new Event('waiting'));
             }
         }, { once: true });
         mkAudio.dispatchEvent(new Event('canplay'));
@@ -667,6 +733,7 @@ async function handleTrackChange(mk) {
         ctrl.signal.addEventListener('abort', () => {
             unbridgeDuration();
             stopVLCPoll();
+            _vlcLoading = false;
             URL.revokeObjectURL(_silentUrl);
             delete mkAudio.paused; // restore native paused accessor
             _vlcPaused = false;
@@ -810,10 +877,11 @@ async function setup() {
         });
     }
 
-    function sendMprisStatus(status) {
-        // Include position + seeked with every status change so clients
-        // re-anchor their position display (fixes "resets to 0 on resume").
-        const seeked = (status === 'Playing');
+    function sendMprisStatus(status, { isResume = false } = {}) {
+        // Emit seeked only on resume-from-pause so clients re-anchor without
+        // jumping: on fresh track starts _vlcPosMs is 0/stale until VLC reports
+        // its first tick, which causes the seek bar to visibly skip ahead.
+        const seeked = isResume && status === 'Playing' && _vlcPosMs > 0;
         window.amlBridge?.mprisUpdate?.({ status, position: _vlcPosMs * 1000, seeked });
     }
 
@@ -860,9 +928,18 @@ async function setup() {
 
         // Sync MPRIS status.
         const s = mk.playbackState;
-        if      (s === PS?.playing) sendMprisStatus('Playing');
-        else if (s === PS?.paused)  sendMprisStatus('Paused');
-        else if (s === PS?.stopped || s === PS?.none) sendMprisStatus('Stopped');
+        if (s === PS?.playing) {
+            // In VLC mode, skip 'Playing' until VLC has actually reported a valid
+            // position (_vlcPosMs > 0). This prevents MPRIS showing "Playing" during
+            // track pre-warming when VLC is still in "opening" state. The poll
+            // dispatches a 'playing' event (triggering this listener again) once VLC
+            // actually transitions to playing with posMs > 0.
+            if (!_vlcMode || _vlcPosMs > 0) sendMprisStatus('Playing', { isResume: _vlcPaused });
+        } else if (s === PS?.paused) {
+            sendMprisStatus('Paused');
+        } else if (s === PS?.stopped || s === PS?.none) {
+            sendMprisStatus('Stopped');
+        }
 
         if (!_vlcMode) return;
         // Sync MK's authoritative playback state to VLC.  MK is the source of truth
@@ -1184,8 +1261,6 @@ window.addEventListener('unhandledrejection', (e) => {
             }
             #aml-settings-dialog::backdrop {
                 background:rgba(0,0,0,0.4);
-                backdrop-filter:blur(6px);
-                -webkit-backdrop-filter:blur(6px);
             }
             #aml-settings-dialog::-webkit-scrollbar { width:4px; }
             #aml-settings-dialog::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18);border-radius:2px; }
@@ -1304,17 +1379,53 @@ window.addEventListener('unhandledrejection', (e) => {
         // ── Display ────────────────────────────────────────────────────────
         const { wrap: dWrap, body: dBody } = makeSection('Display');
 
+        const RST = FF+'border:none;background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.45);border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;margin-left:6px;flex-shrink:0;';
+        function makeResetBtn(label, onClick) {
+            const b = document.createElement('button'); b.title = `Reset ${label}`; b.textContent = '↺'; b.style.cssText = RST;
+            b.onmouseenter = () => b.style.color = 'rgba(255,255,255,0.8)';
+            b.onmouseleave = () => b.style.color = 'rgba(255,255,255,0.45)';
+            b.onclick = onClick; return b;
+        }
+
         const blurVal = document.createElement('span');
         blurVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
-        blurVal.textContent = `${prefs.glassBlur ?? 48}px`;
+        blurVal.textContent = `${prefs.glassBlur ?? 20}px`;
         const blurSl = document.createElement('input');
-        blurSl.type = 'range'; blurSl.min = 0; blurSl.max = 80; blurSl.step = 4; blurSl.value = prefs.glassBlur ?? 48;
+        blurSl.type = 'range'; blurSl.min = 0; blurSl.max = 80; blurSl.step = 4; blurSl.value = prefs.glassBlur ?? 20;
         blurSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
         blurSl.oninput = () => { blurVal.textContent = `${blurSl.value}px`; window.amlBridge.setGlassBlur(+blurSl.value); };
         const blurR = document.createElement('div');
         blurR.style.cssText = 'display:flex;align-items:center;flex:1;';
         blurR.appendChild(blurSl); blurR.appendChild(blurVal);
-        dBody.appendChild(makeRow('Background blur', blurR, null, false));
+        blurR.appendChild(makeResetBtn('glass blur', () => { blurSl.value = 20; blurVal.textContent = '20px'; window.amlBridge.setGlassBlur(20); }));
+        dBody.appendChild(makeRow('Glass blur', blurR, 'Sidebar and UI element blur intensity', false));
+
+        const bgBlurVal = document.createElement('span');
+        bgBlurVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
+        bgBlurVal.textContent = `${prefs.bgBlur ?? 18}px`;
+        const bgBlurSl = document.createElement('input');
+        bgBlurSl.type = 'range'; bgBlurSl.min = 0; bgBlurSl.max = 60; bgBlurSl.step = 2; bgBlurSl.value = prefs.bgBlur ?? 18;
+        bgBlurSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
+        bgBlurSl.oninput = () => { bgBlurVal.textContent = `${bgBlurSl.value}px`; window.amlBridge.setBgBlur(+bgBlurSl.value); };
+        const bgBlurR = document.createElement('div');
+        bgBlurR.style.cssText = 'display:flex;align-items:center;flex:1;';
+        bgBlurR.appendChild(bgBlurSl); bgBlurR.appendChild(bgBlurVal);
+        bgBlurR.appendChild(makeResetBtn('background blur', () => { bgBlurSl.value = 18; bgBlurVal.textContent = '18px'; window.amlBridge.setBgBlur(18); }));
+        dBody.appendChild(makeRow('Background blur', bgBlurR, 'Wallpaper blur behind the window', false));
+
+        const navOpVal = document.createElement('span');
+        navOpVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
+        const initNavAlpha = prefs.themeNavBgAlpha ?? 0.72;
+        navOpVal.textContent = Math.round(initNavAlpha * 100) + '%';
+        const navOpSl = document.createElement('input');
+        navOpSl.type = 'range'; navOpSl.min = 0; navOpSl.max = 1; navOpSl.step = 0.01; navOpSl.value = initNavAlpha;
+        navOpSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
+        navOpSl.oninput = () => { navOpVal.textContent = Math.round(+navOpSl.value * 100) + '%'; window.amlBridge.setNavOpacity(+navOpSl.value); };
+        const navOpR = document.createElement('div');
+        navOpR.style.cssText = 'display:flex;align-items:center;flex:1;';
+        navOpR.appendChild(navOpSl); navOpR.appendChild(navOpVal);
+        navOpR.appendChild(makeResetBtn('sidebar opacity', () => { navOpSl.value = 0.72; navOpVal.textContent = '72%'; window.amlBridge.setNavOpacity(0.72); }));
+        dBody.appendChild(makeRow('Sidebar opacity', navOpR, 'How opaque the sidebar background is', false));
 
         const zoomVal = document.createElement('span');
         zoomVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
@@ -1326,6 +1437,7 @@ window.addEventListener('unhandledrejection', (e) => {
         const zoomR = document.createElement('div');
         zoomR.style.cssText = 'display:flex;align-items:center;flex:1;';
         zoomR.appendChild(zoomSl); zoomR.appendChild(zoomVal);
+        zoomR.appendChild(makeResetBtn('zoom', () => { zoomSl.value = 100; zoomVal.textContent = '100%'; window.amlBridge.setZoom(1); }));
         dBody.appendChild(makeRow('Zoom', zoomR, null, false));
 
         const toggle = document.createElement('input');
@@ -1335,6 +1447,285 @@ window.addEventListener('unhandledrejection', (e) => {
         dBody.appendChild(makeRow('Hide upsell banners', toggle, null, true));
 
         dlg.appendChild(dWrap);
+
+        // ── Theme ──────────────────────────────────────────────────────────────
+        const { wrap: thWrap, body: thBody } = makeSection('Theme');
+        const thInfo = await window.amlBridge.getThemeInfo().catch(() => ({ blurAvailable: false, themeMode: 'accent', themePalette: null, themePresets: [], customCssPath: null, systemAccent: '#fc3c44', themeAppearance: 'dark' }));
+        const blurAvail = !!thInfo.blurAvailable;
+        let curMode = thInfo.themeMode || (blurAvail ? 'blur' : 'accent');
+        let curPalette = thInfo.themePalette;
+        let thPresets = thInfo.themePresets || [];
+        let curAppearance = thInfo.themeAppearance || 'dark';
+
+        // Palette generation (frontend, no Node) — mirrors main.mjs _generatePalette
+        function genPalette(hex, appearance) {
+            if (!appearance) appearance = curAppearance;
+            hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#fc3c44';
+            const r=parseInt(hex.slice(1,3),16)/255, g=parseInt(hex.slice(3,5),16)/255, b=parseInt(hex.slice(5,7),16)/255;
+            const mx=Math.max(r,g,b), mn=Math.min(r,g,b), l=(mx+mn)/2;
+            const d=mx-mn, s=d===0?0:d/(1-Math.abs(2*l-1));
+            let h=0; if(d){if(mx===r)h=((g-b)/d+6)%6;else if(mx===g)h=(b-r)/d+2;else h=(r-g)/d+4;h*=60;}
+            const hi=Math.round(h), si=Math.round(s*100);
+            if (appearance === 'light') {
+                return { accent:hex, bgColor:`hsla(${hi},${Math.round(si*.25)}%,96%,1)`, navBg:`hsla(${hi},${Math.round(si*.3)}%,91%,0.95)`, navBorder:`hsla(${hi},${Math.round(si*.6)}%,30%,0.15)`, accentActive:`hsla(${hi},${si}%,45%,0.15)` };
+            }
+            return { accent:hex, bgColor:`hsla(${hi},${Math.round(si*.5)}%,10%,1)`, navBg:`hsla(${hi},${Math.round(si*.8)}%,14%,0.72)`, navBorder:`hsla(${hi},${Math.round(si*.7)}%,50%,0.25)`, accentActive:`hsla(${hi},${Math.round(si*.9)}%,60%,0.28)` };
+        }
+
+        // hex→hsl color value from any CSS color string (for <input type=color>)
+        function cssColorToHex(str) {
+            if (/^#[0-9a-fA-F]{6}$/.test(str)) return str;
+            const m = str.match(/hsla?\((\d+),\s*([\d.]+)%,\s*([\d.]+)%/);
+            if (!m) return '#336699';
+            const h=+m[1]/360, s=+m[2]/100, l=+m[3]/100, a=s*Math.min(l,1-l);
+            const f=n=>{const k=(n+h*12)%12;return l-a*Math.max(-1,Math.min(k-3,9-k,1));};
+            return '#'+[f(0),f(8),f(4)].map(x=>Math.round(x*255).toString(16).padStart(2,'0')).join('');
+        }
+
+        // Mode selector
+        const modeRow = document.createElement('div');
+        modeRow.style.cssText = 'padding:12px 0;border-bottom:0.5px solid rgba(255,255,255,0.07);';
+        const modeSeg = document.createElement('div');
+        modeSeg.style.cssText = 'display:flex;background:rgba(255,255,255,0.06);border-radius:8px;padding:2px;gap:2px;';
+        const thModes = [
+            { label: 'Blur', value: 'blur', disabled: !blurAvail, tip: blurAvail ? '' : 'Only on Hyprland / KDE' },
+            { label: 'Accent', value: 'accent', disabled: false, tip: '' },
+            { label: 'Custom CSS', value: 'custom', disabled: false, tip: '' },
+        ];
+        const thContentArea = document.createElement('div');
+
+        function renderThemeContent(mode) {
+            thContentArea.innerHTML = '';
+            if (mode === 'blur') {
+                const info = document.createElement('div');
+                info.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.4);padding:12px 0;';
+                info.textContent = blurAvail
+                    ? 'Wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above.'
+                    : 'Blur is only available on Hyprland and KDE. Your current desktop does not support it.';
+                thContentArea.appendChild(info);
+            } else if (mode === 'accent') {
+                if (!curPalette) curPalette = genPalette(thInfo.systemAccent || '#fc3c44');
+                renderPaletteEditor(thContentArea);
+            } else {
+                renderCustomCss(thContentArea);
+            }
+        }
+
+        function renderPaletteEditor(container) {
+            container.innerHTML = '';
+            const pal = curPalette || genPalette(thInfo.systemAccent || '#fc3c44');
+
+            // Light / Dark appearance toggle
+            const appRow = document.createElement('div');
+            appRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 0 8px;';
+            const appLabel = document.createElement('span');
+            appLabel.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.5);flex:1;';
+            appLabel.textContent = 'Appearance';
+            const appSeg = document.createElement('div');
+            appSeg.style.cssText = 'display:flex;background:rgba(255,255,255,0.06);border-radius:6px;padding:2px;gap:2px;';
+            ['Dark','Light'].forEach(label => {
+                const val = label.toLowerCase();
+                const btn = document.createElement('button');
+                btn.textContent = label;
+                const activeStyle = 'background:rgba(255,255,255,0.18);color:rgba(255,255,255,0.95);';
+                const inactiveStyle = 'background:transparent;color:rgba(255,255,255,0.4);';
+                btn.style.cssText = `${FF}border:none;border-radius:5px;padding:3px 12px;font-size:12px;cursor:pointer;transition:all 0.15s;${curAppearance===val?activeStyle:inactiveStyle}`;
+                btn.onclick = async () => {
+                    curAppearance = val;
+                    window.amlBridge.setThemeAppearance(val);
+                    appSeg.querySelectorAll('button').forEach(b => {
+                        b.style.background = 'transparent';
+                        b.style.color = 'rgba(255,255,255,0.4)';
+                    });
+                    btn.style.background = 'rgba(255,255,255,0.18)';
+                    btn.style.color = 'rgba(255,255,255,0.95)';
+                    // setThemeAppearance regenerates+saves palette in main; fetch it back
+                    const info = await window.amlBridge.getThemeInfo().catch(() => null);
+                    if (info?.themePalette) { curPalette = info.themePalette; renderPaletteEditor(container); }
+                };
+                appSeg.appendChild(btn);
+            });
+            appRow.appendChild(appLabel);
+            appRow.appendChild(appSeg);
+            container.appendChild(appRow);
+
+            const paletteKeys = [
+                { key: 'bgColor', label: 'Background' },
+                { key: 'accent', label: 'Accent' },
+                { key: 'navBg', label: 'Sidebar' },
+                { key: 'navBorder', label: 'Border' },
+                { key: 'accentActive', label: 'Active' },
+            ];
+            const grid = document.createElement('div');
+            grid.style.cssText = 'display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:12px 0;border-bottom:0.5px solid rgba(255,255,255,0.07);';
+            paletteKeys.forEach(({ key, label }) => {
+                const cell = document.createElement('div');
+                cell.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;gap:4px;';
+                const swatchWrap = document.createElement('div');
+                swatchWrap.style.cssText = `height:30px;border-radius:6px;background:${pal[key]||'#333'};border:1px solid rgba(255,255,255,0.1);position:relative;overflow:hidden;cursor:pointer;`;
+                const picker = document.createElement('input');
+                picker.type = 'color';
+                picker.value = cssColorToHex(pal[key] || '#336699');
+                picker.style.cssText = 'position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;';
+                picker.oninput = () => {
+                    pal[key] = picker.value;
+                    swatchWrap.style.background = picker.value;
+                    curPalette = { ...pal };
+                    window.amlBridge.setThemePalette(key, picker.value);
+                };
+                swatchWrap.appendChild(picker);
+                const lbl = document.createElement('div');
+                lbl.style.cssText = FF+'font-size:10px;color:rgba(255,255,255,0.4);text-align:center;';
+                lbl.textContent = label;
+                cell.appendChild(swatchWrap);
+                cell.appendChild(lbl);
+                grid.appendChild(cell);
+            });
+            container.appendChild(grid);
+
+            const resetBtn = makeBtn('Reset to system accent');
+            resetBtn.style.cssText += 'margin:10px 0;display:block;';
+            resetBtn.onclick = async () => {
+                const newPal = await window.amlBridge.resetThemePalette();
+                if (newPal) { curPalette = newPal; renderPaletteEditor(container); }
+            };
+            container.appendChild(resetBtn);
+
+            // Presets
+            const presH = document.createElement('div');
+            presH.style.cssText = FF+'font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.4);margin:12px 0 6px;';
+            presH.textContent = 'Presets';
+            container.appendChild(presH);
+
+            const presetList = document.createElement('div');
+            presetList.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;min-height:24px;margin-bottom:10px;';
+            function renderPresets() {
+                presetList.innerHTML = '';
+                if (!thPresets.length) {
+                    const none = document.createElement('span');
+                    none.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.25);';
+                    none.textContent = 'No saved presets';
+                    presetList.appendChild(none);
+                    return;
+                }
+                thPresets.forEach(({ name, builtin }) => {
+                    const chip = document.createElement('div');
+                    chip.style.cssText = `display:flex;align-items:center;gap:4px;background:${builtin?'rgba(252,60,68,0.18)':'rgba(255,255,255,0.1)'};border-radius:20px;padding:3px 8px 3px 12px;cursor:default;${builtin?'border:1px solid rgba(252,60,68,0.35);':''}`;
+                    const cl = document.createElement('span');
+                    cl.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.8);cursor:pointer;';
+                    cl.textContent = name;
+                    cl.onclick = () => {
+                        const pr = thPresets.find(x => x.name === name);
+                        if (pr) { curPalette = pr.palette; window.amlBridge.applyThemePreset(name); renderPaletteEditor(container); }
+                    };
+                    chip.appendChild(cl);
+                    if (!builtin) {
+                        const del = document.createElement('button');
+                        del.textContent = '×';
+                        del.style.cssText = 'border:none;background:transparent;color:rgba(255,255,255,0.35);cursor:pointer;font-size:14px;padding:0 0 0 4px;line-height:1;';
+                        del.onclick = () => {
+                            thPresets = thPresets.filter(x => x.name !== name);
+                            window.amlBridge.deleteThemePreset(name);
+                            renderPresets();
+                        };
+                        chip.appendChild(del);
+                    }
+                    presetList.appendChild(chip);
+                });
+            }
+            renderPresets();
+            container.appendChild(presetList);
+
+            const actRow = document.createElement('div');
+            actRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;padding-bottom:12px;';
+
+            const saveBtn = makeBtn('Save preset');
+            saveBtn.onclick = async () => {
+                const name = prompt('Preset name:');
+                if (!name || !name.trim()) return;
+                const newPresets = await window.amlBridge.saveThemePreset(name.trim());
+                if (newPresets) { thPresets = newPresets; renderPresets(); }
+            };
+
+            const exportBtn = makeBtn('Export');
+            exportBtn.onclick = async () => {
+                const name = prompt('Preset name to export (leave blank for current palette):') || 'current';
+                await window.amlBridge.exportThemePreset(name);
+            };
+
+            const importBtn = makeBtn('Import');
+            importBtn.onclick = async () => {
+                const preset = await window.amlBridge.importThemePreset();
+                if (preset) {
+                    thPresets = thPresets.filter(x => x.name !== preset.name);
+                    thPresets.push(preset);
+                    renderPresets();
+                }
+            };
+
+            actRow.appendChild(saveBtn); actRow.appendChild(exportBtn); actRow.appendChild(importBtn);
+            container.appendChild(actRow);
+        }
+
+        function renderCustomCss(container) {
+            container.innerHTML = '';
+            const pathDiv = document.createElement('div');
+            pathDiv.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.5);padding:10px 0;word-break:break-all;min-height:32px;';
+            pathDiv.textContent = thInfo.customCssPath || 'No file selected';
+            container.appendChild(pathDiv);
+            const btnsRow = document.createElement('div');
+            btnsRow.style.cssText = 'display:flex;gap:6px;padding-bottom:10px;';
+            const browseBtn = makeBtn('Browse & Import CSS');
+            browseBtn.onclick = async () => {
+                const fp = await window.amlBridge.importThemeCss();
+                if (fp) { pathDiv.textContent = fp; thInfo.customCssPath = fp; }
+            };
+            const clearBtn = makeBtn('Clear');
+            clearBtn.onclick = () => {
+                const p = loadPrefs?.() ?? {};
+                p.customCssPath = null;
+                window.amlBridge.setThemeMode('custom');
+                pathDiv.textContent = 'No file selected';
+                thInfo.customCssPath = null;
+            };
+            const hint = document.createElement('div');
+            hint.style.cssText = FF+'font-size:11px;color:rgba(255,255,255,0.28);padding-top:4px;';
+            hint.textContent = 'See aml-custom.example.css in the project root for the template.';
+            btnsRow.appendChild(browseBtn); btnsRow.appendChild(clearBtn);
+            container.appendChild(btnsRow);
+            container.appendChild(hint);
+        }
+
+        thModes.forEach(({ label, value, disabled, tip }) => {
+            const btn = document.createElement('button');
+            btn.textContent = label;
+            btn.disabled = disabled;
+            if (tip) btn.title = tip;
+            const isActive = value === curMode;
+            btn.style.cssText = `flex:1;padding:5px 0;border:none;border-radius:6px;${FF}font-size:12px;` +
+                `cursor:${disabled?'not-allowed':'pointer'};transition:background .15s,color .15s;` +
+                (isActive ? 'background:rgba(255,255,255,0.18);color:rgba(255,255,255,0.88);font-weight:500;' : 'background:transparent;color:rgba(255,255,255,0.38);') +
+                (disabled ? 'opacity:0.3;' : '');
+            btn.onclick = () => {
+                if (disabled) return;
+                curMode = value;
+                modeSeg.querySelectorAll('button').forEach((b, i) => {
+                    const a = thModes[i].value === curMode;
+                    b.style.background = a ? 'rgba(255,255,255,0.18)' : 'transparent';
+                    b.style.color = a ? 'rgba(255,255,255,0.88)' : 'rgba(255,255,255,0.38)';
+                    b.style.fontWeight = a ? '500' : '';
+                });
+                window.amlBridge.setThemeMode(value);
+                renderThemeContent(value);
+            };
+            modeSeg.appendChild(btn);
+        });
+
+        modeRow.appendChild(modeSeg);
+        thBody.appendChild(modeRow);
+        thBody.appendChild(thContentArea);
+        renderThemeContent(curMode);
+        dlg.appendChild(thWrap);
 
         // ── Cache ──────────────────────────────────────────────────────────
         const { wrap: cWrap, body: cBody } = makeSection('Playback Cache');
@@ -1469,79 +1860,74 @@ window.addEventListener('unhandledrejection', (e) => {
         }
     }
 
-    // ── Inject "AML Settings" into account context menu ────────────────────
-    // The dropdown is appended to <body> as a div.contextual-menu__overlay when opened.
-    // We identify the account menu's overlay by the presence of a "Sign Out" item.
-    function injectAMLMenuItem(list) {
-        if (!list || list.querySelector('#aml-menu-item')) return;
-        const isAccount = [...list.querySelectorAll('.contextual-menu-item__option-text')]
-            .some(el => el.textContent.trim() === 'Sign Out');
-        if (!isAccount) return;
+    // ── Settings cog next to account row ──────────────────────────────────
+    // Apple SF Symbols–style gearshape.fill — 8-tooth gear with circular centre hole
+    const COG_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:17%"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.05-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.03-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>`;
 
-        // Clone classes from a native item so our entry inherits Apple Music's
-        // own hover/active/focus CSS exactly — no manual colour matching needed.
-        const nativeLi  = list.querySelector('li.contextual-menu-item');
-        const nativeBtn = nativeLi?.querySelector('button');
-
-        const li = document.createElement('li');
-        li.id = 'aml-menu-item';
-        li.className = nativeLi?.className || 'contextual-menu-item';
-
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = nativeBtn?.className || 'contextual-menu-item__option';
-        btn.style.cssText = 'width:100%;background:none;border:none;cursor:pointer;padding:0;color:inherit;font:inherit;text-align:left;';
-
-        const wrapper = document.createElement('span');
-        wrapper.className = 'contextual-menu-item__option-wrapper';
-        const text = document.createElement('span');
-        text.className = 'contextual-menu-item__option-text';
-        text.textContent = 'AML Settings';
-        wrapper.appendChild(text);
-        btn.appendChild(wrapper);
-        li.appendChild(btn);
-
-        btn.addEventListener('click', () => {
-            document.querySelector('.account-menu--expanded .contextual-menu__trigger')?.click();
-            openSettings();
-        });
-
-        const sep = document.createElement('li');
-        sep.setAttribute('aria-hidden', 'true');
-        sep.style.cssText = 'height:0.5px;background:rgba(255,255,255,0.12);margin:4px 8px;padding:0;list-style:none;pointer-events:none;';
-        list.prepend(sep);
-        list.prepend(li);
+    function findAccountRow() {
+        return (
+            document.querySelector('nav.navigation [class*="account"]') ||
+            document.querySelector('nav.navigation [class*="Account"]') ||
+            document.querySelector('[class*="navigation-account"]') ||
+            document.querySelector('[class*="NavigationAccount"]') ||
+            document.querySelector('nav.navigation [aria-haspopup="true"]') ||
+            document.querySelector('nav.navigation [aria-haspopup="menu"]')
+        );
     }
 
-    function tryInjectInOverlay(overlay) {
-        const list = overlay.querySelector('ul.contextual-menu__list');
-        if (list) { injectAMLMenuItem(list); return; }
-        // ul not yet populated — watch this overlay until it appears (or closes)
-        const obs = new MutationObserver(() => {
-            const l = overlay.querySelector('ul.contextual-menu__list');
-            if (l) { obs.disconnect(); injectAMLMenuItem(l); }
-        });
-        obs.observe(overlay, { childList: true, subtree: true });
-        setTimeout(() => obs.disconnect(), 3000);
+    function mountSettingsCog() {
+        if (document.getElementById('aml-settings-cog')) return;
+        const accountRow = findAccountRow();
+        if (!accountRow) return;
+
+        // Match the avatar circle size
+        const avatarEl = accountRow.querySelector('img, [class*="avatar"], [class*="Avatar"], [class*="profile"], [class*="Profile"]');
+        const avatarSize = avatarEl ? Math.round(avatarEl.getBoundingClientRect().width) || 28 : 28;
+        const sz = Math.max(avatarSize, 28) + 'px';
+
+        const cog = document.createElement('button');
+        cog.id = 'aml-settings-cog';
+        cog.title = 'AML Settings';
+        cog.innerHTML = COG_SVG;
+        cog.style.cssText = [
+            'position:absolute',
+            'right:10px',
+            'top:50%',
+            'transform:translateY(-50%)',
+            'z-index:100',
+            `width:${sz}`,
+            `height:${sz}`,
+            'border-radius:50%',
+            'border:none',
+            'background:rgba(255,255,255,0.10)',
+            'color:rgba(255,255,255,0.55)',
+            'cursor:pointer',
+            'display:flex',
+            'align-items:center',
+            'justify-content:center',
+            'transition:background 0.15s,color 0.15s',
+            '-webkit-app-region:no-drag',
+            'flex-shrink:0',
+            'box-sizing:border-box',
+        ].join(';');
+        cog.onmouseenter = () => { cog.style.background = 'rgba(255,255,255,0.20)'; cog.style.color = 'rgba(255,255,255,0.9)'; };
+        cog.onmouseleave = () => { cog.style.background = 'rgba(255,255,255,0.10)'; cog.style.color = 'rgba(255,255,255,0.55)'; };
+        cog.onclick = (e) => { e.stopPropagation(); openSettings(); };
+
+        // Make parent relative so absolute positioning works
+        const parent = accountRow.closest('li, [class*="account"], [class*="Account"]') || accountRow;
+        if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+        parent.appendChild(cog);
+
     }
 
-    new MutationObserver((mutations) => {
-        for (const m of mutations) {
-            for (const node of m.addedNodes) {
-                if (node.nodeType !== 1) continue;
-                if (node.classList?.contains('contextual-menu__overlay')) {
-                    tryInjectInOverlay(node);
-                } else {
-                    const overlay = node.querySelector?.('.contextual-menu__overlay');
-                    if (overlay) tryInjectInOverlay(overlay);
-                }
-            }
-        }
-    }).observe(document.body, { childList: true });
-
-    // Handle case where account menu was already open when bundle injected
-    document.querySelectorAll('.contextual-menu__overlay')
-        .forEach(tryInjectInOverlay);
+    // Watch the entire document so the cog re-mounts after SPA navigation
+    // replaces the sidebar (observing only parent misses parent-level removals).
+    const cogWatcher = new MutationObserver(() => {
+        if (findAccountRow() && !document.getElementById('aml-settings-cog')) mountSettingsCog();
+    });
+    if (findAccountRow()) mountSettingsCog();
+    cogWatcher.observe(document.documentElement, { childList: true, subtree: true });
 
     window.__amlOpenEngineSettings = openSettings;
 
