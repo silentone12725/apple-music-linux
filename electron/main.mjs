@@ -1,5 +1,5 @@
 import * as electronMain from 'electron/main';
-const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog } = electronMain;
+const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
@@ -10,7 +10,7 @@ process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream } from 'fs';
+import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, readdirSync } from 'fs';
 import os from 'os';
 
 const require = createRequire(import.meta.url);
@@ -256,31 +256,341 @@ function stopEngine() {
     engineProc = null;
 }
 
+// ── Compositor / blur detection ───────────────────────────────────────────────
+const _isWayland = !!process.env.WAYLAND_DISPLAY;
+const _desktop   = (process.env.XDG_CURRENT_DESKTOP || '').toLowerCase();
+const _isKde      = ['kde', 'plasma'].some(d => _desktop.includes(d));
+const _isHyprland = _desktop.includes('hyprland') || !!process.env.HYPRLAND_INSTANCE_SIGNATURE;
+console.log(`[AML] Compositor: desktop=${_desktop || '(unset)'} wayland=${_isWayland} kde=${_isKde} hyprland=${_isHyprland}`);
+// KDE X11 gets native compositor blur via _KDE_NET_WM_BLUR_BEHIND_REGION atom.
+// KDE Wayland: forcing ozone-platform=x11 crashes the GPU process (Mesa Wayland
+// drivers don't support GLX over XWayland). Use CSS dark-tint fallback instead.
+
 // ── Software compositing blur fallback ───────────────────────────────────────
 // Used on X11 or Wayland compositors that don't support blur-behind (GNOME/Sway).
 // Captures a desktop screenshot, sends it to the renderer as a blurred CSS background.
-const _isWayland = !!process.env.WAYLAND_DISPLAY;
-const _desktop   = (process.env.XDG_CURRENT_DESKTOP || '').toLowerCase();
-const _useSoftBlur = !_isWayland ||
-    ['gnome', 'sway', 'unity', 'cosmic', 'budgie'].some(d => _desktop.includes(d));
+// KDE is excluded: we use the native _KDE_NET_WM_BLUR_BEHIND_REGION atom instead.
+let _useSoftBlur = !_isKde && (!_isWayland ||
+    ['gnome', 'sway', 'unity', 'cosmic', 'budgie'].some(d => _desktop.includes(d)));
+
+// GPU crash → activate software blur regardless of compositor so the window
+// doesn't show a black void.
+app.on('gpu-process-crashed', (_event, killed) => {
+    if (killed) return;
+    console.warn('[AML] GPU process crashed — activating software blur fallback');
+    _useSoftBlur = true;
+    refreshBlurBg();
+});
+
+// ── KDE Wayland: wallpaper-based software blur ───────────────────────────────
+// Reads the current wallpaper path from ~/.config/plasma-org.kde.plasma.desktop-appletsrc
+// and injects it as --aml-fallback-bg so the CSS blur ::before renders it blurred.
+// No desktopCapturer / xdg-portal dialog needed.
+function _kdeWallpaperPath() {
+    const cfgPath = path.join(os.homedir(), '.config', 'plasma-org.kde.plasma.desktop-appletsrc');
+    try {
+        const lines = readFileSync(cfgPath, 'utf8').split('\n');
+        for (const line of lines) {
+            const m = line.match(/^Image\s*=\s*(.+)/);
+            if (m) return m[1].trim().replace(/^file:\/\//, '');
+        }
+    } catch (_) {}
+    return null;
+}
+
+// Inject two fixed divs into body: a blurred wallpaper layer + dark tint.
+// position:fixed + prepend means they're behind all app content in DOM order.
+// Works on transparent Electron windows — the divs have visible pixels so they paint.
+function _injectBlurLayer(bwin, dataUrl) {
+    const safe = dataUrl.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+    // Position tracking runs inside the renderer via requestAnimationFrame —
+    // window.screenX/screenY are standard browser APIs Chromium exposes, updated
+    // every frame. This avoids IPC overhead and works on both X11 and Wayland.
+    // Math: #_amlBlurBg has inset:-80px, so its origin is (winX-80, winY-80) on
+    // screen. background-position = (80-winX, 80-winY) keeps wallpaper aligned.
+    bwin.webContents.executeJavaScript(`(function(){
+        let bg = document.getElementById('_amlBlurBg');
+        if (!bg) {
+            bg = document.createElement('div');
+            bg.id = '_amlBlurBg';
+            const tint = document.createElement('div');
+            tint.id = '_amlBlurTint';
+            document.body.prepend(tint);
+            document.body.prepend(bg);
+
+            let _px = null, _py = null;
+            (function tick() {
+                const x = window.screenX, y = window.screenY;
+                if (x !== _px || y !== _py) {
+                    _px = x; _py = y;
+                    bg.style.backgroundSize     = window.screen.width  + 'px ' + window.screen.height + 'px';
+                    bg.style.backgroundPosition = (80 - x) + 'px ' + (80 - y) + 'px';
+                }
+                requestAnimationFrame(tick);
+            })();
+        }
+        bg.style.backgroundImage = \`url("${safe}")\`;
+    })()`).catch(() => {});
+}
+
+function _applyKdeWallpaperBlur(bwin) {
+    const wp = _kdeWallpaperPath();
+    if (!wp) { console.warn('[AML] KDE wallpaper blur: no Image= found in plasma config'); return; }
+    if (!existsSync(wp)) { console.warn('[AML] KDE wallpaper blur: file not found:', wp); return; }
+    try {
+        const data = readFileSync(wp);
+        const ext  = path.extname(wp).slice(1).replace('jpg', 'jpeg') || 'png';
+        _injectBlurLayer(bwin, `data:image/${ext};base64,${data.toString('base64')}`);
+        console.log('[AML] KDE wallpaper blur applied:', wp);
+    } catch (e) { console.warn('[AML] KDE wallpaper blur read failed:', e.message); }
+}
+
+function _hyprlandWallpaperPath() {
+    try {
+        const conf = path.join(os.homedir(), '.config', 'hypr', 'hyprpaper.conf');
+        for (const line of readFileSync(conf, 'utf8').split('\n')) {
+            const m = line.match(/^wallpaper\s*=\s*[^,]*,\s*(.+)/);
+            if (m) return m[1].trim();
+        }
+    } catch {}
+    try {
+        const cacheDir = path.join(os.homedir(), '.cache', 'swww');
+        if (existsSync(cacheDir)) {
+            for (const f of readdirSync(cacheDir)) {
+                const fp = path.join(cacheDir, f);
+                if (statSync(fp).isFile()) {
+                    const content = readFileSync(fp, 'utf8').trim().split('\0')[0];
+                    if (content && existsSync(content)) return content;
+                }
+            }
+        }
+    } catch {}
+    return null;
+}
+
+function _applyHyprlandWallpaperBlur(bwin) {
+    const wp = _hyprlandWallpaperPath();
+    if (!wp) { console.warn('[AML] Hyprland wallpaper blur: no wallpaper found'); return; }
+    if (!existsSync(wp)) { console.warn('[AML] Hyprland wallpaper blur: file not found:', wp); return; }
+    try {
+        const data = readFileSync(wp);
+        const ext  = path.extname(wp).slice(1).replace('jpg', 'jpeg') || 'png';
+        _injectBlurLayer(bwin, `data:image/${ext};base64,${data.toString('base64')}`);
+        console.log('[AML] Hyprland wallpaper blur applied:', wp);
+    } catch (e) { console.warn('[AML] Hyprland wallpaper blur failed:', e.message); }
+}
+
+async function _getSystemAccent() {
+    if (_isKde) {
+        try {
+            const out = execFileSync('kreadconfig5', ['--file', 'kdeglobals', '--group', 'General', '--key', 'AccentColor'], { encoding: 'utf8' }).trim();
+            if (out) {
+                const parts = out.split(',').map(s => parseInt(s.trim(), 10));
+                if (parts.length === 3 && parts.every(n => !isNaN(n)))
+                    return '#' + parts.map(n => n.toString(16).padStart(2, '0')).join('');
+            }
+        } catch {}
+    }
+    if (_isHyprland) {
+        try {
+            const conf = path.join(os.homedir(), '.config', 'hypr', 'hyprland.conf');
+            for (const line of readFileSync(conf, 'utf8').split('\n')) {
+                const m = line.match(/col\.active_border\s*=.*?rgba?\(([0-9a-fA-F]{6})/);
+                if (m) return '#' + m[1].toLowerCase();
+            }
+        } catch {}
+    }
+    try {
+        const out = execFileSync('gsettings', ['get', 'org.gnome.desktop.interface', 'accent-color'], { encoding: 'utf8' }).trim().replace(/'/g, '');
+        const gnomeMap = { blue:'#3584e4', teal:'#2190a4', green:'#3a944a', yellow:'#c88800', orange:'#ed5b00', red:'#e62d42', pink:'#d56199', purple:'#9141ac', slate:'#6f8396' };
+        if (gnomeMap[out]) return gnomeMap[out];
+    } catch {}
+    return '#fc3c44';
+}
+
+function _generatePalette(hex, appearance = 'dark') {
+    hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#0A84FF';
+    const r = parseInt(hex.slice(1,3),16)/255, g = parseInt(hex.slice(3,5),16)/255, b = parseInt(hex.slice(5,7),16)/255;
+    const max = Math.max(r,g,b), min = Math.min(r,g,b), l = (max+min)/2;
+    const d = max-min, s = d === 0 ? 0 : d/(1-Math.abs(2*l-1));
+    let h = 0;
+    if (d) {
+        if (max===r) h=((g-b)/d+6)%6;
+        else if (max===g) h=(b-r)/d+2;
+        else h=(r-g)/d+4;
+        h*=60;
+    }
+    const hi=Math.round(h), si=Math.round(s*100);
+    if (appearance === 'light') {
+        return {
+            accent:       hex,
+            appearance:   'light',
+            bgColor:      `hsla(${hi}, ${Math.round(si*0.25)}%, 96%, 1)`,
+            navBg:        `hsla(${hi}, ${Math.round(si*0.3)}%, 91%, 0.95)`,
+            navBorder:    `hsla(${hi}, ${Math.round(si*0.6)}%, 30%, 0.15)`,
+            accentActive: `hsla(${hi}, ${si}%, 45%, 0.15)`,
+        };
+    }
+    // Dark mode — research-backed values (Spotify/Linear/Radix approach):
+    // bgColor:  s×0.5 gives noticeable hue without mud; 10% L avoids pure black
+    // navBg:    s×0.8 makes sidebar feel colorful; 2% L lift creates hierarchy
+    // navBorder: L=50% sweet spot; 0.25 opacity hits 3:1 contrast minimum
+    // accentActive: s×0.9 pops as clearly interactive; L=60% reads as "active"
+    return {
+        accent:       hex,
+        appearance:   'dark',
+        bgColor:      `hsla(${hi}, ${Math.round(si*0.5)}%, 10%, 1)`,
+        navBg:        `hsla(${hi}, ${Math.round(si*0.8)}%, 14%, 0.72)`,
+        navBorder:    `hsla(${hi}, ${Math.round(si*0.7)}%, 50%, 0.25)`,
+        accentActive: `hsla(${hi}, ${Math.round(si*0.9)}%, 60%, 0.28)`,
+    };
+}
+
+function _withAlpha(color, alpha) {
+    if (!color) return '';
+    const m = color.match(/^hsla?\((.+)\)$/);
+    if (m) {
+        const parts = m[1].split(',').map(s => s.trim());
+        return `hsla(${parts[0]}, ${parts[1]}, ${parts[2]}, ${alpha})`;
+    }
+    if (/^#[0-9a-fA-F]{6}$/.test(color)) {
+        const r = parseInt(color.slice(1,3),16), g = parseInt(color.slice(3,5),16), b = parseInt(color.slice(5,7),16);
+        return `rgba(${r},${g},${b},${alpha})`;
+    }
+    return color;
+}
+
+function _applyThemeVars(palette) {
+    if (!win || !palette) return;
+    const p = palette;
+    const isLight = p.appearance === 'light';
+    nativeTheme.themeSource = isLight ? 'light' : 'dark';
+    const bg = JSON.stringify(p.bgColor || (isLight ? 'hsl(0,0%,96%)' : 'hsl(0,0%,10%)'));
+    const navText = JSON.stringify(isLight ? 'rgba(0,0,0,0.85)' : '');
+    const navTextSec = JSON.stringify(isLight ? 'rgba(0,0,0,0.5)' : '');
+    const prefs = loadPrefs();
+    const navAlpha = prefs.themeNavBgAlpha ?? 0.72;
+    const navBg = JSON.stringify(_withAlpha(p.navBg || '', navAlpha) || p.navBg || '');
+    win.webContents.executeJavaScript(`(function(){
+        const r = document.documentElement;
+        r.style.setProperty('--aml-nav-bg', ${navBg});
+        r.style.setProperty('--aml-nav-border', ${JSON.stringify(p.navBorder || '')});
+        r.style.setProperty('--aml-accent', ${JSON.stringify(p.accent || '')});
+        r.style.setProperty('--aml-accent-active', ${JSON.stringify(p.accentActive || '')});
+        r.style.setProperty('--aml-nav-text', ${navText});
+        r.style.setProperty('--aml-nav-text-sec', ${navTextSec});
+        let bd = document.getElementById('_amlAccentBg');
+        if (!bd) {
+            bd = document.createElement('div');
+            bd.id = '_amlAccentBg';
+            bd.style.cssText = 'position:fixed;inset:0;z-index:0;pointer-events:none;transition:background 0.6s ease;';
+            document.body.prepend(bd);
+        }
+        bd.style.background = ${bg};
+    })()`).catch(() => {});
+}
+
+function _clearThemeVars() {
+    if (!win) return;
+    nativeTheme.themeSource = 'system';
+    win.webContents.executeJavaScript(`(function(){
+        const r = document.documentElement;
+        ['--aml-nav-bg','--aml-nav-border','--aml-accent','--aml-accent-active','--aml-nav-text','--aml-nav-text-sec']
+            .forEach(v => r.style.removeProperty(v));
+        document.getElementById('_amlAccentBg')?.remove();
+        document.getElementById('_amlCustomBg')?.remove();
+    })()`).catch(() => {});
+}
+
+function _injectCustomFallbackBg() {
+    if (!win) return;
+    win.webContents.executeJavaScript(`(function(){
+        if (document.getElementById('_amlCustomBg')) return;
+        const d = document.createElement('div');
+        d.id = '_amlCustomBg';
+        d.style.cssText = 'position:fixed;inset:0;z-index:0;pointer-events:none;background:#1c1c1e;';
+        document.body.prepend(d);
+    })()`).catch(() => {});
+}
+
+let _customCssKey = null;
+async function _injectCustomCss(filePath) {
+    if (!win || !filePath || !existsSync(filePath)) return;
+    if (_customCssKey) { await win.webContents.removeInsertedCSS(_customCssKey).catch(() => {}); _customCssKey = null; }
+    try {
+        const css = readFileSync(filePath, 'utf8');
+        _customCssKey = await win.webContents.insertCSS(css);
+    } catch (e) { console.warn('[AML] Custom CSS inject failed:', e.message); }
+}
+async function _clearCustomCss() {
+    if (!_customCssKey || !win) return;
+    await win.webContents.removeInsertedCSS(_customCssKey).catch(() => {});
+    _customCssKey = null;
+}
+
+// ── KDE compositor blur-behind (X11 atom) ────────────────────────────────────
+// Sets _KDE_NET_WM_BLUR_BEHIND_REGION with an empty region = blur entire window.
+// KWin reads this atom when the window is mapped, so we MUST set it before
+// win.show() — called from ready-to-show for that reason.
+// Retries up to 10×300ms in case the native handle isn't assigned yet;
+// falls back to software blur if the atom can never be set.
+function applyKdeBlurBehind(bwin) {
+    if (!_isKde || _isWayland) return;
+    const _trySet = (attempt) => {
+        const xid = bwin.getNativeWindowHandle().readUInt32LE(0);
+        if (xid <= 1) {
+            if (attempt < 10) { setTimeout(() => _trySet(attempt + 1), 300); return; }
+            console.warn('[AML] KDE blur: no valid XID after 10 attempts — falling back to software blur');
+            _useSoftBlur = true;
+            refreshBlurBg();
+            return;
+        }
+        try {
+            const _x11 = require('x11');
+            _x11.createClient((err, display) => {
+                if (err) {
+                    console.warn('[AML] KDE blur: X11 connect failed:', err.message, '— using software blur');
+                    _useSoftBlur = true; refreshBlurBg();
+                    return;
+                }
+                const X = display.client;
+                X.on('error', (e) => console.warn('[AML] KDE blur X11 error:', e.message ?? e));
+                X.InternAtom(false, '_KDE_NET_WM_BLUR_BEHIND_REGION', (atomErr, atom) => {
+                    if (atomErr) { console.warn('[AML] KDE blur: InternAtom failed:', atomErr); return; }
+                    // Empty data = blur entire window shape.
+                    X.ChangeProperty(0 /* PropModeReplace */, xid, atom, 6 /* XA_CARDINAL */, 32, []);
+                    console.log('[AML] KDE blur-behind atom set (xid=0x%s)', xid.toString(16));
+                });
+            });
+        } catch (e) {
+            console.warn('[AML] KDE blur-behind failed:', e.message);
+        }
+    };
+    _trySet(0);
+}
 
 let _bgTimer = null;
 async function refreshBlurBg() {
     if (!win || !_useSoftBlur) return;
-    // Always activate the class — dark tint + CSS backdrop-filter works even
-    // without a screenshot. Background URL is best-effort on top.
-    win.webContents.executeJavaScript(
-        `document.documentElement.classList.add('aml-sw-blur');`
-    ).catch(() => {});
+    // Skip desktopCapturer on Wayland — triggers the screen-share portal dialog.
+    if (_isWayland) return;
     const { width, height } = win.getBounds();
     const sources = await desktopCapturer.getSources({
         types: ['screen'], thumbnailSize: { width, height }
     }).catch(() => []);
-    if (!sources.length) return;
-    const dataUrl = sources[0].thumbnail.toDataURL();
-    win.webContents.executeJavaScript(
-        `document.documentElement.style.setProperty('--aml-fallback-bg','url("${dataUrl.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}") ');`
-    ).catch(() => {});
+    if (!sources.length) {
+        // Screen capture unavailable (GPU disabled/power-saver) — inject a solid
+        // dark background so the transparent window isn't an invisible black void.
+        win.webContents.executeJavaScript(`(function(){
+            if (document.getElementById('_amlBlurBg')) return;
+            const bg = document.createElement('div');
+            bg.id = '_amlBlurBg';
+            bg.style.cssText = 'position:fixed;inset:0;background:rgba(10,10,12,0.97);z-index:0;pointer-events:none';
+            document.body.prepend(bg);
+        })()`).catch(() => {});
+        return;
+    }
+    _injectBlurLayer(win, sources[0].thumbnail.toDataURL());
 }
 
 function createWindow() {
@@ -293,7 +603,7 @@ function createWindow() {
         backgroundColor: '#00000000',
         transparent: true,
         show: false,
-        title: 'Apple Music',
+        title: 'Apple Music Linux',
         webPreferences: {
             preload: path.join(__dirname, 'preload.cjs'),
             contextIsolation: true,
@@ -304,7 +614,23 @@ function createWindow() {
         },
     });
 
+    win.on('page-title-updated', (e) => e.preventDefault());
     win.loadURL('https://music.apple.com');
+
+    // KDE X11: set the blur atom before the window is mapped.
+    // ready-to-show fires after Chromium's first paint but before win.show(),
+    // so KWin sees the atom the instant it processes our map request.
+    if (_isKde && !_isWayland) {
+        // Warn if KWin blur desktop effect appears disabled.
+        execFile('kreadconfig5', ['--group', 'Plugins', '--key', 'blurEnabled', '--file', 'kwinrc'], {},
+            (_, stdout) => {
+                if (stdout.trim() === 'false')
+                    console.warn('[AML] KDE blur: kwinrc shows blurEnabled=false — enable KWin Blur desktop effect in System Settings → Desktop Effects');
+                else
+                    console.log('[AML] KDE blur: kwinrc blurEnabled =', stdout.trim() || '(default=true)');
+            });
+        win.once('ready-to-show', () => applyKdeBlurBehind(win));
+    }
 
     // ── Show-when-ready ───────────────────────────────────────────────────────
     // ready-to-show fires on first paint — far too early for Apple Music's SPA
@@ -326,10 +652,16 @@ function createWindow() {
             win.setOpacity(op);
             if (op >= 1) clearInterval(step);
         }, 16);
-        // Capture desktop behind window for software blur fallback (X11 / GNOME).
+        // Software blur fallback (X11 / GNOME / Sway).
         if (_useSoftBlur) refreshBlurBg();
+        // KDE Wayland: inject wallpaper blur via CSS (needs executeJavaScript,
+        // so must run after the page is loaded — here is fine since showWindow
+        // fires on app:ui-ready).
+        if (_isHyprland) _applyHyprlandWallpaperBlur(win);
     };
     win.on('move', () => {
+        // Position tracking is handled by requestAnimationFrame in the renderer.
+        // Only refresh the screenshot-based bg (X11 non-KDE) after drag settles.
         clearTimeout(_bgTimer);
         _bgTimer = setTimeout(refreshBlurBg, 500);
     });
@@ -375,9 +707,9 @@ function createWindow() {
     // ── Early CSS via insertCSS — fires before first paint, no preload risk ──
     // webContents.insertCSS() is Electron's dedicated API for injecting CSS
     // before the page renders, unlike executeJavaScript which needs dom-ready.
-    const { glassBlur = 48, glassOpacity = 0.07 } = loadPrefs();
+    const { glassBlur = 48, glassOpacity = 0.07, bgBlur = 18 } = loadPrefs();
     const earlyCss = `
-        :root { --aml-glass-blur: ${glassBlur}px; --aml-glass-opacity: ${glassOpacity}; --aml-art-tint: rgba(255,255,255,0); --aml-fallback-bg: none; }
+        :root { --aml-glass-blur: ${glassBlur}px; --aml-glass-opacity: ${glassOpacity}; --aml-art-tint: rgba(255,255,255,0); --aml-fallback-bg: none; --aml-bg-blur: ${bgBlur}px; }
         html, body { background: transparent !important; overscroll-behavior: none !important; }
         /* Strip grey tint from alternating content sections — let album art / wallpaper show through */
         .section--alternate, [class*="section--alternate"] { background: transparent !important; }
@@ -387,24 +719,25 @@ function createWindow() {
             -webkit-backdrop-filter: blur(var(--aml-glass-blur)) !important;
             border-right: 1px solid rgba(255,255,255,0.12) !important;
         }
-        /* Software compositing blur fallback (X11 / GNOME / Sway).
-           Activated by adding .aml-sw-blur to <html> and setting --aml-fallback-bg. */
-        html.aml-sw-blur::before {
-            content: '';
-            position: fixed;
-            inset: -40px;
-            background: var(--aml-fallback-bg) center / cover no-repeat;
-            filter: blur(var(--aml-glass-blur));
-            z-index: -1;
-            pointer-events: none;
+        /* Software blur layer: two real DOM divs injected by _injectBlurLayer().
+           #_amlBlurBg  — wallpaper image + filter:blur, prepended to body so it
+                          renders behind all app content in DOM stacking order.
+           #_amlBlurTint — dark overlay on top of the blur.
+           position:fixed + inset:-80px overflows the viewport to hide blur edge fringing. */
+        #_amlBlurBg {
+            position: fixed !important;
+            inset: -80px !important;
+            pointer-events: none !important;
+            background-repeat: no-repeat !important;
+            filter: blur(var(--aml-bg-blur, 18px)) brightness(0.92) !important;
+            z-index: 0 !important;
         }
-        html.aml-sw-blur body::before {
-            content: '';
-            position: fixed;
-            inset: 0;
-            background: rgba(10, 10, 12, 0.5);
-            z-index: -1;
-            pointer-events: none;
+        #_amlBlurTint {
+            position: fixed !important;
+            inset: 0 !important;
+            pointer-events: none !important;
+            background: rgba(10, 10, 12, 0.25) !important;
+            z-index: 0 !important;
         }
     `;
 
@@ -833,8 +1166,31 @@ function applyPersistedViewSettings() {
     const p = loadPrefs();
     if (p.zoomFactor && p.zoomFactor !== 1.0)
         win?.webContents.setZoomFactor(p.zoomFactor);
-    applyGlassEffect(p.glassBlur ?? 48, p.glassOpacity ?? 0.07);
+    applyGlassEffect(p.glassBlur ?? 20, p.glassOpacity ?? 0.07);
+    if (p.bgBlur != null)
+        win?.webContents.executeJavaScript(
+            `document.documentElement.style.setProperty('--aml-bg-blur','${p.bgBlur}px')`
+        ).catch(() => {});
     applyTweak('__noop', null);
+    // Resolve effective mode: non-Hyprland can't use blur, fall back to accent.
+    const _effectiveMode = (p.themeMode === 'blur' && !_isHyprland)
+        ? 'accent' : (p.themeMode || (_isHyprland ? 'blur' : 'accent'));
+    if (_effectiveMode === 'accent') {
+        if (p.themePalette) {
+            _applyThemeVars(p.themePalette);
+        } else {
+            _getSystemAccent().then(accent => {
+                const palette = _generatePalette(accent, p.themeAppearance || 'dark');
+                const fresh = loadPrefs();
+                fresh.themePalette = palette;
+                savePrefs(fresh);
+                _applyThemeVars(palette);
+            });
+        }
+    } else if (_effectiveMode === 'custom') {
+        _injectCustomFallbackBg();
+        if (p.customCssPath) _injectCustomCss(p.customCssPath);
+    }
 }
 
 // ── IPC: prefs + view controls (used by settings panel) ─────────────────────
@@ -842,7 +1198,159 @@ ipcMain.handle('prefs:get', () => loadPrefs());
 ipcMain.on('pref:set',        (_, k, v) => { const p = loadPrefs(); p[k] = v; savePrefs(p); });
 ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));
 ipcMain.on('view:glass-blur', (_, b) => { const p = loadPrefs(); applyGlassEffect(parseInt(b), p.glassOpacity ?? 0.07); });
+ipcMain.on('view:bg-blur',   (_, b) => {
+    const p = loadPrefs(); p.bgBlur = parseInt(b); savePrefs(p);
+    win?.webContents.executeJavaScript(
+        `document.documentElement.style.setProperty('--aml-bg-blur','${parseInt(b)}px')`
+    ).catch(() => {});
+});
 ipcMain.on('view:tweak',      (_, k, v) => applyTweak(k, v));
+ipcMain.on('view:nav-opacity', (_, v) => {
+    const p = loadPrefs();
+    p.themeNavBgAlpha = parseFloat(v);
+    savePrefs(p);
+    if (p.themePalette) _applyThemeVars(p.themePalette);
+});
+
+// ── Theme IPC ────────────────────────────────────────────────────────────────
+ipcMain.handle('theme:get-info', async () => {
+    const p = loadPrefs();
+    return {
+        desktop:        _desktop || 'unknown',
+        blurAvailable:  _isHyprland,
+        systemAccent:   await _getSystemAccent(),
+        themeMode:      (p.themeMode === 'blur' && !_isHyprland) ? 'accent' : (p.themeMode || (_isHyprland ? 'blur' : 'accent')),
+        themePalette:   p.themePalette || null,
+        themePresets:   [
+            ...Object.entries(_builtinPresets).map(([name, fn]) => ({ name, palette: fn(p.themeAppearance || 'dark'), builtin: true })),
+            ...(p.themePresets || []),
+        ],
+        customCssPath:  p.customCssPath || null,
+        themeAppearance: p.themeAppearance || 'dark',
+    };
+});
+
+ipcMain.on('theme:set-appearance', async (_, appearance) => {
+    const p = loadPrefs();
+    p.themeAppearance = appearance;
+    const accent = p.themePalette?.accent || await _getSystemAccent();
+    p.themePalette = _generatePalette(accent, appearance);
+    savePrefs(p);
+    _applyThemeVars(p.themePalette);
+});
+
+ipcMain.on('theme:set-mode', async (_, mode) => {
+    const p = loadPrefs();
+    p.themeMode = mode;
+    if (mode === 'accent') {
+        if (!p.themePalette) p.themePalette = _generatePalette(await _getSystemAccent());
+        savePrefs(p);
+        await _clearCustomCss();
+        _applyThemeVars(p.themePalette);
+    } else if (mode === 'blur') {
+        savePrefs(p);
+        await _clearCustomCss();
+        _clearThemeVars();
+    } else if (mode === 'custom') {
+        savePrefs(p);
+        _clearThemeVars();
+        _injectCustomFallbackBg();
+        if (p.customCssPath) await _injectCustomCss(p.customCssPath);
+    }
+});
+
+ipcMain.on('theme:set-palette', (_, key, value) => {
+    const p = loadPrefs();
+    if (!p.themePalette) p.themePalette = {};
+    p.themePalette[key] = value;
+    savePrefs(p);
+    _applyThemeVars(p.themePalette);
+});
+
+ipcMain.handle('theme:reset-palette', async () => {
+    const p = loadPrefs();
+    p.themePalette = _generatePalette(await _getSystemAccent(), p.themeAppearance || 'dark');
+    savePrefs(p);
+    _applyThemeVars(p.themePalette);
+    return p.themePalette;
+});
+
+ipcMain.handle('theme:import-css', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+        title: 'Import Custom CSS',
+        filters: [{ name: 'CSS files', extensions: ['css'] }],
+        properties: ['openFile'],
+    });
+    if (canceled || !filePaths.length) return null;
+    const p = loadPrefs();
+    p.customCssPath = filePaths[0];
+    savePrefs(p);
+    await _injectCustomCss(filePaths[0]);
+    return filePaths[0];
+});
+
+ipcMain.handle('theme:save-preset', (_, name) => {
+    const p = loadPrefs();
+    p.themePresets = (p.themePresets || []).filter(x => x.name !== name);
+    p.themePresets.push({ name, palette: p.themePalette });
+    savePrefs(p);
+    return p.themePresets;
+});
+
+ipcMain.on('theme:delete-preset', (_, name) => {
+    const p = loadPrefs();
+    p.themePresets = (p.themePresets || []).filter(x => x.name !== name);
+    savePrefs(p);
+});
+
+const _builtinPresets = {
+    'Apple Music Pink': (appearance) => {
+        const p = _generatePalette('#fc3c44', appearance);
+        if (appearance !== 'light') p.navBg = '#44080a';
+        return p;
+    },
+};
+
+ipcMain.on('theme:apply-preset', (_, name) => {
+    const p = loadPrefs();
+    const palette = _builtinPresets[name]
+        ? _builtinPresets[name](p.themeAppearance || 'dark')
+        : (p.themePresets || []).find(x => x.name === name)?.palette;
+    if (!palette) return;
+    p.themePalette = palette;
+    savePrefs(p);
+    _applyThemeVars(palette);
+});
+
+ipcMain.handle('theme:export-preset', async (_, name) => {
+    const p = loadPrefs();
+    const preset = (p.themePresets || []).find(x => x.name === name) || { name: 'current', palette: p.themePalette };
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+        defaultPath: `aml-theme-${preset.name}.json`,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (canceled || !filePath) return false;
+    writeFileSync(filePath, JSON.stringify(preset, null, 2));
+    return true;
+});
+
+ipcMain.handle('theme:import-preset', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+        title: 'Import Theme Preset',
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+        properties: ['openFile'],
+    });
+    if (canceled || !filePaths.length) return null;
+    try {
+        const preset = JSON.parse(readFileSync(filePaths[0], 'utf8'));
+        if (!preset.name || !preset.palette) return null;
+        const p = loadPrefs();
+        p.themePresets = (p.themePresets || []).filter(x => x.name !== preset.name);
+        p.themePresets.push(preset);
+        savePrefs(p);
+        return preset;
+    } catch { return null; }
+});
 
 // ── MPRIS2 media integration ─────────────────────────────────────────────────
 // Exposes Now Playing info to the system (taskbars, media keys, GNOME shell,
@@ -865,7 +1373,13 @@ process.on('uncaughtException', (err) => {
         _destroyMprisPlayer();
         return;
     }
-    // Re-throw anything unrelated to D-Bus.
+    // x11 package throws X11 protocol errors (BadWindow etc.) from socket
+    // data handlers — outside any try/catch. Suppress them so they don't exit.
+    if (err?.error != null && err?.badParam != null) {
+        console.warn('[AML] X11 protocol error (suppressed):', err.message ?? err);
+        return;
+    }
+    // Re-throw anything unrelated to D-Bus / X11.
     console.error('Uncaught exception:', err);
     app.exit(1);
 });
@@ -1152,6 +1666,14 @@ app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
     createWindow();
     createTray();
+
+    // Global media key shortcuts — catches Bluetooth AVRCP play/pause/next/prev
+    // which arrive as kernel input events (KEY_PLAYPAUSE etc.) regardless of focus.
+    const sendMediaCmd = (cmd) => win?.webContents.send('mpris:cmd', cmd);
+    globalShortcut.register('MediaPlayPause',    () => sendMediaCmd('playpause'));
+    globalShortcut.register('MediaNextTrack',     () => sendMediaCmd('next'));
+    globalShortcut.register('MediaPreviousTrack', () => sendMediaCmd('previous'));
+    globalShortcut.register('MediaStop',          () => sendMediaCmd('pause'));
 
     // Always attempt to start the engine API server.  engine-playback.js checks
     // reachability at startup and silently falls back to the Apple CDN if the

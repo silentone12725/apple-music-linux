@@ -25,12 +25,91 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	"encoding/hex"
 
+	"apple-music-cli/engine/pipeline"
 	"github.com/itouakirai/mp4ff/mp4"
 )
+
+// audioTimescale extracts the timescale from the first audio track in an init
+// segment. Falls back to 44100 (standard AAC) if not found.
+func audioTimescale(init *mp4.InitSegment) uint64 {
+	if init.Moov != nil {
+		for _, trak := range init.Moov.Traks {
+			if trak.Mdia != nil && trak.Mdia.Mdhd != nil && trak.Mdia.Mdhd.Timescale > 0 {
+				return uint64(trak.Mdia.Mdhd.Timescale)
+			}
+		}
+	}
+	return 44100
+}
+
+// fragDurationTicks returns the total duration of frag in timescale ticks.
+// It reads DefaultSampleDuration from tfhd (the correct source per ISO 14496-12)
+// rather than using the stream timescale, which Trun.Duration takes as its
+// fallback parameter. Apple Music AAC segments carry tfhd.DefaultSampleDuration=1024
+// (one AAC-LC frame) and no per-sample durations in trun, so passing timescale
+// (44100) would yield 44100×sampleCount ≈ 430 seconds instead of ~10 seconds.
+func fragDurationTicks(frag *mp4.Fragment) uint64 {
+	if frag.Moof == nil || frag.Moof.Traf == nil || frag.Moof.Traf.Trun == nil {
+		return 0
+	}
+	var defaultSampleDuration uint32 = 1024 // AAC-LC: 1024 PCM samples per frame
+	if frag.Moof.Traf.Tfhd != nil && frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
+		if d := frag.Moof.Traf.Tfhd.DefaultSampleDuration; d > 0 {
+			defaultSampleDuration = d
+		}
+	}
+	return frag.Moof.Traf.Trun.Duration(defaultSampleDuration)
+}
+
+// patchFragTfdt patches the tfdt box of frag to accumulatedTfdt, updates
+// TrackID and SampleDescriptionIndex (matching ALAC behaviour), adjusts
+// trun.DataOffset for any moof size change, and returns the new accumulated
+// value for the next fragment. Mirrors cbcsSource.streamAttempt exactly.
+func patchFragTfdt(frag *mp4.Fragment, accumulatedTfdt, timescale uint64) uint64 {
+	if frag.Moof == nil || frag.Moof.Traf == nil {
+		return accumulatedTfdt
+	}
+
+	oldSize := frag.Moof.Size()
+
+	if frag.Moof.Traf.Tfdt != nil {
+		frag.Moof.Traf.Tfdt.SetBaseMediaDecodeTime(accumulatedTfdt)
+		frag.Moof.Traf.Tfdt.Version = 1
+	} else {
+		tfdt := mp4.CreateTfdt(accumulatedTfdt)
+		tfdt.Version = 1
+		frag.Moof.Traf.Tfdt = tfdt
+		var newChildren []mp4.Box
+		for _, child := range frag.Moof.Traf.Children {
+			if child.Type() == "trun" {
+				newChildren = append(newChildren, tfdt)
+			}
+			newChildren = append(newChildren, child)
+		}
+		frag.Moof.Traf.Children = newChildren
+	}
+
+	if frag.Moof.Traf.Tfhd != nil {
+		frag.Moof.Traf.Tfhd.TrackID = 1
+		if frag.Moof.Traf.Tfhd.HasSampleDescriptionIndex() {
+			frag.Moof.Traf.Tfhd.SampleDescriptionIndex = 1
+		}
+	}
+
+	newSize := frag.Moof.Size()
+	sizeDiff := int32(newSize) - int32(oldSize)
+	if sizeDiff != 0 && frag.Moof.Traf.Trun != nil && frag.Moof.Traf.Trun.HasDataOffset() {
+		frag.Moof.Traf.Trun.DataOffset += sizeDiff
+	}
+
+	accumulatedTfdt += fragDurationTicks(frag)
+	return accumulatedTfdt
+}
 
 // readInitSegment reads boxes from r until it finds a moov box, returning a
 // populated InitSegment.  Only ftyp and moov are added to the init segment —
@@ -132,6 +211,16 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		return fmt.Errorf("write init: %w", err)
 	}
 
+	// Patch tfdt to be monotonically increasing (same fix as ALAC).
+	// Seed from the first fragment's actual tfdt so VLC reports the correct
+	// absolute playback position — identical approach works for both initial
+	// play and seek (Apple HLS segments carry absolute decode timestamps).
+	timescale := audioTimescale(init)
+	var (
+		accumulatedTfdt uint64
+		tfdtSeeded      bool
+	)
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -143,6 +232,14 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 			}
 			return fmt.Errorf("read fragment: %w", err)
 		}
+
+		if !tfdtSeeded {
+			if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Tfdt != nil {
+				accumulatedTfdt = frag.Moof.Traf.Tfdt.BaseMediaDecodeTime()
+			}
+			tfdtSeeded = true
+		}
+		accumulatedTfdt = patchFragTfdt(frag, accumulatedTfdt, timescale)
 
 		decErr := mp4.DecryptFragment(frag, decryptInfo, key)
 		if decErr != nil && !isNoSencBox(decErr) {
@@ -172,6 +269,29 @@ func PassthroughStreaming(ctx context.Context, r io.Reader, w io.Writer) error {
 		return fmt.Errorf("write init: %w", err)
 	}
 
+	timescale := audioTimescale(init)
+	var (
+		accumulatedTfdt uint64
+		tfdtSeeded      bool
+	)
+
+	// On the seek path, seed tfdt accumulator from actualStart so the trimming
+	// loop can track absolute position from the segment boundary.
+	if actualStart, ok := pipeline.ActualStartFromContext(ctx); ok && actualStart > 0 {
+		accumulatedTfdt = uint64(actualStart * float64(timescale))
+		tfdtSeeded = true
+	}
+
+	// seekTarget is the exact user-requested position. We skip leading fragments
+	// until the accumulated time reaches seekTarget so audio starts within one
+	// fragment of where the user clicked. We compare fragment END times
+	// (accumulatedTfdt + fragDuration) so the first fragment whose end exceeds
+	// seekTarget is the one we output — it contains the seek point.
+	// Apple Music AAC segments have no native tfdts (patchFragTfdt inserts them),
+	// so we rely entirely on the accumulated position from actualStart.
+	seekTarget, hasSeekTarget := pipeline.SeekTargetFromContext(ctx)
+	seekTargetTicks := uint64(seekTarget * float64(timescale))
+
 	var offset uint64
 	for {
 		if ctx.Err() != nil {
@@ -184,6 +304,29 @@ func PassthroughStreaming(ctx context.Context, r io.Reader, w io.Writer) error {
 			}
 			return fmt.Errorf("read fragment: %w", err)
 		}
+
+		if hasSeekTarget {
+			dur := fragDurationTicks(frag)
+			log.Printf("[passthrough] trim check: dur=%d accTfdt=%d seekTicks=%d hasTrun=%v",
+				dur, accumulatedTfdt, seekTargetTicks, frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Trun != nil)
+			if dur > 0 && accumulatedTfdt+dur <= seekTargetTicks {
+				// Fragment ends at or before seekTarget — drop it.
+				accumulatedTfdt += dur
+				continue
+			}
+			// dur==0 means we can't determine duration — output to avoid skipping all.
+			log.Printf("[passthrough] seek trim: first output at %.3fs (target=%.3fs dur=%d)",
+				float64(accumulatedTfdt)/float64(timescale), seekTarget, dur)
+			hasSeekTarget = false
+		}
+
+		if !tfdtSeeded {
+			if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Tfdt != nil {
+				accumulatedTfdt = frag.Moof.Traf.Tfdt.BaseMediaDecodeTime()
+			}
+			tfdtSeeded = true
+		}
+		accumulatedTfdt = patchFragTfdt(frag, accumulatedTfdt, timescale)
 		if err := frag.Encode(w); err != nil {
 			return fmt.Errorf("write fragment: %w", err)
 		}

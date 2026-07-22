@@ -23,7 +23,7 @@
   const sheet = new CSSStyleSheet();
   sheet.replaceSync(`
   :root {
-    --aml-glass-blur:    48px;
+    --aml-glass-blur:    20px;
     --aml-glass-opacity: 0.07;
     /* Art tint \u2014 updated by MutationObserver when album art changes */
     --aml-art-r: 255;
@@ -38,16 +38,17 @@
      Confirmed stable selector. Svelte hash classes change on every deploy;
      nav.navigation (tag + base class) is stable across versions. */
   nav.navigation {
-    background: color-mix(
+    background: var(--aml-nav-bg, color-mix(
       in srgb,
       rgba(255, 255, 255, var(--aml-glass-opacity)) 80%,
       var(--aml-art-tint) 20%
-    ) !important;
+    )) !important;
     backdrop-filter: blur(var(--aml-glass-blur)) saturate(2.2) brightness(1.08) !important;
     -webkit-backdrop-filter: blur(var(--aml-glass-blur)) saturate(2.2) brightness(1.08) !important;
-    border-right: 1px solid rgba(255,255,255,0.12) !important;
+    border-right: 1px solid var(--aml-nav-border, rgba(255,255,255,0.12)) !important;
     box-shadow: 1px 0 32px rgba(0,0,0,0.18) !important;
     transition: background 1.4s ease !important;
+    color: var(--aml-nav-text, inherit) !important;
   }
 
   /* Strip backgrounds only from layout shells while hovered \u2014 :not(:hover)
@@ -60,7 +61,7 @@
   }
   nav.navigation [class*="active"],
   nav.navigation [class*="selected"] {
-    background: rgba(255,255,255,0.12) !important;
+    background: var(--aml-accent-active, rgba(255,255,255,0.12)) !important;
     border-radius: 8px !important;
   }
 
@@ -81,6 +82,18 @@
     backdrop-filter: blur(20px) saturate(1.6) !important;
     -webkit-backdrop-filter: blur(20px) saturate(1.6) !important;
     border: 1px solid rgba(255,255,255,0.15) !important;
+    border-radius: 12px !important;
+  }
+
+  /* Search results dropdown / overlay */
+  [class*="search-results"], [class*="SearchResults"],
+  [role="listbox"][class*="search"], [class*="suggestions"],
+  [class*="search"] [role="listbox"],
+  [data-testid*="search"] ul, [class*="search-overlay"] {
+    background: rgba(20, 20, 22, 0.75) !important;
+    backdrop-filter: blur(40px) saturate(1.8) !important;
+    -webkit-backdrop-filter: blur(40px) saturate(1.8) !important;
+    border: 1px solid rgba(255,255,255,0.10) !important;
     border-radius: 12px !important;
   }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"github.com/go-resty/resty/v2"
 	"google.golang.org/protobuf/proto"
 
@@ -763,25 +764,40 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 // Segments are cached on disk so subsequent calls for the same track are
 // served from cache without any network round-trips.
 func DownloadSegments(ctx context.Context, urls []string, w io.Writer) error {
-	for i, url := range urls {
+	log.Printf("[dl] DownloadSegments nURLs=%d firstURL=%s", len(urls), func() string {
+		if len(urls) > 0 {
+			return urls[0]
+		}
+		return "(none)"
+	}())
+	for i, cacheKey := range urls {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if cached, ok := GetCachedSegment(url); ok {
+		if cached, ok := GetCachedSegment(cacheKey); ok {
 			if _, err := w.Write(cached); err != nil {
 				return err
 			}
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		// Decode optional byte-range encoded as "#bytes=<offset>-<end>" fragment.
+		fetchURL, rangeHdr := cacheKey, ""
+		if idx := strings.Index(cacheKey, "#bytes="); idx >= 0 {
+			fetchURL = cacheKey[:idx]
+			rangeHdr = "bytes=" + cacheKey[idx+len("#bytes="):]
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
 		if err != nil {
 			return fmt.Errorf("segment %d: %w", i, err)
+		}
+		if rangeHdr != "" {
+			req.Header.Set("Range", rangeHdr)
 		}
 		resp, err := mvHTTPClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("segment %d fetch: %w", i, err)
 		}
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 			resp.Body.Close()
 			return fmt.Errorf("segment %d: HTTP %d", i, resp.StatusCode)
 		}
@@ -790,7 +806,7 @@ func DownloadSegments(ctx context.Context, urls []string, w io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("segment %d read: %w", i, err)
 		}
-		PutCachedSegment(url, data)
+		PutCachedSegment(cacheKey, data)
 		if _, err := w.Write(data); err != nil {
 			return err
 		}
