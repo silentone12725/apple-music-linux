@@ -487,6 +487,20 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
     }
 }
 
+// After a seek pipe fills the buffer from actualStart (segment boundary),
+// the browser snaps currentTime to actualStart rather than the requested seekSec.
+// This snaps it back — _nativeCTSet fires 'seeking', but onSeeking ignores it
+// (_ourSeekPending=false) and the browser resolves it natively from the buffer.
+function snapToSeekSec(audio, seekSec, wasPlaying) {
+    const ct = audio.currentTime;
+    if (Math.abs(ct - seekSec) > 0.3) {
+        try { _nativeCTSet.call(audio, seekSec); } catch (_) {}
+        if (wasPlaying) audio.addEventListener('seeked', () => _nativePlay().catch(() => {}), { once: true });
+    } else {
+        if (wasPlaying) _nativePlay().catch(e => console.warn('[AML MSE] seek play():', e));
+    }
+}
+
 async function mseSeekToTime(seekSec, audio, sb, ms) {
     if (ms.readyState === 'closed') return;
     const bufferedRanges = Array.from({length: sb.buffered.length}, (_, i) =>
@@ -570,7 +584,7 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
         audio.addEventListener('canplay', () => {
             if (pipeCtrl.signal.aborted) return;
             _seekTarget = -Infinity;
-            if (wasPlaying) _nativePlay().catch(() => {});
+            snapToSeekSec(audio, seekSec, wasPlaying);
         }, { once: true });
         return;
     }
@@ -625,7 +639,7 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
         if (pipeCtrl.signal.aborted) return;
         _seekTarget = -Infinity;
         console.log(`[AML MSE] Seek ready — req=${seekSec.toFixed(2)}s actual=${actualStart.toFixed(2)}s ct=${audio.currentTime.toFixed(2)}s`);
-        if (wasPlaying) _nativePlay().catch(e => console.warn('[AML MSE] seek play():', e));
+        snapToSeekSec(audio, seekSec, wasPlaying);
     }, { once: true });
 }
 
