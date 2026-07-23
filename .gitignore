@@ -1,6 +1,9 @@
 # ── Build outputs ─────────────────────────────────────────────────────────────
 node_modules/
 
+# AppImage releases (large binary, distributed separately)
+*.AppImage
+
 # Electron: auto-generated JS bundles (rebuilt by esbuild from src/)
 electron/engine-bundle.js
 electron/engine-sse-bundle.js
