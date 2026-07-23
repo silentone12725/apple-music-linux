@@ -8,8 +8,10 @@ package vlc
 import "C"
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -54,13 +56,46 @@ func (p *Player) Load(url string) error {
 
 	C.libvlc_media_player_set_media(p.mp, media)
 	p.lastURL = url
+	vol := p.volume
 	if ret := C.libvlc_media_player_play(p.mp); ret != 0 {
 		return fmt.Errorf("vlc: play failed (ret %d)", int(ret))
 	}
-	// Re-apply volume after play() so WirePlumber's stale per-app value can't
-	// silence VLC (WirePlumber persists the last-set volume across restarts).
-	C.libvlc_audio_set_volume(p.mp, C.int(p.volume))
+	C.libvlc_audio_set_volume(p.mp, C.int(vol))
+	// WirePlumber applies its stored per-app stream volume asynchronously after
+	// VLC opens the audio device, overriding the libvlc software volume above.
+	// Re-apply after VLC reaches playing state so our value lands last.
+	go p.reapplyVolumeOnPlay(vol)
 	return nil
+}
+
+// reapplyVolumeOnPlay waits until VLC enters playing state then sets the
+// libvlc software volume and resets any WirePlumber stream mute via wpctl.
+func (p *Player) reapplyVolumeOnPlay(vol int) {
+	// Wait for VLC to reach Playing state.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		p.mu.Lock()
+		state := C.libvlc_media_player_get_state(p.mp)
+		p.mu.Unlock()
+		if state == C.libvlc_Playing {
+			break
+		}
+	}
+
+	// Re-apply libvlc software volume then hammer wpctl for ~2s.
+	// WirePlumber applies its stored vol=0 asynchronously after VLC opens the
+	// audio device — sometimes hundreds of milliseconds after play() returns.
+	// A single set-volume call races against that; repeated calls win.
+	p.mu.Lock()
+	C.libvlc_audio_set_volume(p.mp, C.int(vol))
+	p.mu.Unlock()
+
+	const wpctlCmd = `id=$(wpctl status 2>/dev/null | grep -i "vlc" | awk '{print $1}' | tr -d '.' | grep -E '^[0-9]+$' | head -1); [ -n "$id" ] && wpctl set-mute "$id" 0 && wpctl set-volume "$id" 1.0`
+	for range 8 {
+		exec.Command("sh", "-c", wpctlCmd).Run() //nolint:errcheck
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // Seek reloads the media at posMs. fMP4 is not byte-range seekable (VLC has
@@ -86,6 +121,32 @@ func (p *Player) Seek(posMs int64) error {
 	C.libvlc_media_player_stop(p.mp)
 	p.mu.Unlock()
 	return p.Load(seekURL)
+}
+
+// SetTime fast-forwards within the currently playing stream to offsetMs
+// milliseconds from the stream start. Used after a seek to skip past the gap
+// between the HLS segment boundary (actualStart) and the requested position.
+// Polls until VLC is playing before applying, so it is safe to call immediately
+// after Load.
+func (p *Player) SetTime(offsetMs int64) {
+	if offsetMs <= 0 {
+		return
+	}
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			p.mu.Lock()
+			state := C.libvlc_media_player_get_state(p.mp)
+			p.mu.Unlock()
+			if state == C.libvlc_Playing {
+				p.mu.Lock()
+				C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(offsetMs))
+				p.mu.Unlock()
+				return
+			}
+		}
+	}()
 }
 
 // Time returns the current position and total length in milliseconds, plus a

@@ -514,7 +514,6 @@ func NewAPIServer(port int) *APIServer {
 	// VLC player — libvlc-backed playback for ALAC/Atmos that the browser cannot decode.
 	// Routes are no-ops when libvlc is not installed; frontend falls back to MSE.
 	s.vlcPlayer, _ = vlc.New() // nil if libvlc unavailable
-	mux.HandleFunc("PUT /api/v1/vlc/queue",  cors(s.handleVLCQueue))
 	mux.HandleFunc("POST /api/v1/vlc/load",  cors(s.handleVLCLoad))
 	mux.HandleFunc("POST /api/v1/vlc/pause", cors(s.handleVLCPause))
 	mux.HandleFunc("POST /api/v1/vlc/resume",cors(s.handleVLCResume))
@@ -1198,9 +1197,14 @@ func (s *APIServer) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleCachePlaybackDelete(w http.ResponseWriter, r *http.Request) {
-	s.scheduler.ClearPreWarmed()
-	if s.diskCache != nil {
-		s.diskCache.Clear()
+	what := r.URL.Query().Get("what") // "prewarm", "persistent", or "" (both)
+	if what == "" || what == "prewarm" {
+		s.scheduler.ClearPreWarmed()
+	}
+	if what == "" || what == "persistent" {
+		if s.diskCache != nil {
+			s.diskCache.Clear()
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1692,15 +1696,6 @@ func randID() string {
 
 // ── VLC handlers ──────────────────────────────────────────────────────────────
 
-func (s *APIServer) handleVLCQueue(w http.ResponseWriter, r *http.Request) {
-	// Queue is advisory (pre-warm hints). The prefetch scheduler handles warming
-	// via the context endpoint; accept and acknowledge without processing.
-	if s.vlcPlayer == nil {
-		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
 
 func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 	if s.vlcPlayer == nil {
@@ -1785,6 +1780,10 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		if actual, ok := s.pm.GetSeekStart(req.SessionID, pipeline.KindAudio, float64(req.PosMs)/1000.0); ok {
 			actualStartMs = int64(actual * 1000)
 		}
+	}
+	// Fast-forward past the HLS segment boundary gap.
+	if offsetMs := req.PosMs - actualStartMs; offsetMs > 200 {
+		s.vlcPlayer.SetTime(offsetMs)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"actualStartMs": actualStartMs})
 }
