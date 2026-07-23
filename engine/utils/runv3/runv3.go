@@ -362,44 +362,6 @@ type Segment struct {
 	Data  []byte
 }
 
-// RunStream streams a track directly to an io.Writer without saving to disk.
-// Decryption happens on-the-fly as the download progresses.
-func RunStream(adamId string, authtoken string, mutoken string, w io.Writer) error {
-	fileurl, kidBase64, uriPrefix, err := GetWebplayback(adamId, authtoken, mutoken, false)
-	if err != nil {
-		return err
-	}
-	ctx := context.Background()
-	ctx = context.WithValue(ctx, "pssh", kidBase64)
-	ctx = context.WithValue(ctx, "adamId", adamId)
-	ctx = context.WithValue(ctx, "uriPrefix", uriPrefix)
-	pssh, err := getPSSH("", kidBase64)
-	if err != nil {
-		return err
-	}
-	headers := map[string]string{
-		"authorization":            "Bearer " + authtoken,
-		"x-apple-music-user-token": mutoken,
-	}
-	client := resty.New()
-	client.SetHeaders(headers)
-	k := key.Key{
-		ReqCli:        client,
-		BeforeRequest: BeforeRequest,
-		AfterRequest:  AfterRequest,
-	}
-	k.CdmInit()
-	_, keybt, err := k.GetKey(ctx, "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense", pssh, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.Get(fileurl)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return DecryptMP4(resp.Body, keybt, w)
-}
 
 // aimdLimiter implements Additive-Increase / Multiplicative-Decrease
 // concurrency control. On each successful segment download the limit grows
@@ -570,51 +532,42 @@ func downloadSegment(ctx context.Context, url string, index int, wg *sync.WaitGr
 	segmentsChan <- Segment{Index: index, Data: data}
 }
 
-// fileWriter 从 Channel 接收分段并按顺序写入文件
+// fileWriter receives segments from the channel and writes them to outputFile in order.
 func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.Writer, totalSegments int) {
 	defer wg.Done()
 
-	// 缓冲区，用于存放乱序到达的分段
-	// key 是分段序号，value 是分段数据
+	// Buffer for out-of-order segments: key = segment index, value = data.
 	segmentBuffer := make(map[int][]byte)
-	nextIndex := 0 // 期望写入的下一个分段的序号
+	nextIndex := 0
 
 	for segment := range segmentsChan {
-		// 检查收到的分段是否是当前期望的
 		if segment.Index == nextIndex {
-			//fmt.Printf("写入分段 %d\n", segment.Index)
 			_, err := outputFile.Write(segment.Data)
 			if err != nil {
-				fmt.Printf("错误(分段 %d): 写入文件失败: %v\n", segment.Index, err)
+				fmt.Printf("error(segment %d): write failed: %v\n", segment.Index, err)
 			}
 			nextIndex++
 
-			// 检查缓冲区中是否有下一个连续的分段
+			// Flush any buffered consecutive segments.
 			for {
 				data, ok := segmentBuffer[nextIndex]
 				if !ok {
-					break // 缓冲区里没有下一个，跳出循环，等待下一个分段到达
+					break
 				}
-
-				//fmt.Printf("从缓冲区写入分段 %d\n", nextIndex)
 				_, err := outputFile.Write(data)
 				if err != nil {
-					fmt.Printf("错误(分段 %d): 从缓冲区写入文件失败: %v\n", nextIndex, err)
+					fmt.Printf("error(segment %d): write from buffer failed: %v\n", nextIndex, err)
 				}
-				// 从缓冲区删除已写入的分段，释放内存
 				delete(segmentBuffer, nextIndex)
 				nextIndex++
 			}
 		} else {
-			// 如果不是期望的分段，先存入缓冲区
-			//fmt.Printf("缓冲分段 %d (等待 %d)\n", segment.Index, nextIndex)
 			segmentBuffer[segment.Index] = segment.Data
 		}
 	}
 
-	// 确保所有分段都已写入
 	if nextIndex != totalSegments {
-		fmt.Printf("警告: 写入完成，但似乎有分段丢失。期望 %d 个, 实际写入 %d 个。\n", totalSegments, nextIndex)
+		fmt.Printf("warning: write complete but segments may be missing — expected %d, wrote %d\n", totalSegments, nextIndex)
 	}
 }
 

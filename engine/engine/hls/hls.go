@@ -247,12 +247,6 @@ func (m *Media) URLsFrom(startSec float64) (urls []string, actualStart float64) 
 	return out, cumulative
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
 
 // OpenMediaAuth is like OpenMedia but adds Apple Music auth headers.
 // Use this for media playlists at play.itunes.apple.com that require authentication.

@@ -29,11 +29,8 @@ import (
 type StreamKind int
 
 const (
-	KindAudio    StreamKind = iota // primary audio (ALAC, AAC, Atmos)
-	KindVideo                      // video track (H.264, HEVC)
-	KindSubtitle                   // subtitle / caption track
-	KindChapter                    // chapter markers
-	KindPreview                    // short preview clip
+	KindAudio StreamKind = iota // primary audio (ALAC, AAC, Atmos)
+	KindVideo                  // video track (H.264, HEVC)
 )
 
 func (k StreamKind) String() string {
@@ -42,13 +39,7 @@ func (k StreamKind) String() string {
 		return "audio"
 	case KindVideo:
 		return "video"
-	case KindSubtitle:
-		return "subtitle"
-	case KindChapter:
-		return "chapter"
-	case KindPreview:
-		return "preview"
-	default:
+default:
 		return "unknown"
 	}
 }
@@ -63,9 +54,6 @@ const (
 	CodecAAC   Codec = "aac"
 	CodecAtmos Codec = "atmos"
 	CodecH264  Codec = "h264"
-	CodecHEVC  Codec = "hevc"
-	CodecFLAC  Codec = "flac" // transcoded output
-	CodecOpus  Codec = "opus" // transcoded output
 )
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
