@@ -44,7 +44,7 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 
 ## Features
 
-- **Lossless & Hi-Res** — ALAC up to 192kHz, Dolby Atmos via FairPlay-decrypted HLS
+- **Lossless & Hi-Res** — ALAC up to 192kHz via FairPlay-decrypted HLS
 - **AAC streaming** — dedicated MSE pipeline for AAC with working seek
 - **MPRIS2** — bidirectional D-Bus media control: play/pause/next/prev/seek, shuffle sync
 
