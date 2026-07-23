@@ -45,14 +45,18 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 ## Features
 
 - **Lossless & Hi-Res** — ALAC up to 192kHz, Dolby Atmos via FairPlay-decrypted HLS
-- **MPRIS2** — bidirectional D-Bus media control: play/pause/next/prev/seek from any media key handler or taskbar widget
+- **AAC streaming** — dedicated MSE pipeline for AAC with working seek
+- **MPRIS2** — bidirectional D-Bus media control: play/pause/next/prev/seek, shuffle sync
 
 <div align="center">
   <img src="assets/screenshots/MPRIS_integration.png" alt="MPRIS2 integration" width="600"/>
 </div>
-  
+
 - **Frosted glass UI** — compositor blur-behind on Hyprland/KWin; software blur fallback on X11, GNOME, and Sway
-- **Smart prefetch cache** — tracks pre-warmed before you hit play; configurable size
+- **Back / Forward navigation** — iOS-style history buttons in the sidebar header
+- **Theme engine** — live accent colour picker, five tunable palette keys, dark/light/blur modes, save and share presets
+- **Custom CSS** — inject any `.css` file into the webview from AML Settings
+- **Smart prefetch cache** — tracks pre-warmed before you hit play; separate controls to clear song cache or prewarm buffer
 - **System tray** — minimize to tray with playback controls in the context menu
 - **Wayland + X11** — tested on Hyprland, KDE Plasma, GNOME, and Sway
 
@@ -176,19 +180,20 @@ NODE_ENV=production npm run dist
 ```
 electron/
   src/
-    engine-playback.js  MusicKit bridge, VLC control, settings UI
+    engine-playback.js  MusicKit bridge, AAC/VLC pipeline, settings UI, theme engine
     engine-sse.js       SSE client for engine push events
     smart-cache.js      prefetch scheduler and disk cache
-  main.mjs              app lifecycle, window, tray, MPRIS2, IPC
+    vision-glass.js     glass UI, CSS rules, navigation buttons
+  main.mjs              app lifecycle, window, tray, MPRIS2, IPC, theme presets
   preload.cjs           context bridge (window.amlBridge)
 
-cli/
+engine/
+  apiserver.go          HTTP API server (/api/v1/*)
   engine/drm/           FairPlay session management
   engine/hls/           HLS decrypt and stream proxy
-  engine/playback/      VLC HTTP control
-  apiserver.go          HTTP API server (/api/v1/*)
+  engine/vlc/           VLC subprocess controller
 
-Wrapper.x86_64.latest/  Android wrapper binary + rootfs (FairPlay DRM)
+drm/                    Android rootless chroot (FairPlay DRM)
 ```
 
 ## References
