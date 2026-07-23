@@ -1261,30 +1261,46 @@ async function setup() {
         item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
 
     // ── Track-row play button interceptor ────────────────────────────────────────
-    // When a user clicks a track's play button (data-testid="track-play-button"),
-    // Apple Music web inserts the track at queue.position+1 ("Play Next") but
-    // does NOT advance nowPlayingItem. nowPlayingItemDidChange never fires.
-    // After 150 ms (Apple Music has processed the click and mutated the queue),
-    // we detect the insertion and advance via changeToMediaAtIndex.
-    let _lastClickInMenu = false;
+    // When a user clicks a track in a playlist, Apple Music inserts it at
+    // queue.position+1 ("Play Next") but does NOT fire nowPlayingItemDidChange.
+    // We detect the queue mutation and call skipToNextItem() to bridge the gap.
     document.addEventListener('click', (e) => {
-        _lastClickInMenu = !!e.target.closest('.contextual-menu');
-        if (!e.target.closest('[data-testid="track-play-button"]')) return;
-        if (_lastClickInMenu) return;
+        if (e.target.closest('.contextual-menu')) return; // Play Next / Add to Queue — don't interfere
 
-        const snapId     = _qId(mk.nowPlayingItem);
-        const snapPos    = mk.queue?.position ?? 0;
-        const snapNextId = _qId(mk.queue?.items?.[snapPos + 1]);
+        const PS = window.MusicKit?.PlaybackStates;
+        if (mk.playbackState !== PS?.playing) return; // only intercept during active playback
 
-        setTimeout(() => {
-            const curId = _qId(mk.nowPlayingItem);
-            if (curId !== snapId) return; // nowPlayingItem already changed — handled
-            const newNextId = _qId(mk.queue?.items?.[snapPos + 1]);
-            if (newNextId && newNextId !== snapNextId) {
-                console.log('[aml] track-play-button: inserted at next, advancing to pos', snapPos + 1);
-                mk.changeToMediaAtIndex(snapPos + 1).catch(() => {});
+        const pos      = mk.queue?.position ?? 0;
+        const snapNext = _qId(mk.queue?.items?.[pos + 1]);
+        const snapNow  = _qId(mk.nowPlayingItem); // snapshot current song id at click time
+
+        let cancelled = false;
+        const cancel = () => { cancelled = true; };
+        mk.addEventListener('nowPlayingItemDidChange', cancel, { once: true });
+
+        const checkAdvance = () => {
+            mk.removeEventListener('queueDidChange', checkAdvance);
+            mk.removeEventListener('nowPlayingItemDidChange', cancel);
+            if (cancelled) return; // MK already fired nowPlayingItemDidChange — existing listener handles it
+
+            const curPos = mk.queue?.position ?? 0;
+            if (curPos !== pos) return; // queue position changed (context switch, pos > 0 case)
+
+            // Guard context switch at pos=0: queue.items[0] updates before nowPlayingItemDidChange fires
+            if ((_qId(mk.queue?.items?.[curPos]) ?? null) !== snapNow) return;
+
+            const newNext = _qId(mk.queue?.items?.[curPos + 1]);
+            if (newNext && newNext !== snapNext) {
+                console.log('[aml] track-click: inserted at next, calling skipToNextItem');
+                mk.skipToNextItem().catch(() => {});
             }
-        }, 150);
+        };
+
+        mk.addEventListener('queueDidChange', checkAdvance, { once: true });
+        setTimeout(() => {
+            mk.removeEventListener('queueDidChange', checkAdvance);
+            checkAdvance();
+        }, 200);
     }, true);
 
     mk.addEventListener('nowPlayingItemDidChange', () => {
