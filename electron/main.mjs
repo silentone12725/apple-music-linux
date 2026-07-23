@@ -1306,7 +1306,10 @@ ipcMain.on('theme:delete-preset', (_, name) => {
 const _builtinPresets = {
     'Apple Music Pink': (appearance) => {
         const p = _generatePalette('#fc3c44', appearance);
-        if (appearance !== 'light') p.navBg = '#44080a';
+        if (appearance !== 'light') {
+            p.navBg = '#1c1c1c';
+            p.navBorder = '#4f4f4f';
+        }
         return p;
     },
 };
@@ -1427,6 +1430,7 @@ function createMprisPlayer() {
         player.on('next',      () => sendCmd('next'));
         player.on('previous',  () => sendCmd('previous'));
         player.on('stop',      () => sendCmd('pause'));
+        player.on('shuffle',   (val) => sendCmd({ type: 'shuffle', value: Boolean(val) }));
 
         // MPRIS → app: Seek (delta µs) and SetPosition (absolute µs).
         // dbus-next returns int64 as BigInt; convert to Number before dividing.
@@ -1467,6 +1471,7 @@ function createMprisPlayer() {
 let _lastMprisStatus   = null;
 let _lastMprisMetadata = null;
 let _lastMprisPosition = 0; // µs
+let _lastMprisShuffle  = false;
 
 function applyMprisData(data) {
     // Snapshot player — the error event handler may null mprisPlayer
@@ -1492,6 +1497,9 @@ function applyMprisData(data) {
     if (data.position != null) {
         try { p.position = data.position; } catch (_) {}
     }
+    if (data.shuffle != null) {
+        try { p.shuffle = data.shuffle; } catch (_) {}
+    }
 }
 
 function replayMprisState() {
@@ -1503,15 +1511,17 @@ function replayMprisState() {
             if (_lastMprisStatus)   applyMprisData({ status: _lastMprisStatus });
             if (_lastMprisMetadata) applyMprisData({ metadata: _lastMprisMetadata });
             if (_lastMprisPosition) applyMprisData({ position: _lastMprisPosition });
+            applyMprisData({ shuffle: _lastMprisShuffle });
         } catch (_) {}
     }, 400);
 }
 
 ipcMain.on('mpris:update', (_, data) => {
     // Track each field independently so all survive across reconnects.
-    if (data.status)     _lastMprisStatus   = data.status;
-    if (data.metadata)   _lastMprisMetadata = data.metadata;
+    if (data.status)        _lastMprisStatus   = data.status;
+    if (data.metadata)      _lastMprisMetadata = data.metadata;
     if (data.position != null) _lastMprisPosition = data.position;
+    if (data.shuffle != null)  _lastMprisShuffle  = data.shuffle;
 
     const wasNull = !mprisPlayer;
     if (!mprisPlayer) mprisPlayer = createMprisPlayer();

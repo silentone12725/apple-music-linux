@@ -72,6 +72,11 @@ sheet.replaceSync(`
   }
 
 
+  /* ── Footer + iTunes Store CTA removal ── */
+  footer[data-testid="footer"], footer.footer--full-width { display: none !important; }
+  button[aria-label*="iTunes Store"],
+  button:has([data-testid="cta-button-arrow-icon"]) { display: none !important; }
+
   /* ── Vignette / upsell removal ── */
   body::before, body::after { display: none !important; }
   /* Only hide page-level background overlays, not card gradients */
@@ -113,8 +118,9 @@ sheet.replaceSync(`
     align-items: center;
     z-index: 20;
     -webkit-app-region: no-drag;
+    min-height: 44px;
   }
-  nav.navigation { position: relative !important; }
+  nav.navigation { position: relative !important; overflow: visible !important; }
   .aml-nav-btn {
     /* explicit box model — hit area == visual circle */
     box-sizing: border-box !important;
@@ -354,24 +360,27 @@ barObserver.observe(document.documentElement, { childList: true, subtree: true }
             const navRect    = nav.getBoundingClientRect();
             const headerRect = header.getBoundingClientRect();
             const top    = headerRect.top - navRect.top;
-            const height = headerRect.height;
+            const height = headerRect.height || 44; // fallback if not yet laid out
             wrap.style.top    = `${top}px`;
             wrap.style.height = `${height}px`;
         };
 
         positionButtons();
-        // Re-measure if the header changes size (e.g. on zoom/resize)
+        // Re-measure if the header changes size (e.g. on zoom/resize or deferred layout)
         new ResizeObserver(positionButtons).observe(header);
 
         syncButtons();
     };
 
+    // Initial attach (or watch for nav to appear on SPA first paint)
     const navWatcher = new MutationObserver(() => {
-        if (findHeader()) {
-            attach();
-            navWatcher.disconnect();
-        }
+        if (findHeader()) { attach(); navWatcher.disconnect(); }
     });
     if (findHeader()) attach();
     else navWatcher.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Re-attach if SPA navigation removes and recreates the nav element
+    new MutationObserver(() => {
+        if (!document.getElementById('aml-nav-buttons') && findHeader()) attach();
+    }).observe(document.documentElement, { childList: true, subtree: true });
 })();
