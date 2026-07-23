@@ -62,10 +62,5 @@ wrapper-arm64/rootfs/system/** filter=lfs diff=lfs merge=lfs -text
 /electron/dist/libffmpeg.so filter=lfs diff=lfs merge=lfs -text
 /electron/dist/libvulkan.so.1 filter=lfs diff=lfs merge=lfs -text
 /electron/dist/resources.pak filter=lfs diff=lfs merge=lfs -text
-electron/dist/resources/drm filter=lfs diff=lfs merge=lfs -text
-electron/dist/resources/vlc/** filter=lfs diff=lfs merge=lfs -text
 drm/rootfs/data/data/com.apple.android.music/files/531EA4BB8D4B206263577F83ADB3948181F99DA3 filter=lfs diff=lfs merge=lfs -text
 drm/rootfs/data/data/com.apple.android.music/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA filter=lfs diff=lfs merge=lfs -text
-*.AppImage filter=lfs diff=lfs merge=lfs -text
-electron/dist/linux-unpacked/** filter=lfs diff=lfs merge=lfs -text
-electron/dist/resources/app/engine filter=lfs diff=lfs merge=lfs -text
