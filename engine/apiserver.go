@@ -102,7 +102,6 @@ type EpochReason string
 const (
 	EpochEngineStart    EpochReason = "engine-start"
 	EpochSessionChanged EpochReason = "session-changed"
-	EpochPlaybackReset  EpochReason = "playback-reset"
 )
 
 // EpochInfo is an immutable snapshot of the current engine epoch.
@@ -177,8 +176,6 @@ func (l *engineLifecycle) OnDRMStateChanged(sessionStr string) {
 	}
 }
 
-// OnPlaybackReset advances the epoch when the playback graph is rebuilt.
-func (l *engineLifecycle) OnPlaybackReset() { l.epoch.Advance(EpochPlaybackReset) }
 
 // ── SSE event bus ─────────────────────────────────────────────────────────────
 
@@ -677,8 +674,7 @@ func (s *APIServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"musicVideo": true,
 		"downloads":  true,
 		"lyrics":     true,
-		"queue":      false,
-		"radio":      false,
+
 		// DRM status detail for frontends that want to show granular state.
 		"drm": map[string]any{
 			"process":  snap.State.Process.String(),
@@ -1647,11 +1643,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v) //nolint:errcheck
 }
 
-func flushHeaders(w http.ResponseWriter) {
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
-}
 
 func fmtArtworkURL(template string, size int) string {
 	s := fmt.Sprintf("%d", size)

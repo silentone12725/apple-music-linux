@@ -67,8 +67,6 @@ let _msePaused        = false; // true while user has manually paused in MSE mod
 // Saved after every nowPlayingItemDidChange so queueDidChange can compare
 // old vs new state to distinguish "play next" insertions from "play now" replacements.
 
-let _queueSnap     = { items: [], pos: 0 };
-let _autoAdvancing = false; // guard: skip queueDidChange re-entry during auto-skip
 
 // ── Engine capability snapshot (from SSE) ─────────────────────────────────────
 
@@ -83,48 +81,6 @@ let _snapshotEventId  = -1;     // SSE meta.id of the last engine.snapshot — d
 // fires. We stub the probe so MusicKit proceeds to change the queue, then our
 // MSE pipeline takes over. Since MSE pipes raw AAC (no encryption), no actual
 // DRM license is ever requested.
-
-function stubDRM() {
-    if (window.__amlDRMStubbed) return;
-    window.__amlDRMStubbed = true;
-
-    const _origRMKSA = navigator.requestMediaKeySystemAccess?.bind(navigator);
-    navigator.requestMediaKeySystemAccess = async function(keySystem, configs) {
-        // Prefer a real CDM if Electron ever gets one.
-        if (_origRMKSA) {
-            try { return await _origRMKSA(keySystem, configs); } catch (_) {}
-        }
-        const fakeSession = {
-            sessionId: '', expiration: NaN, closed: Promise.resolve(),
-            keyStatuses: new Map(),
-            addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
-            generateRequest: async () => {}, load: async () => false,
-            update: async () => {}, close: async () => {}, remove: async () => {},
-        };
-        const fakeMediaKeys = {
-            createSession: () => fakeSession,
-            setServerCertificate: async () => true,
-        };
-        return {
-            keySystem,
-            getConfiguration: () => (configs && configs[0]) || {},
-            createMediaKeys: async () => fakeMediaKeys,
-        };
-    };
-
-    // Stub setMediaKeys so the browser doesn't reject our fake MediaKeys object.
-    const _origSMK = HTMLMediaElement.prototype.setMediaKeys;
-    HTMLMediaElement.prototype.setMediaKeys = async function(keys) {
-        if (!keys) { try { return await _origSMK.call(this, null); } catch (_) {} return; }
-        // If it's a real browser MediaKeys instance, delegate normally.
-        if (typeof MediaKeys !== 'undefined' && keys instanceof MediaKeys) {
-            return _origSMK.call(this, keys);
-        }
-        // Fake keys — accept silently; our MSE stream never generates encrypted events.
-    };
-
-    console.log('[AML Engine] DRM stub installed');
-}
 
 // ── CDN blocker (prototype-level, runs at parse time) ─────────────────────────
 
@@ -1126,7 +1082,6 @@ async function setup() {
     if (window.__amlEngineMounted) return;
     window.__amlEngineMounted = true;
 
-    stubDRM();
     blockAppleCDN();
 
     // Feature-detect native ALAC MSE support (Chromium 116+ / Electron 38+).
@@ -1296,14 +1251,6 @@ async function setup() {
         }
     });
 
-    function _snapQueue() {
-        _queueSnap = { items: (mk.queue?.items ?? []).slice(), pos: mk.queue?.position ?? 0 };
-    }
-
-    mk.addEventListener('queueDidChange', () => {
-        _snapQueue();
-    });
-
     mk.addEventListener('shuffleModeDidChange', () => {
         window.amlBridge?.mprisUpdate?.({ shuffle: mk.shuffleMode === 1 });
     });
@@ -1341,7 +1288,6 @@ async function setup() {
     }, true);
 
     mk.addEventListener('nowPlayingItemDidChange', () => {
-        _snapQueue(); // capture queue state the moment the track changes
         handleTrackChange(mk);
         // Signal queue context to the prefetch scheduler.
         window._amlSmartCache?.onTrackChange(mk);
@@ -1399,7 +1345,6 @@ async function setup() {
         cache.warmOnStartup(mk);
     }
 
-    _snapQueue(); // seed snapshot before any events arrive
     if (mk.nowPlayingItem) handleTrackChange(mk);
 }
 
