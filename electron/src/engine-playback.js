@@ -818,7 +818,12 @@ async function handleTrackChange(mk) {
     if (!adamId) { console.warn('[AML Engine] No Adam ID'); return; }
     _currentAssetId = adamId;
 
-    const isMV = item.type === 'music-videos';
+    // Music videos play natively through MusicKit — don't intercept.
+    if (item.type === 'music-videos') {
+        console.log(`[AML Engine] MV — handing back to MusicKit: ${item.attributes?.name ?? adamId}`);
+        showQualityBadge(null);
+        return;
+    }
 
     const t0 = performance.now();
     console.log(`[AML Engine] → ${item.attributes?.name ?? adamId} (id=${adamId} sf=${sf})`);
