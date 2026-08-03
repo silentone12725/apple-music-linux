@@ -6,10 +6,10 @@
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20x86__64-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 
-An unofficial Apple Music desktop client for Linux with Lossless support
+An Apple Music desktop client for Linux with Lossless support
 
 <div align="center">
-  <img src="assets/screenshots/Preview_logged_out.png" alt="Logged out" width="49%"/>
+  <img src="assets/screenshots/Accented-preview.png" alt="Accented-preview" width="49%"/>
   <img src="assets/screenshots/Preview_logged_in.png" alt="Logged in" width="49%"/>
 </div>
 
@@ -54,6 +54,11 @@ An unofficial Apple Music desktop client for Linux with Lossless support
 
 - **Frosted glass UI** — compositor blur-behind on Hyprland/KWin; software blur fallback on X11, GNOME, and Sway
 - **Back / Forward navigation** — iOS-style history buttons in the sidebar header
+
+<div align="center">
+  <img src="assets/screenshots/Features.png" alt="Features" width="600"/>
+</div>
+
 - **Theme engine** — live accent colour picker, five tunable palette keys, dark/light/blur modes, save and share presets
 - **Custom CSS** — inject any `.css` file into the webview from AML Settings
 - **Smart prefetch cache** — tracks pre-warmed before you hit play; separate controls to clear song cache or prewarm buffer
@@ -138,12 +143,12 @@ Sign in via the web UI on first launch, the same as signing into music.apple.com
 
 This authenticates the FairPlay layer. Without it, playback falls back to AAC 256 kbps.
 
-1. Click the **User Account** button in the bottom-left corner of the app , close it and open it a second time 
-2. open **AML Settings**
-3. Click **Sign In** and enter your Apple ID credentials wait for it to authentiacate and fetch the key in the backend should take about 20 seconds.
+1. Click the **Settings** cog wheel on right side of the user account button 
+2. Click **Sign In** and enter your Apple ID credentials wait for it to authentiacate and fetch the key in the backend should take about 20 seconds.
 
 <div align="center">
-  <img src="assets/screenshots/engine_login.png" alt="AML Settings — Engine Account login" width="600"/>
+  <img src="assets/screenshots/engine_login.png" alt="AML Settings — Engine Account login" width=49%/>
+  <img src="assets/screenshots/Account_logged_in.png" alt="Account_logged_in" width=49%/>
 </div>
 
 ## Dev
@@ -173,27 +178,6 @@ cd electron
 bash build.sh          # bundle VLC libs first
 NODE_ENV=production npm run dist
 # → dist/apple-music-linux.AppImage
-```
-
-## Project structure
-
-```
-electron/
-  src/
-    engine-playback.js  MusicKit bridge, AAC/VLC pipeline, settings UI, theme engine
-    engine-sse.js       SSE client for engine push events
-    smart-cache.js      prefetch scheduler and disk cache
-    vision-glass.js     glass UI, CSS rules, navigation buttons
-  main.mjs              app lifecycle, window, tray, MPRIS2, IPC, theme presets
-  preload.cjs           context bridge (window.amlBridge)
-
-engine/
-  apiserver.go          HTTP API server (/api/v1/*)
-  engine/drm/           FairPlay session management
-  engine/hls/           HLS decrypt and stream proxy
-  engine/vlc/           VLC subprocess controller
-
-drm/                    Android rootless chroot (FairPlay DRM)
 ```
 
 ## References
