@@ -23,14 +23,14 @@ import (
 	"syscall"
 	"time"
 
-	"apple-music-cli/utils/alacfix"
-	"apple-music-cli/utils/ampapi"
-	"apple-music-cli/utils/lyrics"
-	"apple-music-cli/utils/manifest"
-	"apple-music-cli/utils/runv2"
-	"apple-music-cli/utils/runv3"
-	"apple-music-cli/utils/structs"
-	"apple-music-cli/utils/task"
+	"engine/utils/alacfix"
+	"engine/utils/ampapi"
+	"engine/utils/lyrics"
+	"engine/utils/manifest"
+	"engine/utils/runv2"
+	"engine/utils/runv3"
+	"engine/utils/structs"
+	"engine/utils/task"
 
 	"github.com/grafov/m3u8"
 	"github.com/spf13/pflag"
@@ -1502,7 +1502,7 @@ func main() {
 		srv.Stop()
 		return
 	}
-	fmt.Fprintln(os.Stderr, "Usage: apple-music-cli --api <port>")
+	fmt.Fprintln(os.Stderr, "Usage: engine --api <port>")
 	os.Exit(1)
 }
 

@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"apple-music-cli/engine/drm"
+	"engine/engine/drm"
 )
 
 // ── Test harness ──────────────────────────────────────────────────────────────

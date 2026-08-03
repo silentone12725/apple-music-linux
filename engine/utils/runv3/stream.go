@@ -25,12 +25,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"strings"
 
 	"encoding/hex"
 
-	"apple-music-cli/engine/pipeline"
+	"engine/engine/pipeline"
 	"github.com/itouakirai/mp4ff/mp4"
 )
 
@@ -212,14 +211,14 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 	}
 
 	// Patch tfdt to be monotonically increasing (same fix as ALAC).
-	// Seed from the first fragment's actual tfdt so VLC reports the correct
-	// absolute playback position — identical approach works for both initial
-	// play and seek (Apple HLS segments carry absolute decode timestamps).
+	// Always start timestamps at 0 for from-start streams.
+	// Apple Music HLS segments (including MVs) may carry non-zero absolute
+	// decode timestamps (e.g. 10 s), which would prevent MSE currentTime=0
+	// from finding data in the SourceBuffer. The seek path seeds its own
+	// timestamp from ActualStart (set by the pipeline before this call), so
+	// it is not affected.
 	timescale := audioTimescale(init)
-	var (
-		accumulatedTfdt uint64
-		tfdtSeeded      bool
-	)
+	var accumulatedTfdt uint64
 
 	for {
 		if ctx.Err() != nil {
@@ -233,12 +232,6 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 			return fmt.Errorf("read fragment: %w", err)
 		}
 
-		if !tfdtSeeded {
-			if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Tfdt != nil {
-				accumulatedTfdt = frag.Moof.Traf.Tfdt.BaseMediaDecodeTime()
-			}
-			tfdtSeeded = true
-		}
 		accumulatedTfdt = patchFragTfdt(frag, accumulatedTfdt, timescale)
 
 		decErr := mp4.DecryptFragment(frag, decryptInfo, key)
@@ -307,23 +300,16 @@ func PassthroughStreaming(ctx context.Context, r io.Reader, w io.Writer) error {
 
 		if hasSeekTarget {
 			dur := fragDurationTicks(frag)
-			log.Printf("[passthrough] trim check: dur=%d accTfdt=%d seekTicks=%d hasTrun=%v",
-				dur, accumulatedTfdt, seekTargetTicks, frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Trun != nil)
 			if dur > 0 && accumulatedTfdt+dur <= seekTargetTicks {
-				// Fragment ends at or before seekTarget — drop it.
 				accumulatedTfdt += dur
 				continue
 			}
-			// dur==0 means we can't determine duration — output to avoid skipping all.
-			log.Printf("[passthrough] seek trim: first output at %.3fs (target=%.3fs dur=%d)",
-				float64(accumulatedTfdt)/float64(timescale), seekTarget, dur)
 			hasSeekTarget = false
 		}
 
 		if !tfdtSeeded {
-			if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Tfdt != nil {
-				accumulatedTfdt = frag.Moof.Traf.Tfdt.BaseMediaDecodeTime()
-			}
+			// From-start path: normalise to 0 (seek path already set
+			// accumulatedTfdt above via ActualStart).
 			tfdtSeeded = true
 		}
 		accumulatedTfdt = patchFragTfdt(frag, accumulatedTfdt, timescale)

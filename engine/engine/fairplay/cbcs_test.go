@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"apple-music-cli/utils/runv2"
+	"engine/utils/runv2"
 )
 
 // ── stallDetector tests ───────────────────────────────────────────────────────

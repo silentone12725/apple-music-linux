@@ -11,7 +11,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
 
-	"apple-music-cli/utils/ampapi"
+	"engine/utils/ampapi"
 )
 
 type Playlist struct {
