@@ -210,6 +210,7 @@ video { max-height: 300px; background: #000; }
   <button class="nav-btn" onclick="showTab('concurrent')">Concurrent</button>
   <button class="nav-btn" onclick="showTab('errors')">Error Injection</button>
   <button class="nav-btn" onclick="showTab('network')">Network <span class="badge" id="net-badge" style="background:var(--border);color:var(--muted)">0</span></button>
+  <button class="nav-btn" onclick="showTab('mvprobe')">MV Probe</button>
 </div>
 
 <!-- ── MAIN LAYOUT ── -->
@@ -600,6 +601,68 @@ video { max-height: 300px; background: #000; }
     <span style="font-size:11px;color:var(--muted);margin-left:4px" id="net-count">0 requests</span>
   </div>
   <div id="net-log"></div>
+</div>
+
+<!-- MV PROBE -->
+<div class="panel" id="tab-mvprobe">
+  <div class="card">
+    <div class="card-title">MV Stream Probe — Compare All API Variations</div>
+    <div class="row">
+      <div><label>Adam ID (music-video)</label><input id="mv-id" placeholder="1795906793"></div>
+      <div><label>Storefront</label><input id="mv-sf" value="in" style="width:60px"></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div style="flex:1"><label>Bearer Token <span style="color:var(--muted);font-size:10px">— Authorization header from DevTools</span></label><input id="mv-token" placeholder="eyJ… (optional)"></div>
+      <div style="flex:1"><label>Music-User-Token <span style="color:var(--muted);font-size:10px">— Music-User-Token header from DevTools</span></label><input id="mv-mut" placeholder="0.Ai… (optional)"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="mvRunProbes()">▶ Run All Probes</button>
+      <button class="btn-secondary btn-sm" onclick="mvClear()">Clear</button>
+    </div>
+    <div id="mv-probe-status" style="font-size:11px;color:var(--muted);margin-top:4px"></div>
+  </div>
+
+  <!-- Probe result cards (injected by JS) -->
+  <div id="mv-probe-cards"></div>
+
+  <!-- Comparison summary table -->
+  <div class="card" id="mv-summary-card" style="display:none">
+    <div class="card-title">Stream Comparison</div>
+    <div style="overflow-x:auto">
+      <table id="mv-summary-table" style="width:100%;border-collapse:collapse;font-size:11px"></table>
+    </div>
+  </div>
+
+  <!-- HLS manifest inspector -->
+  <div class="card" id="mv-hls-card" style="display:none">
+    <div class="card-title">HLS Manifest Inspector <span id="mv-hls-url-label" style="font-size:10px;color:var(--muted);margin-left:6px;word-break:break-all"></span></div>
+    <div id="mv-hls-variants" style="margin-bottom:8px;display:none">
+      <div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:4px">QUALITY VARIANTS</div>
+      <table id="mv-hls-variant-table" style="width:100%;border-collapse:collapse;font-size:11px"></table>
+    </div>
+    <div id="mv-hls-content" class="json-box" style="white-space:pre;max-height:300px;color:#a8ff78;font-size:10px"></div>
+  </div>
+
+  <!-- Visual comparison player -->
+  <div class="card" id="mv-compare-card" style="display:none">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+      <span class="card-title" style="margin:0">Visual Quality Comparison</span>
+      <button class="btn-sm btn-red" onclick="mvStopCompare()">■ Stop</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px">PREVIEW (30s clip · catalog MP4)</div>
+        <video id="mv-vid-preview" controls style="width:100%;background:#000;border-radius:4px;max-height:300px" preload="metadata"></video>
+        <div id="mv-preview-info" style="font-size:10px;color:var(--muted);margin-top:4px"></div>
+      </div>
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--green);margin-bottom:6px">ENGINE STREAM (webplayback · full quality)</div>
+        <video id="mv-vid-engine" controls style="width:100%;background:#000;border-radius:4px;max-height:300px"></video>
+        <audio id="mv-audio-engine" style="display:none"></audio>
+        <div id="mv-engine-info" style="font-size:10px;color:var(--muted);margin-top:4px"></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 </div><!-- end layout left side -->
@@ -1333,6 +1396,365 @@ async function drmClearSession() {
   res.style.color = ok ? 'var(--green)' : 'var(--red)';
   res.textContent = ok ? '✓ Session DB cleared' : `✗ ${JSON.stringify(data)}`;
   if (ok) setTimeout(drmRefresh, 500);
+}
+
+// ── MV Probe ───────────────────────────────────────────────────────────────
+
+const MV_PROBE_LABELS = {
+  catalog_basic:               { label: 'Catalog (no auth)',   desc: 'Baseline — no MUT, no extend',                  color: 'var(--muted)'  },
+  catalog_basic_mut:           { label: 'Catalog + MUT',       desc: 'With MUT, no extend= — checks auth gate',       color: 'var(--blue)'   },
+  catalog_extended_asset_urls: { label: 'extendedAssetUrls',   desc: 'Native app path — all stream flavors',           color: 'var(--green)'  },
+  catalog_extended_offers:     { label: '+ offers',            desc: 'extendedAssetUrls + offers (purchase info)',     color: 'var(--green)'  },
+  catalog_extended_full:       { label: '+ editorialVideo',    desc: 'All extends — maximum catalog data',             color: 'var(--purple)' },
+  webplayback_api:             { label: 'Webplayback API',     desc: 'Current engine path — POST webPlayback',        color: 'var(--orange)' },
+};
+
+async function mvRunProbes() {
+  const id = v('mv-id'), sf = v('mv-sf') || 'in';
+  if (!id) { document.getElementById('mv-probe-status').textContent = 'Enter an Adam ID first.'; return; }
+
+  document.getElementById('mv-probe-cards').innerHTML = '';
+  document.getElementById('mv-summary-card').style.display = 'none';
+  document.getElementById('mv-hls-card').style.display = 'none';
+  document.getElementById('mv-probe-status').textContent = 'Running probes…';
+
+  const tok = v('mv-token'), mut = v('mv-mut');
+  let qs = `sf=${sf}`;
+  if (tok) qs += `&token=${encodeURIComponent(tok)}`;
+  if (mut) qs += `&mut=${encodeURIComponent(mut)}`;
+
+  const { ok, data } = await api('GET', `/api/v1/probe/mv/${id}?${qs}`, null, 'mv-probe');
+  if (!ok) {
+    document.getElementById('mv-probe-status').textContent = `Engine error: ${JSON.stringify(data)}`;
+    return;
+  }
+
+  _mvLastProbeResults = data;
+  document.getElementById('mv-probe-status').innerHTML =
+    `${data.length} probes completed. &nbsp;
+     <button class="btn-sm btn-green" onclick="mvStartCompare()" style="vertical-align:middle">▶ Visual Compare</button>`;
+  renderMVProbeCards(data, id, sf);
+  renderMVSummary(data);
+  // Auto-inspect webplayback HLS master for quality variant table
+  const wp = data.find(r => r.name === 'webplayback_api');
+  const hlsUrl = wp?.raw?.songList?.[0]?.['hls-playlist-url'];
+  if (hlsUrl) mvFetchHLS(hlsUrl);
+}
+
+function renderMVProbeCards(results, adamId, sf) {
+  const container = document.getElementById('mv-probe-cards');
+  container.innerHTML = '';
+
+  for (const r of results) {
+    const meta = MV_PROBE_LABELS[r.name] || { label: r.name, desc: '', color: 'var(--text)' };
+    const statusColor = !r.status ? 'var(--red)' : r.status < 300 ? 'var(--green)' : 'var(--red)';
+    const statusText  = r.error ? 'ERR' : r.status || '?';
+
+    // Parse useful fields from the raw response
+    let parsed = null;
+    let extendedAssetUrls = null;
+    let hlsUrl = null;
+    let assets = null;
+    let previewHlsUrl = null;
+
+    parsed = r.raw ?? null; // json.RawMessage arrives already parsed
+
+    if (parsed) {
+      const attrs = parsed?.data?.[0]?.attributes;
+      if (attrs) {
+        extendedAssetUrls = attrs.extendedAssetUrls ?? null;
+        previewHlsUrl = attrs.previews?.[0]?.hlsUrl ?? null;
+      }
+      // webplayback: songList[0].hls-playlist-url + assets
+      const sl = parsed?.songList?.[0];
+      if (sl) {
+        hlsUrl = sl['hls-playlist-url'] ?? null;
+        assets = sl.assets ?? null;
+      }
+    }
+
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.style.marginBottom = '10px';
+
+    let bodyHTML = '';
+
+    // extendedAssetUrls flavors
+    if (extendedAssetUrls && typeof extendedAssetUrls === 'object') {
+      const flavors = Object.entries(extendedAssetUrls)
+        .map(([k, url]) => `
+          <div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">
+            <span style="font-family:var(--mono);font-size:11px;color:var(--yellow);min-width:80px">${esc(k)}</span>
+            <span style="flex:1;font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(url)}">${esc(url.substring(0,80))}…</span>
+            <button class="btn-sm btn-secondary" onclick="mvFetchHLS('${esc(url)}')">Inspect HLS</button>
+            <button class="btn-sm btn-green" onclick="mvPlayFlavor('${adamId}','${sf}','${esc(url)}')">▶ Play</button>
+          </div>`).join('');
+      bodyHTML += `<div style="margin-bottom:8px"><div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:4px">EXTENDED ASSET URLS (${Object.keys(extendedAssetUrls).length} flavors)</div>${flavors}</div>`;
+    }
+
+    // webplayback HLS + assets
+    if (hlsUrl) {
+      bodyHTML += `<div style="margin-bottom:8px">
+        <div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:4px">HLS MASTER</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="flex:1;font-size:10px;color:var(--blue);word-break:break-all">${esc(hlsUrl.substring(0,120))}…</span>
+          <button class="btn-sm btn-secondary" onclick="mvFetchHLS('${esc(hlsUrl)}')">Inspect</button>
+          <button class="btn-sm btn-green" onclick="mvPlayViaEngine('${adamId}','${sf}')">▶ Engine</button>
+        </div>
+      </div>`;
+    }
+    if (assets && assets.length) {
+      const rows = assets.map(a => `
+        <div style="display:flex;gap:8px;padding:3px 0;font-size:10px;border-bottom:1px solid var(--border)">
+          <span style="color:var(--yellow);min-width:120px;font-family:var(--mono)">${esc(a.flavor||'?')}</span>
+          <span style="flex:1;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(a.URL||'')}">${esc((a.URL||'').substring(0,80))}…</span>
+        </div>`).join('');
+      bodyHTML += `<div style="margin-bottom:8px"><div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:4px">ASSETS (${assets.length})</div>${rows}</div>`;
+    }
+
+    // preview HLS
+    if (previewHlsUrl) {
+      bodyHTML += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:10px;color:var(--muted)">Preview HLS:</span>
+        <span style="flex:1;font-size:10px;color:var(--blue);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(previewHlsUrl)}</span>
+        <button class="btn-sm btn-secondary" onclick="mvFetchHLS('${esc(previewHlsUrl)}')">Inspect</button>
+      </div>`;
+    }
+
+    // collapsible raw JSON
+    const rawId = `mv-raw-${r.name}`;
+    bodyHTML += `<div>
+      <button class="btn-sm btn-secondary" onclick="document.getElementById('${rawId}').style.display=document.getElementById('${rawId}').style.display==='none'?'block':'none'">
+        Toggle raw (${r.raw ? JSON.stringify(r.raw).length : 0} chars)
+      </button>
+      <div id="${rawId}" class="json-box" style="display:none;margin-top:6px;font-size:10px;max-height:400px">${esc(r.raw ? JSON.stringify(r.raw, null, 2) : r.error || '')}</div>
+    </div>`;
+
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <span style="font-weight:700;color:${meta.color}">${meta.label}</span>
+        <span class="tag" style="background:var(--card);color:${statusColor}">${statusText}</span>
+        <span style="font-size:10px;color:var(--muted)">${r.ms}ms</span>
+        <span style="flex:1;font-size:10px;color:var(--dim)">${meta.desc}</span>
+      </div>
+      ${bodyHTML}`;
+    container.appendChild(card);
+  }
+}
+
+function renderMVSummary(results) {
+  const card = document.getElementById('mv-summary-card');
+  const tbl  = document.getElementById('mv-summary-table');
+
+  // Collect all flavor names across all results
+  const flavorSet = new Set();
+  const hasHLS = {};
+  const flavorURLs = {};
+
+  for (const r of results) {
+    let parsed = null;
+    parsed = r.raw ?? null;
+    if (!parsed) continue;
+
+    const attrs = parsed?.data?.[0]?.attributes;
+    const ext = attrs?.extendedAssetUrls;
+    if (ext && typeof ext === 'object') {
+      for (const k of Object.keys(ext)) flavorSet.add(k);
+      flavorURLs[r.name] = ext;
+    }
+    const sl = parsed?.songList?.[0];
+    if (sl?.['hls-playlist-url']) hasHLS[r.name] = sl['hls-playlist-url'];
+  }
+
+  const flavors = [...flavorSet];
+  if (!flavors.length && !Object.keys(hasHLS).length) { card.style.display = 'none'; return; }
+
+  const probeNames = results.map(r => r.name);
+  const thCells = probeNames.map(n => {
+    const m = MV_PROBE_LABELS[n] || { label: n };
+    return `<th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;color:var(--muted)">${m.label}</th>`;
+  }).join('');
+
+  let rows = `<tr><th style="padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);color:var(--muted)">Flavor / Field</th>${thCells}</tr>`;
+
+  // HLS master row
+  rows += `<tr><td style="padding:5px 10px;font-family:var(--mono);font-size:11px;color:var(--orange)">hls-master</td>` +
+    probeNames.map(n => hasHLS[n]
+      ? `<td style="padding:5px 10px"><span class="tag tag-ok">✓</span></td>`
+      : `<td style="padding:5px 10px"><span style="color:var(--dim)">—</span></td>`
+    ).join('') + `</tr>`;
+
+  // One row per flavor
+  for (const flavor of flavors) {
+    rows += `<tr><td style="padding:5px 10px;font-family:var(--mono);font-size:11px;color:var(--yellow)">${esc(flavor)}</td>` +
+      probeNames.map(n => {
+        const url = flavorURLs[n]?.[flavor];
+        return url
+          ? `<td style="padding:5px 10px"><span class="tag tag-ok">✓</span></td>`
+          : `<td style="padding:5px 10px"><span style="color:var(--dim)">—</span></td>`;
+      }).join('') + `</tr>`;
+  }
+
+  tbl.innerHTML = rows;
+  card.style.display = 'block';
+}
+
+async function mvFetchHLS(url) {
+  document.getElementById('mv-hls-card').style.display = 'block';
+  document.getElementById('mv-hls-url-label').textContent = url.substring(0, 120) + '…';
+  document.getElementById('mv-hls-content').textContent = 'Fetching…';
+  const { ok, text } = await api('GET', `/api/v1/probe/hls?url=${encodeURIComponent(url)}`, null, 'hls-inspect');
+  if (ok) {
+    document.getElementById('mv-hls-content').textContent = text;
+    mvParseVariants(text, url);
+  } else {
+    document.getElementById('mv-hls-content').textContent = `Error: ${text}`;
+    document.getElementById('mv-hls-variants').style.display = 'none';
+  }
+  document.getElementById('mv-hls-card').scrollIntoView({ behavior: 'smooth' });
+}
+
+function mvParseVariants(manifest, baseUrl) {
+  // Parse #EXT-X-STREAM-INF entries from HLS master manifest
+  const variants = [];
+  const lines = manifest.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line.startsWith('#EXT-X-STREAM-INF')) continue;
+    const attrs = {};
+    line.replace(/([A-Z-]+)=("([^"]+)"|([^,\n]+))/g, (_, k, __, q, u) => { attrs[k] = q ?? u; });
+    const uri = lines[i + 1]?.trim();
+    if (uri && !uri.startsWith('#')) {
+      variants.push({ ...attrs, uri });
+      i++;
+    }
+  }
+  if (!variants.length) { document.getElementById('mv-hls-variants').style.display = 'none'; return; }
+
+  variants.sort((a, b) => parseInt(b.BANDWIDTH || 0) - parseInt(a.BANDWIDTH || 0));
+  const rows = variants.map(v => {
+    const bw = v.BANDWIDTH ? `${Math.round(parseInt(v.BANDWIDTH) / 1000)} kbps` : '';
+    const avgbw = v['AVERAGE-BANDWIDTH'] ? `avg ${Math.round(parseInt(v['AVERAGE-BANDWIDTH']) / 1000)} kbps` : '';
+    const res = v.RESOLUTION || '';
+    const codec = v.CODECS || '';
+    const fps = v['FRAME-RATE'] || '';
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:4px 8px;font-family:var(--mono);color:var(--yellow)">${res}</td>
+      <td style="padding:4px 8px;color:var(--green)">${bw}</td>
+      <td style="padding:4px 8px;color:var(--muted)">${avgbw}</td>
+      <td style="padding:4px 8px;color:var(--muted)">${fps ? fps+'fps' : ''}</td>
+      <td style="padding:4px 8px;font-family:var(--mono);font-size:10px;color:var(--dim)">${codec}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('mv-hls-variant-table').innerHTML =
+    `<tr style="border-bottom:2px solid var(--border)">
+      <th style="padding:4px 8px;text-align:left;color:var(--muted)">Resolution</th>
+      <th style="padding:4px 8px;text-align:left;color:var(--muted)">Peak Bitrate</th>
+      <th style="padding:4px 8px;text-align:left;color:var(--muted)">Avg Bitrate</th>
+      <th style="padding:4px 8px;text-align:left;color:var(--muted)">FPS</th>
+      <th style="padding:4px 8px;text-align:left;color:var(--muted)">Codecs</th>
+    </tr>${rows}`;
+  document.getElementById('mv-hls-variants').style.display = 'block';
+}
+
+// ── Visual comparison player ────────────────────────────────────────────────
+
+let _mvCompareSessionId = null;
+let _mvLastProbeResults = null; // set after each probe run
+
+async function mvStartCompare() {
+  const id = v('mv-id'), sf = v('mv-sf') || 'in';
+  if (!id) return;
+
+  const card = document.getElementById('mv-compare-card');
+  const previewVid = document.getElementById('mv-vid-preview');
+  const engineVid  = document.getElementById('mv-vid-engine');
+  const engineAud  = document.getElementById('mv-audio-engine');
+
+  card.style.display = 'block';
+  card.scrollIntoView({ behavior: 'smooth' });
+  document.getElementById('mv-engine-info').textContent  = 'Creating engine session…';
+  document.getElementById('mv-preview-info').textContent = 'Loading preview…';
+
+  // Left panel: preview MP4 from catalog response
+  const previewUrl = mvExtractPreviewUrl(_mvLastProbeResults);
+  if (previewUrl) {
+    previewVid.src = previewUrl;
+    document.getElementById('mv-preview-info').textContent = previewUrl.split('?')[0].split('/').pop();
+  } else {
+    document.getElementById('mv-preview-info').textContent = 'No direct preview URL found in catalog';
+  }
+
+  // Right panel: engine session (webplayback path, full quality)
+  const tok = v('mv-token'), mut = v('mv-mut');
+  const body = { assetId: id, storefront: sf, capabilities: { video: true } };
+  if (tok) body.token = tok;
+  if (mut) body.mediaUserToken = mut;
+
+  const { ok, data } = await api('POST', '/api/v1/playback', body, 'mv-compare-session');
+  if (!ok) {
+    document.getElementById('mv-engine-info').textContent = `Session error: ${JSON.stringify(data)}`;
+    return;
+  }
+  _mvCompareSessionId = data.sessionId;
+
+  engineVid.src = `${base()}/api/v1/playback/${data.sessionId}/video`;
+  engineAud.src = `${base()}/api/v1/playback/${data.sessionId}/audio`;
+
+  engineVid.onplay   = () => engineAud.play().catch(() => {});
+  engineVid.onpause  = () => engineAud.pause();
+  engineVid.onseeked = () => { engineAud.currentTime = engineVid.currentTime; };
+
+  document.getElementById('mv-engine-info').textContent =
+    `Session ${data.sessionId} · ${data.codec || 'video/mp4'}`;
+}
+
+async function mvStopCompare() {
+  const previewVid = document.getElementById('mv-vid-preview');
+  const engineVid  = document.getElementById('mv-vid-engine');
+  const engineAud  = document.getElementById('mv-audio-engine');
+  [previewVid, engineVid, engineAud].forEach(el => { el.pause(); el.src = ''; });
+  if (_mvCompareSessionId) {
+    await api('DELETE', `/api/v1/playback/${_mvCompareSessionId}`, null, 'mv-compare-stop');
+    _mvCompareSessionId = null;
+  }
+  document.getElementById('mv-compare-card').style.display = 'none';
+}
+
+function mvExtractPreviewUrl(results) {
+  if (!results) return null;
+  for (const r of results) {
+    const attrs = r.raw?.data?.[0]?.attributes;
+    if (attrs?.previews?.[0]?.url) return attrs.previews[0].url;
+  }
+  return null;
+}
+
+async function mvPlayFlavor(adamId, sf, _hlsUrl) {
+  // Route through engine — it will use the webplayback path to get a full session
+  document.getElementById('p-id').value = adamId;
+  document.getElementById('p-sf').value = sf;
+  document.getElementById('p-quality').value = 'video';
+  showTab('player');
+  await createSession();
+}
+
+async function mvPlayViaEngine(adamId, sf) {
+  document.getElementById('p-id').value = adamId;
+  document.getElementById('p-sf').value = sf;
+  document.getElementById('p-quality').value = 'video';
+  showTab('player');
+  await createSession();
+}
+
+function mvClear() {
+  mvStopCompare();
+  _mvLastProbeResults = null;
+  document.getElementById('mv-probe-cards').innerHTML = '';
+  document.getElementById('mv-summary-card').style.display = 'none';
+  document.getElementById('mv-hls-card').style.display = 'none';
+  document.getElementById('mv-compare-card').style.display = 'none';
+  document.getElementById('mv-probe-status').textContent = '';
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ import (
 
 	"github.com/grafov/m3u8"
 
-	"apple-music-cli/utils/structs"
+	"engine/utils/structs"
 )
 
 // Format selects which variant to pick from the master playlist.

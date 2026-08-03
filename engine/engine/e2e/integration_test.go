@@ -43,10 +43,10 @@ import (
 
 	"github.com/itouakirai/mp4ff/mp4"
 
-	"apple-music-cli/engine/apple"
-	"apple-music-cli/engine/fairplay"
-	"apple-music-cli/engine/pipeline"
-	"apple-music-cli/engine/playback"
+	"engine/engine/apple"
+	"engine/engine/fairplay"
+	"engine/engine/pipeline"
+	"engine/engine/playback"
 )
 
 // ── environment helpers ───────────────────────────────────────────────────────

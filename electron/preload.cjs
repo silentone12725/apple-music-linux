@@ -90,6 +90,8 @@ contextBridge.exposeInMainWorld('amlBridge', {
     importThemePreset: ()         => ipcRenderer.invoke('theme:import-preset'),
     setThemeAppearance: (a)       => ipcRenderer.send('theme:set-appearance', a),
     setNavOpacity:     (v)        => ipcRenderer.send('view:nav-opacity', v),
+    eqSaveFile:   (filename, content) => ipcRenderer.invoke('eq:save-file', { filename, content }),
+    eqOpenFile:   (filters)           => ipcRenderer.invoke('eq:open-file', filters ? { filters } : undefined),
     mprisUpdate:    (d)         => ipcRenderer.send('mpris:update', d),
     onMprisCmd:     (cb)        => ipcRenderer.on('mpris:cmd', (_, cmd) => cb(cmd)),
 });

@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"apple-music-cli/utils/structs"
+	"engine/utils/structs"
 
 	"github.com/grafov/m3u8"
 	"github.com/itouakirai/mp4ff/mp4"

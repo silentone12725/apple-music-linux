@@ -64,16 +64,15 @@ let engineProc = null;
 let isQuitting = false;
 
 // ── Engine API server ─────────────────────────────────────────────────────────
-// The engine binary is the apple-music-cli binary run in --api mode.  It
-// decrypts Apple Music streams and exposes them as plain AAC fMP4 over HTTP so
-// the renderer (engine-playback.js) can pipe them into a MediaSource.
+// The engine binary decrypts Apple Music streams and exposes them as plain
+// AAC/H.264 fMP4 over HTTP so the renderer can pipe them into a MediaSource.
 //
 // Binary resolution order:
 //  1. AML_ENGINE_BIN environment variable (manual override / CI)
-//  2. <resources>/apple-music-cli  (packaged Electron — app.isPackaged)
-//  3. dist/resources/apple-music-cli  (dev: electron . from electron/ dir)
-const _resPkgBin  = path.join(process.resourcesPath, 'apple-music-cli');
-const _resDevBin  = path.join(__dirname, 'dist', 'resources', 'apple-music-cli');
+//  2. <resources>/engine  (packaged Electron — app.isPackaged)
+//  3. dist/resources/engine  (dev: electron . from electron/ dir)
+const _resPkgBin  = path.join(process.resourcesPath, 'engine');
+const _resDevBin  = path.join(__dirname, 'dist', 'resources', 'engine');
 const ENGINE_BIN  = process.env.AML_ENGINE_BIN ||
     (app.isPackaged ? _resPkgBin : (existsSync(_resDevBin) ? _resDevBin : _resPkgBin));
 
@@ -302,12 +301,12 @@ function _kdeWallpaperPath() {
 // position:fixed + prepend means they're behind all app content in DOM order.
 // Works on transparent Electron windows — the divs have visible pixels so they paint.
 function _injectBlurLayer(bwin, dataUrl) {
-    const safe = dataUrl.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+    const safe = dataUrl;
     // Position tracking runs inside the renderer via requestAnimationFrame —
     // window.screenX/screenY are standard browser APIs Chromium exposes, updated
     // every frame. This avoids IPC overhead and works on both X11 and Wayland.
     // Math: #_amlBlurBg has inset:-80px, so its origin is (winX-80, winY-80) on
-    // screen. background-position = (80-winX, 80-winY) keeps wallpaper aligned.
+    // screen. background-position = (80-winX, 80-y) + 'px ' + (80 - y) + 'px' keeps wallpaper aligned.
     bwin.webContents.executeJavaScript(`(function(){
         let bg = document.getElementById('_amlBlurBg');
         if (!bg) {
@@ -315,6 +314,20 @@ function _injectBlurLayer(bwin, dataUrl) {
             bg.id = '_amlBlurBg';
             const tint = document.createElement('div');
             tint.id = '_amlBlurTint';
+            // Set styles for the blur layer and the tint
+            bg.style.position = 'fixed';
+            bg.style.top = '0';
+            bg.style.left = '0';
+            bg.style.width = '100%';
+            bg.style.height = '100%';
+            bg.style.zIndex = '-1';
+            tint.style.position = 'fixed';
+            tint.style.top = '0';
+            tint.style.left = '0';
+            tint.style.width = '100%';
+            tint.style.height = '100%';
+            tint.style.background = 'rgba(0,0,0,0.4)';
+            tint.style.zIndex = '-1';
             document.body.prepend(tint);
             document.body.prepend(bg);
 
@@ -329,9 +342,8 @@ function _injectBlurLayer(bwin, dataUrl) {
                 requestAnimationFrame(tick);
             })();
         }
-        bg.style.backgroundImage = \`url("${safe}")\`;
-    })()`).catch(() => {});
-}
+        bg.style.backgroundImage = 'url("' + safe + '")';
+    })()`).catch(() => {});}
 
 function _applyKdeWallpaperBlur(bwin) {
     const wp = _kdeWallpaperPath();
@@ -730,14 +742,14 @@ function createWindow() {
             pointer-events: none !important;
             background-repeat: no-repeat !important;
             filter: blur(var(--aml-bg-blur, 18px)) brightness(0.92) !important;
-            z-index: 0 !important;
+            z-index: -1 !important;
         }
         #_amlBlurTint {
             position: fixed !important;
             inset: 0 !important;
             pointer-events: none !important;
             background: rgba(10, 10, 12, 0.25) !important;
-            z-index: 0 !important;
+            z-index: -1 !important;
         }
     `;
 
@@ -1353,6 +1365,33 @@ ipcMain.handle('theme:import-preset', async () => {
         savePrefs(p);
         return preset;
     } catch { return null; }
+});
+
+// ── EQ file I/O ──────────────────────────────────────────────────────────────
+ipcMain.handle('eq:save-file', async (_, { filename, content }) => {
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+        defaultPath: filename,
+        filters: [
+            { name: 'EqualizerAPO config', extensions: ['txt'] },
+            { name: 'JSON', extensions: ['json'] },
+            { name: 'All files', extensions: ['*'] },
+        ],
+    });
+    if (canceled || !filePath) return false;
+    writeFileSync(filePath, content, 'utf8');
+    return true;
+});
+
+ipcMain.handle('eq:open-file', async (_, { filters } = {}) => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+        properties: ['openFile'],
+        filters: filters || [
+            { name: 'EqualizerAPO / text / JSON', extensions: ['txt', 'json', 'csv'] },
+            { name: 'All files', extensions: ['*'] },
+        ],
+    });
+    if (canceled || !filePaths.length) return null;
+    return readFileSync(filePaths[0], 'utf8');
 });
 
 // ── MPRIS2 media integration ─────────────────────────────────────────────────

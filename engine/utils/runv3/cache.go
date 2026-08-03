@@ -28,7 +28,7 @@ const (
 	CacheMaxBytes int64 = 512 * 1024 * 1024
 
 	// CacheDir is the subdirectory under os.UserCacheDir().
-	cacheDirName = "apple-music-cli/segments"
+	cacheDirName = "engine/segments"
 )
 
 // segmentCache is a global LRU segment cache.

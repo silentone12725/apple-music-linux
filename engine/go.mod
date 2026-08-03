@@ -1,4 +1,4 @@
-module apple-music-cli
+module engine
 
 go 1.24.0
 

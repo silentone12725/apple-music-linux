@@ -52,16 +52,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"apple-music-cli/engine/apple"
-	"apple-music-cli/engine/diskcache"
-	"apple-music-cli/engine/drm"
-	"apple-music-cli/engine/export"
-	"apple-music-cli/engine/pipeline"
-	"apple-music-cli/engine/playback"
-	"apple-music-cli/engine/prefetch"
-	"apple-music-cli/engine/vlc"
-	"apple-music-cli/utils/ampapi"
-	"apple-music-cli/utils/lyrics"
+	"engine/engine/apple"
+	"engine/engine/diskcache"
+	"engine/engine/drm"
+	"engine/engine/export"
+	"engine/engine/pipeline"
+	"engine/engine/playback"
+	"engine/engine/prefetch"
+	"engine/engine/vlc"
+	"engine/utils/ampapi"
+	"engine/utils/lyrics"
 )
 
 // ── Request / response types ──────────────────────────────────────────────────

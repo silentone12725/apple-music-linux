@@ -90,16 +90,16 @@ let engineProc = null;
 let isQuitting = false;
 
 // ── Engine API server ─────────────────────────────────────────────────────────
-// The engine binary is the apple-music-cli binary run in --api mode.  It
+// The engine binary is the engine binary.  It
 // decrypts Apple Music streams and exposes them as plain AAC fMP4 over HTTP so
 // the renderer (engine-playback.js) can pipe them into a MediaSource.
 //
 // Binary resolution order:
 //  1. AML_ENGINE_BIN environment variable (manual override / CI)
-//  2. <resources>/apple-music-cli  (packaged Electron — app.isPackaged)
-//  3. dist/resources/apple-music-cli  (dev: electron . from electron/ dir)
-const _resPkgBin  = path.join(process.resourcesPath, 'apple-music-cli');
-const _resDevBin  = path.join(__dirname, 'dist', 'resources', 'apple-music-cli');
+//  2. <resources>/engine  (packaged Electron — app.isPackaged)
+//  3. dist/resources/engine  (dev: electron . from electron/ dir)
+const _resPkgBin  = path.join(process.resourcesPath, 'engine');
+const _resDevBin  = path.join(__dirname, 'dist', 'resources', 'engine');
 const ENGINE_BIN  = process.env.AML_ENGINE_BIN ||
     (app.isPackaged ? _resPkgBin : (existsSync(_resDevBin) ? _resDevBin : _resPkgBin));
 

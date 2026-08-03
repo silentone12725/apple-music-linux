@@ -8,8 +8,8 @@ import (
 	"github.com/go-resty/resty/v2"
 	"google.golang.org/protobuf/proto"
 
-	cdm "apple-music-cli/utils/runv3/cdm"
-	key "apple-music-cli/utils/runv3/key"
+	cdm "engine/utils/runv3/cdm"
+	key "engine/utils/runv3/key"
 	"os"
 
 	"bytes"
