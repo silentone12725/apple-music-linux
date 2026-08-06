@@ -157,6 +157,60 @@ func (m *Master) SelectVideoVariant(maxHeight int) (string, error) {
 	return "", fmt.Errorf("no video variant at or below %dp", maxHeight)
 }
 
+// SelectVideoVariantWithCodec is like SelectVideoVariant but also returns the
+// CODECS= attribute string from the chosen variant.
+func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs string, err error) {
+	re := regexp.MustCompile(`_?(\d+)x(\d+)`)
+	sorted := make([]Variant, len(m.Variants))
+	copy(sorted, m.Variants)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].AverageBandwidth > sorted[j].AverageBandwidth
+	})
+	heightOf := func(v Variant) int {
+		if v.Resolution != "" {
+			var w, h int
+			if n, _ := fmt.Sscanf(v.Resolution, "%dx%d", &w, &h); n == 2 && h > 0 {
+				return h
+			}
+		}
+		u, err := url.Parse(v.URL)
+		if err != nil {
+			return 0
+		}
+		matches := re.FindStringSubmatch(u.Path)
+		if len(matches) != 3 {
+			return 0
+		}
+		var h int
+		fmt.Sscanf(matches[2], "%d", &h)
+		return h
+	}
+	isH264 := func(v Variant) bool {
+		return strings.Contains(strings.ToLower(v.Codecs), "avc1")
+	}
+	// Prefer H.264 (avc1) — HEVC software decode fails on most Linux/Electron setups.
+	// Two-pass: H.264 first, HEVC fallback.
+	for _, preferH264 := range []bool{true, false} {
+		anyParseable := false
+		for _, v := range sorted {
+			if preferH264 && !isH264(v) {
+				continue
+			}
+			h := heightOf(v)
+			if h > 0 {
+				anyParseable = true
+				if h <= maxHeight {
+					return v.URL, v.Codecs, nil
+				}
+			}
+		}
+		if !preferH264 && !anyParseable && len(sorted) > 0 {
+			return sorted[0].URL, sorted[0].Codecs, nil
+		}
+	}
+	return "", "", fmt.Errorf("no video variant at or below %dp", maxHeight)
+}
+
 // SelectByCodec returns the URL of the highest-bandwidth variant whose Codecs
 // field contains the given string.  Falls back to highest bandwidth on no match.
 func (m *Master) SelectByCodec(codec string) string {
@@ -176,6 +230,39 @@ func (m *Master) SelectByCodec(codec string) string {
 		return best.URL
 	}
 	return fallback.URL
+}
+
+// VideoHeights returns the unique, sorted set of video heights present in the
+// master playlist.  Heights are read from the RESOLUTION= attribute first;
+// the _WxH_ URL-path pattern is used as fallback.  Used by the JS quality menu
+// to filter out tiers that the playlist cannot actually satisfy.
+func (m *Master) VideoHeights() []int {
+	re := regexp.MustCompile(`_?(\d+)x(\d+)`)
+	seen := make(map[int]struct{})
+	for _, v := range m.Variants {
+		h := 0
+		if v.Resolution != "" {
+			if parts := strings.SplitN(v.Resolution, "x", 2); len(parts) == 2 {
+				if n, err := fmt.Sscanf(parts[1], "%d", &h); n != 1 || err != nil {
+					h = 0
+				}
+			}
+		}
+		if h == 0 {
+			if m2 := re.FindStringSubmatch(v.URL); len(m2) == 3 {
+				fmt.Sscanf(m2[2], "%d", &h)
+			}
+		}
+		if h > 0 {
+			seen[h] = struct{}{}
+		}
+	}
+	out := make([]int, 0, len(seen))
+	for h := range seen {
+		out = append(out, h)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ─── Media playlist ───────────────────────────────────────────────────────────
@@ -316,7 +403,42 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 		}
 		med.SegmentURLs = append(med.SegmentURLs, byteRangeURL(u.String(), seg.Offset, seg.Limit))
 		med.SegmentDurations = append(med.SegmentDurations, seg.Duration)
+
+		// If this segment has a different EXT-X-MAP than the playlist-level map, it
+		// means the playlist switched init segments mid-stream (clear-leader CBCS
+		// pattern: first segments use a clear mp4a init, later encrypted segments use
+		// an enca init). We want the LAST unique init URL so that DecryptInit can
+		// extract the CBCS sinf and decrypt the encrypted segments. The playlist-level
+		// pl.Map is always the FIRST map (grafov/m3u8 behaviour), so scan per-segment
+		// maps to find the encrypted one.
+		if seg.Map != nil && seg.Map.URI != "" {
+			mu, err := base.Parse(seg.Map.URI)
+			if err == nil {
+				candidate := byteRangeURL(mu.String(), seg.Map.Offset, seg.Map.Limit)
+				if candidate != med.InitURL {
+					med.InitURL = candidate
+				}
+			}
+		}
 	}
+
+	var totalDur float64
+	for _, d := range med.SegmentDurations { totalDur += d }
+	firstSeg := "(none)"
+	if len(med.SegmentURLs) > 0 { firstSeg = med.SegmentURLs[0] }
+	lastSeg := "(none)"
+	if len(med.SegmentURLs) > 1 { lastSeg = med.SegmentURLs[len(med.SegmentURLs)-1] }
+	encInfo := "nil"
+	if med.Encryption != nil {
+		encInfo = med.Encryption.URIPrefix + ",<kid>"
+	}
+	keyMethod := ""
+	if pl.Key != nil {
+		keyMethod = pl.Key.Method
+	}
+	log.Printf("[hls] parseMedia url=%s nSegs=%d totalDur=%.2fs enc=%s method=%q initURL=%q first=%q last=%q",
+		rawURL, len(med.SegmentURLs), totalDur, encInfo, keyMethod,
+		med.InitURL, firstSeg, lastSeg)
 
 	return med, nil
 }

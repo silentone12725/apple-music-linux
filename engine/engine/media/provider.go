@@ -36,19 +36,22 @@ type Metadata struct {
 // never needs to inspect them to route playback — it simply asks for the Kind
 // it wants when opening a stream.
 type Track struct {
-	Kind       pipeline.StreamKind
-	Codec      pipeline.Codec
-	SampleRate int // optional; meaningful only for lossless audio
-	BitDepth   int // optional; meaningful only for lossless audio
-	Open       func(context.Context) (*pipeline.Stream, error)
+	Kind         pipeline.StreamKind
+	Codec        pipeline.Codec
+	CodecString  string // MSE codec string from HLS CODECS= attribute (e.g. "avc1.640028")
+	SampleRate   int    // optional; meaningful only for lossless audio
+	BitDepth     int    // optional; meaningful only for lossless audio
+	SpatialAudio string // "binaural" | "binaural-lossless" | "" (empty = normal stereo)
+	Open         func(context.Context) (*pipeline.Stream, error)
 }
 
 // Session is the result of a successful Provider.Open call.
 // It carries the item's metadata and the full set of available tracks.
 type Session struct {
-	Kind     string // "song" | "mv" | "podcast" | "radio" …
-	Metadata Metadata
-	Tracks   []Track
+	Kind         string // "song" | "mv" | "podcast" | "radio" …
+	Metadata     Metadata
+	Tracks       []Track
+	VideoHeights []int // available video variant heights from HLS master (MV only)
 }
 
 // OpenRequest carries the parameters that Providers use to locate and open a

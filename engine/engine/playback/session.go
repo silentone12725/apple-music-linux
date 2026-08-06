@@ -15,15 +15,17 @@ type Session struct {
 	Storefront string `json:"storefront"`
 	Type       string `json:"type"` // "song" | "mv"
 
-	Codec      string `json:"codec,omitempty"`
-	SampleRate int    `json:"sampleRate,omitempty"`
-	BitDepth   int    `json:"bitDepth,omitempty"`
+	Codec        string `json:"codec,omitempty"`
+	SampleRate   int    `json:"sampleRate,omitempty"`
+	BitDepth     int    `json:"bitDepth,omitempty"`
+	SpatialAudio string `json:"spatialAudio,omitempty"` // "binaural" | "binaural-lossless"
 
 	Capabilities struct {
-		Audio    bool `json:"audio"`
-		Video    bool `json:"video"`
-		Lyrics   bool `json:"lyrics"`
-		Seekable bool `json:"seekable"` // true when audio stream supports ?t= restart
+		Audio      bool   `json:"audio"`
+		Video      bool   `json:"video"`
+		Lyrics     bool   `json:"lyrics"`
+		Seekable   bool   `json:"seekable"`   // true when audio stream supports ?t= restart
+		VideoCodec string `json:"videoCodec"` // fMP4 codec string for MSE SourceBuffer (MV only)
 	} `json:"capabilities"`
 
 	Streams struct {
@@ -36,6 +38,8 @@ type Session struct {
 	AlbumName  string `json:"albumName,omitempty"`
 	DurationMs int    `json:"durationMs"`
 	ArtworkURL string `json:"artworkUrl"`
+
+	VideoHeights []int `json:"videoHeights,omitempty"` // available heights from HLS master (MV only)
 
 	ExpiresIn int `json:"expiresIn"`
 }

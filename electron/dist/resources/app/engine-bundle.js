@@ -17,6 +17,120 @@
 
 const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
 
+// ── Raw audio capture module ──────────────────────────────────────────────────
+// Stores raw chunk bytes + deep MP4 parse for every audio append so the
+// external debug_app.py inspector can retrieve and analyse them.
+// Capped at 64 MB total to avoid OOM.
+(function installAudioCapture() {
+    const CAP_LIMIT = 64 * 1024 * 1024;
+
+    window.__amlCapture = {
+        chunks: [],   // {n, path, size, b64, boxes, bufBefore, bufAfter, grew, t}
+        totalBytes: 0,
+        enabled: true,
+    };
+
+    // Deep MP4 box walker — returns array of box descriptors.
+    window.__amlParseMp4 = function parseMp4(data, maxDepth) {
+        if (maxDepth === undefined) maxDepth = 4;
+        const result = [];
+        let off = 0;
+        while (off + 8 <= data.length) {
+            const size = (data[off]<<24 | data[off+1]<<16 | data[off+2]<<8 | data[off+3]) >>> 0;
+            const type = String.fromCharCode(data[off+4], data[off+5], data[off+6], data[off+7]);
+            if (size < 8) break;
+            const boxData = data.slice(off, off + Math.min(size, data.length - off));
+            const box = { type, size, offset: off };
+
+            // Recurse into container boxes.
+            const containers = ['moov','trak','mdia','minf','stbl','stsd','mvex',
+                                'moof','traf','udta','meta','ilst','edts'];
+            if (containers.includes(type) && maxDepth > 0) {
+                const headerSize = (type === 'stsd') ? 16 : (type === 'meta') ? 12 : 8;
+                box.children = parseMp4(data.slice(off + headerSize, off + boxData.length), maxDepth - 1);
+            }
+            // Extract key fields.
+            if (type === 'ftyp' && boxData.length >= 12) {
+                box.majorBrand = String.fromCharCode(boxData[8],boxData[9],boxData[10],boxData[11]);
+            }
+            if (type === 'mdhd' && boxData.length >= 24) {
+                const ver = boxData[8];
+                box.timescale = ver === 1
+                    ? (boxData[20]<<24|boxData[21]<<16|boxData[22]<<8|boxData[23])>>>0
+                    : (boxData[16]<<24|boxData[17]<<16|boxData[18]<<8|boxData[19])>>>0;
+            }
+            if (type === 'hdlr' && boxData.length >= 20) {
+                box.handler = String.fromCharCode(boxData[16],boxData[17],boxData[18],boxData[19]);
+            }
+            if ((type === 'mp4a' || type === 'enca') && boxData.length >= 28) {
+                box.sampleRate = (boxData[24]<<8|boxData[25]);
+                box.channels   = (boxData[16]<<8|boxData[17]);
+                box.isEncrypted = (type === 'enca');
+            }
+            if (type === 'schm' && boxData.length >= 16) {
+                box.schemeType = String.fromCharCode(boxData[8],boxData[9],boxData[10],boxData[11]);
+            }
+            if (type === 'tfhd' && boxData.length >= 16) {
+                box.trackID = (boxData[8]<<24|boxData[9]<<16|boxData[10]<<8|boxData[11])>>>0;
+                box.flags   = (boxData[9]<<16|boxData[10]<<8|boxData[11]);
+            }
+            if (type === 'trun' && boxData.length >= 16) {
+                box.sampleCount = (boxData[8]<<24|boxData[9]<<16|boxData[10]<<8|boxData[11])>>>0;
+            }
+            if (type === 'tfdt' && boxData.length >= 12) {
+                const ver = boxData[8];
+                box.baseMediaDecodeTime = ver === 1
+                    ? ((boxData[12]*2**24+boxData[13]*2**16+boxData[14]*256+boxData[15])*2**32
+                       + (boxData[16]*2**24+boxData[17]*2**16+boxData[18]*256+boxData[19]))
+                    : (boxData[12]<<24|boxData[13]<<16|boxData[14]<<8|boxData[15])>>>0;
+            }
+            if (type === 'senc' && boxData.length >= 12) {
+                box.sampleCount = (boxData[12]<<24|boxData[13]<<16|boxData[14]<<8|boxData[15])>>>0;
+                box.ENCRYPTED   = true;
+            }
+            if (type === 'mdat') {
+                box.hex32 = Array.from(boxData.slice(8, Math.min(40, boxData.length)))
+                    .map(b => b.toString(16).padStart(2,'0')).join(' ');
+            }
+
+            result.push(box);
+            off += size;
+            if (off >= data.length) break;
+        }
+        return result;
+    };
+
+    // Capture one chunk — called from runAudioPipe and pipeToSourceBuffer hooks.
+    // Only encodes the first 8 KB as base64 to avoid blocking the JS thread.
+    // Full box structure is parsed from that prefix (sufficient for all headers).
+    window.__amlCaptureChunk = function(path, n, value, bufBefore, bufAfter, grew) {
+        if (!window.__amlCapture.enabled) return;
+        const bytes = value instanceof Uint8Array ? value : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        const HEADER = 8192; // first 8 KB — covers ftyp+moov or moof+mdat header
+        const slice  = bytes.slice(0, HEADER);
+        // hex-encode only (no btoa binary-string loop — that blocks for large chunks)
+        const hex = Array.from(slice).map(b => b.toString(16).padStart(2,'0')).join('');
+        const boxes = window.__amlParseMp4(bytes);
+        window.__amlCapture.chunks.push({
+            n, path,
+            size: value.byteLength,
+            capturedBytes: slice.length,
+            hex,          // first 8 KB as hex string
+            boxes,
+            bufBefore, bufAfter, grew,
+            t: Date.now()
+        });
+        window.__amlCapture.totalBytes += value.byteLength;
+    };
+
+    // Python inspector calls this to drain all captured chunks.
+    window.__amlDrainCapture = function() {
+        const out = window.__amlCapture.chunks.slice();
+        window.__amlCapture.chunks = [];
+        return out;
+    };
+})();
+
 // Suppress MusicKit's high-frequency event-queue overflow spam so it doesn't
 // drown useful [AML *] diagnostic messages in the renderer console.
 (() => {
@@ -33,6 +147,27 @@ let _nativeSrcSet = null; // saved by blockAppleCDN() for our own src writes
 let _nativeCTSet  = null; // native currentTime setter — used by MSE seek to fire 'seeking'
 let _nativePlay   = null; // saved when play() proxy is installed on the element
 let _ourBlobUrl   = null; // current blob URL we own; blocks MK from replacing it
+
+// The music.apple.com origin's HTMLMediaElement.prototype.play is gated by Chromium's
+// autoplay policy for that realm, which blocks play() on elements managed by the native
+// amp-video-player controller while MusicKit state=1 (loading). An iframe's play() from
+// a blank realm bypasses this gate and works reliably for the MV native video element.
+const _iframePlay = (() => {
+    try {
+        const ifr = document.createElement('iframe');
+        ifr.style.display = 'none';
+        document.body.appendChild(ifr);
+        const fn = ifr.contentWindow.HTMLMediaElement.prototype.play;
+        document.body.removeChild(ifr);
+        return fn;
+    } catch (e) { return HTMLMediaElement.prototype.play; }
+})();
+
+// Captured before blockAppleCDN() or any other override — same reference Apple Music
+// saves as 'savedPause' at page-load time. Used by the MV counter-pause interceptor.
+const _nativePauseRef = HTMLMediaElement.prototype.pause;
+const _origFnCall     = Function.prototype.call;
+const _origFnApply    = Function.prototype.apply;
 
 // ── VLC state ─────────────────────────────────────────────────────────────────
 
@@ -210,19 +345,18 @@ function installMKSeekInterceptor(mk) {
                     const seekData = await seekResp.json().catch(() => ({}));
                     actualStartMs = seekData.actualStartMs ?? seekTarget;
                     console.log(`[AML VLC] seek DONE  target=${seekTarget}ms  actualStart=${actualStartMs}ms  rtt=${(performance.now()-t0).toFixed(0)}ms`);
-                    // Snap position to the actual segment boundary so UI and audio stay in sync.
-                    _vlcPosMs = actualStartMs;
+                    // Snap position to the requested target so UI stays in sync while VLC loads.
+                    _vlcPosMs = seekTarget;
                 } catch (e) {
                     console.warn(`[AML VLC] seek ERROR`, e);
                 }
-                // VLC always reports elapsed time from its first DTS frame, not the
-                // absolute tfdt position. Use actualStartMs (the true segment boundary)
-                // so _vlcPosMs = actualStartMs + elapsed tracks audio position accurately.
-                _vlcSeekOffsetMs = actualStartMs;
+                // VLC reports absolute fMP4 timestamps (tfdt), so no offset is needed.
+                // _vlcPosMs = posMs (raw VLC time) gives the correct absolute position.
+                _vlcSeekOffsetMs = 0;
                 _vlcPrevState = null;          // force poll to re-emit 'playing', cancelling 'waiting'
                 _vlcSeekFrozen = false;
                 _seekBurstLog = 15;            // log every tick for 15 ticks (3.75s) after seek
-                console.log(`[AML VLC] seek UNFREEZE  offset=${_vlcSeekOffsetMs}ms`);
+                console.log(`[AML VLC] seek UNFREEZE`);
                 // Emit Seeked signal so MPRIS clients re-anchor their seek bar.
                 window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000, seeked: true });
             }, 150);
@@ -299,21 +433,29 @@ let _currentAssetId = null;
 let _durationSec = 0;
 let _abortCtrl   = null;   // session-level abort — killed on track change
 let _generation  = 0;
+let _videoCodec  = null;   // HLS CODECS= for the video track (MV sessions only)
+let _mvMaxHeight    = parseInt(localStorage.getItem('aml-mv-quality') || '1080', 10); // 480/720/1080/2160
+let _mvVideoHeights = []; // available variant heights from HLS master, set per-session
 
 // ── Quality badge ─────────────────────────────────────────────────────────────
 
-function showQualityBadge(codec, sampleRate, bitDepth) {
+function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
     let badge = document.getElementById('aml-quality-badge');
 
-    if (codec !== 'alac') {
+    let text, color;
+    if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural') {
+        text  = 'SPATIAL AUDIO';
+        color = '#bf5af2';
+    } else if (codec === 'alac') {
+        const hiRes = sampleRate > 48000 || bitDepth > 16;
+        text  = hiRes
+            ? `HI-RES LOSSLESS  ·  ${(sampleRate / 1000).toFixed(0)} kHz / ${bitDepth}-bit`
+            : 'LOSSLESS';
+        color = '#30d158';
+    } else {
         if (badge) badge.style.display = 'none';
         return;
     }
-
-    const hiRes = sampleRate > 48000 || bitDepth > 16;
-    const text  = hiRes
-        ? `HI-RES LOSSLESS  ·  ${(sampleRate / 1000).toFixed(0)} kHz / ${bitDepth}-bit`
-        : 'LOSSLESS';
 
     if (!badge) {
         badge = document.createElement('div');
@@ -321,7 +463,7 @@ function showQualityBadge(codec, sampleRate, bitDepth) {
         badge.style.cssText =
             'font-size:8px;font-weight:700;letter-spacing:.07em;' +
             'font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;' +
-            'color:#30d158;border:1px solid #30d158;border-radius:3px;' +
+            'border-radius:3px;' +
             'padding:1px 4px;pointer-events:none;z-index:9999;white-space:nowrap;';
 
         // Inject into the player LCD area so it moves with the player.
@@ -342,7 +484,9 @@ function showQualityBadge(codec, sampleRate, bitDepth) {
         }
     }
 
-    badge.textContent   = text;
+    badge.style.color  = color;
+    badge.style.border = `1px solid ${color}`;
+    badge.textContent  = text;
     badge.style.display = '';
 }
 
@@ -405,7 +549,7 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
         }
         chunks++;
 
-        if (ms.readyState !== 'open' || audio.error) throw new Error('MediaSource closed or audio error');
+        if (ms.readyState !== 'open' || audio.error) throw new Error(`MediaSource closed or audio error: ms=${ms.readyState} err=${audio.error?.code}`);
 
         if (_chunkCache && _chunkCache.sessionId === localSessionId &&
                 _chunkCache.byteSize < 80 * 1024 * 1024) {
@@ -427,11 +571,17 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
 
         await waitUpdate();
         if (signal.aborted) throw new Error('aborted');
-        if (ms.readyState !== 'open' || audio.error) throw new Error('MediaSource closed or audio error');
+        if (ms.readyState !== 'open' || audio.error) throw new Error(`MediaSource closed or audio error [post-wait]: ms=${ms.readyState} err=${audio.error?.code}`);
         try {
             sb.appendBuffer(value);
         } catch (e) {
-            if (e.name === 'QuotaExceededError') {
+            if (e.name === 'InvalidStateError') {
+                // Browser triggered an internal buffer op between our waitUpdate() check and
+                // appendBuffer() — typically happens when video playback starts mid-pipe.
+                await waitUpdate();
+                if (signal.aborted) throw new Error('aborted');
+                sb.appendBuffer(value);
+            } else if (e.name === 'QuotaExceededError') {
                 let appended = false;
                 for (let attempt = 0; !appended; attempt++) {
                     await new Promise(r => setTimeout(r, 300));
@@ -498,10 +648,12 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
 
         console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB)`);
 
-        const waitIdle = () => new Promise(res => {
+        const waitIdle = () => new Promise((res, rej) => {
             if (!sb.updating) return res();
-            sb.addEventListener('updateend', res, { once: true });
-            sb.addEventListener('error',     res, { once: true });
+            const done = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); res(); };
+            const fail = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); rej(new Error('SB error during cache re-inject')); };
+            sb.addEventListener('updateend', done, { once: true });
+            sb.addEventListener('error',     fail, { once: true });
         });
 
         (async () => {
@@ -624,6 +776,1146 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
 
 function stopVLCPoll() {
     if (_vlcPollTimer) { clearInterval(_vlcPollTimer); _vlcPollTimer = null; }
+}
+
+// Wait for the MV full-screen container: DIV.container.takeover inside amp-window-takeover.
+// amp-window-takeover has no shadow root — .container is plain light DOM.
+// DOM: apple-music-video-player shadowRoot → amp-window-takeover → DIV.container.takeover.show
+// The container is 908×513, position:fixed, z-index:20 — the actual full player window.
+// amp-video-player-internal sits inside it at top:256.5px (only 185px tall, hence the thin strip bug).
+function getMVContainer(signal, timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        const deadline = Date.now() + timeoutMs;
+        const poll = () => {
+            if (signal.aborted) return;
+            const awk = document.querySelector('apple-music-video-player')
+                ?.shadowRoot?.querySelector('amp-window-takeover');
+            const c = awk?.querySelector('.container.takeover');
+            if (c && c.offsetHeight > 0) { resolve(c); return; }
+            if (Date.now() > deadline) { reject(new Error('MV container not found')); return; }
+            setTimeout(poll, 100);
+        };
+        poll();
+    });
+}
+
+async function startMVPipeline() {
+    const _mvGen = _generation; // capture at entry; if a second handleTrackChange fires, _generation will differ
+    console.log(`[AML MV-V] enter gen=${_mvGen} session=${_sessionId} t=${Date.now()}`);
+
+    // Video: wait for DIV.container.takeover inside amp-window-takeover (the real full-screen
+    // player — 908×513, position:fixed, z-index:20). amp-video-player-internal sits inside it
+    // at top:256.5px and is only 185px tall, which caused the thin-strip aspect-ratio bug.
+    let mvContainer;
+    try {
+        mvContainer = await getMVContainer(_abortCtrl.signal);
+        console.log(`[AML MV] container found ${mvContainer.offsetWidth}×${mvContainer.offsetHeight}`);
+    } catch (e) {
+        console.warn('[AML MV] MV container not found, aborting:', e.message);
+        return;
+    }
+
+
+    // amp-video-player-internal sits at top:256.5px / 185px tall inside the 513px container.
+    // Expand it to fill the full container and feed our MSE directly to its native <video>
+    // element so the native controls (scrim, title, progress bar) work correctly.
+    const avpi = mvContainer.querySelector('amp-video-player-internal');
+    const avp  = avpi?.shadowRoot?.querySelector('amp-video-player');
+    const avpShadow = avp?.shadowRoot;
+    const vcDiv = avpShadow?.querySelector('#video-container');
+    const nativeVidEl = avpShadow?.querySelector('#apple-music-video-player') ?? avpShadow?.querySelector('video');
+    console.log(`[AML MV-V] shadow traversal: avpi=${!!avpi} avp=${!!avp} avpShadow=${!!avpShadow} vcDiv=${!!vcDiv} nativeVidEl=${!!nativeVidEl} nativeVidEl.id=${nativeVidEl?.id} nativeVidEl.src="${nativeVidEl?.src?.slice(0,60)}"`);
+
+    // ── Counter-pause interceptor ────────────────────────────────────────────────
+    // Apple Music saves HTMLMediaElement.prototype.pause at page-load ('savedPause').
+    // Their 'playing' listener calls savedPause.call(nativeVidEl) — bypassing instance
+    // and prototype overrides. BUT: savedPause.call() is a JS property lookup that
+    // resolves through Function.prototype.call, so our override catches it.
+    // _nativePauseRef === savedPause (same reference). Reflect.apply prevents recursion.
+    if (nativeVidEl) {
+        const _vidRef = nativeVidEl;
+        Function.prototype.call = function(ctx, ...args) {
+            if (this === _nativePauseRef && ctx === _vidRef) {
+                console.warn('[AML MV] intercepted savedPause.call(nativeVidEl) — counter-pause blocked. Stack:', new Error().stack.split('\n').slice(1, 4).join(' | '));
+                return;
+            }
+            return Reflect.apply(_origFnCall, this, [ctx, ...args]);
+        };
+        Function.prototype.apply = function(ctx, args) {
+            if (this === _nativePauseRef && ctx === _vidRef) {
+                console.warn('[AML MV] intercepted savedPause.apply(nativeVidEl) — counter-pause blocked.');
+                return;
+            }
+            return Reflect.apply(_origFnApply, this, [ctx, args]);
+        };
+        console.log('[AML MV] Function.prototype.call/apply intercept installed for counter-pause');
+    }
+
+    // ── Fullscreen redirect ──────────────────────────────────────────────────────
+    // Redirect ALL requestFullscreen() calls (from our UI or from Apple Music's own
+    // keyboard handlers) to document.documentElement so the entire overlay (video +
+    // controls) enters fullscreen as one unit.  Without this, AML's native keyboard
+    // shortcut may fullscreen only nativeVidEl, showing video without our UI, while
+    // our button fullscreens only the document, occasionally without the video.
+    const _origReqFS = Element.prototype.requestFullscreen;
+    Element.prototype.requestFullscreen = function(opts) {
+        return _origReqFS.call(document.documentElement, opts);
+    };
+
+    // ── Container: full-viewport overlay (Layer 2) ──────────────────────────────
+    // Force mvContainer to cover the entire viewport. avpi's internal top:256.5px
+    // layout becomes irrelevant — myVid centers in the full viewport via CSS transform.
+    const _containerProps = ['position','top','left','width','height','z-index','background','display','justify-content','align-content'];
+    mvContainer.style.setProperty('position', 'fixed', 'important');
+    mvContainer.style.setProperty('top', '0', 'important');
+    mvContainer.style.setProperty('left', '0', 'important');
+    mvContainer.style.setProperty('width', '100vw', 'important');
+    mvContainer.style.setProperty('height', '100vh', 'important');
+    mvContainer.style.setProperty('z-index', '999990', 'important');
+    mvContainer.style.setProperty('background', '#000', 'important');
+    mvContainer.style.setProperty('display', 'flex', 'important');
+    mvContainer.style.setProperty('justify-content', 'center', 'important');
+    mvContainer.style.setProperty('align-content', 'center', 'important');
+    mvContainer.style.setProperty('cursor', 'default', 'important');
+
+    // ── Video element (Layer 3) ──────────────────────────────────────────────────
+    // CSS transform centering: top:50%+left:50%+translate(-50%,-50%) places the video
+    // at the true viewport center regardless of avpi's internal layout offsets.
+    const myVid = document.createElement('video');
+    myVid.muted = true; // audio is on mkAudio
+    myVid.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;';
+
+    // Separate audio element — own MSE, own SB, pipeToSourceBuffer handles everything.
+    const mkAudio = document.createElement('audio');
+    mkAudio.style.display = 'none';
+    document.body.appendChild(mkAudio);
+    mvContainer.insertAdjacentElement('afterbegin', myVid);
+    if (nativeVidEl) nativeVidEl.style.opacity = '0';
+    // Suppress CDN-buffering events from nativeVidEl that cause MK loading-indicator blinking.
+    // nativeVidEl keeps loading from Apple CDN in the background; its waiting/stalled/suspend
+    // events propagate to MK's state machine and toggle the loading spinner continuously.
+    const _nativeVidStopEvt = e => e.stopImmediatePropagation();
+    if (nativeVidEl) {
+        ['waiting', 'stalled', 'suspend'].forEach(evt =>
+            nativeVidEl.addEventListener(evt, _nativeVidStopEvt, true)
+        );
+    }
+
+    // ── Subtitle / CC overlay ────────────────────────────────────────────────────
+    // myVid is fed the real H.264 fMP4; Chromium extracts EIA-608/WebVTT cues from
+    // the video stream and surfaces them as TextTrack objects on myVid. We render
+    // them ourselves so they appear on top of our video overlay, not on nativeVidEl.
+    const _subDiv = document.createElement('div');
+    _subDiv.style.cssText = 'position:absolute;bottom:90px;left:5%;right:5%;text-align:center;z-index:20;pointer-events:none;font-family:inherit;';
+    mvContainer.appendChild(_subDiv);
+    // _ccEnabled: follows native CC button. Default true — show if tracks exist.
+    // Chromium extracts EIA-608 CC from the H.264 MSE stream and surfaces them as
+    // TextTrack objects on myVid. We render them ourselves (mode='hidden') so cues
+    // appear on our overlay, not on the hidden nativeVidEl.
+    let _ccEnabled = true;
+
+    const _renderSubs = () => {
+        if (!_ccEnabled) { _subDiv.innerHTML = ''; return; }
+        const lines = [];
+        for (let i = 0; i < myVid.textTracks.length; i++) {
+            const track = myVid.textTracks[i];
+            if (track.mode === 'disabled') continue;
+            const cues = track.activeCues;
+            for (let j = 0; j < (cues?.length ?? 0); j++) {
+                const cue = cues[j];
+                const text = (cue instanceof VTTCue && cue.getCueAsHTML)
+                    ? cue.getCueAsHTML().textContent
+                    : (cue.text ?? '');
+                if (text.trim()) lines.push(text.replace(/<[^>]+>/g, '').trim());
+            }
+        }
+        if (lines.length) {
+            _subDiv.innerHTML = `<span style="display:inline-block;background:rgba(0,0,0,0.72);color:#fff;padding:3px 10px;border-radius:4px;font-size:1.05em;line-height:1.45;white-space:pre-wrap;max-width:80%">${lines.map(l => l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')).join('\n')}</span>`;
+        } else {
+            _subDiv.innerHTML = '';
+        }
+    };
+
+    const _attachTrack = track => {
+        if (track.kind !== 'captions' && track.kind !== 'subtitles') return;
+        track.mode = 'hidden'; // activeCues populated, no native rendering (we do it)
+        track.addEventListener('cuechange', _renderSubs);
+    };
+    for (let i = 0; i < myVid.textTracks.length; i++) _attachTrack(myVid.textTracks[i]);
+    myVid.textTracks.addEventListener('addtrack', e => _attachTrack(e.track));
+    // Expand avpi + avp to fill the entire container so the native scrim controls
+    // span the full viewport (header at top, footer at bottom, clickable in between).
+    // Cancel Apple Music's transform:translateY(-256.5px) animation on avpi. Without
+    // this, avpi starts at top:0 (our override) but the translateY pushes it to y=-256.5
+    // (off-screen above viewport), making scrimClickable cover only the bottom portion.
+    const _avpiProps = ['position','top','left','width','height','background','transform'];
+    if (avpi) {
+        avpi.style.setProperty('position', 'absolute', 'important');
+        avpi.style.setProperty('top', '0', 'important');
+        avpi.style.setProperty('left', '0', 'important');
+        avpi.style.setProperty('width', '100%', 'important');
+        avpi.style.setProperty('height', '100%', 'important');
+        avpi.style.setProperty('background', 'transparent', 'important');
+        avpi.style.setProperty('transform', 'none', 'important');
+    }
+    const avpEl = avpi?.shadowRoot?.querySelector('amp-video-player');
+    if (avpEl) {
+        avpEl.style.setProperty('width', '100%', 'important');
+        avpEl.style.setProperty('height', '100%', 'important');
+        avpEl.style.setProperty('background', 'transparent', 'important');
+    }
+    if (vcDiv) {
+        vcDiv.style.setProperty('width', '100%', 'important');
+        vcDiv.style.setProperty('height', '100%', 'important');
+        vcDiv.style.setProperty('background', 'transparent', 'important');
+    }
+
+    // Force the native .gradient div visible — Apple Music hides it when no native video
+    // is active. It adds top/bottom dark vignette over the video frame.
+    const gradientDiv = avpShadow?.querySelector('.gradient');
+    if (gradientDiv) {
+        gradientDiv.style.setProperty('display', 'block', 'important');
+        gradientDiv.style.setProperty('opacity', '1', 'important');
+        gradientDiv.style.setProperty('visibility', 'visible', 'important');
+        gradientDiv.style.setProperty('pointer-events', 'none', 'important');
+        gradientDiv.style.setProperty('transition', 'opacity 0.3s ease', 'important');
+    }
+    const nativeVidInVc = vcDiv?.querySelector('video');
+    if (nativeVidInVc && nativeVidInVc !== nativeVidEl) {
+        nativeVidInVc.style.setProperty('display', 'none', 'important');
+    }
+
+    const mvPlay  = () => { _iframePlay.call(myVid).then(() => mkAudio.play().catch(() => {})).catch(() => {}); };
+    const mvPause = () => { myVid.pause(); mkAudio.pause(); };
+    const togglePlayPause = () => { if (myVid.paused) mvPlay(); else mvPause(); };
+
+    // ── Fullscreen ────────────────────────────────────────────────────────────
+    const toggleFullscreen = () => {
+        if (document.fullscreenElement) {
+            document.exitFullscreen().catch(() => {});
+        } else {
+            // Use documentElement — requesting fullscreen on a shadow DOM element is
+            // unreliable in Electron/Chromium and causes a black video frame.
+            // mvContainer is already position:fixed; width:100vw so it covers the screen.
+            document.documentElement.requestFullscreen?.().catch(() => {});
+        }
+    };
+    const onFullscreenChange = () => {
+        // Re-fit scrim to video bounds after the viewport size changes.
+        _resizeScrim();
+        // Force mvContainer dimensions in case fullscreen collapses fixed sizing.
+        mvContainer.style.setProperty('width',  '100%',  'important');
+        mvContainer.style.setProperty('height', '100%',  'important');
+        setTimeout(_resizeScrim, 100); // second pass after browser reflow
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+
+    // ── Scrim elements (Layers 4 & 5) ───────────────────────────────────────────
+    const scrimEl        = avpShadow?.querySelector('.scrim');
+    const scrimClickable = avpShadow?.querySelector('.scrim__clickable');
+    const scrimHeader    = avpShadow?.querySelector('.scrim__header');
+    const scrimFooter    = avpShadow?.querySelector('.scrim__footer');
+    const scrimInfo      = avpShadow?.querySelector('.scrim__info');
+    const exitBtn        = mvContainer.querySelector('amp-playback-controls-exit');
+
+    // Fit avpi (and thus avp + scrim) to the rendered video area, excluding letterbox bars.
+    // Native scrim is display:grid with children at position:static — the grid distributes
+    // space correctly once avpi height matches the actual video frame height.
+    const _resizeScrim = () => {
+        const cw = mvContainer.offsetWidth  || window.innerWidth;
+        const ch = mvContainer.offsetHeight || window.innerHeight;
+        const vw = myVid.videoWidth, vh2 = myVid.videoHeight;
+        let lv = 0, lh = 0;
+        if (vw && vh2) {
+            const vr = vw / vh2, cr = cw / ch;
+            if (vr > cr) lv = Math.round((ch - cw / vr) / 2);   // wide video → top/bottom bars
+            else         lh = Math.round((cw - ch * vr) / 2);    // tall video → left/right bars
+        }
+        if (avpi) {
+            avpi.style.setProperty('top',    lv + 'px', 'important');
+            avpi.style.setProperty('left',   lh + 'px', 'important');
+            avpi.style.setProperty('width',  (cw - 2 * lh) + 'px', 'important');
+            avpi.style.setProperty('height', (ch - 2 * lv) + 'px', 'important');
+        }
+    };
+    myVid.addEventListener('loadedmetadata', _resizeScrim);
+    myVid.addEventListener('resize', _resizeScrim);
+    const _scrimResizeObs = new ResizeObserver(_resizeScrim);
+    _scrimResizeObs.observe(mvContainer);
+    _resizeScrim();
+
+    // Force scrim visible — Apple Music keeps opacity:0 when native video isn't playing.
+    // Don't override display/position: native display:grid + position:relative is correct,
+    // the grid distributes header/info/footer rows automatically via named grid areas.
+    if (scrimEl) {
+        scrimEl.style.setProperty('opacity', '1', 'important');
+        scrimEl.style.setProperty('visibility', 'visible', 'important');
+        scrimEl.style.setProperty('transition', 'opacity 0.3s ease', 'important');
+        scrimEl.style.setProperty('cursor', 'default', 'important');
+    }
+
+    // scrimClickable: native gridArea "1/1/-3/-1" (spans rows 1–4, covers everything above footer).
+    // position:static in the native grid — no override needed.
+    if (scrimClickable) {
+        scrimClickable.style.setProperty('pointer-events', 'auto', 'important');
+        scrimClickable.style.setProperty('cursor', 'default', 'important');
+    }
+
+    // scrimHeader: hide — exitBtn (amp-playback-controls-exit) handles the X button.
+    if (scrimHeader) scrimHeader.style.setProperty('display', 'none', 'important');
+
+    // scrimFooter/scrimInfo: native CSS grid positions them. Force visibility + pointer-events
+    // so slotted buttons (skip, play, fullscreen) actually receive clicks.
+    if (scrimFooter) {
+        scrimFooter.style.setProperty('opacity', '1', 'important');
+        scrimFooter.style.setProperty('visibility', 'visible', 'important');
+        scrimFooter.style.setProperty('pointer-events', 'auto', 'important');
+    }
+    if (scrimInfo) {
+        scrimInfo.style.setProperty('opacity', '1', 'important');
+        scrimInfo.style.setProperty('visibility', 'visible', 'important');
+    }
+
+    const onExitClick = (e) => { e.stopPropagation(); _abortCtrl?.abort(); };
+    if (exitBtn) {
+        exitBtn.style.transition = 'opacity 0.3s ease';
+        exitBtn.style.setProperty('cursor', 'default', 'important');
+        // Raise above avpi's shadow stacking context without touching position — Apple Music
+        // already positions exitBtn absolutely in the corner; overriding position moves it.
+        exitBtn.style.setProperty('z-index', '999999', 'important');
+        exitBtn.addEventListener('click', onExitClick);
+    }
+
+    // ── Quality selector — integrated into native footer control bar ─────────────
+    // ── Load SF Pro font from bundled engine resource ─────────────────────────────
+    // Injected once per page — blob: URL bypasses CSP restrictions on @font-face src.
+    if (!document.querySelector('#aml-sfpro-style')) {
+        fetch(`${ENGINE}/fonts/SF-Pro.ttf`)
+            .then(r => r.ok ? r.blob() : null)
+            .then(b => {
+                if (!b) return;
+                const url = URL.createObjectURL(b);
+                const s = document.createElement('style');
+                s.id = 'aml-sfpro-style';
+                s.textContent = `@font-face{font-family:'SF Pro';src:url('${url}')format('truetype');font-weight:100 900;font-style:normal;}`;
+                document.head.appendChild(s);
+            })
+            .catch(() => {});
+    }
+
+    const _sfFont = `'SF Pro',-apple-system,BlinkMacSystemFont,sans-serif`;
+    const _qualityLabel = () => _mvMaxHeight >= 2160 ? '4K' : `${_mvMaxHeight}p`;
+
+    // tv.fill SVG — matches SF Symbols style: filled rounded-rect body + short stand + base bar
+    const _tvIcon = `<svg width="20" height="17" viewBox="0 0 20 17" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0">` +
+        `<rect x="0.75" y="0.75" width="18.5" height="11.5" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>` +
+        `<rect x="8" y="13" width="4" height="1.5" rx="0.6"/>` +
+        `<rect x="5.5" y="14.5" width="9" height="2" rx="1"/>` +
+        `</svg>`;
+
+    const _qualityBtn = document.createElement('button');
+    _qualityBtn.setAttribute('tabindex', '0');
+    Object.assign(_qualityBtn.style, {
+        background: 'none', border: 'none', color: 'rgba(255,255,255,0.9)',
+        fontSize: '11px', fontWeight: '510', letterSpacing: '0.02em',
+        fontFamily: _sfFont,
+        cursor: 'pointer', padding: '5px 8px', borderRadius: '8px',
+        display: 'inline-flex', alignItems: 'center', gap: '5px',
+        transition: 'background 0.12s, opacity 0.3s', flexShrink: '0',
+    });
+    const _qualitySpanEl = document.createElement('span');
+    _qualitySpanEl.textContent = _qualityLabel();
+    _qualityBtn.innerHTML = _tvIcon;
+    _qualityBtn.appendChild(_qualitySpanEl);
+    _qualityBtn.addEventListener('mouseenter', () => { _qualityBtn.style.background = 'rgba(255,255,255,0.1)'; });
+    _qualityBtn.addEventListener('mouseleave', () => { _qualityBtn.style.background = 'none'; });
+
+    // Inject before fullscreen button in the native footer control bar.
+    const fsCtrl = avp?.querySelector('amp-playback-controls-full-screen');
+    if (fsCtrl?.parentNode) {
+        fsCtrl.parentNode.insertBefore(_qualityBtn, fsCtrl);
+    } else if (footerRow) {
+        footerRow.appendChild(_qualityBtn);
+    } else {
+        Object.assign(_qualityBtn.style, { position: 'fixed', bottom: '64px', right: '56px', zIndex: '999999' });
+        mvContainer.appendChild(_qualityBtn);
+    }
+
+    // ── Quality menu — macOS vibrancy style ───────────────────────────────────────
+    // SF checkmark SVG for selected item (matches SF Symbols checkmark weight)
+    const _checkSVG = `<svg width="11" height="9" viewBox="0 0 11 9" fill="none" xmlns="http://www.w3.org/2000/svg">` +
+        `<path d="M1 4.5L4 7.5L10 1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>` +
+        `</svg>`;
+
+    const _qualityMenu = document.createElement('div');
+    Object.assign(_qualityMenu.style, {
+        position: 'fixed', zIndex: '1000001',
+        width: '150px',
+        background: 'rgba(28,28,30,0.82)',
+        backdropFilter: 'blur(48px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(48px) saturate(180%)',
+        border: '0.5px solid rgba(255,255,255,0.13)',
+        borderRadius: '10px',
+        padding: '5px 0',
+        display: 'none', flexDirection: 'column',
+        boxShadow: '0 4px 24px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.04) inset, 0 0 0 0.5px rgba(0,0,0,0.3)',
+        fontFamily: _sfFont,
+        overflow: 'hidden',
+        boxSizing: 'border-box',
+    });
+
+    // Available variant heights returned by the engine after parsing the HLS master playlist.
+    // Used to filter quality options so we only show tiers that actually differ.
+    const _sessHeights = Array.isArray(_mvVideoHeights) ? _mvVideoHeights : [];
+    const _allTiers = [
+        { label: '4K',    height: 2160 },
+        { label: '1080p', height: 1080 },
+        { label: '720p',  height: 720  },
+        { label: '480p',  height: 480  },
+    ];
+    const _bestForMax = max => Math.max(0, ..._sessHeights.filter(h => h <= max));
+    const _qualityOptions = _sessHeights.length === 0 ? _allTiers :
+        _allTiers.filter((tier, i) => {
+            const myBest = _bestForMax(tier.height);
+            if (myBest === 0) return false; // no variant at or below this tier
+            const below = _allTiers[i + 1];
+            return !below || myBest > _bestForMax(below.height); // adds a distinct quality step
+        });
+    // Snap _mvMaxHeight to highest available tier so the button label is accurate
+    if (_qualityOptions.length > 0 && !_qualityOptions.some(o => o.height === _mvMaxHeight)) {
+        _mvMaxHeight = _qualityOptions[0].height;
+    }
+
+    _qualityOptions.forEach(({ label, height }) => {
+        const opt = document.createElement('button');
+        Object.assign(opt.style, {
+            background: 'none', border: 'none',
+            color: 'rgba(255,255,255,0.92)',
+            padding: '0 14px 0 10px',
+            height: '28px',
+            textAlign: 'left', fontSize: '13px', fontWeight: '400',
+            fontFamily: _sfFont,
+            cursor: 'default', width: '100%',
+            display: 'flex', alignItems: 'center', gap: '0',
+            transition: 'background 0.08s',
+        });
+
+        // Left gutter: 22px — checkmark sits here for selected item
+        const checkEl = document.createElement('span');
+        checkEl.style.cssText = `width:22px;display:flex;align-items:center;flex-shrink:0;color:rgba(255,255,255,0.92)`;
+        checkEl.innerHTML = height === _mvMaxHeight ? _checkSVG : '';
+
+        const labelEl = document.createElement('span');
+        labelEl.textContent = label;
+        labelEl.style.flex = '1';
+
+        opt.append(checkEl, labelEl);
+
+        opt.addEventListener('mouseenter', () => {
+            opt.style.background = 'rgba(10,132,255,0.85)';
+            opt.style.color = '#fff';
+        });
+        opt.addEventListener('mouseleave', () => {
+            opt.style.background = 'none';
+            opt.style.color = 'rgba(255,255,255,0.92)';
+        });
+        opt.addEventListener('click', (e) => {
+            e.stopPropagation();
+            _mvMaxHeight = height;
+            localStorage.setItem('aml-mv-quality', String(height));
+            _qualitySpanEl.textContent = _qualityLabel();
+            _qualityMenu.querySelectorAll('button').forEach((b, i) => {
+                b.querySelector('span').innerHTML = _qualityOptions[i].height === _mvMaxHeight ? _checkSVG : '';
+            });
+            _qualityMenu.style.display = 'none';
+            _qualityMenuOpen = false;
+            // Abort the current pipeline. Restoring Function.prototype.call/apply in cleanup
+            // may cause MK to fire nowPlayingItemDidChange naturally. Only call handleTrackChange
+            // manually if the generation hasn't advanced (i.e. no natural restart happened).
+            const _genSnap = _generation;
+            _abortCtrl.abort();
+            setTimeout(() => { if (_generation === _genSnap && _mkInstance) handleTrackChange(_mkInstance); }, 200);
+        });
+        _qualityMenu.appendChild(opt);
+    });
+    // Append to body, not mvContainer — mvContainer may have a CSS transform
+    // (Apple Music entrance animation) which makes position:fixed children position
+    // relative to it rather than the viewport, breaking getBoundingClientRect math.
+    document.body.appendChild(_qualityMenu);
+
+    let _qualityMenuOpen = false;
+
+    const _openQualityMenu = () => {
+        _qualityMenuOpen = true;
+        _qualityMenu.style.visibility = 'hidden';
+        _qualityMenu.style.display = 'flex';
+        const mh = _qualityMenu.offsetHeight;
+        _qualityMenu.style.visibility = '';
+        // btnRect is always viewport-relative; with the menu on body the fixed
+        // positioning is also viewport-relative, so the math is exact.
+        const btnRect = _qualityBtn.getBoundingClientRect();
+        _qualityMenu.style.top    = Math.max(8, btnRect.top - mh - 8) + 'px';
+        _qualityMenu.style.right  = (window.innerWidth - btnRect.right) + 'px';
+        _qualityMenu.style.bottom = '';
+        _qualityMenu.style.left   = '';
+        // Focus the currently-selected option for keyboard navigation.
+        const selected = [..._qualityMenu.querySelectorAll('button')]
+            .find(b => b.querySelector('span')?.innerHTML?.includes('<svg')) ?? _qualityMenu.querySelector('button');
+        selected?.focus();
+    };
+    const _closeQualityMenu = (restoreFocus = true) => {
+        _qualityMenuOpen = false;
+        _qualityMenu.style.display = 'none';
+        if (restoreFocus) _qualityBtn.focus();
+    };
+
+    _qualityBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (_qualityMenuOpen) _closeQualityMenu(false); else _openQualityMenu();
+        _showControls();
+    });
+    _qualityBtn.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _qualityBtn.click(); }
+        if (e.key === 'Escape') _closeQualityMenu();
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); _openQualityMenu(); }
+    });
+    _qualityMenu.addEventListener('keydown', (e) => {
+        const items = [..._qualityMenu.querySelectorAll('button')];
+        const idx = items.indexOf(document.activeElement);
+        if (e.key === 'ArrowDown') { e.preventDefault(); items[(idx + 1) % items.length]?.focus(); }
+        if (e.key === 'ArrowUp')   { e.preventDefault(); items[(idx - 1 + items.length) % items.length]?.focus(); }
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); items[idx]?.click(); }
+        if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); _closeQualityMenu(); }
+    });
+    mvContainer.addEventListener('click', () => {
+        if (_qualityMenuOpen) _closeQualityMenu(false);
+    });
+
+    // MutationObserver: re-force scrim visible whenever Apple Music's JS hides it.
+    // _scrimAllowHide gates intentional fade-outs so the observer doesn't fight _showControls.
+    let _scrimAllowHide = false;
+    const _scrimObs = scrimEl ? new MutationObserver(() => {
+        if (_scrimAllowHide) return;
+        if (scrimEl.style.opacity !== '1') scrimEl.style.setProperty('opacity', '1', 'important');
+        if (scrimEl.style.visibility !== 'visible') scrimEl.style.setProperty('visibility', 'visible', 'important');
+    }) : null;
+    if (_scrimObs) _scrimObs.observe(scrimEl, { attributes: true, attributeFilter: ['style', 'class'] });
+
+    // ── Slotted light-DOM children of avp (info + footer rows) ──────────────────
+    // These have slot="info" / slot="footer" attributes — they are light DOM children
+    // of amp-video-player distributed to named slots inside avp's shadow root.
+    // Apple Music hides them when no native video is detected — force them visible.
+    const footerRow = avp?.querySelector('[slot="footer"]');
+    const infoEls   = avp ? [...avp.querySelectorAll('[slot="info"]')] : [];
+    // Force visibility/opacity only — native display values are already correct
+    // (info__eyebrow / info__title are display:block; footer rows are display:flex).
+    // Overriding display:flex on info elements shifts text layout vs. Chrome reference.
+    [...infoEls, footerRow].forEach(el => {
+        if (!el) return;
+        el.style.setProperty('visibility', 'visible', 'important');
+        el.style.setProperty('opacity', '1', 'important');
+    });
+
+    // ── Seek bar ──────────────────────────────────────────────────────────────────
+    const footerEls  = avp ? [...avp.querySelectorAll('[slot="footer"]')] : [];
+    const scrubberEl = footerEls[0]?.querySelector('amp-playback-controls-progress')
+                    ?? footerRow?.querySelector('amp-playback-controls-progress');
+    const scrubberShadow = scrubberEl?.shadowRoot;
+    const rangeInput = scrubberShadow?.querySelector('#playback-progress') ?? scrubberShadow?.querySelector('input[type=range]');
+    if (scrubberEl) {
+        scrubberEl.style.setProperty('visibility', 'visible', 'important');
+        scrubberEl.style.setProperty('opacity', '1', 'important');
+    }
+    let _userScrubbing = false;
+    if (rangeInput) {
+        rangeInput.removeAttribute('disabled');
+        rangeInput.style.setProperty('pointer-events', 'auto', 'important');
+        rangeInput.addEventListener('mousedown', () => { _userScrubbing = true; }, true);
+        rangeInput.addEventListener('touchstart', () => { _userScrubbing = true; }, true);
+        rangeInput.addEventListener('input', () => {
+            const t = parseFloat(rangeInput.value);
+            if (!isNaN(t)) {
+                myVid.currentTime = t; mkAudio.currentTime = t;
+                _updateProgress();
+            }
+            _showControls();
+        }, true);
+        rangeInput.addEventListener('mouseup',    () => { _userScrubbing = false; }, true);
+        rangeInput.addEventListener('touchend',   () => { _userScrubbing = false; }, true);
+        // Set max from video duration once known
+        const _setRangeMax = () => {
+            if (myVid.duration && isFinite(myVid.duration)) rangeInput.max = String(myVid.duration);
+        };
+        myVid.addEventListener('loadedmetadata', _setRangeMax);
+        myVid.addEventListener('durationchange', _setRangeMax);
+        _setRangeMax();
+    }
+
+    // ── Play/pause button — our own, injected next to the native controls ────────
+    // Native amp-playback-controls-play is hidden by AM's CSS when our synthetic
+    // video (not the native one) is playing. Hide it and inject a reliable button.
+    const playCtrl = avp?.querySelector('amp-playback-controls-play');
+    if (playCtrl) playCtrl.style.setProperty('display', 'none', 'important');
+
+    // play.fill / pause.fill — SF Symbols proportions, sized to match native skip buttons
+    const _svgPlay  = `<svg width="28" height="28" viewBox="0 0 28 28" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M9 6L22 14 9 22V6z"/></svg>`;
+    const _svgPause = `<svg width="28" height="28" viewBox="0 0 28 28" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="4" width="6" height="20" rx="2"/><rect x="17" y="4" width="6" height="20" rx="2"/></svg>`;
+
+    const _mvPlayBtn = document.createElement('button');
+    Object.assign(_mvPlayBtn.style, {
+        background: 'none', border: 'none', color: 'rgba(255,255,255,0.95)',
+        cursor: 'pointer', padding: '0',
+        width: '40px', height: '40px',
+        borderRadius: '50%', flexShrink: '0',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        transition: 'background 0.15s',
+    });
+    _mvPlayBtn.addEventListener('mouseenter', () => { _mvPlayBtn.style.background = 'rgba(255,255,255,0.15)'; });
+    _mvPlayBtn.addEventListener('mouseleave', () => { _mvPlayBtn.style.background = 'none'; });
+    _mvPlayBtn.addEventListener('click', (e) => { e.stopImmediatePropagation(); togglePlayPause(); _showControls(); }, true);
+
+    const _syncPlayIcon = () => {
+        _mvPlayBtn.innerHTML = myVid.paused ? _svgPlay : _svgPause;
+        _mvPlayBtn.setAttribute('aria-label', myVid.paused ? 'Play' : 'Pause');
+    };
+    myVid.addEventListener('play',  _syncPlayIcon);
+    myVid.addEventListener('pause', _syncPlayIcon);
+    _syncPlayIcon();
+
+    // Inject between the skip-back and skip-forward controls, or after playCtrl.
+    const _skipFwd = avp?.querySelector('amp-playback-controls-skip-forward')
+                  ?? avp?.querySelector('[aria-label*="forward" i]')
+                  ?? avp?.querySelector('[aria-label*="10" i]');
+    const _insertTarget = playCtrl ?? _skipFwd;
+    if (_insertTarget?.parentNode) {
+        _insertTarget.parentNode.insertBefore(_mvPlayBtn, _insertTarget);
+    } else if (footerRow) {
+        footerRow.appendChild(_mvPlayBtn);
+    }
+
+    // ── Volume slider ─────────────────────────────────────────────────────────────
+    // AMP-VOLUME-CONTROL has a shadow root with a single INPUT[type=range] (min=0 max=1).
+    const volCtrl   = avp?.querySelector('amp-volume-control');
+    const volInput  = volCtrl?.shadowRoot?.querySelector('input[type=range]');
+    if (volInput) {
+        volInput.addEventListener('input', () => {
+            mkAudio.volume = parseFloat(volInput.value);
+            mkAudio.muted  = (parseFloat(volInput.value) === 0);
+            _showControls();
+        }, true);
+    }
+    const _syncVolSlider = () => {
+        if (volInput && !_userScrubbing) volInput.value = String(mkAudio.muted ? 0 : mkAudio.volume);
+    };
+    mkAudio.addEventListener('volumechange', _syncVolSlider);
+
+    // ── Auto-hide UI after 3 s of inactivity ─────────────────────────────────────
+    let _hideTimer = null;
+    const _showControls = () => {
+        _scrimAllowHide = false;
+        if (scrimEl) { scrimEl.style.setProperty('opacity', '1', 'important'); scrimEl.style.removeProperty('pointer-events'); }
+        if (gradientDiv) gradientDiv.style.setProperty('opacity', '1', 'important');
+        if (exitBtn) exitBtn.style.opacity = '1';
+        _qualityBtn.style.opacity = '1';
+        mvContainer.style.setProperty('cursor', 'default', 'important');
+        clearTimeout(_hideTimer);
+        _hideTimer = setTimeout(() => {
+            if (myVid.paused) return;
+            _scrimAllowHide = true;
+            if (scrimEl) { scrimEl.style.setProperty('opacity', '0', 'important'); scrimEl.style.setProperty('pointer-events', 'none', 'important'); }
+            if (gradientDiv) gradientDiv.style.setProperty('opacity', '0', 'important');
+            if (exitBtn) exitBtn.style.opacity = '0';
+            _qualityBtn.style.opacity = '0';
+            _qualityMenuOpen = false; _qualityMenu.style.display = 'none';
+            mvContainer.style.setProperty('cursor', 'none', 'important');
+        }, 3000);
+    };
+    mvContainer.addEventListener('mousemove', _showControls);
+    // Keyboard shortcuts (document-level so they fire regardless of focus).
+    const onKeyDown = (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        switch (e.key) {
+            case ' ': case 'k': case 'K':
+                e.preventDefault(); togglePlayPause(); _showControls(); break;
+            case 'f': case 'F':
+                e.preventDefault(); toggleFullscreen(); break;
+            case 'ArrowLeft':
+                e.preventDefault();
+                myVid.currentTime = Math.max(0, myVid.currentTime - 10);
+                mkAudio.currentTime = myVid.currentTime; _showControls(); break;
+            case 'ArrowRight':
+                e.preventDefault();
+                myVid.currentTime = Math.min(myVid.duration || 1e9, myVid.currentTime + 10);
+                mkAudio.currentTime = myVid.currentTime; _showControls(); break;
+            case 'ArrowUp':
+                e.preventDefault();
+                mkAudio.volume = Math.min(1, mkAudio.volume + 0.1); _showControls(); break;
+            case 'ArrowDown':
+                e.preventDefault();
+                mkAudio.volume = Math.max(0, mkAudio.volume - 0.1); _showControls(); break;
+            case 'm': case 'M':
+                mkAudio.muted = !mkAudio.muted; _showControls(); break;
+            case 'Escape':
+                if (!document.fullscreenElement) _abortCtrl.abort(); break;
+            default: _showControls();
+        }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    _showControls();
+
+    const onScrimClick = (e) => {
+        // Don't toggle play/pause if a button, input, or link was the actual target
+        if (e.target.closest('button, input, a, [role="button"], [role="slider"]')) {
+            _showControls();
+            return;
+        }
+        e.stopImmediatePropagation();
+        _showControls();
+        togglePlayPause();
+    };
+    scrimClickable?.addEventListener('click', onScrimClick, true);
+
+    // scrim__footer: native controls bar — non-clickthrough for the container.
+    // Intercept play/pause + skip buttons; let scrub bar reach Apple Music natively.
+    const onFooterClick = (e) => {
+        const btn = e.target.closest('button');
+        // Skip our own quality button — it handles its own clicks.
+        if (!btn || btn === _qualityBtn) return;
+        const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+        const text  = btn.textContent.trim().toLowerCase();
+        const cls   = btn.className.toLowerCase();
+        // Use aria-label for semantic matching; fall back to class only (not textContent,
+        // which would match "1080p" as containing "10" for the skip-seconds buttons).
+        if (label.includes('play') || label.includes('pause') || cls.includes('play') || cls.includes('pause')) {
+            e.stopImmediatePropagation();
+            togglePlayPause(); _showControls();
+        } else if (label.includes('10') || label.includes('skip') || label.includes('forward') || label.includes('back') || label.includes('rewind') || cls.includes('skip')) {
+            e.stopImmediatePropagation();
+            const delta = (label.includes('back') || label.includes('rewind') || cls.includes('back')) ? -10 : 10;
+            myVid.currentTime = Math.max(0, myVid.currentTime + delta);
+            mkAudio.currentTime = myVid.currentTime; _showControls();
+        } else if (label.includes('fullscreen') || label.includes('screen') || cls.includes('full-screen') || cls.includes('fullscreen')) {
+            e.stopImmediatePropagation();
+            toggleFullscreen();
+        }
+    };
+    scrimFooter?.addEventListener('click', onFooterClick, true);
+
+    // ── Seek bar position + fill sync ─────────────────────────────────────────────
+    // nativeVidEl is null in MV mode. Drive thumb (value), filled track (--progress),
+    // and the elapsed/remaining <time> text elements directly from myVid.currentTime.
+    const _fmtTime = s => {
+        const t = Math.max(0, Math.floor(s));
+        const m = Math.floor(t / 60), sec = t % 60;
+        return `${m}:${String(sec).padStart(2, '0')}`;
+    };
+    const progShadow   = scrubberEl?.shadowRoot;
+    const timeElapsed  = progShadow?.querySelector('.time.elapsed');
+    const timeRemain   = progShadow?.querySelector('.time.remaining');
+    const _updateProgress = () => {
+        if (!rangeInput) return;
+        const t   = myVid.currentTime;
+        const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute('max')) || 1;
+        // Write value so the thumb position moves. Programmatic .value writes do NOT fire
+        // the input/change events (confirmed), so mk.seekToTime() is never triggered here.
+        // Not writing it causes amp-playback-controls-progress to see a stale value of 0 and
+        // enter its loading/blink state repeatedly.
+        rangeInput.value = String(t);
+        const pct = (t / max * 100).toFixed(2) + '%';
+        rangeInput.style.setProperty('--progress', pct);
+        rangeInput.style.setProperty('--width',    pct);
+        if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
+        if (timeRemain)  timeRemain.textContent  = '-' + _fmtTime(max - t);
+    };
+    const _seekSyncInterval = setInterval(_updateProgress, 250);
+    const onNativeSeeked  = null;
+    const onNativeVolume  = null;
+
+    console.log(`[AML MV-V] myVid created in mvContainer; nativeVidEl readyState=${nativeVidEl?.readyState}`);
+
+    // ── Audio MSE — separate element, pipeToSourceBuffer handles caching/seeking ──
+    const audioMs = new MediaSource();
+    const audioBlobUrl = URL.createObjectURL(audioMs);
+    _nativeSrcSet.call(mkAudio, audioBlobUrl);
+    try {
+        await new Promise((resolve, reject) => {
+            const sig = _abortCtrl.signal;
+            sig.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+            audioMs.addEventListener('sourceopen', resolve, { once: true });
+        });
+    } catch (e) {
+        console.warn(`[AML MV-V] audio MSE sourceopen failed: ${e.message}`);
+        if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
+        return;
+    }
+    URL.revokeObjectURL(audioBlobUrl);
+    // Start mkAudio as soon as audio data arrives so MK exits "loading" state early,
+    // preventing the seek bar loading-blink that occurs while the video MSE is still
+    // filling (which can take seconds).  onVideoPlay will re-sync currentTime if needed.
+    mkAudio.addEventListener('canplay', function _onAudCanPlay() {
+        if (mkAudio.paused && !_abortCtrl.signal.aborted) mkAudio.play().catch(() => {});
+    }, { once: true });
+    const audioSb = audioMs.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+    const audioUrl = `${ENGINE}/api/v1/playback/${_sessionId}/audio?raw=1`;
+    let _audioPipeCtrl = new AbortController();
+
+    const _waitAudIdle = () => new Promise((res, rej) => {
+        if (!audioSb.updating) return res();
+        const onEnd = () => { audioSb.removeEventListener('error', onErr); res(); };
+        const onErr = (ev) => {
+            audioSb.removeEventListener('updateend', onEnd);
+            const detail = `code=${ev.target?.error?.code} msg=${ev.target?.error?.message}`;
+            console.error(`[AML MV-A] SourceBuffer ERROR event: ${detail}`);
+            rej(new Error(`audio SB error: ${detail}`));
+        };
+        audioSb.addEventListener('updateend', onEnd, { once: true });
+        audioSb.addEventListener('error',     onErr, { once: true });
+    });
+
+    // Parse MP4 box chain from a chunk using direct byte access (no DataView).
+    const _parseBoxHeader = (buf) => {
+        if (!buf || buf.byteLength < 8) return `(${buf?.byteLength ?? 0}B too small)`;
+        const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+        const results = [];
+        let off = 0;
+        while (off + 8 <= b.length && off < 512) {
+            const size = (b[off]<<24 | b[off+1]<<16 | b[off+2]<<8 | b[off+3]) >>> 0;
+            const type = String.fromCharCode(b[off+4], b[off+5], b[off+6], b[off+7]);
+            results.push(`[${type}:${size}B]`);
+            if (size < 8 || off + size > b.length) break;
+            off += size;
+        }
+        const hex16 = Array.from(b.slice(0, Math.min(16, b.length))).map(x => x.toString(16).padStart(2,'0')).join(' ');
+        return `boxes=${results.join('')} hex=${hex16}`;
+    };
+    const _mvaTs = () => (Date.now() / 1000).toFixed(3);
+    const _mvaBufStr = () => {
+        if (!audioSb || audioSb.buffered.length === 0) return '(empty)';
+        const ranges = [];
+        for (let i = 0; i < audioSb.buffered.length; i++)
+            ranges.push(`${audioSb.buffered.start(i).toFixed(2)}-${audioSb.buffered.end(i).toFixed(2)}`);
+        return ranges.join(' ');
+    };
+    const runAudioPipe = async (signal) => {
+        console.log(`[AML MV-A] fetch start t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} url=${audioUrl}`);
+        const t0 = performance.now();
+        const resp = await fetch(audioUrl, { signal });
+        if (!resp.ok) throw new Error(`audio ${resp.status}`);
+        const reader = resp.body.getReader();
+        let chunk = 0;
+        const evictAudio = async () => {
+            if (audioMs.readyState !== 'open' || audioSb.buffered.length === 0) return;
+            const evictTo = Math.max(0, mkAudio.currentTime - 30);
+            if (evictTo > audioSb.buffered.start(0) + 1) {
+                console.log(`[AML MV-A] evict 0-${evictTo.toFixed(2)}s t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()}`);
+                await _waitAudIdle();
+                await new Promise((res, rej) => {
+                    audioSb.addEventListener('updateend', res, { once: true });
+                    audioSb.addEventListener('error', rej, { once: true });
+                    audioSb.remove(audioSb.buffered.start(0), evictTo);
+                });
+            }
+        };
+        // INTERCEPT: listen for raw SourceBuffer error events (fires before updateend).
+        const _sbErrListener = (ev) => {
+            console.error(`[INTERCEPT SB-ERR] SourceBuffer error event fired! code=${ev.target?.error?.code} msg=${ev.target?.error?.message} readyState=${audioMs.readyState} buf=${_mvaBufStr()}`);
+        };
+        audioSb.addEventListener('error', _sbErrListener);
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) { console.log(`[AML MV-A] stream done t=${_mvaTs()} chunk#${chunk} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()}`); break; }
+                if (signal.aborted || audioMs.readyState !== 'open') break;
+                const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+                await _waitAudIdle();
+                if (signal.aborted || audioMs.readyState !== 'open') break;
+
+                // INTERCEPT: log chunk content before append.
+                const bufBefore = _mvaBufStr();
+                console.log(`[INTERCEPT PRE-APPEND] chunk#${chunk+1} size=${value.byteLength} bufBefore=${bufBefore} ${_parseBoxHeader(value)}`);
+
+                try {
+                    audioSb.appendBuffer(value);
+                    await _waitAudIdle();
+                    chunk++;
+                    const bufAfter = _mvaBufStr();
+                    const grew = bufBefore !== bufAfter;
+                    window.__amlCaptureChunk?.('mv-audio', chunk, value, bufBefore, bufAfter, grew);
+                    console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${bufAfter} +${elapsed}s bufGrew=${grew}`);
+                    if (!grew && chunk > 1) {
+                        console.warn(`[INTERCEPT] chunk#${chunk} DID NOT grow buffer! Encrypted fragment rejected by browser MSE.`);
+                    }
+                }
+                catch (e) {
+                    console.error(`[INTERCEPT APPEND-ERR] chunk#${chunk+1} threw ${e.name}: ${e.message}`);
+                    if (e.name === 'InvalidStateError') {
+                        console.warn(`[AML MV-A] InvalidStateError chunk#${chunk} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} — retrying`);
+                        await _waitAudIdle();
+                        if (signal.aborted || audioMs.readyState !== 'open') break;
+                        audioSb.appendBuffer(value);
+                        await _waitAudIdle();
+                        chunk++;
+                        console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} +${elapsed}s (retry)`);
+                    } else if (e.name === 'QuotaExceededError') {
+                        console.warn(`[AML MV-A] QuotaExceeded chunk#${chunk} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} — evicting`);
+                        await evictAudio();
+                        await _waitAudIdle();
+                        if (signal.aborted || audioMs.readyState !== 'open') break;
+                        try {
+                            audioSb.appendBuffer(value);
+                            await _waitAudIdle();
+                            chunk++;
+                            console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} +${elapsed}s (post-evict)`);
+                        } catch (_) {}
+                    } else { throw e; }
+                }
+            }
+        } finally {
+            audioSb.removeEventListener('error', _sbErrListener);
+            reader.cancel().catch(() => {});
+        }
+        await _waitAudIdle().catch(() => {});
+        if (!signal.aborted && audioMs.readyState === 'open') {
+            try { audioMs.endOfStream(); } catch (_) {}
+        }
+    };
+    runAudioPipe(_audioPipeCtrl.signal)
+        .catch(e => { if (!_audioPipeCtrl.signal.aborted) console.error('[AML MV] audio pipe error:', e); });
+
+    // ── Video MSE ─────────────────────────────────────────────────────────────────
+    const ms = new MediaSource();
+    const msBlobUrl = URL.createObjectURL(ms);
+    myVid.src = msBlobUrl;
+
+    try {
+        await new Promise((resolve, reject) => {
+            const sig = _abortCtrl.signal;
+            sig.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+            ms.addEventListener('sourceopen', resolve, { once: true });
+        });
+    } catch (e) {
+        console.warn(`[AML MV-V] video MSE sourceopen failed: ${e.message}`);
+        _audioPipeCtrl.abort();
+        mkAudio.pause(); mkAudio.src = '';
+        if (audioMs.readyState === 'open') { try { audioMs.endOfStream(); } catch (_) {} }
+        if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
+        return;
+    }
+    URL.revokeObjectURL(msBlobUrl);
+
+    // Extract video-only codec string (manifest may carry "avc1.xxx,mp4a.40.2").
+    const rawVideoCodec = _videoCodec || '';
+    const videoCodecStr = rawVideoCodec.split(',').map(c => c.trim())
+        .find(c => /^(avc1|hvc1|hev1|vp09|av01)/.test(c)) ?? 'avc1.640028';
+    const videoMime = `video/mp4; codecs="${videoCodecStr}"`;
+    if (!MediaSource.isTypeSupported(videoMime)) {
+        console.error(`[AML MV] video codec not supported: ${videoMime}`);
+        _audioPipeCtrl.abort();
+        mkAudio.pause(); mkAudio.src = '';
+        if (audioMs.readyState === 'open') { try { audioMs.endOfStream(); } catch (_) {} }
+        if (ms.readyState === 'open') { try { ms.endOfStream(); } catch (_) {} }
+        if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
+        return;
+    }
+    console.log(`[AML MV] video codec="${videoCodecStr}"`);
+
+    // segments mode (default) — preserves HLS fMP4 timestamps.
+    const videoSb = ms.addSourceBuffer(videoMime);
+
+    const videoEl = myVid;
+    let pipeCtrl = new AbortController();
+    const videoUrl = `${ENGINE}/api/v1/playback/${_sessionId}/video`;
+
+    // ── Video pipe (with chunk cache for backward seek re-injection) ──────────────
+    const _vidCache = [];
+    const _waitVidIdle = () => new Promise((res, rej) => {
+        if (!videoSb.updating) return res();
+        const onEnd = () => { videoSb.removeEventListener('error', onErr); res(); };
+        const onErr = () => { videoSb.removeEventListener('updateend', onEnd); rej(new Error('SB error')); };
+        videoSb.addEventListener('updateend', onEnd, { once: true });
+        videoSb.addEventListener('error',     onErr, { once: true });
+    });
+    const runVideoPipe = async (url, cache, signal) => {
+        const resp = await fetch(url, { signal });
+        if (!resp.ok) throw new Error(`video ${resp.status}`);
+        const reader = resp.body.getReader();
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done || signal.aborted || ms.readyState !== 'open') break;
+                if (cache) _vidCache.push(value);
+                await _waitVidIdle();
+                if (signal.aborted || ms.readyState !== 'open') break;
+                try { videoSb.appendBuffer(value); }
+                catch (e) {
+                    if (e.name === 'InvalidStateError') {
+                        await _waitVidIdle();
+                        if (signal.aborted || ms.readyState !== 'open') break;
+                        videoSb.appendBuffer(value);
+                    } else if (e.name !== 'QuotaExceededError') throw e;
+                }
+            }
+        } finally { reader.cancel().catch(() => {}); }
+        await _waitVidIdle().catch(() => {});
+        if (!signal.aborted && ms.readyState === 'open') ms.endOfStream();
+    };
+    runVideoPipe(videoUrl, true, pipeCtrl.signal)
+        .catch(e => { if (!pipeCtrl.signal.aborted) console.error('[AML MV] video pipe error:', e); });
+
+    // ── Backward seek: re-inject cached chunks for both video and audio ──────────
+    let _mvVidSeeking = false;
+    const _mvVideoSeek = async (seekSec) => {
+        if (_mvVidSeeking || pipeCtrl.signal.aborted) return;
+        for (let i = 0; i < videoSb.buffered.length; i++) {
+            if (seekSec >= videoSb.buffered.start(i) - 1.0 && seekSec <= videoSb.buffered.end(i) + 1.0) return;
+        }
+        if (_vidCache.length === 0) return;
+        _mvVidSeeking = true;
+        try {
+            const prev = pipeCtrl;
+            pipeCtrl = new AbortController();
+            prev.abort();
+            const sig = pipeCtrl.signal;
+            await _waitVidIdle();
+            if (videoSb.buffered.length > 0) { videoSb.remove(0, Infinity); await _waitVidIdle(); }
+            videoSb.timestampOffset = 0;
+            for (const chunk of [..._vidCache]) {
+                if (sig.aborted || ms.readyState !== 'open') return;
+                await _waitVidIdle();
+                try { videoSb.appendBuffer(chunk); } catch (e) { break; }
+            }
+            if (sig.aborted || ms.readyState !== 'open') return;
+            const bufEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : 0;
+            if (bufEnd < (_durationSec || 1e9) - 1) {
+                runVideoPipe(`${videoUrl}?t=${bufEnd.toFixed(3)}`, false, sig)
+                    .catch(e => { if (!sig.aborted) console.error('[AML MV] video resume error:', e); });
+            }
+        } finally { _mvVidSeeking = false; }
+    };
+    videoEl.addEventListener('seeking', () => { _mvVideoSeek(videoEl.currentTime).catch(() => {}); });
+
+    // Start audio from the exact video frame position on first timeupdate — avoids
+    // snapping audio to 0 during FFmpeg startup latency.
+    const onVideoPlay  = () => {
+        console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)}`);
+        if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
+            mkAudio.currentTime = videoEl.currentTime;
+        mkAudio.play().catch(() => {});
+    };
+    // Dispatch synthetic 'playing'/'pause' on nativeVidEl so MK's state machine
+    // transitions from state=1 (loading) to state=2 (playing) / state=3 (paused).
+    // MK observes nativeVidEl events; we never play nativeVidEl so it never fires
+    // these on its own. The counter-pause interceptor (Function.prototype.call override)
+    // blocks MK's savedPause.call(nativeVidEl) that fires on 'playing'.
+    const onVideoPlaying = () => {
+        nativeVidEl?.dispatchEvent(new Event('playing', { bubbles: false }));
+    };
+    const onVideoPause = () => {
+        console.log(`[AML MV-V] videoEl pause ct=${videoEl.currentTime.toFixed(2)}`);
+        mkAudio.pause();
+        nativeVidEl?.dispatchEvent(new Event('pause', { bubbles: false }));
+    };
+    const onVideoSeek  = () => {
+        if (_mvVidSeeking) return; // videoSb.remove() fires a spurious seeked with ct=0
+        console.log(`[AML MV-V] videoEl seeked ct=${videoEl.currentTime.toFixed(2)}`);
+        if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
+            mkAudio.currentTime = videoEl.currentTime;
+    };
+    const onEnded = () => { console.log(`[AML MV-V] videoEl ended — aborting pipeline`); _abortCtrl.abort(); };
+    const onVideoError  = () => {
+        const code = videoEl.error?.code;
+        console.error(`[AML MV-V] videoEl error code=${code} msg="${videoEl.error?.message}"`);
+        if (code === 3 || code === 4) _abortCtrl.abort();
+    };
+    const onVideoStall  = () => console.warn(`[AML MV-V] videoEl stalled ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+    const onVideoWait   = () => console.warn(`[AML MV-V] videoEl waiting ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+    videoEl.addEventListener('play',    onVideoPlay);
+    videoEl.addEventListener('playing', onVideoPlaying);
+    videoEl.addEventListener('pause',   onVideoPause);
+    videoEl.addEventListener('seeked',  onVideoSeek);
+    videoEl.addEventListener('error',   onVideoError);
+    videoEl.addEventListener('stalled', onVideoStall);
+    videoEl.addEventListener('waiting', onVideoWait);
+    mkAudio.addEventListener('ended',   onEnded);
+    videoEl.addEventListener('ended',   onEnded);
+
+    videoEl.addEventListener('canplay', () => {
+        if (_abortCtrl?.signal.aborted) return;
+        console.log(`[AML MV] canplay videoWidth=${videoEl.videoWidth} videoHeight=${videoEl.videoHeight} readyState=${videoEl.readyState}`);
+        _iframePlay.call(videoEl).catch(e => console.warn('[AML MV] play rejected:', e.message));
+    }, { once: true });
+
+    const cleanup = () => {
+        console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation}`);
+        pipeCtrl.abort(); _audioPipeCtrl.abort();
+        mkAudio.pause();
+        videoEl.removeEventListener('play',    onVideoPlay);
+        videoEl.removeEventListener('playing', onVideoPlaying);
+        videoEl.removeEventListener('pause',   onVideoPause);
+        videoEl.removeEventListener('seeked',  onVideoSeek);
+        // Signal MK's state machine: session ended
+        nativeVidEl?.dispatchEvent(new Event('pause', { bubbles: false }));
+        videoEl.removeEventListener('error',   onVideoError);
+        videoEl.removeEventListener('stalled', onVideoStall);
+        videoEl.removeEventListener('waiting', onVideoWait);
+        videoEl.removeEventListener('ended',   onEnded);
+        videoEl.pause();
+        if (ms.readyState === 'open') { try { ms.endOfStream(); } catch (_) {} }
+        if (myVid.parentNode) myVid.parentNode.removeChild(myVid);
+        mvContainer.removeEventListener('mousemove', _showControls);
+        document.removeEventListener('keydown', onKeyDown);
+        document.removeEventListener('fullscreenchange', onFullscreenChange);
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        scrimClickable?.removeEventListener('click', onScrimClick, true);
+        scrimFooter?.removeEventListener('click', onFooterClick, true);
+        // Restore container forced styles.
+        for (const p of _containerProps) mvContainer.style.removeProperty(p);
+        mvContainer.style.removeProperty('cursor');
+        // Restore scrim forced styles.
+        _scrimObs?.disconnect();
+        _scrimResizeObs?.disconnect();
+        myVid.removeEventListener('loadedmetadata', _resizeScrim);
+        myVid.removeEventListener('resize', _resizeScrim);
+        if (scrimEl)       { ['opacity','visibility','transition','cursor'].forEach(p => scrimEl.style.removeProperty(p)); }
+        if (scrimClickable){ ['pointer-events','cursor'].forEach(p => scrimClickable.style.removeProperty(p)); }
+        if (scrimFooter)   { ['opacity','visibility','pointer-events'].forEach(p => scrimFooter.style.removeProperty(p)); }
+        if (scrimHeader)   { scrimHeader.style.removeProperty('display'); }
+        if (scrimInfo)     { ['opacity','visibility'].forEach(p => scrimInfo.style.removeProperty(p)); }
+        if (exitBtn)  { exitBtn.removeEventListener('click', onExitClick); exitBtn.style.opacity = ''; exitBtn.style.transition = ''; ['cursor','z-index'].forEach(p => exitBtn.style.removeProperty(p)); }
+        if (_qualityBtn.parentNode) _qualityBtn.parentNode.removeChild(_qualityBtn);
+        if (_qualityMenu.parentNode) _qualityMenu.parentNode.removeChild(_qualityMenu);
+        if (vcDiv) vcDiv.classList.remove('hide-cursor');
+        clearTimeout(_hideTimer);
+        clearInterval(_seekSyncInterval);
+        // Restore avpi / avpEl / vcDiv expansions.
+        if (avpi) { for (const p of _avpiProps) avpi.style.removeProperty(p); }
+        if (avpEl) { avpEl.style.removeProperty('width'); avpEl.style.removeProperty('height'); avpEl.style.removeProperty('background'); }
+        if (vcDiv) { vcDiv.style.removeProperty('width'); vcDiv.style.removeProperty('height'); vcDiv.style.removeProperty('background'); }
+        if (gradientDiv) { ['display','opacity','visibility','pointer-events','transition'].forEach(p => gradientDiv.style.removeProperty(p)); }
+        mvContainer.style.removeProperty('cursor');
+        if (nativeVidInVc) nativeVidInVc.style.removeProperty('display');
+        if (nativeVidEl) {
+            nativeVidEl.style.opacity = '';
+            ['waiting', 'stalled', 'suspend'].forEach(evt =>
+                nativeVidEl.removeEventListener(evt, _nativeVidStopEvt, true)
+            );
+        }
+        Element.prototype.requestFullscreen = _origReqFS;
+        _mvPlayBtn.remove();
+        videoEl.removeEventListener('play',  _syncPlayIcon);
+        videoEl.removeEventListener('pause', _syncPlayIcon);
+        myVid.removeEventListener('volumechange', _syncVolSlider);
+        Function.prototype.call  = _origFnCall;
+        Function.prototype.apply = _origFnApply;
+        // Subtitle cleanup
+        if (_subDiv.parentNode) _subDiv.parentNode.removeChild(_subDiv);
+        for (let i = 0; i < myVid.textTracks.length; i++)
+            myVid.textTracks[i].removeEventListener('cuechange', _renderSubs);
+    };
+    _abortCtrl.signal.addEventListener('abort', cleanup, { once: true });
+    console.log(`[AML MV] pipeline started session=${_sessionId}`);
 }
 
 function startVLCPoll(mkAudio) {
@@ -846,169 +2138,13 @@ function startVLCPoll(mkAudio) {
             }, { once: true });
         }
 
-async function startMVPipeline() {
-    // Create video element
-    const videoElement = document.createElement('video');
-    videoElement.style.position = 'fixed';
-    videoElement.style.top = '0';
-    videoElement.style.left = '0';
-    videoElement.style.width = '100%';
-    videoElement.style.height = '100%';
-    videoElement.style.objectFit = 'contain';
-    videoElement.style.zIndex = '1000'; // Ensure it's above other content
-    videoElement.style.display = 'none'; // Initially hidden, we'll show it when ready
-    document.body.appendChild(videoElement);
-
-    // We will use the existing mkAudio element for audio
-    // Create two MediaSource objects
-    const audioMs = new MediaSource();
-    const videoMs = new MediaSource();
-
-    // Set the src of the audio and video elements
-    mkAudio.src = URL.createObjectURL(audioMs);
-    videoElement.src = URL.createObjectURL(videoMs);
-
-    // Wait for both MediaSources to be open
-    await Promise.all([
-        new Promise((resolve, reject) => {
-            audioMs.addEventListener('sourceopen', () => resolve(), { once: true });
-            audioMs.addEventListener('error', (e) => reject(e), { once: true });
-        }),
-        new Promise((resolve, reject) => {
-            videoMs.addEventListener('sourceopen', () => resolve(), { once: true });
-            videoMs.addEventListener('error', (e) => reject(e), { once: true });
-        })
-    ]);
-
-    // Create SourceBuffers
-    const audioSb = audioMs.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"'); // AAC LC
-    const videoSb = videoMs.addSourceBuffer('video/mp4; codecs="avc1.640028"'); // H.264
-
-    // Configure SourceBuffers
-    audioSb.mode = 'sequence';
-    videoSb.mode = 'sequence';
-
-    // Function to handle errors on SourceBuffers
-    const handleSbError = (e, type) => {
-        console.error(`[AML MSE] ${type} SourceBuffer error:`, e);
-    };
-    audioSb.addEventListener('error', (e) => handleSbError(e, 'Audio'));
-    videoSb.addEventListener('error', (e) => handleSbError(e, 'Video'));
-
-    // We'll keep track of the audio and video pipelines
-    const audioPipeCtrl = new AbortController();
-    const videoPipeCtrl = new AbortController();
-
-    // Fetch the audio and video streams
-    const audioPath = `/api/v1/playback/${_sessionId}/audio`;
-    const videoPath = `/api/v1/playback/${_sessionId}/video`;
-    const audioUrl = `${ENGINE}${audioPath}?raw=1`;
-    const videoUrl = `${ENGINE}${videoPath}?raw=1`;
-
-    // Start the audio pipe
-    const audioResponse = await fetch(audioUrl, { signal: ctrl.signal });
-    if (!audioResponse.ok) {
-        throw new Error(`Audio stream failed: ${await audioResponse.text()}`);
-    }
-    pipeToSourceBuffer(audioSb, mkAudio, audioUrl, audioPipeCtrl.signal, audioMs, _durationSec, performance.now()).catch(e => {
-        if (!audioPipeCtrl.signal.aborted) console.error('[AML MSE] Audio pipe error:', e);
-    });
-
-    // Start the video pipe
-    const videoResponse = await fetch(videoUrl, { signal: ctrl.signal });
-    if (!videoResponse.ok) {
-        throw new Error(`Video stream failed: ${await videoResponse.text()}`);
-    }
-    pipeToSourceBuffer(videoSb, videoElement, videoUrl, videoPipeCtrl.signal, videoMs, _durationSec, performance.now()).catch(e => {
-        if (!videoPipeCtrl.signal.aborted) console.error('[AML MSE] Video pipe error:', e);
-    });
-
-    // Show the video element when it's ready to play
-    videoElement.addEventListener('canplay', () => {
-        if (!ctrl.signal.aborted) {
-            videoElement.style.display = '';
-        }
-    }, { once: true });
-
-    // Synchronize video and audio: when audio seeks or changes playback state, update video accordingly
-    const syncVideo = () => {
-        if (!ctrl.signal.aborted) {
-            videoElement.currentTime = mkAudio.currentTime;
-            if (mkAudio.paused) {
-                videoElement.pause();
-            } else {
-                videoElement.play();
-            }
-        }
-    };
-    mkAudio.addEventListener('seeked', syncVideo);
-    mkAudio.addEventListener('play', syncVideo);
-    mkAudio.addEventListener('pause', syncVideo);
-
-    // Also, when the video ends, pause the audio (and vice versa)
-    const onEnded = () => {
-        if (!ctrl.signal.aborted) {
-            mkAudio.pause();
-            videoElement.pause();
-        }
-    };
-    mkAudio.addEventListener('ended', onEnded);
-    videoElement.addEventListener('ended', onEnded);
-
-    // Handle duration changes
-    const updateDuration = () => {
-        if (!ctrl.signal.aborted) {
-            if (!isNaN(mkAudio.duration) && mkAudio.duration > 0) {
-                try { audioMs.duration = mkAudio.duration; } catch (_) {}
-            }
-            if (!isNaN(videoElement.duration) && videoElement.duration > 0) {
-                try { videoMs.duration = videoElement.duration; } catch (_) {}
-            }
-        }
-    };
-    mkAudio.addEventListener('durationchange', updateDuration);
-    videoElement.addEventListener('durationchange', updateDuration);
-
-    // We'll also update the duration periodically in case it changes
-    const durationInterval = setInterval(updateDuration, 1000);
-
-    // Cleanup function
-    const cleanup = () => {
-        clearInterval(durationInterval);
-        audioPipeCtrl.abort();
-        videoPipeCtrl.abort();
-        // Remove event listeners
-        mkAudio.removeEventListener('seeked', syncVideo);
-        mkAudio.removeEventListener('play', syncVideo);
-        mkAudio.removeEventListener('pause', syncVideo);
-        mkAudio.removeEventListener('ended', onEnded);
-        mkAudio.removeEventListener('durationchange', updateDuration);
-        videoElement.removeEventListener('ended', onEnded);
-        videoElement.removeEventListener('durationchange', updateDuration);
-        // Revoke object URLs
-        URL.revokeObjectURL(mkAudio.src);
-        URL.revokeObjectURL(videoElement.src);
-        // Remove video element from DOM
-        if (videoElement.parentNode) {
-            videoElement.parentNode.removeChild(videoElement);
-        }
-        // Close MediaSources
-        if (audioMs.readyState === 'open') audioMs.close();
-        if (videoMs.readyState === 'open') videoMs.close();
-    };
-
-    // Attach cleanup to the abort signal
-    ctrl.signal.addEventListener('abort', cleanup, { once: true });
-
-    // Show quality badge (optional)
-    showQualityBadge(null);
-}
+// startMVPipeline is defined at module scope below startVLCPoll
 
         // --- End of extracted pipeline functions ---
 
 
 
-        if (item.type === 'music-videos') {
+        if (item.type === 'music-videos' || item.type === 'musicVideo') {
         await startMVPipeline();
         return;
         } else if (sess.codec === 'aac') {
@@ -1020,11 +2156,10 @@ async function startMVPipeline() {
         }
             }
             const prevPos = _vlcPosMs;
-            // VLC counts elapsed time from the start of the current HTTP stream,
-            // not absolute PTS. Add _vlcSeekOffsetMs (set at seek UNFREEZE) so the
-            // displayed position stays anchored to the song timeline after seeks.
-            // Guard posMs > 0: VLC returns -1/0 briefly before first decode.
-            if (!_vlcSeekFrozen && posMs > 0) _vlcPosMs = _vlcSeekOffsetMs + posMs;
+            // VLC reports absolute fMP4 tfdt timestamps, so posMs is already the
+            // correct song-timeline position. Guard posMs > 0: VLC returns -1/0
+            // briefly before first decode; keep the snapped seek position during that window.
+            if (!_vlcSeekFrozen && posMs > 0) _vlcPosMs = posMs;
             if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event('timeupdate'));
             // Update MPRIS position every ~1s (every 4 ticks × 250ms).
             if (++_tickCount % 4 === 0) {
@@ -1221,10 +2356,10 @@ async function handleTrackChange(mk) {
                 storefront: sf,
                 capabilities: {
                     lossless: _engineCaps.lossless,
-                    video: false,
                     atmos:    false,
-                    video:    (item.type === 'music-videos'),
+                    video:    (item.type === 'music-videos' || item.type === 'musicVideo'),
                 },
+                mvMaxHeight:    _mvMaxHeight,
                 token:          mk.developerToken ?? '',
                 mediaUserToken: getMUT(),
             }),
@@ -1235,16 +2370,25 @@ async function handleTrackChange(mk) {
 
         if (myGen !== _generation) { deleteSession(sess.sessionId); return; }
 
-        _sessionId   = sess.sessionId;
-        _durationSec = (sess.durationMs ?? 0) / 1000;
+        _sessionId      = sess.sessionId;
+        _durationSec    = (sess.durationMs ?? 0) / 1000;
+        _videoCodec     = sess.capabilities?.videoCodec || null;
+        _mvVideoHeights = sess.videoHeights ?? [];
         console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now()-t0)/1000).toFixed(2)}s`);
 
-        showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth);
-
-        if (!mkAudio) throw new Error('MK audio element not found');
+        showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
 
         _abortCtrl = new AbortController();
         const ctrl = _abortCtrl;
+
+        // Music video: route to MV pipeline before mkAudio check (MV creates its own audio)
+        if (sess.capabilities?.video) {
+            bridgeDuration(mk, _durationSec);
+            await startMVPipeline();
+            return;
+        }
+
+        if (!mkAudio) throw new Error('MK audio element not found');
 
         bridgeDuration(mk, _durationSec);
 
@@ -1579,7 +2723,7 @@ async function setup() {
         if (!window.amlBridge?.mprisUpdate || !item) return;
         const a = item.attributes ?? {};
         const artTemplate = a.artwork?.url ?? '';
-        const artUrl = artTemplate.replace('{w}', '500').replace('{h}', '500');
+        const artUrl = artTemplate.replace('{w}', '1000').replace('{h}', '1000');
         window.amlBridge.mprisUpdate({
             metadata: {
                 'mpris:trackid': mprisTrackId(item),

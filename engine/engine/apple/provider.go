@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -187,7 +188,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 
 func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) (*media.Session, error) {
 	if req.MVMaxHeight == 0 {
-		req.MVMaxHeight = 2160
+		req.MVMaxHeight = 1080 // default: 1080p H.264 (safe for Linux/Electron)
 	}
 	if len(req.MVAudioPriorities) == 0 {
 		req.MVAudioPriorities = []string{"audio-atmos", "audio-ac3", "audio-stereo-256"}
@@ -222,7 +223,7 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 		return nil, fmt.Errorf("open MV master playlist: %w", err)
 	}
 
-	videoURL, err := master.SelectVideoVariant(req.MVMaxHeight)
+	videoURL, videoCodecs, err := master.SelectVideoVariantWithCodec(req.MVMaxHeight)
 	if err != nil {
 		return nil, fmt.Errorf("select video variant: %w", err)
 	}
@@ -244,11 +245,13 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 			DurationMs: a.DurationInMillis,
 			ArtworkURL: fmtArtwork(a.Artwork.URL, 500),
 		},
+		VideoHeights: master.VideoHeights(),
 		Tracks: []media.Track{
 			{
-				Kind:  pipeline.KindVideo,
-				Codec: pipeline.CodecH264,
-				Open:  makeAuthTrackOpener(lp, assetID, token, mut, videoURL, pipeline.KindVideo, pipeline.CodecH264),
+				Kind:        pipeline.KindVideo,
+				Codec:       pipeline.CodecH264,
+				CodecString: videoCodecs,
+				Open:        makeAuthSeekableTrackOpener(lp, assetID, token, mut, videoURL, pipeline.KindVideo, pipeline.CodecH264),
 			},
 			{
 				Kind:  pipeline.KindAudio,
@@ -306,8 +309,10 @@ func makeSeekableTrackOpenerWithAuth(
 		}
 		var dec pipeline.Decryptor
 		if med.Encryption == nil {
+			log.Printf("[apple] %s %s: enc=nil → passthrough (no content-level encryption detected)", kind, playlistURL)
 			dec = fairplay.PassthroughDecryptor()
 		} else {
+			log.Printf("[apple] %s %s: enc detected prefix=%q → acquiring licence", kind, playlistURL, med.Encryption.URIPrefix)
 			dec, err = lp.Open(ctx, fairplay.LicenseRequest{
 				AssetID:        assetID,
 				KIDBase64:      med.Encryption.KIDBase64,
