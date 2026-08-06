@@ -91,16 +91,17 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 	}
 
 	sess := &Session{
-		ID:         newID(),
-		AssetID:    req.AssetID,
-		Storefront: req.Storefront,
-		Type:       ms.Kind,
-		Title:      ms.Metadata.Title,
-		ArtistName: ms.Metadata.ArtistName,
-		AlbumName:  ms.Metadata.AlbumName,
-		DurationMs: ms.Metadata.DurationMs,
-		ArtworkURL: ms.Metadata.ArtworkURL,
-		ExpiresIn:  int(sessionTTL.Seconds()),
+		ID:           newID(),
+		AssetID:      req.AssetID,
+		Storefront:   req.Storefront,
+		Type:         ms.Kind,
+		Title:        ms.Metadata.Title,
+		ArtistName:   ms.Metadata.ArtistName,
+		AlbumName:    ms.Metadata.AlbumName,
+		DurationMs:   ms.Metadata.DurationMs,
+		ArtworkURL:   ms.Metadata.ArtworkURL,
+		VideoHeights: ms.VideoHeights,
+		ExpiresIn:    int(sessionTTL.Seconds()),
 	}
 	sess.Capabilities.Lyrics = ms.Metadata.HasLyrics
 	sess.Streams.Audio = "/api/v1/playback/" + sess.ID + "/audio"
@@ -124,10 +125,12 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 				sess.Codec = string(track.Codec)
 				sess.SampleRate = track.SampleRate
 				sess.BitDepth = track.BitDepth
+				sess.SpatialAudio = track.SpatialAudio
 			}
 			_, sess.Capabilities.Seekable = stream.Source.(pipeline.SeekableSource)
 		case pipeline.KindVideo:
 			sess.Capabilities.Video = true
+			sess.Capabilities.VideoCodec = track.CodecString
 			sess.Streams.Video = "/api/v1/playback/" + sess.ID + "/video"
 		}
 	}

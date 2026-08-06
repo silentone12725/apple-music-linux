@@ -44,6 +44,7 @@ import (
 	"net/http"
 	httppprof "net/http/pprof"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -82,6 +83,7 @@ type PlaybackRequest struct {
 		Video    bool `json:"video"`
 		Atmos    bool `json:"atmos"`
 	} `json:"capabilities"`
+	MVMaxHeight int `json:"mvMaxHeight"` // 0 = auto (defaults to 1080 in provider)
 }
 
 // StreamInfo describes one available stream quality returned by GET /metadata.
@@ -462,6 +464,14 @@ func NewAPIServer(port int) *APIServer {
 	}, export.DefaultWorkers)
 
 	mux := http.NewServeMux()
+
+	// Bundled fonts — served from fonts/ next to the engine binary so the
+	// webview can load SF Pro via @font-face without depending on system fonts.
+	if exe, err := os.Executable(); err == nil {
+		fontsDir := filepath.Join(filepath.Dir(exe), "fonts")
+		mux.Handle("/fonts/", http.StripPrefix("/fonts/", http.FileServer(http.Dir(fontsDir))))
+	}
+
 	mux.HandleFunc("GET /api/v1/status", cors(s.handleStatus))
 	mux.HandleFunc("GET /api/v1/capabilities", cors(s.handleCapabilities))
 	mux.HandleFunc("GET /api/v1/events", cors(s.handleEvents))
@@ -955,14 +965,15 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 	if sess == nil {
 		var err error
 		sess, err = s.pm.Open(r.Context(), playback.OpenRequest{
-			AssetID:    req.AssetID,
-			Storefront: sf,
-			Token:      token,
-			MUT:        mut,
-			Lossless:   req.Capabilities.Lossless,
-			Video:      req.Capabilities.Video,
-			Atmos:      req.Capabilities.Atmos,
-			Language:   Config.Language,
+			AssetID:     req.AssetID,
+			Storefront:  sf,
+			Token:       token,
+			MUT:         mut,
+			Lossless:    req.Capabilities.Lossless,
+			Video:       req.Capabilities.Video,
+			Atmos:       req.Capabilities.Atmos,
+			Language:    Config.Language,
+			MVMaxHeight: req.MVMaxHeight,
 		})
 		if err != nil {
 			http.Error(w, "playback resolution failed: "+err.Error(), http.StatusInternalServerError)
@@ -1002,8 +1013,23 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Disk cache: pre-download the full track so the response has
-	// Accept-Ranges: bytes and VLC can seek natively without a URL reload.
-	if seekSec == 0 && s.diskCache != nil {
+	// Accept-Ranges: bytes and VLC can seek natively via libvlc_media_player_set_time.
+	// Serve cached files for all requests (including ?t= seeks) so VLC always reads
+	// from local disk rather than re-downloading from the CDN on every seek.
+	// INTERCEPT: wrap writer for MV sessions to count/log bytes sent to browser.
+	if sess.Type == "mv" {
+		cw := &countingWriter{w: w}
+		log.Printf("[INTERCEPT] MV audio stream START id=%s codec=%s", id, sess.Codec)
+		streamMedia(w, r, func(dst io.Writer) error {
+			return s.pm.Stream(r.Context(), id, pipeline.KindAudio, cw)
+		}, "audio/mp4")
+		log.Printf("[INTERCEPT] MV audio stream END id=%s totalBytes=%d", id, cw.n)
+		return
+	}
+
+	// MV sessions stream audio direct to MSE — skip disk cache to avoid
+	// colliding with same-AssetID song cache entries.
+	if s.diskCache != nil && sess.Type != "mv" {
 		qualifier := sess.Codec
 		if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
 			defer f.Close()
@@ -1066,9 +1092,66 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "no video stream in this session", http.StatusNotFound)
 		return
 	}
+	var seekSec float64
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
+		seekSec = v
+	}
+	srcFn := func(w io.Writer) error {
+		if seekSec > 0 {
+			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, w)
+			return err
+		}
+		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, w)
+	}
 	streamMedia(w, r, func(dst io.Writer) error {
-		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
+		return transcodeVideoForMSE(r.Context(), srcFn, dst)
 	}, "video/mp4")
+}
+
+// transcodeVideoForMSE remuxes the Apple CDN fMP4 through FFmpeg with -c:v copy:
+// strips the audio track, re-fragments for MSE (frag_keyframe+empty_moov+default_base_moof),
+// and normalises the container without re-encoding. Near-zero CPU overhead.
+// Falls back to direct pass-through if FFmpeg is not in PATH.
+func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io.Writer) error {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		log.Printf("[video] ffmpeg not found, streaming raw fMP4 (CHUNK_DEMUXER errors possible)")
+		return src(dst)
+	}
+	pr, pw := io.Pipe()
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-loglevel", "error",
+		"-i", "pipe:0",
+		"-c:v", "libx264",
+		"-profile:v", "main",
+		"-level:v", "4.0",
+		"-x264-params", "bframes=0:keyint=24:min-keyint=24:scenecut=0",
+		"-pix_fmt", "yuv420p",
+		"-an",
+		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
+		"-f", "mp4",
+		"pipe:1",
+	)
+	cmd.Stdin = pr
+	cmd.Stdout = dst
+
+	srcErrCh := make(chan error, 1)
+	go func() {
+		err := src(pw)
+		pw.CloseWithError(err)
+		srcErrCh <- err
+	}()
+
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("ffmpeg video remux: %w", err)
+	}
+	srcErr := <-srcErrCh
+	if srcErr != nil && ctx.Err() == nil {
+		return fmt.Errorf("video source: %w", srcErr)
+	}
+	return nil
 }
 
 // streamMedia runs fn into a firstByteWriter so that:
@@ -1122,6 +1205,18 @@ func (b *firstByteWriter) Write(p []byte) (int, error) {
 			f.Flush()
 		}
 	}
+	return n, err
+}
+
+// countingWriter wraps an io.Writer and counts total bytes written.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
 	return n, err
 }
 
@@ -1762,21 +1857,11 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := s.vlcPlayer.Seek(req.PosMs); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	actualStartMs := req.PosMs
-	if req.SessionID != "" {
-		if actual, ok := s.pm.GetSeekStart(req.SessionID, pipeline.KindAudio, float64(req.PosMs)/1000.0); ok {
-			actualStartMs = int64(actual * 1000)
-		}
-	}
-	// Fast-forward past the HLS segment boundary gap.
-	if offsetMs := req.PosMs - actualStartMs; offsetMs > 200 {
-		s.vlcPlayer.SetTime(offsetMs)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"actualStartMs": actualStartMs})
+	// Use native libvlc set_time to seek within the disk-cached full-track file.
+	// This avoids a full CDN re-download on every seek (the old URL-reload approach).
+	// The cached file is served with Accept-Ranges so VLC can byte-range seek.
+	s.vlcPlayer.SetTime(req.PosMs)
+	writeJSON(w, http.StatusOK, map[string]any{"actualStartMs": req.PosMs})
 }
 
 func (s *APIServer) handleVLCVolume(w http.ResponseWriter, r *http.Request) {

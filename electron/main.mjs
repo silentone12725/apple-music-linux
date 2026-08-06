@@ -38,7 +38,13 @@ app.commandLine.appendSwitch('enable-features',
 // AudioServiceOutOfProcess: keep audio in-process so PulseAudio stream identity
 // matches the desktop name we set.
 app.commandLine.appendSwitch('disable-features',
-    'ExplicitSync,MediaSessionService,AudioServiceOutOfProcess');
+    'ExplicitSync,MediaSessionService,AudioServiceOutOfProcess,' +
+    // Chrome 138 Linux regression: VA-API hardware decoder falls back mid-stream to
+    // FFmpegVideoDecoder for H.264 High/Main profile, causing a decode pipeline
+    // discontinuity that MSE surfaces as CHUNK_DEMUXER_ERROR_APPEND_FAILED.
+    // Disabling the VA-API decoder path forces a consistent software decode from the
+    // start, eliminating the non-deterministic fallback race.
+    'VaapiVideoDecoder,VaapiVideoEncoder');
 app.setDesktopName('apple-music-linux.desktop');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 // Music player: allow audio.play() without a live user gesture. Without this,

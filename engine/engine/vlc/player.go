@@ -123,13 +123,21 @@ func (p *Player) Seek(posMs int64) error {
 	return p.Load(seekURL)
 }
 
-// SetTime fast-forwards within the currently playing stream to offsetMs
-// milliseconds from the stream start. Used after a seek to skip past the gap
-// between the HLS segment boundary (actualStart) and the requested position.
-// Polls until VLC is playing before applying, so it is safe to call immediately
-// after Load.
-func (p *Player) SetTime(offsetMs int64) {
-	if offsetMs <= 0 {
+// SetTime seeks within the currently loaded media to posMs milliseconds.
+// If VLC is already playing the call is synchronous (instant disk-cache seek).
+// If VLC is still opening (e.g. right after Load), it polls up to 5 s for the
+// playing state before applying — so it is safe to call immediately after Load.
+func (p *Player) SetTime(posMs int64) {
+	if posMs < 0 {
+		return
+	}
+	p.mu.Lock()
+	state := C.libvlc_media_player_get_state(p.mp)
+	p.mu.Unlock()
+	if state == C.libvlc_Playing || state == C.libvlc_Paused {
+		p.mu.Lock()
+		C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
+		p.mu.Unlock()
 		return
 	}
 	go func() {
@@ -139,9 +147,9 @@ func (p *Player) SetTime(offsetMs int64) {
 			p.mu.Lock()
 			state := C.libvlc_media_player_get_state(p.mp)
 			p.mu.Unlock()
-			if state == C.libvlc_Playing {
+			if state == C.libvlc_Playing || state == C.libvlc_Paused {
 				p.mu.Lock()
-				C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(offsetMs))
+				C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
 				p.mu.Unlock()
 				return
 			}

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	"encoding/hex"
@@ -108,6 +109,35 @@ func patchFragTfdt(frag *mp4.Fragment, accumulatedTfdt, timescale uint64) uint64
 
 	accumulatedTfdt += fragDurationTicks(frag)
 	return accumulatedTfdt
+}
+
+// shiftFragTfdt shifts an existing tfdt box by subtracting t0 (the first
+// fragment's original BaseMediaDecodeTime), so the stream starts at t=0 while
+// preserving the correct relative timing between all fragments. This is the
+// right approach for encrypted fMP4 streams (MV audio) that already carry
+// valid Apple-provided tfdt values — unlike the accumulated fragDurationTicks
+// approach, which breaks when trun per-sample durations are not standard AAC
+// frame size (e.g. MV audio FRAG#1–16 have per-sample dur=1 instead of ~33k).
+func shiftFragTfdt(frag *mp4.Fragment, t0 int64) {
+	if frag.Moof == nil || frag.Moof.Traf == nil {
+		return
+	}
+	if frag.Moof.Traf.Tfhd != nil {
+		frag.Moof.Traf.Tfhd.TrackID = 1
+		if frag.Moof.Traf.Tfhd.HasSampleDescriptionIndex() {
+			frag.Moof.Traf.Tfhd.SampleDescriptionIndex = 1
+		}
+	}
+	if frag.Moof.Traf.Tfdt == nil {
+		return
+	}
+	orig := int64(frag.Moof.Traf.Tfdt.BaseMediaDecodeTime())
+	shifted := orig - t0
+	if shifted < 0 {
+		shifted = 0
+	}
+	frag.Moof.Traf.Tfdt.SetBaseMediaDecodeTime(uint64(shifted))
+	frag.Moof.Traf.Tfdt.Version = 1
 }
 
 // readInitSegment reads boxes from r until it finds a moov box, returning a
@@ -202,23 +232,64 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		return fmt.Errorf("init segment: %w", err)
 	}
 
+	// INTERCEPT stage 1: analyse init segment — sample entry types and enca presence.
+	{
+		sinfInfo := "no-tracks"
+		if init.Moov != nil {
+			trackInfos := []string{}
+			for _, trak := range init.Moov.Traks {
+				hdlr := "?"
+				if trak.Mdia != nil && trak.Mdia.Hdlr != nil {
+					hdlr = trak.Mdia.Hdlr.HandlerType
+				}
+				entries := []string{}
+				if trak.Mdia != nil && trak.Mdia.Minf != nil &&
+					trak.Mdia.Minf.Stbl != nil && trak.Mdia.Minf.Stbl.Stsd != nil {
+					for _, c := range trak.Mdia.Minf.Stbl.Stsd.Children {
+						entries = append(entries, c.Type())
+					}
+				}
+				trackInfos = append(trackInfos, fmt.Sprintf("%s[%s]", hdlr, strings.Join(entries, ",")))
+			}
+			sinfInfo = strings.Join(trackInfos, " ")
+		}
+		log.Printf("[INTERCEPT] INIT stsd-entries: %s  key=%x", sinfInfo, key[:min(8, len(key))])
+	}
+
 	decryptInfo, err := mp4.DecryptInit(init)
 	if err != nil {
 		return fmt.Errorf("decrypt init: %w", err)
 	}
+
+	// INTERCEPT stage 2: what did DecryptInit find?
+	{
+		infos := []string{}
+		for _, ti := range decryptInfo.TrackInfos {
+			if ti.Sinf == nil {
+				infos = append(infos, fmt.Sprintf("track%d:sinf=nil(CLEAR-INIT→no-decrypt)", ti.TrackID))
+			} else {
+				scheme := "?"
+				if ti.Sinf.Schm != nil {
+					scheme = ti.Sinf.Schm.SchemeType
+				}
+				infos = append(infos, fmt.Sprintf("track%d:scheme=%s", ti.TrackID, scheme))
+			}
+		}
+		if len(infos) == 0 {
+			infos = []string{"NO-TRACKS-IN-DECRYPT-INFO"}
+		}
+		log.Printf("[INTERCEPT] DecryptInit result: %s", strings.Join(infos, " "))
+	}
+
 	if err := init.Encode(w); err != nil {
 		return fmt.Errorf("write init: %w", err)
 	}
 
-	// Patch tfdt to be monotonically increasing (same fix as ALAC).
-	// Always start timestamps at 0 for from-start streams.
-	// Apple Music HLS segments (including MVs) may carry non-zero absolute
-	// decode timestamps (e.g. 10 s), which would prevent MSE currentTime=0
-	// from finding data in the SourceBuffer. The seek path seeds its own
-	// timestamp from ActualStart (set by the pipeline before this call), so
-	// it is not affected.
-	timescale := audioTimescale(init)
-	var accumulatedTfdt uint64
+	var (
+		tfdtT0          int64
+		tfdtInitialized bool
+		fragNum         int
+	)
 
 	for {
 		if ctx.Err() != nil {
@@ -227,23 +298,66 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		frag, err := readNextFragment(br, &offset)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				log.Printf("[INTERCEPT] stream done after %d fragments", fragNum)
 				return nil
 			}
 			return fmt.Errorf("read fragment: %w", err)
 		}
+		fragNum++
 
-		accumulatedTfdt = patchFragTfdt(frag, accumulatedTfdt, timescale)
+		// INTERCEPT stage 3: per-fragment analysis before decrypt.
+		hasSenc := frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Senc != nil
+		sampleCount := 0
+		if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Trun != nil {
+			sampleCount = int(frag.Moof.Traf.Trun.SampleCount())
+		}
+		mdatSize := 0
+		if frag.Mdat != nil {
+			mdatSize = int(frag.Mdat.Size())
+		}
+		origTfdt := int64(0)
+		if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Tfdt != nil {
+			origTfdt = int64(frag.Moof.Traf.Tfdt.BaseMediaDecodeTime())
+		}
+		if !tfdtInitialized {
+			tfdtT0 = origTfdt
+			tfdtInitialized = true
+		}
+		log.Printf("[INTERCEPT] FRAG#%d hasSenc=%v samples=%d mdat=%dB origTfdt=%d shifted=%d",
+			fragNum, hasSenc, sampleCount, mdatSize, origTfdt, origTfdt-tfdtT0)
+
+		shiftFragTfdt(frag, tfdtT0)
 
 		decErr := mp4.DecryptFragment(frag, decryptInfo, key)
 		if decErr != nil && !isNoSencBox(decErr) {
+			log.Printf("[INTERCEPT] FRAG#%d DECRYPT ERROR: %v", fragNum, decErr)
 			return fmt.Errorf("decrypt fragment: %w", decErr)
 		}
-		// "no senc box in traf" → unencrypted fragment, pass through as-is.
+
+		// INTERCEPT stage 4: result of decrypt attempt.
+		if isNoSencBox(decErr) {
+			log.Printf("[INTERCEPT] FRAG#%d → CLEAR (no senc, passthrough)", fragNum)
+		} else {
+			// Check if senc box is STILL present after decrypt (means Sinf was nil → decrypt skipped).
+			sencAfter := frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Senc != nil
+			if sencAfter {
+				log.Printf("[INTERCEPT] FRAG#%d → DECRYPT SKIPPED (sinf=nil), senc STILL PRESENT — browser cannot decode!", fragNum)
+			} else {
+				log.Printf("[INTERCEPT] FRAG#%d → decrypted OK, senc removed", fragNum)
+			}
+		}
 
 		if err := frag.Encode(w); err != nil {
 			return fmt.Errorf("write fragment: %w", err)
 		}
 	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // PassthroughStreaming reads an fMP4 stream, strips the PSSH box from the init
@@ -339,8 +453,9 @@ func StreamMvData(ctx context.Context, keyAndUrls string, w io.Writer) error {
 	}
 	urlList := strings.Split(parts[1], ";")
 
-	// pipe: download goroutine writes assembled encrypted bytes →
-	//       DecryptMP4Streaming reads and decrypts them fragment by fragment.
+	log.Printf("[INTERCEPT] StreamMvData: key=%x (%d bytes) urls=%d scheme=%s",
+		keyBytes, len(keyBytes), len(urlList), keyParts[0])
+
 	pr, pw := io.Pipe()
 
 	go func() {
