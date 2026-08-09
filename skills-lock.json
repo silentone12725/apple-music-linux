@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "electron-scaffold": {
+      "source": "chrisvoncsefalvay/claude-skills",
+      "sourceType": "github",
+      "skillPath": "electron-scaffold/SKILL.md",
+      "computedHash": "3e9d436fa84d0b1d990f42a99290ac76009007524fb9e19fed113781db16a8e0"
+    }
+  }
+}
