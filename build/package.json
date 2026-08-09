@@ -1,0 +1,86 @@
+{
+  "name": "apple-music-linux",
+  "version": "1.0.0",
+  "description": "Apple Music desktop client for Linux",
+  "main": "main.mjs",
+  "type": "module",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "mpris-service": "^2.1.2",
+    "node-pty": "^1.1.0",
+    "x11": "^2.3.0"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true,
+    "esbuild@0.28.1": true,
+    "abstract-socket@2.1.1": true
+  },
+  "scripts": {
+    "dist": "electron-builder --linux AppImage",
+    "dir": "electron-builder --linux dir"
+  },
+  "desktopName": "apple-music-linux.desktop",
+  "devDependencies": {
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
+    "playwright-core": "^1.61.1"
+  },
+  "build": {
+    "appId": "com.apple.android.music",
+    "productName": "Apple Music",
+    "copyright": "Apple Inc.",
+    "files": [
+      "**/*",
+      "!node_modules/.bin",
+      "!**/*.map",
+      "!test-*.html",
+      "!dist/resources/engine",
+      "!dist/resources/drm",
+      "!dist/resources/vlc",
+      "!node_modules/node-pty/prebuilds/win32*",
+      "!node_modules/node-pty/prebuilds/darwin*",
+      "!node_modules/node-pty/deps",
+      "!node_modules/@xterm/xterm/src",
+      "!node_modules/@xterm/addon-fit/src",
+      "!node_modules/**/*.ts",
+      "!node_modules/**/*.ts.map"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/resources/engine",
+        "to": "engine"
+      },
+      {
+        "from": "dist/resources/drm",
+        "to": "drm"
+      },
+      {
+        "from": "../drm/rootfs",
+        "to": "rootfs",
+        "filter": [
+          "system/**",
+          "etc/**"
+        ]
+      },
+      {
+        "from": "dist/resources/vlc",
+        "to": "vlc"
+      },
+      {
+        "from": "../tray-icon.png",
+        "to": "tray-icon.png"
+      }
+    ],
+    "linux": {
+      "target": "AppImage",
+      "icon": "icon.png",
+      "category": "AudioVideo",
+      "description": "Apple Music desktop client for Linux",
+      "executableName": "apple-music-linux",
+      "artifactName": "apple-music-linux.AppImage",
+      "syncDesktopName": true
+    }
+  }
+}
