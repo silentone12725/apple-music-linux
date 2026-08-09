@@ -63,6 +63,30 @@ for plat in win32-x64 win32-arm64 darwin-x64 darwin-arm64; do
     rm -rf "$UNPACKED/resources/app.asar.unpacked/node_modules/node-pty/prebuilds/$plat" 2>/dev/null || true
 done
 
+# Strip debug instrumentation from app.asar:
+#   - installAudioCapture IIFE (allocates 64MB capture buffer, runs unconditionally)
+#   - __amlCaptureChunk call site in the MV audio pipeline
+ASAR_BIN="$REPO/build/node_modules/.bin/asar"
+ASAR_PATH="$UNPACKED/resources/app.asar"
+ASAR_STAGE="$STAGE/asar-stage"
+
+"$ASAR_BIN" e "$ASAR_PATH" "$ASAR_STAGE"
+
+node -e "
+const fs = require('fs');
+const bundle = process.argv[1];
+let src = fs.readFileSync(bundle, 'utf8');
+const before = src.length;
+src = src.replace(/\(function installAudioCapture\(\) \{[\s\S]*?\}\)\(\);\n?/, '');
+src = src.replace(/[ \t]*window\.__amlCaptureChunk\?\.\([^)]+\);\n?/, '');
+fs.writeFileSync(bundle, src);
+const removed = before - src.length;
+console.log('  debug strip: -' + removed + ' bytes' + (removed === 0 ? ' (already clean)' : ''));
+" "$ASAR_STAGE/engine-bundle.js"
+
+"$ASAR_BIN" p "$ASAR_STAGE" "$ASAR_PATH" --unpack "*.node"
+rm -rf "$ASAR_STAGE"
+
 # ── 5. Pack SFX ───────────────────────────────────────────────────────────────
 echo "[5/5] Compressing (zstd -19 --long=31, ~2 min)..."
 
