@@ -23,6 +23,7 @@ type Player struct {
 	mp      *C.libvlc_media_player_t
 	lastURL string
 	volume  int // 0-200; default 100
+	loadGen int // incremented on each Load; goroutines compare to detect staleness
 }
 
 // New creates a libvlc instance and media player.
@@ -56,6 +57,8 @@ func (p *Player) Load(url string) error {
 
 	C.libvlc_media_player_set_media(p.mp, media)
 	p.lastURL = url
+	p.loadGen++
+	myGen := p.loadGen
 	vol := p.volume
 	if ret := C.libvlc_media_player_play(p.mp); ret != 0 {
 		return fmt.Errorf("vlc: play failed (ret %d)", int(ret))
@@ -64,35 +67,44 @@ func (p *Player) Load(url string) error {
 	// WirePlumber applies its stored per-app stream volume asynchronously after
 	// VLC opens the audio device, overriding the libvlc software volume above.
 	// Re-apply after VLC reaches playing state so our value lands last.
-	go p.reapplyVolumeOnPlay(vol)
+	go p.reapplyVolumeOnPlay(vol, myGen)
 	return nil
 }
 
 // reapplyVolumeOnPlay waits until VLC enters playing state then sets the
 // libvlc software volume and resets any WirePlumber stream mute via wpctl.
-func (p *Player) reapplyVolumeOnPlay(vol int) {
-	// Wait for VLC to reach Playing state.
-	deadline := time.Now().Add(5 * time.Second)
+func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
+	// Wait for VLC to reach Playing state. Bail out immediately if a newer
+	// Load() call has fired (myGen no longer matches p.loadGen).
+	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 		p.mu.Lock()
 		state := C.libvlc_media_player_get_state(p.mp)
+		gen := p.loadGen
 		p.mu.Unlock()
+		if gen != myGen {
+			return // stale — new track loaded
+		}
 		if state == C.libvlc_Playing {
 			break
 		}
 	}
 
-	// Re-apply libvlc software volume then hammer wpctl for ~2s.
-	// WirePlumber applies its stored vol=0 asynchronously after VLC opens the
-	// audio device — sometimes hundreds of milliseconds after play() returns.
-	// A single set-volume call races against that; repeated calls win.
+	// Re-apply libvlc software volume then apply wpctl correction.
+	// WirePlumber applies vol=0 asynchronously after VLC opens the audio
+	// device; repeated calls ensure our value lands last.
 	p.mu.Lock()
+	if p.loadGen != myGen { p.mu.Unlock(); return }
 	C.libvlc_audio_set_volume(p.mp, C.int(vol))
 	p.mu.Unlock()
 
 	const wpctlCmd = `id=$(wpctl status 2>/dev/null | grep -i "vlc" | awk '{print $1}' | tr -d '.' | grep -E '^[0-9]+$' | head -1); [ -n "$id" ] && wpctl set-mute "$id" 0 && wpctl set-volume "$id" 1.0`
 	for range 8 {
+		p.mu.Lock()
+		stale := p.loadGen != myGen
+		p.mu.Unlock()
+		if stale { return }
 		exec.Command("sh", "-c", wpctlCmd).Run() //nolint:errcheck
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -140,13 +152,17 @@ func (p *Player) SetTime(posMs int64) {
 		p.mu.Unlock()
 		return
 	}
+	myGen := p.loadGen
 	go func() {
-		deadline := time.Now().Add(5 * time.Second)
+		// 10s deadline — throttled CPUs take longer to open the HLS stream
+		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
 			p.mu.Lock()
 			state := C.libvlc_media_player_get_state(p.mp)
+			gen := p.loadGen
 			p.mu.Unlock()
+			if gen != myGen { return } // track changed — drop seek
 			if state == C.libvlc_Playing || state == C.libvlc_Paused {
 				p.mu.Lock()
 				C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))

@@ -27,6 +27,7 @@ import (
 	"engine/engine/media"
 	"engine/engine/pipeline"
 	"engine/utils/ampapi"
+	"engine/utils/runv3"
 )
 
 // webplaybackClient is used for all Apple webplayback API calls.
@@ -223,10 +224,11 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 		return nil, fmt.Errorf("open MV master playlist: %w", err)
 	}
 
-	videoURL, videoCodecs, err := master.SelectVideoVariantWithCodec(req.MVMaxHeight)
+	videoURL, videoCodecs, videoResolution, err := master.SelectVideoVariantWithCodec(req.MVMaxHeight)
 	if err != nil {
 		return nil, fmt.Errorf("select video variant: %w", err)
 	}
+	runv3.SetMVCacheQualityLabel(videoResolution)
 	audioURL, err := master.SelectAudioVariant(req.MVAudioPriorities)
 	if err != nil {
 		return nil, fmt.Errorf("select audio variant: %w", err)
@@ -324,8 +326,14 @@ func makeSeekableTrackOpenerWithAuth(
 				return nil, fmt.Errorf("acquire licence: %w", err)
 			}
 		}
+		var src pipeline.SeekableSource
+		if kind == pipeline.KindVideo {
+			src = fairplay.HLSMVVideoSource(med) // uses separate MV cache
+		} else {
+			src = fairplay.HLSSeekableSource(med)
+		}
 		return &pipeline.Stream{
-			Source: fairplay.HLSSeekableSource(med),
+			Source: src,
 			Stages: []pipeline.Stage{pipeline.DecryptStage(dec)},
 			Kind:   kind,
 			Codec:  codec,

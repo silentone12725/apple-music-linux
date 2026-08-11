@@ -106,6 +106,20 @@ func TagFile(path string, meta TrackMeta, opts TagOptions) error {
 // fetchArtworkPicture downloads the artwork at urlTemplate (with size applied)
 // and returns an MP4Picture ready to embed via mp4tag.
 func fetchArtworkPicture(urlTemplate string, size int) (*mp4tag.MP4Picture, error) {
+	data, ct, err := downloadArtworkBytes(urlTemplate, size)
+	if err != nil {
+		return nil, err
+	}
+	imgType := mp4tag.ImageTypeJPEG
+	if ct == "image/png" {
+		imgType = mp4tag.ImageTypePNG
+	}
+	return &mp4tag.MP4Picture{Format: imgType, Data: data}, nil
+}
+
+// downloadArtworkBytes fetches raw artwork bytes and returns (data, contentType, error).
+// Used by both fetchArtworkPicture (mp4 tagging) and FLAC conversion (ffmpeg input).
+func downloadArtworkBytes(urlTemplate string, size int) ([]byte, string, error) {
 	if size <= 0 {
 		size = 3000
 	}
@@ -116,29 +130,21 @@ func fetchArtworkPicture(urlTemplate string, size int) (*mp4tag.MP4Picture, erro
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("artwork HTTP %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("artwork HTTP %d", resp.StatusCode)
 	}
-
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-
-	imgType := mp4tag.ImageTypeJPEG
-	switch resp.Header.Get("Content-Type") {
-	case "image/png":
-		imgType = mp4tag.ImageTypePNG
-	}
-
-	return &mp4tag.MP4Picture{Format: imgType, Data: data}, nil
+	return data, resp.Header.Get("Content-Type"), nil
 }
 
 // artworkURL formats an Apple CDN artwork URL template by substituting

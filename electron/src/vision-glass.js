@@ -11,14 +11,41 @@
 // ── Show-when-ready signal ────────────────────────────────────────────────────
 (function detectUIReady() {
     if (typeof window.amlReady !== 'function') return;
-    const fire = () => window.amlReady();
-    const check = () => {
-        const nav = document.querySelector('nav.navigation');
-        if (nav && nav.children.length > 0) { fire(); return true; }
-        return false;
+    if (window._amlReadyFired) return;
+
+    // Poll the engine's DRM status until FairPlay (or Widevine) reports ready.
+    // Returns true as soon as either is ready, false after exhausting retries.
+    const waitForDRM = async (maxMs = 10000) => {
+        const engine = window._amlEngineURL || 'http://127.0.0.1:9823';
+        const deadline = Date.now() + maxMs;
+        while (Date.now() < deadline) {
+            try {
+                const d = await fetch(`${engine}/api/v1/drm/status`).then(r => r.json());
+                const s = d?.state ?? d ?? {};
+                if (s.fairplay === 'ready' || s.widevine === 'ready') return true;
+            } catch { /* engine not up yet — keep polling */ }
+            await new Promise(r => setTimeout(r, 400));
+        }
+        return false; // timed out — let the 12 s main-process fallback handle it
     };
-    if (check()) return;
-    const obs = new MutationObserver(() => { if (check()) obs.disconnect(); });
+
+    const fire = async () => {
+        if (window._amlReadyFired) return;
+        await waitForDRM(10000);
+        if (window._amlReadyFired) return;
+        window._amlReadyFired = true;
+        window.amlReady();
+    };
+
+    const checkPage = () => {
+        const nav = document.querySelector('nav.navigation');
+        if (!nav || nav.children.length === 0) return false;
+        // Also wait for the player bar — confirms MusicKit has initialised
+        return !!document.querySelector('.web-chrome-playback-lcd, .player-lcd, [data-testid="lcd-metadata"]');
+    };
+
+    if (checkPage()) { fire(); return; }
+    const obs = new MutationObserver(() => { if (checkPage()) { obs.disconnect(); fire(); } });
     obs.observe(document.documentElement, { childList: true, subtree: true });
     setTimeout(() => { obs.disconnect(); fire(); }, 10000);
 })();
@@ -72,40 +99,167 @@ sheet.replaceSync(`
   }
 
 
-  /* ── Footer + iTunes Store CTA removal ── */
-  footer[data-testid="footer"], footer.footer--full-width { display: none !important; }
-  button[aria-label*="iTunes Store"],
-  button:has([data-testid="cta-button-arrow-icon"]) { display: none !important; }
+  /* ── Vignette removal — content-scope-bar has a dark solid + gradient that shows as black bar when inactive ── */
+  [class*="content-scope-bar"] { background: transparent !important; }
 
-  /* ── Vignette / upsell removal ── */
-  body::before, body::after { display: none !important; }
-  /* Only hide page-level background overlays, not card gradients */
-  [class*="PageBackground"] [class*="gradient"],
-  [class*="page-background"] [class*="gradient"],
-  [class*="page-gradient"],
-  [class*="app-header"] > [class*="background"] { display: none !important; }
-  [class*="upsell"], [class*="commerce-message"],
-  [class*="subscribe-banner"] { display: none !important; }
+  /* ── Footer removal ── */
+  footer, [class*="footer-wrapper"] { display: none !important; }
 
-  /* ── Search bar glass ── */
-  [role="search"], header [class*="search"] {
-    background: rgba(255,255,255,0.10) !important;
-    backdrop-filter: blur(20px) saturate(1.6) !important;
-    -webkit-backdrop-filter: blur(20px) saturate(1.6) !important;
-    border: 1px solid rgba(255,255,255,0.15) !important;
-    border-radius: 12px !important;
+  /* ── Player bar clearance — pad scrollable page so content never hides under the 54px bar ── */
+  [class*="scrollable-page"] { padding-bottom: 72px !important; }
+
+  /* ── Songs library column header bar — glass-themed instead of solid dark ── */
+  [class*="library-track--header"] {
+    background: rgba(255,255,255,0.05) !important;
+    backdrop-filter: blur(20px) saturate(1.8) !important;
+    -webkit-backdrop-filter: blur(20px) saturate(1.8) !important;
+    border-bottom: 0.5px solid rgba(255,255,255,0.10) !important;
+    color: rgba(255,255,255,0.45) !important;
+  }
+  [class*="library-track--header"] * {
+    color: rgba(255,255,255,0.45) !important;
+    font-size: 11px !important;
+    letter-spacing: 0.04em !important;
+    text-transform: uppercase !important;
   }
 
-  /* Search results dropdown / overlay */
-  [class*="search-results"], [class*="SearchResults"],
-  [role="listbox"][class*="search"], [class*="suggestions"],
-  [class*="search"] [role="listbox"],
-  [data-testid*="search"] ul, [class*="search-overlay"] {
-    background: rgba(20, 20, 22, 0.75) !important;
-    backdrop-filter: blur(40px) saturate(1.8) !important;
-    -webkit-backdrop-filter: blur(40px) saturate(1.8) !important;
-    border: 1px solid rgba(255,255,255,0.10) !important;
+  /* ── Strip alternating row zebra striping in virtual lists ── */
+  [class*="row-zebra-striping"] [class*="virtual-row"],
+  [class*="songs-list__item--alternate"],
+  [class*="songs-list__item--odd"],
+  [class*="songs-list__item--even"] { background: transparent !important; }
+
+  /* Stats injected into headings element by JS (initTracklistStatsInHeader).
+     No grid-template-areas override — Apple's native two-column desktop layout
+     is preserved; stats flows as a block after the subtitle inside headings. */
+  #aml-tracklist-stats {
+    display: block;
+    font-size: 13px;
+    color: rgba(255,255,255,0.52);
+    margin: 4px 0 0;
+    padding: 0;
+    letter-spacing: 0.01em;
+  }
+
+
+  /* ── Library scope bar — glass pill container + selected chip ──
+     Selectors use 3 attribute chains (specificity 0,3,0) to beat Apple's
+     Svelte-scoped 2-class rules (0,2,0) even with equal !important weight. */
+  [class*="pill-container"] {
+    background: rgba(255,255,255,0.08) !important;
+    backdrop-filter: blur(20px) saturate(1.8) !important;
+    -webkit-backdrop-filter: blur(20px) saturate(1.8) !important;
+    border: 0.5px solid rgba(255,255,255,0.12) !important;
+    border-radius: 9999px !important;
+    padding: 3px !important;
+  }
+  [class*="pill-container"] [class*="pill-option"] {
+    position: relative !important;
+    border-radius: 9999px !important;
+    transition: background 0.18s ease !important;
+  }
+  /* White glass pill overlay via ::before — unaffected by Apple's background rules */
+  [class*="pill-container"] [class*="pill-option--selected"]::before {
+    content: '' !important;
+    display: block !important;
+    position: absolute !important;
+    inset: 0 !important;
+    border-radius: 9999px !important;
+    background: rgba(255,255,255,0.13) !important;
+    backdrop-filter: blur(12px) !important;
+    -webkit-backdrop-filter: blur(12px) !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12), inset 0 0 0 0.5px rgba(255,255,255,0.18) !important;
+    pointer-events: none !important;
+    z-index: 0 !important;
+  }
+  /* Keep label text above the overlay */
+  [class*="pill-container"] [class*="pill-option"] [class*="pill-label"] {
+    position: relative !important;
+    z-index: 1 !important;
+  }
+  [class*="pill-container"] [class*="pill-option"] [class*="pill-label"] {
+    color: rgba(255,255,255,0.45) !important;
+    transition: color 0.15s !important;
+  }
+  [class*="pill-container"] [class*="pill-option--selected"] [class*="pill-label"] {
+    color: rgba(255,255,255,0.95) !important;
+    font-weight: 600 !important;
+  }
+
+  /* ── Accessory button select (Playlist Type, Sort dropdowns) — strip dark background ──
+     Apple: .select.svelte-XXXX = specificity 0,2,0. Use 3 attr selectors (0,3,0) to win. */
+  [class*="accessory-button"] [class*="select"][class*="svelte"],
+  [class*="accessory-button"] [class*="select-text"][class*="svelte"],
+  [class*="accessory-button"] [class*="select-chevron"][class*="svelte"] {
+    background: transparent !important;
+    background-color: transparent !important;
+  }
+
+  /* ── Sidebar scrollbar fix ──
+     Apple sets scrollbar-width:thin on the nav container, which suppresses
+     ::-webkit-scrollbar pseudo-elements entirely in Chrome 121+. Force auto
+     to restore webkit control, then apply custom styles. */
+  [class*="navigation__scrollable"][class*="svelte"] { scrollbar-width: auto !important; }
+  [class*="navigation__scrollable"]::-webkit-scrollbar       { width: 3px !important; }
+  [class*="navigation__scrollable"]::-webkit-scrollbar-track { background: transparent !important; box-shadow: none !important; }
+  [class*="navigation__scrollable"]::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.28) !important; border-radius: 9999px !important; border: none !important; }
+  [class*="navigation__scrollable"]::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.55) !important; }
+  [class*="navigation__scrollable"]:hover::-webkit-scrollbar { width: 7px !important; }
+
+  /* ── Account button — strip pill, keep context menu ──
+     Apple: .account-menu.svelte-XXXX.account-menu--expanded = 3 classes (0,3,0).
+     Ancestor + 2 self attr selectors = (0,3,0); adoptedStyleSheets wins the cascade tie. */
+  [class*="navigation"] [class*="account-menu"][class*="svelte"] {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+  }
+  [class*="navigation"] [class*="account-menu"][class*="svelte"]:hover {
+    background: rgba(255,255,255,0.08) !important;
+    border-radius: 8px !important;
+  }
+
+  /* ── Search bar glass ──
+     JS portal (initSearchSuggestionsPortal in engine-playback.js) moves
+     .search-suggestions to <body> when Svelte mounts it, so the wrapper's
+     compositing layer no longer traps the dropdown's backdrop-filter.
+     Both can now blur independently and always-on. */
+  [class*="search-input-wrapper"] {
+    background: rgba(255,255,255,0.11) !important;
+    backdrop-filter: blur(24px) saturate(1.8) !important;
+    -webkit-backdrop-filter: blur(24px) saturate(1.8) !important;
+    border: 0.5px solid rgba(255,255,255,0.18) !important;
+    border-radius: 9999px !important;
+    box-shadow: none !important;
+  }
+  /* Strip the inner input's own background so it doesn't double-layer */
+  [class*="search-input__text-field"],
+  [id="search-input__text-field"] {
+    background: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+
+/* ── Search suggestions dropdown glass ──
+     Dark tint + blur matches the player bar look: blurred wallpaper shows through.
+     Apple uses .search-suggestions.svelte-XXXX (specificity 0,2,0).
+     Chain two attribute selectors to match; adoptedStyleSheets wins cascade ties. */
+  [class*="search-suggestions"][class*="svelte"] {
+    background: rgba(14,14,18,0.55) !important;
+    backdrop-filter: blur(32px) saturate(1.8) brightness(0.92) !important;
+    -webkit-backdrop-filter: blur(32px) saturate(1.8) brightness(0.92) !important;
+    border: 0.5px solid rgba(255,255,255,0.10) !important;
     border-radius: 12px !important;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.35) !important;
+  }
+  /* Search hint icons — SVGs inside hint rows are black by default; make them white */
+  [class*="search-suggestions"] [class*="search-hint"] > svg,
+  [class*="search-suggestions"] [class*="search-hint"] > svg path {
+    fill: rgba(255,255,255,0.5) !important;
   }
 
   /* ── iOS/iPadOS-style back + forward navigation buttons (sidebar header row) ── */
@@ -177,6 +331,34 @@ sheet.replaceSync(`
   /* Blur-over-blur note: terminal has no backdrop-filter — sidebar blur
      remains active at all times since they never overlap (sidebar=left,
      terminal=right). No :has() override needed. */
+
+  /* ── Page-wide glass scrollbars — border-mask expansion technique ──
+     The channel is fixed at 14px. A thick transparent border acts as a mask,
+     shrinking the visible pill to ~6px at rest. On hover the border thins to 2px,
+     expanding the pill to ~10px. border-width IS transitioable on webkit thumbs
+     in Chromium, giving a smooth grow animation without animating width itself.
+     display is never set so Apple's display:none rules on internal elements hold. */
+  *::-webkit-scrollbar {
+    width: 14px;
+    height: 14px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(255,255,255,0.22);
+    border-radius: 9999px;
+    border: 4px solid transparent;
+    background-clip: padding-box;
+    transition: background-color 0.2s ease, border-width 0.2s ease;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255,255,255,0.50);
+    border-width: 2px;
+  }
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 `);
 document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
 

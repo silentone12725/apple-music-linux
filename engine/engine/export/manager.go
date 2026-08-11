@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"engine/engine/pipeline"
@@ -21,9 +22,6 @@ import (
 )
 
 const (
-	// DefaultWorkers is the number of concurrent export jobs.
-	DefaultWorkers = 2
-
 	// defaultArtworkSize is the square pixel dimension requested from Apple CDN.
 	defaultArtworkSize = 3000
 )
@@ -32,7 +30,7 @@ const (
 // implementation that forwards them to SSE clients.
 type EventSink func(ev ExportEvent)
 
-// Manager enqueues and executes export jobs using a bounded worker pool.
+// Manager enqueues and executes export jobs one at a time in FIFO order.
 // It is safe for concurrent use.
 type Manager struct {
 	mu       sync.RWMutex
@@ -41,6 +39,7 @@ type Manager struct {
 	queue    chan *workItem
 	sink     EventSink
 	manager  *playback.Manager
+	seq      atomic.Int64 // monotonically increasing enqueue counter
 }
 
 type workItem struct {
@@ -50,21 +49,17 @@ type workItem struct {
 }
 
 // NewManager creates an ExportManager that acquires media through pm and
-// notifies ev on each state transition.
-func NewManager(pm *playback.Manager, ev EventSink, workers int) *Manager {
-	if workers <= 0 {
-		workers = DefaultWorkers
-	}
+// notifies ev on each state transition. Jobs are processed one at a time
+// in the order they were enqueued.
+func NewManager(pm *playback.Manager, ev EventSink, _ int) *Manager {
 	m := &Manager{
 		jobs:     make(map[string]*ExportJob),
 		requests: make(map[string]ExportRequest),
-		queue:    make(chan *workItem, 64),
+		queue:    make(chan *workItem, 256),
 		sink:     ev,
 		manager:  pm,
 	}
-	for range workers {
-		go m.worker()
-	}
+	go m.worker()
 	return m
 }
 
@@ -91,12 +86,16 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 
 	jobCtx, cancel := context.WithCancel(context.Background())
 	job := &ExportJob{
-		ID:        newExportID(),
-		AssetID:   req.AssetID,
-		Phase:     PhaseQueued,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		cancel:    cancel,
+		ID:         newExportID(),
+		AssetID:    req.AssetID,
+		Phase:      PhaseQueued,
+		QueuePos:   m.seq.Add(1),
+		Title:      req.HintTitle,
+		ArtistName: req.HintArtist,
+		ArtworkURL: req.HintArtwork,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+		cancel:     cancel,
 	}
 
 	m.mu.Lock()
@@ -109,21 +108,35 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	return job, nil
 }
 
-// Get returns the current state of a job, or (nil, false) if unknown.
+// worker processes items from the queue one at a time in FIFO order.
+func (m *Manager) worker() {
+	for item := range m.queue {
+		m.execute(item)
+	}
+}
+
+// Get returns a snapshot of a job's current state, or (nil, false) if unknown.
+// Returns a copy so the caller can safely serialise it without holding the lock.
 func (m *Manager) Get(id string) (*ExportJob, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	j, ok := m.jobs[id]
-	return j, ok
+	if !ok {
+		return nil, false
+	}
+	cp := *j
+	return &cp, true
 }
 
-// List returns all known jobs.
+// List returns snapshots of all known jobs.
+// Returns copies so callers can safely serialise them without holding the lock.
 func (m *Manager) List() []*ExportJob {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]*ExportJob, 0, len(m.jobs))
 	for _, j := range m.jobs {
-		out = append(out, j)
+		cp := *j
+		out = append(out, &cp)
 	}
 	return out
 }
@@ -147,12 +160,16 @@ func (m *Manager) Retry(id string) (*ExportJob, bool) {
 	m.mu.RLock()
 	j, ok := m.jobs[id]
 	req, hasReq := m.requests[id]
+	var phase Phase
+	if j != nil {
+		phase = j.Phase
+	}
 	m.mu.RUnlock()
 
 	if !ok || !hasReq {
 		return nil, false
 	}
-	if j.Phase != PhaseFailed && j.Phase != PhaseCancelled {
+	if phase != PhaseFailed && phase != PhaseCancelled {
 		return nil, false
 	}
 	newJob, err := m.Enqueue(req)
@@ -160,13 +177,6 @@ func (m *Manager) Retry(id string) (*ExportJob, bool) {
 		return nil, false
 	}
 	return newJob, true
-}
-
-// worker processes items from the queue one at a time.
-func (m *Manager) worker() {
-	for item := range m.queue {
-		m.execute(item)
-	}
 }
 
 // execute runs one export job through the full pipeline.
@@ -193,16 +203,105 @@ func (m *Manager) execute(item *workItem) {
 		lang = "en-US"
 	}
 
-	song, err := ampapi.GetSongRespContext(ctx, sf, req.AssetID, lang, req.Token)
-	if err != nil || len(song.Data) == 0 {
-		m.fail(job, fmt.Errorf("song %s not found in %s: %w", req.AssetID, sf, err))
+	// ── Playlist expansion (before per-track resolution) ─────────────────
+	if req.Capabilities.Playlist {
+		pl, err := ampapi.GetPlaylistRespContext(ctx, sf, req.AssetID, lang, req.Token, req.MUT)
+		if err != nil || len(pl.Data) == 0 || len(pl.Data[0].Relationships.Tracks.Data) == 0 {
+			m.fail(job, fmt.Errorf("playlist %s: %w", req.AssetID, err))
+			return
+		}
+		for _, track := range pl.Data[0].Relationships.Tracks.Data {
+			if track.Type != "songs" && track.Type != "music-videos" {
+				continue
+			}
+			trackReq := req
+			trackReq.AssetID = track.ID
+			trackReq.Capabilities.Playlist = false
+			if track.Type == "music-videos" {
+				trackReq.Capabilities.Video = true
+			}
+			m.Enqueue(trackReq) //nolint:errcheck
+		}
+		m.mu.Lock()
+		delete(m.jobs, job.ID)
+		delete(m.requests, job.ID)
+		m.mu.Unlock()
 		return
 	}
-	a := song.Data[0].Attributes
 
-	genre := ""
-	if len(a.GenreNames) > 0 {
-		genre = a.GenreNames[0]
+	// Normalized track attributes — filled from song or music-video API below.
+	var (
+		trackName     string
+		artistName    string
+		albumName     string
+		artworkURL    string
+		genreStr      string
+		durationMs    int
+		isrc          string
+		trackNumber   int
+		discNumber    int
+		releaseDate   string
+		contentRating string
+		composerName  string
+		hasLyrics     bool
+		audioTraits   []string
+		isMastered    bool
+	)
+
+	if req.Capabilities.Video {
+		mv, err := ampapi.GetMusicVideoRespContext(ctx, sf, req.AssetID, lang, req.Token)
+		if err != nil || len(mv.Data) == 0 {
+			m.fail(job, fmt.Errorf("music video %s not found in %s: %w", req.AssetID, sf, err))
+			return
+		}
+		a := mv.Data[0].Attributes
+		trackName, artistName, albumName = a.Name, a.ArtistName, a.AlbumName
+		artworkURL = a.Artwork.URL
+		if len(a.GenreNames) > 0 {
+			genreStr = a.GenreNames[0]
+		}
+		durationMs, isrc = a.DurationInMillis, a.Isrc
+		trackNumber, discNumber = a.TrackNumber, a.DiscNumber
+		releaseDate, contentRating = a.ReleaseDate, a.ContentRating
+	} else {
+		song, err := ampapi.GetSongRespContext(ctx, sf, req.AssetID, lang, req.Token)
+		if err != nil || len(song.Data) == 0 {
+			// Try as an album/single — if it has tracks, expand to per-song jobs.
+			album, aerr := ampapi.GetAlbumRespContext(ctx, sf, req.AssetID, lang, req.Token)
+			if aerr == nil && len(album.Data) > 0 && len(album.Data[0].Relationships.Tracks.Data) > 0 {
+				for _, track := range album.Data[0].Relationships.Tracks.Data {
+					if track.Type != "songs" && track.Type != "music-videos" {
+						continue
+					}
+					trackReq := req
+					trackReq.AssetID = track.ID
+					if track.Type == "music-videos" {
+						trackReq.Capabilities.Video = true
+					}
+					m.Enqueue(trackReq) //nolint:errcheck
+				}
+				// Album expansion job is a routing artifact — remove it from the
+				// list so the UI only shows the per-track jobs.
+				m.mu.Lock()
+				delete(m.jobs, job.ID)
+				delete(m.requests, job.ID)
+				m.mu.Unlock()
+				return
+			}
+			m.fail(job, fmt.Errorf("song %s not found in %s: %w", req.AssetID, sf, err))
+			return
+		}
+		a := song.Data[0].Attributes
+		trackName, artistName, albumName = a.Name, a.ArtistName, a.AlbumName
+		artworkURL = a.Artwork.URL
+		if len(a.GenreNames) > 0 {
+			genreStr = a.GenreNames[0]
+		}
+		durationMs, isrc = a.DurationInMillis, a.Isrc
+		trackNumber, discNumber = a.TrackNumber, a.DiscNumber
+		releaseDate, contentRating = a.ReleaseDate, a.ContentRating
+		composerName, hasLyrics, audioTraits = a.ComposerName, a.HasLyrics, a.AudioTraits
+		isMastered = a.IsMasteredForItunes || a.IsAppleDigitalMaster
 	}
 
 	codec, ext := "aac", "m4a"
@@ -218,32 +317,74 @@ func (m *Manager) execute(item *workItem) {
 		ext = "flac"
 	}
 
+	m.mu.Lock()
+	job.Title = trackName
+	job.ArtistName = artistName
+	job.ArtworkURL = artworkURL
+	m.mu.Unlock()
+
 	meta := TrackMeta{
-		Title:         a.Name,
-		ArtistName:    a.ArtistName,
-		AlbumArtist:   a.ArtistName,
-		AlbumName:     a.AlbumName,
-		TrackNumber:   a.TrackNumber,
-		DiscNumber:    a.DiscNumber,
-		ReleaseDate:   a.ReleaseDate,
-		Genre:         genre,
-		Composer:      a.ComposerName,
-		Isrc:          a.Isrc,
-		ContentRating: a.ContentRating,
-		DurationMs:    a.DurationInMillis,
-		ArtworkURL:    a.Artwork.URL,
-		HasLyrics:     a.HasLyrics,
+		Title:         trackName,
+		ArtistName:    artistName,
+		AlbumArtist:   artistName,
+		AlbumName:     albumName,
+		TrackNumber:   trackNumber,
+		DiscNumber:    discNumber,
+		ReleaseDate:   releaseDate,
+		Genre:         genreStr,
+		Composer:      composerName,
+		Isrc:          isrc,
+		ContentRating: contentRating,
+		DurationMs:    durationMs,
+		ArtworkURL:    artworkURL,
+		HasLyrics:     hasLyrics,
+	}
+
+	// Derive {quality} from capabilities + audio traits
+	quality := "AAC"
+	switch {
+	case req.Capabilities.Video:
+		quality = "MV"
+	case req.Capabilities.Atmos:
+		quality = "Atmos"
+	case req.Capabilities.Lossless:
+		quality = "Lossless"
+		for _, t := range audioTraits {
+			if t == "hi-res-lossless" {
+				quality = "Hi-Res Lossless"
+				break
+			}
+		}
+	}
+
+	// Derive {tag} from ContentRating + Apple Digital Master flag.
+	// Empty choice string means the marker is disabled by the client.
+	tag := ""
+	switch contentRating {
+	case "explicit":
+		tag = req.Options.ExplicitChoice
+	case "clean":
+		tag = req.Options.CleanChoice
+	}
+	if isMastered {
+		tag += req.Options.MasterChoice
 	}
 
 	vars := templateVar{
-		Title:       a.Name,
-		Artist:      a.ArtistName,
-		AlbumArtist: a.ArtistName,
-		Album:       a.AlbumName,
-		TrackNumber: a.TrackNumber,
-		DiscNumber:  a.DiscNumber,
-		Year:        yearFromDate(a.ReleaseDate),
-		Genre:       genre,
+		Title:       trackName,
+		Artist:      artistName,
+		AlbumArtist: artistName,
+		Album:       albumName,
+		TrackNumber: trackNumber,
+		DiscNumber:  discNumber,
+		Year:        yearFromDate(releaseDate),
+		Genre:       genreStr,
+		Quality:     quality,
+		Tag:         tag,
+		ReleaseDate: releaseDate,
+		Isrc:        isrc,
+		SongID:      req.AssetID,
+		URLArtist:   slugify(artistName),
 		Codec:       codec,
 		Ext:         ext,
 	}
@@ -263,110 +404,207 @@ func (m *Manager) execute(item *workItem) {
 	m.advance(job, PhaseDownloading, 0)
 
 	sess, err := m.manager.Open(ctx, playback.OpenRequest{
-		AssetID:    req.AssetID,
-		Storefront: sf,
-		Token:      req.Token,
-		MUT:        req.MUT,
-		Language:   lang,
-		Lossless:   req.Capabilities.Lossless,
-		Atmos:      req.Capabilities.Atmos,
-		Video:      req.Capabilities.Video,
+		AssetID:     req.AssetID,
+		Storefront:  sf,
+		Token:       req.Token,
+		MUT:         req.MUT,
+		Language:    lang,
+		Lossless:    req.Capabilities.Lossless,
+		Atmos:       req.Capabilities.Atmos,
+		Video:       req.Capabilities.Video,
+		MVMaxHeight: req.MVMaxHeight,
 	})
 	if err != nil {
 		m.fail(job, fmt.Errorf("open session: %w", err))
 		return
 	}
-	defer m.manager.Release(sess.ID)
 
-	kind := pipeline.KindAudio
-	if req.Capabilities.Video {
-		kind = pipeline.KindVideo
-	}
-
-	// Buffer decrypted audio in memory; then write to a temp file for tagging.
-	// mp4tag.Open requires a seekable file path, so we cannot tag in-place
-	// from a streaming write.
-	var buf bytes.Buffer
-	if err := m.manager.Stream(ctx, sess.ID, kind, &buf); err != nil {
-		m.fail(job, fmt.Errorf("stream: %w", err))
-		return
-	}
-
-	// ── Phase 4: Write to disk (temp file) ───────────────────────────────
-	m.advance(job, PhaseTagging, 80)
+	// ── Phase 3a: Stream to buffer(s) ────────────────────────────────────
+	// Music videos need separate video + audio streams muxed together.
+	// Audio tracks use an in-memory buffer; video tracks write directly to
+	// temp files to avoid holding the full video in RAM.
 
 	if err := ensureDir(filepath.Dir(finalPath)); err != nil {
+		m.manager.Release(sess.ID)
 		m.fail(job, fmt.Errorf("mkdir %s: %w", filepath.Dir(finalPath), err))
 		return
 	}
 	tmpPath := finalPath + ".am-export.tmp"
-	if err := os.WriteFile(tmpPath, buf.Bytes(), 0o644); err != nil {
-		m.fail(job, fmt.Errorf("write temp: %w", err))
-		return
-	}
-	buf.Reset()
 
-	// ── Phase 5: Fetch lyrics if requested ───────────────────────────────
-	var lrcStr string
-	if req.Options.EmbedLyrics && a.HasLyrics {
-		lrcStr, _ = lyrics.GetContext(ctx,
-			sf, req.AssetID,
-			req.Options.LrcType, lang, req.Options.LrcFormat,
-			req.Token, req.MUT,
-		)
-	}
-
-	// ── Phase 6: Tag (metadata, artwork, lyrics) ──────────────────────────
-	if !req.Capabilities.Video {
-		if err := TagFile(tmpPath, meta, TagOptions{
-			EmbedArtwork: req.Options.EmbedArtwork,
-			ArtworkSize:  req.Options.ArtworkSize,
-			Lyrics:       lrcStr,
-		}); err != nil {
-			// Tagging failure is non-fatal: warn and continue.
-			fmt.Printf("export %s: tag warning: %v\n", req.AssetID, err)
-		}
-	}
-
-	// ── Phase 7: LRC sidecar ─────────────────────────────────────────────
-	if req.Options.SaveLrcSidecar && lrcStr != "" {
-		lrcExt := req.Options.LrcFormat
-		if lrcExt == "" {
-			lrcExt = "lrc"
-		}
-		lrcPath := strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + "." + lrcExt
-		_ = os.WriteFile(lrcPath, []byte(lrcStr), 0o644)
-	}
-
-	// ── Phase 8: Format conversion (optional) ────────────────────────────
-	if req.Options.ConvertToFLAC && req.Capabilities.Lossless {
-		flacTmp := tmpPath + ".flac"
-		if err := convertToFLAC(tmpPath, flacTmp, req.Options.FFmpegPath); err != nil {
-			fmt.Printf("export %s: flac conversion failed: %v — keeping .m4a\n", req.AssetID, err)
-			finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
-		} else {
-			if !req.Options.KeepOriginal {
-				os.Remove(tmpPath) //nolint:errcheck
-			}
-			tmpPath = flacTmp
-		}
-	}
-
-	// ── Phase 9: Move temp → final ────────────────────────────────────────
-	m.advance(job, PhaseMoving, 96)
-
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		// Cross-device move: fall back to copy+delete.
-		if err2 := copyFile(tmpPath, finalPath); err2 != nil {
-			os.Remove(tmpPath) //nolint:errcheck
-			m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err2))
+	if req.Capabilities.Video {
+		// Stream video track to disk.
+		videoTmp := tmpPath + ".video"
+		vf, err := os.Create(videoTmp)
+		if err != nil {
+			m.manager.Release(sess.ID)
+			m.fail(job, fmt.Errorf("create video tmp: %w", err))
 			return
 		}
-		os.Remove(tmpPath) //nolint:errcheck
+		vpw := &progressWriter{w: vf, mu: &m.mu, job: job}
+		if err := m.manager.Stream(ctx, sess.ID, pipeline.KindVideo, vpw); err != nil {
+			vf.Close()
+			os.Remove(videoTmp)
+			m.manager.Release(sess.ID)
+			m.fail(job, fmt.Errorf("stream video: %w", err))
+			return
+		}
+		vf.Close()
+
+		// Stream audio track to disk.
+		audioTmp := tmpPath + ".audio"
+		af, err := os.Create(audioTmp)
+		if err != nil {
+			os.Remove(videoTmp)
+			m.manager.Release(sess.ID)
+			m.fail(job, fmt.Errorf("create audio tmp: %w", err))
+			return
+		}
+		if err := m.manager.Stream(ctx, sess.ID, pipeline.KindAudio, af); err != nil {
+			af.Close()
+			os.Remove(videoTmp)
+			os.Remove(audioTmp)
+			m.manager.Release(sess.ID)
+			m.fail(job, fmt.Errorf("stream audio: %w", err))
+			return
+		}
+		af.Close()
+		m.manager.Release(sess.ID)
+
+		// ── Phase 4: Mux video + audio ────────────────────────────────────
+		// Mux happens in the post-process goroutine — release already done above.
+		ffPath := req.Options.FFmpegPath
+		if ffPath == "" {
+			ffPath = "ffmpeg"
+		}
+		if err := muxVideoAudio(ffPath, videoTmp, audioTmp, tmpPath); err != nil {
+			os.Remove(videoTmp)
+			os.Remove(audioTmp)
+			m.fail(job, fmt.Errorf("mux video+audio: %w (ffmpeg required)", err))
+			return
+		}
+		os.Remove(videoTmp)
+		os.Remove(audioTmp)
+	} else {
+		// Audio-only: buffer in memory then write once (allows mp4tag to tag it).
+		var buf bytes.Buffer
+		pw := &progressWriter{w: &buf, mu: &m.mu, job: job}
+		if err := m.manager.Stream(ctx, sess.ID, pipeline.KindAudio, pw); err != nil {
+			m.manager.Release(sess.ID)
+			m.fail(job, fmt.Errorf("stream: %w", err))
+			return
+		}
+		m.manager.Release(sess.ID) // release DRM session — next download can start now
+
+		if err := os.WriteFile(tmpPath, buf.Bytes(), 0o644); err != nil {
+			m.fail(job, fmt.Errorf("write temp: %w", err))
+			return
+		}
 	}
 
-	m.setOutput(job, finalPath)
-	m.advance(job, PhaseDone, 100)
+	// ── Phases 5–9: post-process in background ────────────────────────────
+	// Tagging/lyrics/move run concurrently with the next download.
+	// context.WithoutCancel so a UI cancel doesn't abort an already-written file.
+	ppCtx := context.WithoutCancel(ctx)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				m.fail(job, fmt.Errorf("post-process panic: %v", r))
+			}
+		}()
+		m.advance(job, PhaseTagging, 80)
+
+		// ── Phase 5: Fetch lyrics if requested ───────────────────────────
+		var lrcStr string
+		if req.Options.EmbedLyrics && hasLyrics {
+			lrcStr, _ = lyrics.GetContext(ppCtx,
+				sf, req.AssetID,
+				req.Options.LrcType, lang, req.Options.LrcFormat,
+				req.Token, req.MUT,
+			)
+		}
+
+		// ── Phase 6: Tag (metadata, artwork, lyrics) ──────────────────────
+		if !req.Capabilities.Video {
+			if err := TagFile(tmpPath, meta, TagOptions{
+				EmbedArtwork: req.Options.EmbedArtwork,
+				ArtworkSize:  req.Options.ArtworkSize,
+				Lyrics:       lrcStr,
+			}); err != nil {
+				fmt.Printf("export %s: tag warning: %v\n", req.AssetID, err)
+			}
+		}
+
+		// ── Phase 7: LRC sidecar ─────────────────────────────────────────
+		if req.Options.SaveLrcSidecar && lrcStr != "" {
+			lrcExt := req.Options.LrcFormat
+			if lrcExt == "" {
+				lrcExt = "lrc"
+			}
+			lrcPath := strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + "." + lrcExt
+			_ = os.WriteFile(lrcPath, []byte(lrcStr), 0o644)
+		}
+
+		// ── Phase 8: Format conversion (optional) ────────────────────────
+		if req.Options.ConvertToFLAC && req.Capabilities.Lossless {
+			flacTmp := tmpPath + ".flac"
+			artTmp := ""
+			if req.Options.EmbedArtwork && meta.ArtworkURL != "" {
+				if data, ct, aerr := downloadArtworkBytes(meta.ArtworkURL, req.Options.ArtworkSize); aerr == nil {
+					ext := "jpg"
+					if ct == "image/png" {
+						ext = "png"
+					}
+					artTmp = tmpPath + ".art." + ext
+					if werr := os.WriteFile(artTmp, data, 0o644); werr != nil {
+						artTmp = ""
+					}
+				}
+			}
+			if err := convertToFLAC(tmpPath, flacTmp, req.Options.FFmpegPath, artTmp); err != nil {
+				fmt.Printf("export %s: flac conversion failed: %v — keeping .m4a\n", req.AssetID, err)
+				finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
+			} else {
+				if !req.Options.KeepOriginal {
+					os.Remove(tmpPath) //nolint:errcheck
+				}
+				tmpPath = flacTmp
+			}
+			if artTmp != "" {
+				os.Remove(artTmp) //nolint:errcheck
+			}
+		}
+
+		// ── Phase 9: Move temp → final ────────────────────────────────────
+		m.advance(job, PhaseMoving, 96)
+		if err := os.Rename(tmpPath, finalPath); err != nil {
+			if err2 := copyFile(tmpPath, finalPath); err2 != nil {
+				os.Remove(tmpPath) //nolint:errcheck
+				m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err2))
+				return
+			}
+			os.Remove(tmpPath) //nolint:errcheck
+		}
+		m.setOutput(job, finalPath)
+		m.advance(job, PhaseDone, 100)
+	}()
+}
+
+// progressWriter wraps an io.Writer and updates job.BytesDone on each write
+// so the UI can show live byte counts during PhaseDownloading.
+type progressWriter struct {
+	w   io.Writer
+	mu  *sync.RWMutex
+	job *ExportJob
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n, err := pw.w.Write(p)
+	if n > 0 {
+		pw.mu.Lock()
+		pw.job.BytesDone += int64(n)
+		pw.mu.Unlock()
+	}
+	return n, err
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -438,14 +676,12 @@ func copyFile(src, dst string) error {
 }
 
 // convertToFLAC invokes ffmpeg to transcode src (ALAC .m4a) to dst (.flac).
-func convertToFLAC(src, dst, ffmpegPath string) error {
+// artPath is an optional cover image file path (see runFFmpeg).
+func convertToFLAC(src, dst, ffmpegPath, artPath string) error {
 	if ffmpegPath == "" {
 		ffmpegPath = "ffmpeg"
 	}
-	// ffmpeg is an external dependency; check it exists before starting.
-	// We construct the command but do not import os/exec directly here to keep
-	// the dependency explicit.  The actual invocation is in ffmpeg.go.
-	if err := runFFmpeg(ffmpegPath, src, dst); err != nil {
+	if err := runFFmpeg(ffmpegPath, src, artPath, dst); err != nil {
 		return fmt.Errorf("ffmpeg: %w", err)
 	}
 	return nil

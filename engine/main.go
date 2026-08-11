@@ -1092,7 +1092,14 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 	}
 	startIdx := len(AddedTracks)
 	// Kick off metadata prefetch for the first few tracks before the loop.
-	PrefetchAlbumMeta(context.Background(), album.Tracks, token, mediaUserToken)
+	PrefetchAlbumMeta(context.Background(), album.Tracks, token, mediaUserToken, MetaConfig{
+		UseSongInfoForPlaylist: Config.UseSongInfoForPlaylist,
+		EmbedLrc:              Config.EmbedLrc,
+		SaveLrcFile:           Config.SaveLrcFile,
+		LrcType:               Config.LrcType,
+		Language:              Config.Language,
+		LrcFormat:             Config.LrcFormat,
+	})
 
 	for i := range album.Tracks {
 		i++
@@ -1105,7 +1112,14 @@ func ripAlbum(albumId string, token string, storefront string, mediaUserToken st
 			// Rolling lookahead: prefetch metadata for tracks further ahead.
 			lookahead := i + schedLookahead
 			if lookahead <= len(album.Tracks) {
-				PrefetchMeta(context.Background(), &album.Tracks[lookahead-1], token, mediaUserToken)
+				PrefetchMeta(context.Background(), &album.Tracks[lookahead-1], token, mediaUserToken, MetaConfig{
+					UseSongInfoForPlaylist: Config.UseSongInfoForPlaylist,
+					EmbedLrc:              Config.EmbedLrc,
+					SaveLrcFile:           Config.SaveLrcFile,
+					LrcType:               Config.LrcType,
+					Language:              Config.Language,
+					LrcFormat:             Config.LrcFormat,
+				})
 			}
 			ripTrack(&album.Tracks[i-1], token, mediaUserToken)
 		}
@@ -1306,7 +1320,14 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 		selected = playlist.ShowSelect()
 	}
 	startIdx := len(AddedTracks)
-	PrefetchAlbumMeta(context.Background(), playlist.Tracks, token, mediaUserToken)
+	PrefetchAlbumMeta(context.Background(), playlist.Tracks, token, mediaUserToken, MetaConfig{
+		UseSongInfoForPlaylist: Config.UseSongInfoForPlaylist,
+		EmbedLrc:              Config.EmbedLrc,
+		SaveLrcFile:           Config.SaveLrcFile,
+		LrcType:               Config.LrcType,
+		Language:              Config.Language,
+		LrcFormat:             Config.LrcFormat,
+	})
 	for i := range playlist.Tracks {
 		i++
 		if isInArray(okDict[playlistId], i) {
@@ -1316,7 +1337,14 @@ func ripPlaylist(playlistId string, token string, storefront string, mediaUserTo
 		}
 		if isInArray(selected, i) {
 			if lookahead := i + schedLookahead; lookahead <= len(playlist.Tracks) {
-				PrefetchMeta(context.Background(), &playlist.Tracks[lookahead-1], token, mediaUserToken)
+				PrefetchMeta(context.Background(), &playlist.Tracks[lookahead-1], token, mediaUserToken, MetaConfig{
+					UseSongInfoForPlaylist: Config.UseSongInfoForPlaylist,
+					EmbedLrc:              Config.EmbedLrc,
+					SaveLrcFile:           Config.SaveLrcFile,
+					LrcType:               Config.LrcType,
+					Language:              Config.Language,
+					LrcFormat:             Config.LrcFormat,
+				})
 			}
 			ripTrack(&playlist.Tracks[i-1], token, mediaUserToken)
 		}
@@ -1490,7 +1518,15 @@ func main() {
 	pflag.Parse()
 	runv3.WarmCache()
 	if api_port > 0 {
-		srv := NewAPIServer(api_port)
+		srv := NewAPIServer(api_port, ServerConfig{
+			DRMBinaryPath:      Config.DRMBinaryPath,
+			DRMBaseDir:         Config.DRMBaseDir,
+			BackendPreferred:   Config.Backend.Preferred,
+			BackendFallback:    Config.Backend.Fallback,
+			UseEmbeddedBackend: Config.UseEmbeddedBackend,
+			DecryptM3u8Port:    Config.DecryptM3u8Port,
+			GetM3u8Port:        Config.GetM3u8Port,
+		})
 		if err := srv.Start(); err != nil {
 			fmt.Println("API server failed to start:", err)
 			os.Exit(1)

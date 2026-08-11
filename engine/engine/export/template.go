@@ -2,6 +2,7 @@ package export
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -22,6 +23,13 @@ type templateVar struct {
 	Genre       string
 	Codec       string // "alac" | "aac" | "atmos" | "mv"
 	Ext         string // "m4a" | "flac" | "mp4" — without leading dot
+	// Extended vars
+	Quality     string // "Lossless" | "Hi-Res Lossless" | "AAC" | "Atmos" | "MV"
+	Tag         string // "[E]", "[M]", "[E][M]", etc. — derived from ContentRating + ADM flag
+	ReleaseDate string // full "YYYY-MM-DD" from catalog
+	Isrc        string // ISRC code
+	SongID      string // Apple Music catalog ID
+	URLArtist   string // URL-safe artist name (lowercase, spaces→hyphens)
 }
 
 // yearFromDate parses the year from an Apple Music ReleaseDate string
@@ -89,6 +97,18 @@ func renderTemplate(t FilenameTemplate, v templateVar) string {
 			value = v.Codec
 		case "ext":
 			value = v.Ext
+		case "quality":
+			value = v.Quality
+		case "tag":
+			value = v.Tag
+		case "release_date", "releasedate":
+			value = v.ReleaseDate
+		case "isrc":
+			value = v.Isrc
+		case "id", "song_id":
+			value = v.SongID
+		case "url_artist", "urlartist":
+			value = v.URLArtist
 		default:
 			return m // unknown variable — leave as-is
 		}
@@ -101,6 +121,27 @@ func renderTemplate(t FilenameTemplate, v templateVar) string {
 		path = path + "." + v.Ext
 	}
 	return path
+}
+
+// slugify converts a string to a URL-safe lowercase slug (spaces → hyphens,
+// non-alphanumeric stripped).  Used for {url_artist}.
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ' || r == '_' || r == '.':
+			b.WriteByte('-')
+		}
+	}
+	// Collapse repeated hyphens and trim
+	result := b.String()
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
+	}
+	return strings.Trim(result, "-")
 }
 
 // sanitizePathComponent replaces characters that are forbidden in file or
@@ -124,18 +165,21 @@ func sanitizePathComponent(s string) string {
 	return strings.TrimFunc(s, unicode.IsSpace)
 }
 
-// defaultOutputDir returns a sensible default output directory under the user's
-// Music folder or home directory if Music is not available.
+// defaultOutputDir returns ~/Music/AML-Downloads, falling back through
+// $XDG_MUSIC_DIR/AML-Downloads and $HOME/Music/AML-Downloads.
 func defaultOutputDir() string {
-	// Try $XDG_MUSIC_DIR, ~/Music, home directory in that order.
-	if xdg := xdgMusicDir(); xdg != "" {
-		return xdg
+	base := xdgMusicDir()
+	if base == "" {
+		base = filepath.Join(homeDir(), "Music")
 	}
-	return filepath.Join(homeDir(), "Music")
+	return filepath.Join(base, "AML-Downloads")
 }
 
 func xdgMusicDir() string {
-	return "" // populated by platform-specific init or env var; stub for now
+	if v := os.Getenv("XDG_MUSIC_DIR"); v != "" {
+		return v
+	}
+	return ""
 }
 
 func homeDir() string {

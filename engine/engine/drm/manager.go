@@ -80,6 +80,7 @@ type DRMManager struct {
 
 	// crash restart state
 	crashCount int
+	restartMu  sync.Mutex // serialises concurrent handleCrash goroutines
 }
 
 // NewDRMManager creates a DRMManager with the given backend.
@@ -162,7 +163,11 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 	defer cancel()
 
 	if err := m.backend.Start(startCtx, m.cfg); err != nil {
-		return err
+		// A concurrent ensureRunning / handleCrash goroutine may have started
+		// the backend between our Running() check and this call — that is fine.
+		if !m.backend.Running() {
+			return err
+		}
 	}
 	// Session DB is present — reflect that immediately so the UI shows the
 	// correct state without waiting for a wrapper-emitted event.
@@ -297,40 +302,6 @@ func (m *DRMManager) watchEvents() {
 	for ev := range m.backend.Events() {
 		snap := ev.Snapshot
 
-		// Update process state.
-		if snap.State.Process != 0 {
-			m.mu.Lock()
-			m.snapshot.State.Process = snap.State.Process
-			m.mu.Unlock()
-		}
-		// Update FairPlay state.
-		if snap.State.FairPlay != 0 {
-			m.mu.Lock()
-			m.snapshot.State.FairPlay = snap.State.FairPlay
-			m.mu.Unlock()
-			if snap.State.FairPlay == FairPlayReady {
-				m.updateCapabilities()
-			}
-		}
-		// Update auth state.
-		if snap.State.Authentication != 0 {
-			m.mu.Lock()
-			m.snapshot.State.Authentication = snap.State.Authentication
-			m.mu.Unlock()
-		}
-		// Update recovery state.
-		if snap.State.Recovery != 0 {
-			m.mu.Lock()
-			m.snapshot.State.Recovery = snap.State.Recovery
-			m.mu.Unlock()
-		}
-		// Update session state.
-		if snap.State.Session != 0 {
-			m.mu.Lock()
-			m.snapshot.State.Session = snap.State.Session
-			m.mu.Unlock()
-		}
-
 		// Crash detection: process stopped unexpectedly → apply restart policy.
 		// Skip when IntentionalStop is set — the stop was planned (e.g. a
 		// credential-triggered relaunch inside ProcessBackend). Calling
@@ -339,11 +310,26 @@ func (m *DRMManager) watchEvents() {
 			go m.handleCrash()
 		}
 
+		// mergeAndEmit applies all non-zero fields atomically under one lock,
+		// avoiding partial-state reads between the five old per-field updates.
 		m.mergeAndEmit(snap)
+
+		if snap.State.FairPlay == FairPlayReady {
+			m.updateCapabilities()
+		}
 	}
 }
 
 func (m *DRMManager) handleCrash() {
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
+
+	// If a concurrent handleCrash goroutine already restarted the backend,
+	// or Authenticate() started a fresh one, there is nothing to do.
+	if m.backend.Running() {
+		return
+	}
+
 	m.mu.Lock()
 	count := m.crashCount
 	m.crashCount++

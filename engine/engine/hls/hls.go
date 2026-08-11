@@ -159,7 +159,7 @@ func (m *Master) SelectVideoVariant(maxHeight int) (string, error) {
 
 // SelectVideoVariantWithCodec is like SelectVideoVariant but also returns the
 // CODECS= attribute string from the chosen variant.
-func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs string, err error) {
+func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs, resolution string, err error) {
 	re := regexp.MustCompile(`_?(\d+)x(\d+)`)
 	sorted := make([]Variant, len(m.Variants))
 	copy(sorted, m.Variants)
@@ -200,15 +200,15 @@ func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs 
 			if h > 0 {
 				anyParseable = true
 				if h <= maxHeight {
-					return v.URL, v.Codecs, nil
+					return v.URL, v.Codecs, v.Resolution, nil
 				}
 			}
 		}
 		if !preferH264 && !anyParseable && len(sorted) > 0 {
-			return sorted[0].URL, sorted[0].Codecs, nil
+			return sorted[0].URL, sorted[0].Codecs, sorted[0].Resolution, nil
 		}
 	}
-	return "", "", fmt.Errorf("no video variant at or below %dp", maxHeight)
+	return "", "", "", fmt.Errorf("no video variant at or below %dp", maxHeight)
 }
 
 // SelectByCodec returns the URL of the highest-bandwidth variant whose Codecs

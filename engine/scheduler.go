@@ -35,10 +35,20 @@ var schedCache sync.Map
 // schedPool is a buffered channel acting as a semaphore to bound concurrency.
 var schedPool = make(chan struct{}, schedWorkers)
 
+// MetaConfig carries the per-fetch configuration for PrefetchMeta.
+type MetaConfig struct {
+	UseSongInfoForPlaylist bool
+	EmbedLrc              bool
+	SaveLrcFile           bool
+	LrcType               string
+	Language              string
+	LrcFormat             string
+}
+
 // PrefetchMeta starts a background metadata fetch for track if one has not
 // already been started.  ctx controls cancellation; if ctx is cancelled the
 // goroutine records the cancellation error and exits without blocking.
-func PrefetchMeta(ctx context.Context, track *task.Track, token, mediaUserToken string) {
+func PrefetchMeta(ctx context.Context, track *task.Track, token, mediaUserToken string, cfg MetaConfig) {
 	ch := make(chan schedResult, 1)
 	if _, loaded := schedCache.LoadOrStore(track.ID, ch); loaded {
 		return // already in flight or complete
@@ -56,18 +66,18 @@ func PrefetchMeta(ctx context.Context, track *task.Track, token, mediaUserToken 
 		res := schedResult{}
 
 		// Fetch album data for playlist tracks (needed for per-track tags).
-		if track.PreType == "playlists" && Config.UseSongInfoForPlaylist {
+		if track.PreType == "playlists" && cfg.UseSongInfoForPlaylist {
 			if ctx.Err() == nil {
 				track.GetAlbumDataContext(ctx, token)
 			}
 		}
 
 		// Fetch lyrics if any output format is enabled.
-		if (Config.EmbedLrc || Config.SaveLrcFile) && ctx.Err() == nil {
+		if (cfg.EmbedLrc || cfg.SaveLrcFile) && ctx.Err() == nil {
 			lrcStr, err := lyrics.GetContext(
 				ctx,
 				track.Storefront, track.ID,
-				Config.LrcType, Config.Language, Config.LrcFormat,
+				cfg.LrcType, cfg.Language, cfg.LrcFormat,
 				token, mediaUserToken,
 			)
 			res.lrc = lrcStr
@@ -90,12 +100,12 @@ func TakeMeta(trackID string) (schedResult, bool) {
 
 // PrefetchAlbumMeta starts prefetch goroutines for the first schedLookahead
 // tracks.  Call once per album/playlist before the download loop starts.
-func PrefetchAlbumMeta(ctx context.Context, tracks []task.Track, token, mediaUserToken string) {
+func PrefetchAlbumMeta(ctx context.Context, tracks []task.Track, token, mediaUserToken string, cfg MetaConfig) {
 	n := schedLookahead
 	if n > len(tracks) {
 		n = len(tracks)
 	}
 	for i := 0; i < n; i++ {
-		PrefetchMeta(ctx, &tracks[i], token, mediaUserToken)
+		PrefetchMeta(ctx, &tracks[i], token, mediaUserToken, cfg)
 	}
 }

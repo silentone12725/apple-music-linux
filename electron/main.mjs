@@ -337,16 +337,22 @@ function _injectBlurLayer(bwin, dataUrl) {
             document.body.prepend(tint);
             document.body.prepend(bg);
 
-            let _px = null, _py = null;
-            (function tick() {
-                const x = window.screenX, y = window.screenY;
-                if (x !== _px || y !== _py) {
-                    _px = x; _py = y;
-                    bg.style.backgroundSize     = window.screen.width  + 'px ' + window.screen.height + 'px';
-                    bg.style.backgroundPosition = (80 - x) + 'px ' + (80 - y) + 'px';
+            let _px = null, _py = null, _lastWPCheck = 0;
+            (function tick(ts) {
+                // Throttle window-position reads to ~10fps — pure position reads
+                // don't need compositor-frame precision and this saves main-thread
+                // budget on throttled/battery CPUs.
+                if (ts - _lastWPCheck > 100) {
+                    _lastWPCheck = ts;
+                    const x = window.screenX, y = window.screenY;
+                    if (x !== _px || y !== _py) {
+                        _px = x; _py = y;
+                        bg.style.backgroundSize     = window.screen.width  + 'px ' + window.screen.height + 'px';
+                        bg.style.backgroundPosition = (80 - x) + 'px ' + (80 - y) + 'px';
+                    }
                 }
                 requestAnimationFrame(tick);
-            })();
+            })(0);
         }
         bg.style.backgroundImage = 'url("' + safe + '")';
     })()`).catch(() => {});}
@@ -683,7 +689,7 @@ function createWindow() {
         clearTimeout(_bgTimer);
         _bgTimer = setTimeout(refreshBlurBg, 500);
     });
-    const showFallback = setTimeout(showWindow, 12000);
+    const showFallback = setTimeout(showWindow, 7000);
 
     ipcMain.once('app:ui-ready', () => {
         clearTimeout(showFallback);
@@ -779,7 +785,7 @@ function createWindow() {
 
         /* Menu panel — no backdrop-filter (causes 1s render stall on Linux) */
         div.contextual-menu {
-            background: rgba(30, 30, 32, 0.97) !important;
+            background: rgba(14, 14, 16, 0.98) !important;
             border-radius: 10px !important;
             border: 0.5px solid rgba(255, 255, 255, 0.12) !important;
             box-shadow: 0 8px 36px rgba(0,0,0,0.65), 0 2px 6px rgba(0,0,0,0.4) !important;
@@ -905,29 +911,36 @@ function createWindow() {
             opacity: 0.35 !important;
         }
 
-        /* Submenu: JS clamps position/height at runtime (page-context aware).
-           CSS only provides overflow containment and macOS scrollbar style. */
+        /* Submenu container: keep overflow visible so border-radius/shadow stay intact.
+           JS sets max-height on the inner list, not this element. */
         div.contextual-menu.contextual-menu--nested,
         div.contextual-menu.contextual-menu--in-submenu {
+            overflow: visible !important;
+        }
+
+        /* Submenu list: this is what actually scrolls. JS sets max-height at runtime. */
+        div.contextual-menu.contextual-menu--nested ul.contextual-menu__list,
+        div.contextual-menu.contextual-menu--in-submenu ul.contextual-menu__list {
+            overflow-y: auto !important;
             overflow-x: hidden !important;
             scrollbar-width: thin;
             scrollbar-color: rgba(255,255,255,0.28) transparent;
         }
-        div.contextual-menu.contextual-menu--nested::-webkit-scrollbar,
-        div.contextual-menu.contextual-menu--in-submenu::-webkit-scrollbar {
+        div.contextual-menu.contextual-menu--nested ul.contextual-menu__list::-webkit-scrollbar,
+        div.contextual-menu.contextual-menu--in-submenu ul.contextual-menu__list::-webkit-scrollbar {
             width: 5px;
         }
-        div.contextual-menu.contextual-menu--nested::-webkit-scrollbar-track,
-        div.contextual-menu.contextual-menu--in-submenu::-webkit-scrollbar-track {
+        div.contextual-menu.contextual-menu--nested ul.contextual-menu__list::-webkit-scrollbar-track,
+        div.contextual-menu.contextual-menu--in-submenu ul.contextual-menu__list::-webkit-scrollbar-track {
             background: transparent;
         }
-        div.contextual-menu.contextual-menu--nested::-webkit-scrollbar-thumb,
-        div.contextual-menu.contextual-menu--in-submenu::-webkit-scrollbar-thumb {
+        div.contextual-menu.contextual-menu--nested ul.contextual-menu__list::-webkit-scrollbar-thumb,
+        div.contextual-menu.contextual-menu--in-submenu ul.contextual-menu__list::-webkit-scrollbar-thumb {
             background: rgba(255,255,255,0.28);
             border-radius: 3px;
         }
-        div.contextual-menu.contextual-menu--nested::-webkit-scrollbar-thumb:hover,
-        div.contextual-menu.contextual-menu--in-submenu::-webkit-scrollbar-thumb:hover {
+        div.contextual-menu.contextual-menu--nested ul.contextual-menu__list::-webkit-scrollbar-thumb:hover,
+        div.contextual-menu.contextual-menu--in-submenu ul.contextual-menu__list::-webkit-scrollbar-thumb:hover {
             background: rgba(255,255,255,0.5);
         }
 
@@ -974,7 +987,7 @@ function createWindow() {
         }
         /* Expanded dropdown — same solid dark treatment as context menus */
         div.account-menu.account-menu--expanded {
-            background: rgba(30, 30, 32, 0.97) !important;
+            background: rgba(14, 14, 16, 0.98) !important;
             border-radius: 10px !important;
             border: 0.5px solid rgba(255, 255, 255, 0.12) !important;
             box-shadow: 0 8px 36px rgba(0,0,0,0.65), 0 2px 6px rgba(0,0,0,0.4) !important;
@@ -1120,7 +1133,9 @@ function createWindow() {
     });
 
     win.webContents.on('did-navigate', () => {
-        if (!win.isVisible()) win.show();
+        // Only show if the initial ready-signal already fired; don't interrupt the
+        // first-load sequence where the window stays hidden until content is loaded.
+        if (shown && !win.isVisible()) win.show();
     });
 
     // Hide on close instead of destroying — keeps the page alive in memory so
@@ -1213,6 +1228,13 @@ function applyPersistedViewSettings() {
 
 // ── IPC: prefs + view controls (used by settings panel) ─────────────────────
 ipcMain.handle('prefs:get', () => loadPrefs());
+ipcMain.handle('dialog:choose-download-dir', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+        title: 'Choose Download Folder',
+        properties: ['openDirectory', 'createDirectory'],
+    });
+    return { canceled, filePaths };
+});
 ipcMain.on('pref:set',        (_, k, v) => { const p = loadPrefs(); p[k] = v; savePrefs(p); });
 ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));
 ipcMain.on('view:glass-blur', (_, b) => { const p = loadPrefs(); applyGlassEffect(parseInt(b), p.glassOpacity ?? 0.07); });
@@ -1227,7 +1249,15 @@ ipcMain.on('view:nav-opacity', (_, v) => {
     const p = loadPrefs();
     p.themeNavBgAlpha = parseFloat(v);
     savePrefs(p);
-    if (p.themePalette) _applyThemeVars(p.themePalette);
+    const effectiveMode = (p.themeMode === 'blur' && !_isHyprland) ? 'accent' : (p.themeMode || (_isHyprland ? 'blur' : 'accent'));
+    if (effectiveMode === 'blur') {
+        // In blur mode, opacity controls the glass opacity CSS var directly
+        win?.webContents.executeJavaScript(
+            `document.documentElement.style.setProperty('--aml-glass-opacity','${parseFloat(v)}')`
+        ).catch(() => {});
+    } else if (p.themePalette) {
+        _applyThemeVars(p.themePalette);
+    }
 });
 
 // ── Theme IPC ────────────────────────────────────────────────────────────────
@@ -1322,14 +1352,14 @@ ipcMain.on('theme:delete-preset', (_, name) => {
 });
 
 const _builtinPresets = {
-    'Apple Music Pink': (appearance) => {
-        const p = _generatePalette('#fc3c44', appearance);
-        if (appearance !== 'light') {
-            p.navBg = '#1c1c1c';
-            p.navBorder = '#4f4f4f';
-        }
-        return p;
-    },
+    'Apple Music Pink': (_appearance) => ({
+        accent:       '#fc3c44',
+        appearance:   'dark',
+        bgColor:      '#000000',
+        navBg:        '#303030',
+        navBorder:    '#3b3b3b',
+        accentActive: 'hsla(358, 87%, 60%, 0.28)',
+    }),
 };
 
 ipcMain.on('theme:apply-preset', (_, name) => {
@@ -1600,22 +1630,37 @@ function createTray() {
     tray = new Tray(icon);
     tray.setToolTip('Apple Music');
 
+    const sendPlayback = (cmd) => win?.webContents.send('mpris:cmd', cmd);
+
     const buildTrayMenu = () => Menu.buildFromTemplate([
         {
-            label: win?.isVisible() ? 'Hide Apple Music' : 'Show Apple Music',
+            label: win?.isVisible() ? 'Show window' : 'Show window',
             click: () => {
                 if (!win) return;
-                if (win.isVisible() && win.isFocused()) { win.hide(); }
-                else { win.show(); win.focus(); }
+                win.show(); win.focus();
             },
         },
         { type: 'separator' },
         {
-            label: 'Quit',
-            click: () => {
-                isQuitting = true;
-                app.quit();
-            },
+            label: 'Play/Pause',
+            click: () => sendPlayback('playpause'),
+        },
+        {
+            label: 'Next',
+            click: () => sendPlayback('next'),
+        },
+        {
+            label: 'Previous',
+            click: () => sendPlayback('previous'),
+        },
+        { type: 'separator' },
+        {
+            label: 'Restart App',
+            click: () => { app.relaunch(); isQuitting = true; app.exit(0); },
+        },
+        {
+            label: 'Exit',
+            click: () => { isQuitting = true; app.quit(); },
         },
     ]);
 

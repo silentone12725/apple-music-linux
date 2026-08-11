@@ -20,6 +20,7 @@ import (
 
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -573,13 +574,18 @@ func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.W
 
 var mvHTTPClient = &http.Client{
 	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 		MaxIdleConns:          64,
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
 		DisableCompression:    true,
 		ForceAttemptHTTP2:     true,
 	},
-	Timeout: 60 * time.Second,
+	Timeout: 90 * time.Second,
 }
 
 func ExtMvData(keyAndUrls string, savePath string) error {
@@ -710,12 +716,214 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 	return keyBytes, err
 }
 
+// fetchSegment downloads cacheKey (cache-hit → returns immediately) with up to
+// 3 retries and exponential backoff. Handles "#bytes=<off>-<end>" range fragments.
+func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
+	if cached, ok := GetCachedSegment(cacheKey); ok {
+		return cached, nil
+	}
+	fetchURL, rangeHdr := cacheKey, ""
+	if idx := strings.Index(cacheKey, "#bytes="); idx >= 0 {
+		fetchURL = cacheKey[:idx]
+		rangeHdr = "bytes=" + cacheKey[idx+len("#bytes="):]
+	}
+	const maxRetries = 3
+	for attempt := range maxRetries {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if rangeHdr != "" {
+			req.Header.Set("Range", rangeHdr)
+		}
+		resp, err := mvHTTPClient.Do(req)
+		if err != nil {
+			if attempt < maxRetries-1 && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("fetch: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			if attempt < maxRetries-1 && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			if attempt < maxRetries-1 && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("read body: %w", err)
+		}
+		go PutCachedSegment(cacheKey, data) // async: don't block the download goroutine
+		return data, nil
+	}
+	return nil, fmt.Errorf("all retries exhausted")
+}
+
+// fetchMVSegment is like fetchSegment but uses the separate MV video cache.
+func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
+	// Strip rotating query params (accessKey changes each session) so the disk
+	// cache key is stable across replays of the same video.
+	diskKey := url
+	if q := strings.IndexByte(url, '?'); q >= 0 {
+		diskKey = url[:q]
+	}
+	if cached, ok := GetCachedMVSegment(diskKey); ok {
+		log.Printf("[mv-seg] cache HIT key=%s len=%d", diskKey[len(diskKey)-20:], len(cached))
+		return cached, nil
+	}
+	log.Printf("[mv-seg] cache MISS key=%s", diskKey[len(diskKey)-20:])
+	fetchURL, rangeHdr := url, ""
+	if idx := strings.Index(url, "#bytes="); idx >= 0 {
+		fetchURL = url[:idx]
+		rangeHdr = "bytes=" + url[idx+len("#bytes="):]
+	}
+	const maxRetries = 3
+	for attempt := range maxRetries {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if rangeHdr != "" {
+			req.Header.Set("Range", rangeHdr)
+		}
+		resp, err := mvHTTPClient.Do(req)
+		if err != nil {
+			if attempt < maxRetries-1 && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("fetch: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			if attempt < maxRetries-1 && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			if attempt < maxRetries-1 && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("read body: %w", err)
+		}
+		if MVCacheEnabled() {
+			go PutCachedMVSegment(diskKey, data)
+		}
+		return data, nil
+	}
+	return nil, fmt.Errorf("all retries exhausted")
+}
+
+// DownloadMVSegmentsParallel is like DownloadSegmentsParallel but uses the
+// separate MV video segment cache. Use for MV video tracks.
+func DownloadMVSegmentsParallel(ctx context.Context, urls []string, w io.Writer, concurrency int) error {
+	log.Printf("[dl] DownloadMVSegmentsParallel nURLs=%d concurrency=%d firstURL=%s",
+		len(urls), concurrency, func() string {
+			if len(urls) > 0 {
+				return urls[0]
+			}
+			return "(none)"
+		}())
+
+	type result struct {
+		data []byte
+		err  error
+	}
+
+	resultChs := make([]chan result, len(urls))
+	for i := range resultChs {
+		resultChs[i] = make(chan result, 1)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sem := make(chan struct{}, concurrency)
+
+	go func() {
+		for i, url := range urls {
+			i, url := i, url
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				for j := i; j < len(resultChs); j++ {
+					resultChs[j] <- result{err: ctx.Err()}
+				}
+				return
+			}
+			go func() {
+				defer func() { <-sem }()
+				t0 := time.Now()
+				data, err := fetchMVSegment(ctx, url)
+				if err == nil {
+					log.Printf("[dl] mv#%d arrived size=%dB elapsed=%.2fs", i, len(data), time.Since(t0).Seconds())
+				} else {
+					log.Printf("[dl] mv#%d error elapsed=%.2fs: %v", i, time.Since(t0).Seconds(), err)
+				}
+				resultChs[i] <- result{data: data, err: err}
+			}()
+		}
+	}()
+
+	for i, ch := range resultChs {
+		r := <-ch
+		if r.err != nil {
+			cancel()
+			return fmt.Errorf("segment %d: %w", i, r.err)
+		}
+		if _, err := w.Write(r.data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DownloadSegments streams each URL one at a time, writing each segment to w
-// immediately after it is fetched. This gives the lowest possible startup
-// latency: the caller receives the first segment as soon as it is downloaded,
-// rather than waiting for the full track to arrive.
-// Segments are cached on disk so subsequent calls for the same track are
-// served from cache without any network round-trips.
+// immediately after it is fetched. Use for small segments (AAC audio) where
+// startup latency matters more than throughput.
 func DownloadSegments(ctx context.Context, urls []string, w io.Writer) error {
 	log.Printf("[dl] DownloadSegments nURLs=%d firstURL=%s", len(urls), func() string {
 		if len(urls) > 0 {
@@ -727,40 +935,85 @@ func DownloadSegments(ctx context.Context, urls []string, w io.Writer) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if cached, ok := GetCachedSegment(cacheKey); ok {
-			if _, err := w.Write(cached); err != nil {
-				return err
-			}
-			continue
-		}
-		// Decode optional byte-range encoded as "#bytes=<offset>-<end>" fragment.
-		fetchURL, rangeHdr := cacheKey, ""
-		if idx := strings.Index(cacheKey, "#bytes="); idx >= 0 {
-			fetchURL = cacheKey[:idx]
-			rangeHdr = "bytes=" + cacheKey[idx+len("#bytes="):]
-		}
-		req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
+		data, err := fetchSegment(ctx, cacheKey)
 		if err != nil {
 			return fmt.Errorf("segment %d: %w", i, err)
 		}
-		if rangeHdr != "" {
-			req.Header.Set("Range", rangeHdr)
-		}
-		resp, err := mvHTTPClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("segment %d fetch: %w", i, err)
-		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			resp.Body.Close()
-			return fmt.Errorf("segment %d: HTTP %d", i, resp.StatusCode)
-		}
-		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return fmt.Errorf("segment %d read: %w", i, err)
-		}
-		PutCachedSegment(cacheKey, data)
 		if _, err := w.Write(data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DownloadSegmentsParallel fetches up to concurrency segments simultaneously
+// and writes them to w in playlist order. The launcher runs in its own goroutine
+// so the drain loop starts immediately — segments already in cache flow to the
+// decrypt pipeline without waiting for slow network segments to be launched.
+//
+// Memory: at most concurrency×segmentSize bytes in-flight at any time.
+// Order: strictly preserved — w always receives [init, seg0, seg1, …].
+func DownloadSegmentsParallel(ctx context.Context, urls []string, w io.Writer, concurrency int) error {
+	log.Printf("[dl] DownloadSegmentsParallel nURLs=%d concurrency=%d firstURL=%s",
+		len(urls), concurrency, func() string {
+			if len(urls) > 0 {
+				return urls[0]
+			}
+			return "(none)"
+		}())
+
+	type result struct {
+		data []byte
+		err  error
+	}
+
+	// One buffered channel per segment so goroutines never block writing results.
+	resultChs := make([]chan result, len(urls))
+	for i := range resultChs {
+		resultChs[i] = make(chan result, 1)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Semaphore: at most `concurrency` HTTP requests in flight at once.
+	sem := make(chan struct{}, concurrency)
+
+	// Launcher runs in a separate goroutine so the drain loop below starts
+	// immediately. Cache-hit segments (elapsed≈0) flow to w without waiting
+	// for the semaphore to open for slow network segments.
+	go func() {
+		for i, url := range urls {
+			i, url := i, url
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				for j := i; j < len(resultChs); j++ {
+					resultChs[j] <- result{err: ctx.Err()}
+				}
+				return
+			}
+			go func() {
+				defer func() { <-sem }()
+				t0 := time.Now()
+				data, err := fetchSegment(ctx, url)
+				if err == nil {
+					log.Printf("[dl] seg#%d arrived size=%dB elapsed=%.2fs", i, len(data), time.Since(t0).Seconds())
+				} else {
+					log.Printf("[dl] seg#%d error elapsed=%.2fs: %v", i, time.Since(t0).Seconds(), err)
+				}
+				resultChs[i] <- result{data: data, err: err}
+			}()
+		}
+	}()
+
+	for i, ch := range resultChs {
+		r := <-ch
+		if r.err != nil {
+			cancel()
+			return fmt.Errorf("segment %d: %w", i, r.err)
+		}
+		if _, err := w.Write(r.data); err != nil {
 			return err
 		}
 	}

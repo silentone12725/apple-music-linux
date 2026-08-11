@@ -1,12 +1,82 @@
 package ampapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 )
+
+func GetPlaylistRespContext(ctx context.Context, storefront string, id string, language string, token string, mut string) (*PlaylistResp, error) {
+	var err error
+	if token == "" {
+		token, err = GetToken()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	fetch := func(rawURL string) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		if mut != "" {
+			req.Header.Set("Media-User-Token", mut)
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("Origin", "https://music.apple.com")
+		return http.DefaultClient.Do(req)
+	}
+
+	// Catalog playlist endpoint (works for Apple-curated and user-shared playlists).
+	// Library playlists (/v1/me/library/playlists/) require a different path.
+	baseURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/playlists/%s", storefront, id)
+	q := url.Values{}
+	q.Set("include", "tracks,artists")
+	q.Set("include[songs]", "artists")
+	q.Set("l", language)
+	fullURL := baseURL + "?" + q.Encode()
+
+	do, err := fetch(fullURL)
+	if err != nil {
+		return nil, err
+	}
+	defer do.Body.Close()
+	if do.StatusCode != http.StatusOK {
+		return nil, errors.New(do.Status)
+	}
+	obj := new(PlaylistResp)
+	if err := json.NewDecoder(do.Body).Decode(obj); err != nil {
+		return nil, err
+	}
+	if len(obj.Data) == 0 {
+		return nil, fmt.Errorf("empty playlist response")
+	}
+
+	// Follow pagination for large playlists.
+	next := obj.Data[0].Relationships.Tracks.Next
+	for next != "" {
+		do, err := fetch("https://amp-api.music.apple.com" + next)
+		if err != nil {
+			break
+		}
+		defer do.Body.Close()
+		if do.StatusCode != http.StatusOK {
+			break
+		}
+		page := new(TrackResp)
+		if err := json.NewDecoder(do.Body).Decode(page); err != nil {
+			break
+		}
+		obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, page.Data...)
+		next = page.Next
+	}
+	return obj, nil
+}
 
 func GetPlaylistResp(storefront string, id string, language string, token string) (*PlaylistResp, error) {
 	var err error

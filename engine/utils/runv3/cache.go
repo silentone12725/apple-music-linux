@@ -19,20 +19,27 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	// CacheMaxBytes is the default maximum on-disk cache size (512 MiB).
-	// Set to 0 to disable the cache.
+	// CacheMaxBytes is the default maximum on-disk cache size for audio segments (512 MiB).
 	CacheMaxBytes int64 = 512 * 1024 * 1024
 
-	// CacheDir is the subdirectory under os.UserCacheDir().
-	cacheDirName = "engine/segments"
+	// DefaultMVCacheMaxBytes is the default maximum on-disk cache size for MV video segments (2 GiB).
+	DefaultMVCacheMaxBytes int64 = 2 * 1024 * 1024 * 1024
+
+	cacheDirName   = "engine/segments"
+	mvCacheDirName = "engine/mv-segments"
 )
 
-// segmentCache is a global LRU segment cache.
+// segmentCache is the global LRU cache for audio HLS segments.
 var segmentCache = &SegmentCache{}
+
+// mvSegmentCache is the global LRU cache for MV video HLS segments.
+// Kept separate so its size limit and enabled state can be tuned independently.
+var mvSegmentCache = &SegmentCache{}
 
 func init() {
 	base, err := os.UserCacheDir()
@@ -40,19 +47,24 @@ func init() {
 		base = os.TempDir()
 	}
 	segmentCache.dir = filepath.Join(base, cacheDirName)
-	segmentCache.maxBytes = CacheMaxBytes
+	segmentCache.maxBytes.Store(CacheMaxBytes)
 	os.MkdirAll(segmentCache.dir, 0700)
+
+	mvSegmentCache.dir = filepath.Join(base, mvCacheDirName)
+	mvSegmentCache.maxBytes.Store(DefaultMVCacheMaxBytes)
+	os.MkdirAll(mvSegmentCache.dir, 0700)
 }
 
 // SegmentCache manages a bounded on-disk cache for HLS segment bytes.
 type SegmentCache struct {
 	dir      string
-	maxBytes int64
+	maxBytes atomic.Int64
 
-	mu       sync.Mutex
-	lru      list.List                // front = most recent
-	entries  map[string]*list.Element // key → element
-	totalSz  int64
+	mu           sync.Mutex
+	lru          list.List                // front = most recent
+	entries      map[string]*list.Element // key → element
+	totalSz      int64
+	qualityLabel string // MV only: resolution of last cached variant, e.g. "1920x1080"
 
 	Hits   int64
 	Misses int64
@@ -82,7 +94,7 @@ func (c *SegmentCache) cachePath(key string) string {
 // The stored SHA-256 prefix is verified on every read; a mismatch deletes
 // the corrupt entry and returns a miss.
 func (c *SegmentCache) Get(url string) ([]byte, bool) {
-	if c.maxBytes == 0 {
+	if c.maxBytes.Load() == 0 {
 		return nil, false
 	}
 	key := cacheKey(url)
@@ -132,7 +144,7 @@ func (c *SegmentCache) Get(url string) ([]byte, bool) {
 
 // Put writes data for url to the cache with a SHA-256 integrity prefix.
 func (c *SegmentCache) Put(url string, data []byte) {
-	if c.maxBytes == 0 || len(data) == 0 {
+	if c.maxBytes.Load() == 0 || len(data) == 0 {
 		return
 	}
 	key := cacheKey(url)
@@ -179,11 +191,13 @@ func (c *SegmentCache) Put(url string, data []byte) {
 
 // evictIfNeeded removes least-recently-used entries until totalSz ≤ maxBytes.
 func (c *SegmentCache) evictIfNeeded() {
-	if c.maxBytes <= 0 {
+	limit := c.maxBytes.Load()
+	if limit <= 0 {
 		return
 	}
+	var toDelete []string
 	c.mu.Lock()
-	for c.totalSz > c.maxBytes && c.lru.Len() > 0 {
+	for c.totalSz > limit && c.lru.Len() > 0 {
 		el := c.lru.Back()
 		if el == nil {
 			break
@@ -192,19 +206,18 @@ func (c *SegmentCache) evictIfNeeded() {
 		c.lru.Remove(el)
 		delete(c.entries, entry.key)
 		c.totalSz -= entry.size
-		// Delete the file outside the lock.
-		key := entry.key
-		c.mu.Unlock()
-		os.Remove(c.cachePath(key))
-		c.mu.Lock()
+		toDelete = append(toDelete, c.cachePath(entry.key))
 	}
 	c.mu.Unlock()
+	for _, p := range toDelete {
+		os.Remove(p)
+	}
 }
 
 // WarmFromDisk loads cache metadata from the existing on-disk files so that
 // the in-memory LRU reflects existing cached segments after a restart.
 func (c *SegmentCache) WarmFromDisk() {
-	if c.maxBytes == 0 {
+	if c.maxBytes.Load() == 0 {
 		return
 	}
 	type fileInfo struct {
@@ -262,10 +275,84 @@ func PutCachedSegment(url string, data []byte) {
 // Call once at startup.
 func WarmCache() {
 	go segmentCache.WarmFromDisk()
+	go mvSegmentCache.WarmFromDisk()
 }
 
 // SetCacheMaxBytes overrides the default cache size limit.
 // Call before any downloads begin.
 func SetCacheMaxBytes(n int64) {
-	segmentCache.maxBytes = n
+	segmentCache.maxBytes.Store(n)
+}
+
+// ── MV video segment cache ────────────────────────────────────────────────────
+
+// GetCachedMVSegment returns a cached MV video segment, or (nil, false).
+func GetCachedMVSegment(url string) ([]byte, bool) {
+	return mvSegmentCache.Get(url)
+}
+
+// PutCachedMVSegment stores an MV video segment in the MV cache.
+func PutCachedMVSegment(url string, data []byte) {
+	mvSegmentCache.Put(url, data)
+}
+
+// SetMVCacheMaxBytes sets the MV cache capacity. Pass 0 to disable.
+func SetMVCacheMaxBytes(n int64) {
+	mvSegmentCache.maxBytes.Store(n)
+}
+
+// MVCacheStats returns hit/miss counts for the MV segment cache.
+func MVCacheStats() (hits, misses int64) {
+	mvSegmentCache.mu.Lock()
+	defer mvSegmentCache.mu.Unlock()
+	return mvSegmentCache.Hits, mvSegmentCache.Misses
+}
+
+// SetMVCacheQualityLabel records the resolution string of the most recently
+// selected MV variant (e.g. "1920x1080"). Cleared on ClearMVCache.
+func SetMVCacheQualityLabel(resolution string) {
+	mvSegmentCache.mu.Lock()
+	mvSegmentCache.qualityLabel = resolution
+	mvSegmentCache.mu.Unlock()
+}
+
+// MVCacheQualityLabel returns the cached MV quality label, e.g. "1920x1080".
+func MVCacheQualityLabel() string {
+	mvSegmentCache.mu.Lock()
+	defer mvSegmentCache.mu.Unlock()
+	return mvSegmentCache.qualityLabel
+}
+
+// MVCacheEnabled reports whether the MV cache is active (maxBytes > 0).
+func MVCacheEnabled() bool { return mvSegmentCache.maxBytes.Load() > 0 }
+
+// MVCacheMaxBytes returns the current MV cache capacity limit in bytes.
+func MVCacheMaxBytes() int64 { return mvSegmentCache.maxBytes.Load() }
+
+// MVCacheTotalBytes returns the combined on-disk usage of MV segment and
+// decrypted track caches.
+func MVCacheTotalBytes() int64 {
+	mvSegmentCache.mu.Lock()
+	segSz := mvSegmentCache.totalSz
+	mvSegmentCache.mu.Unlock()
+	return segSz + MVDecTotalBytes()
+}
+
+// ClearMVCache deletes all MV segment cache files, decrypted track files,
+// and resets the in-memory index.
+func ClearMVCache() error {
+	mvSegmentCache.mu.Lock()
+	mvSegmentCache.lru.Init()
+	mvSegmentCache.entries = make(map[string]*list.Element)
+	mvSegmentCache.totalSz = 0
+	mvSegmentCache.qualityLabel = ""
+	dir := mvSegmentCache.dir
+	mvSegmentCache.mu.Unlock()
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return ClearMVDecCache()
 }

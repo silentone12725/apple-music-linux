@@ -63,6 +63,7 @@ import (
 	"engine/engine/vlc"
 	"engine/utils/ampapi"
 	"engine/utils/lyrics"
+	"engine/utils/runv3"
 )
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -336,10 +337,25 @@ type APIServer struct {
 	diskCache   *diskcache.Cache     // per-track decrypted audio disk cache
 	vlcPlayer   *vlc.Player          // nil when libvlc is not available
 	vlcSessionID string              // session backing the current VLC stream
+
+	tokenMu     sync.RWMutex
+	cachedToken string // bearer token cached from the most recent browser request
+}
+
+// ServerConfig holds infrastructure values resolved once at startup.
+// All fields are optional: zero values fall back to sensible defaults.
+type ServerConfig struct {
+	DRMBinaryPath      string
+	DRMBaseDir         string
+	BackendPreferred   string
+	BackendFallback    string
+	UseEmbeddedBackend bool
+	DecryptM3u8Port    string
+	GetM3u8Port        string
 }
 
 // NewAPIServer wires all routes.
-func NewAPIServer(port int) *APIServer {
+func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	epoch := newEpochManager()
 	s := &APIServer{
 		port:      port,
@@ -356,7 +372,7 @@ func NewAPIServer(port int) *APIServer {
 	// from drm/drm-rootless relative to the working directory.
 	// The binary lives inside the repo at a canonical location so no config
 	// entry is needed for the common case.
-	drmBinaryPath := Config.DRMBinaryPath
+	drmBinaryPath := cfg.DRMBinaryPath
 	if drmBinaryPath == "" {
 		if abs, err := filepath.Abs("drm/drm-rootless"); err == nil {
 			if _, err := os.Stat(abs); err == nil {
@@ -371,7 +387,7 @@ func NewAPIServer(port int) *APIServer {
 	//   /data/data/com.apple.android.music/files  (inside the chroot)
 	// From the host that resolves to rootfs/data/data/com.apple.android.music/files
 	// relative to the binary's parent directory.
-	drmBaseDir := Config.DRMBaseDir
+	drmBaseDir := cfg.DRMBaseDir
 	if drmBaseDir == "" && drmBinaryPath != "" {
 		drmBaseDir = filepath.Join(
 			filepath.Dir(drmBinaryPath),
@@ -388,11 +404,11 @@ func NewAPIServer(port int) *APIServer {
 	// so the choice is by architecture, not speed. Fallback is startup-only —
 	// no runtime hot-swap (see docs/design/backend-supervisor.md).
 	preferred, fallbackName := drm.ResolveBackendPolicy(
-		drmBinaryPath != "", Config.Backend.Preferred, Config.Backend.Fallback, Config.UseEmbeddedBackend)
+		drmBinaryPath != "", cfg.BackendPreferred, cfg.BackendFallback, cfg.UseEmbeddedBackend)
 	s.backendName = preferred
-	drmBackend := buildDRMBackend(preferred, drmBinaryPath)
+	drmBackend := buildDRMBackend(preferred, drmBinaryPath, cfg.DecryptM3u8Port, cfg.GetM3u8Port)
 	if fallbackName != "" && fallbackName != preferred {
-		if fb := buildDRMBackend(fallbackName, drmBinaryPath); fb != nil && drmBackend != nil {
+		if fb := buildDRMBackend(fallbackName, drmBinaryPath, cfg.DecryptM3u8Port, cfg.GetM3u8Port); fb != nil && drmBackend != nil {
 			composite := drm.NewFallbackBackend(drmBackend, preferred, fb, fallbackName)
 			drmBackend = composite
 			if sel, ok := composite.(drm.BackendSelection); ok {
@@ -432,7 +448,7 @@ func NewAPIServer(port int) *APIServer {
 	// so token rotations are picked up automatically.
 	// Use ev.Kind as the SSE event name so clients can subscribe to specific
 	// phases (prefetch.cached, prefetch.done, …) without filtering JSON.
-	s.scheduler = prefetch.NewScheduler(s.pm, bearerToken, s.mediaUserToken, func(ev prefetch.Event) {
+	s.scheduler = prefetch.NewScheduler(s.pm, s.token, s.mediaUserToken, func(ev prefetch.Event) {
 		s.events.emit(string(ev.Kind), ev)
 	}, prefetch.DefaultWorkers)
 	go func() {
@@ -461,7 +477,7 @@ func NewAPIServer(port int) *APIServer {
 
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
-	}, export.DefaultWorkers)
+	}, 0)
 
 	mux := http.NewServeMux()
 
@@ -473,6 +489,7 @@ func NewAPIServer(port int) *APIServer {
 	}
 
 	mux.HandleFunc("GET /api/v1/status", cors(s.handleStatus))
+	mux.HandleFunc("GET /api/v1/tools", cors(s.handleTools))
 	mux.HandleFunc("GET /api/v1/capabilities", cors(s.handleCapabilities))
 	mux.HandleFunc("GET /api/v1/events", cors(s.handleEvents))
 
@@ -484,10 +501,13 @@ func NewAPIServer(port int) *APIServer {
 	// Playback context — renderer signals user intent; scheduler decides what to warm.
 	mux.HandleFunc("PUT /api/v1/playback/context", cors(s.handlePlaybackContext))
 
-	// Cache endpoints — config, stats, and clear.
+	// Cache endpoints — config, stats, clear, and MV-specific settings.
 	mux.HandleFunc("PUT /api/v1/cache/config", cors(s.handleCacheConfig))
 	mux.HandleFunc("GET /api/v1/cache/stats", cors(s.handleCacheStats))
 	mux.HandleFunc("DELETE /api/v1/cache/playback", cors(s.handleCachePlaybackDelete))
+	mux.HandleFunc("GET /api/v1/cache/mv", cors(s.handleMVCacheGet))
+	mux.HandleFunc("PUT /api/v1/cache/mv", cors(s.handleMVCachePut))
+	mux.HandleFunc("DELETE /api/v1/cache/mv", cors(s.handleMVCacheClear))
 
 	// Job status and cancellation for cache-warming jobs.
 	mux.HandleFunc("GET /api/v1/jobs/{id}", cors(s.handleJobStatus))
@@ -626,20 +646,20 @@ func (s *APIServer) Stop() {
 // buildDRMBackend constructs a single backend by name. Both backends share the
 // same transport addresses; EmbeddedBackend needs the drm directory, while
 // ProcessBackend execs the drm-rootless binary at drmBinaryPath.
-func buildDRMBackend(name, drmBinaryPath string) drm.DRMBackend {
+func buildDRMBackend(name, drmBinaryPath, decryptAddr, m3u8Addr string) drm.DRMBackend {
 	if name == "embedded" {
 		return drm.NewEmbeddedBackend(drm.EmbedConfig{
 			WrapperDir:  filepath.Dir(drmBinaryPath),
 			OmitBaseDir: true,
-			DecryptAddr: Config.DecryptM3u8Port,
-			M3U8Addr:    Config.GetM3u8Port,
+			DecryptAddr: decryptAddr,
+			M3U8Addr:    m3u8Addr,
 		})
 	}
 	return drm.NewProcessBackend(drm.ProcessConfig{
 		BinaryPath:  drmBinaryPath,
 		OmitBaseDir: true, // drm-rootless resolves BaseDir relative to its cwd; absolute path breaks anisette init
-		DecryptAddr: Config.DecryptM3u8Port,
-		M3U8Addr:    Config.GetM3u8Port,
+		DecryptAddr: decryptAddr,
+		M3U8Addr:    m3u8Addr,
 	})
 }
 
@@ -647,6 +667,16 @@ func buildDRMBackend(name, drmBinaryPath string) drm.DRMBackend {
 
 func (s *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *APIServer) handleTools(w http.ResponseWriter, r *http.Request) {
+	ffPath, ffErr := exec.LookPath("ffmpeg")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ffmpeg": map[string]any{
+			"available": ffErr == nil,
+			"path":      ffPath,
+		},
+	})
 }
 
 // handleRuntimeStats reports scalar Go runtime metrics for the benchmark
@@ -929,11 +959,10 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Prefer request-level tokens (supplied by the browser renderer from MusicKit)
-	// over config-level tokens so that the renderer's live session is used without
-	// requiring them to be duplicated in config.yaml.
+	// over the cached token so that the renderer's live session is always used.
 	token := req.Token
 	if token == "" {
-		token = bearerToken()
+		token = s.token()
 	}
 	mut := req.MUT
 	if mut == "" {
@@ -943,6 +972,7 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "not authenticated — provide token+mediaUserToken in request body or configure them", http.StatusUnauthorized)
 		return
 	}
+	s.setToken(token)
 
 	sf := req.Storefront
 	if sf == "" {
@@ -972,7 +1002,7 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 			Lossless:    req.Capabilities.Lossless,
 			Video:       req.Capabilities.Video,
 			Atmos:       req.Capabilities.Atmos,
-			Language:    Config.Language,
+			Language:    s.lang(r),
 			MVMaxHeight: req.MVMaxHeight,
 		})
 		if err != nil {
@@ -1092,10 +1122,23 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "no video stream in this session", http.StatusNotFound)
 		return
 	}
+
+	assetID := sess.AssetID
 	var seekSec float64
 	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
 		seekSec = v
 	}
+	log.Printf("[video] GET id=%s assetID=%q seekSec=%.2f decExists=%v", id, assetID, seekSec, runv3.MVDecExists(assetID))
+
+	// Serve from decrypted-track cache for full plays (seekSec==0).
+	// Seeks fall through to the normal pipeline so the segment cache handles them.
+	if seekSec == 0 && runv3.MVDecExists(assetID) {
+		streamMedia(w, r, func(dst io.Writer) error {
+			return runv3.ServeMVDec(assetID, dst)
+		}, "video/mp4")
+		return
+	}
+
 	srcFn := func(w io.Writer) error {
 		if seekSec > 0 {
 			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, w)
@@ -1103,8 +1146,21 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 		}
 		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, w)
 	}
+	// Only cache full plays; seek streams produce a partial file and must not be cached.
 	streamMedia(w, r, func(dst io.Writer) error {
-		return transcodeVideoForMSE(r.Context(), srcFn, dst)
+		if seekSec > 0 {
+			return transcodeVideoForMSE(r.Context(), srcFn, dst)
+		}
+		cw := runv3.MVDecCacheWriter(assetID, dst)
+		err := transcodeVideoForMSE(r.Context(), srcFn, cw)
+		if err == nil {
+			log.Printf("[video] transcode OK — committing dec cache assetID=%s", assetID)
+			cw.Commit()
+		} else {
+			log.Printf("[video] transcode ERR — aborting dec cache assetID=%s err=%v", assetID, err)
+			cw.Abort()
+		}
+		return err
 	}, "video/mp4")
 }
 
@@ -1287,6 +1343,48 @@ func (s *APIServer) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *APIServer) handleMVCacheGet(w http.ResponseWriter, r *http.Request) {
+	enabled, maxBytes, sizeBytes, quality := MVCacheGetInfo()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":   enabled,
+		"maxBytes":  maxBytes,
+		"sizeBytes": sizeBytes,
+		"quality":   quality,
+	})
+}
+
+func (s *APIServer) handleMVCacheClear(w http.ResponseWriter, r *http.Request) {
+	if err := ClearMVCache(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *APIServer) handleMVCachePut(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled  *bool  `json:"enabled"`
+		MaxBytes *int64 `json:"maxBytes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if body.MaxBytes != nil {
+		MVCacheSetMaxBytes(*body.MaxBytes)
+	}
+	if body.Enabled != nil {
+		MVCacheSetEnabled(*body.Enabled)
+	}
+	enabled, maxBytes, sizeBytes, quality := MVCacheGetInfo()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":   enabled,
+		"maxBytes":  maxBytes,
+		"sizeBytes": sizeBytes,
+		"quality":   quality,
+	})
+}
+
 func (s *APIServer) handleCachePlaybackDelete(w http.ResponseWriter, r *http.Request) {
 	what := r.URL.Query().Get("what") // "prewarm", "persistent", or "" (both)
 	if what == "" || what == "prewarm" {
@@ -1327,7 +1425,7 @@ func (s *APIServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	if sf == "" {
 		sf = s.storefront()
 	}
-	tok := bearerToken()
+	tok := s.token()
 
 	type Meta struct {
 		ID               string       `json:"id"`
@@ -1343,7 +1441,7 @@ func (s *APIServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		AvailableStreams []StreamInfo `json:"availableStreams"`
 	}
 
-	if song, err := ampapi.GetSongRespContext(r.Context(), sf, id, Config.Language, tok); err == nil && len(song.Data) > 0 {
+	if song, err := ampapi.GetSongRespContext(r.Context(), sf, id, s.lang(r), tok); err == nil && len(song.Data) > 0 {
 		a := song.Data[0].Attributes
 		writeJSON(w, http.StatusOK, Meta{
 			ID:               id,
@@ -1359,7 +1457,7 @@ func (s *APIServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if mv, err := ampapi.GetMusicVideoRespContext(r.Context(), sf, id, Config.Language, tok); err == nil && len(mv.Data) > 0 {
+	if mv, err := ampapi.GetMusicVideoRespContext(r.Context(), sf, id, s.lang(r), tok); err == nil && len(mv.Data) > 0 {
 		a := mv.Data[0].Attributes
 		writeJSON(w, http.StatusOK, Meta{
 			ID:         id,
@@ -1379,6 +1477,18 @@ func (s *APIServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if album, err := ampapi.GetAlbumRespContext(r.Context(), sf, id, s.lang(r), tok); err == nil && len(album.Data) > 0 {
+		a := album.Data[0].Attributes
+		writeJSON(w, http.StatusOK, Meta{
+			ID:         id,
+			Type:       "album",
+			Title:      a.Name,
+			ArtistName: a.ArtistName,
+			ArtworkURL: fmtArtworkURL(a.Artwork.URL, 500),
+		})
+		return
+	}
+
 	http.Error(w, "asset not found", http.StatusNotFound)
 }
 
@@ -1390,12 +1500,12 @@ func (s *APIServer) handleArtwork(w http.ResponseWriter, r *http.Request) {
 	}
 	size := 500
 	fmt.Sscanf(r.URL.Query().Get("size"), "%d", &size)
-	tok := bearerToken()
+	tok := s.token()
 
 	var rawURL string
-	if song, err := ampapi.GetSongRespContext(r.Context(), sf, id, Config.Language, tok); err == nil && len(song.Data) > 0 {
+	if song, err := ampapi.GetSongRespContext(r.Context(), sf, id, s.lang(r), tok); err == nil && len(song.Data) > 0 {
 		rawURL = song.Data[0].Attributes.Artwork.URL
-	} else if mv, err := ampapi.GetMusicVideoRespContext(r.Context(), sf, id, Config.Language, tok); err == nil && len(mv.Data) > 0 {
+	} else if mv, err := ampapi.GetMusicVideoRespContext(r.Context(), sf, id, s.lang(r), tok); err == nil && len(mv.Data) > 0 {
 		rawURL = mv.Data[0].Attributes.Artwork.URL
 	} else {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1421,23 +1531,17 @@ func (s *APIServer) handleLyrics(w http.ResponseWriter, r *http.Request) {
 	}
 	format := r.URL.Query().Get("format")
 	if format == "" {
-		format = Config.LrcFormat
-	}
-	if format == "" {
 		format = "lrc"
 	}
 	lrcType := r.URL.Query().Get("type")
 	if lrcType == "" {
-		lrcType = Config.LrcType
-	}
-	if lrcType == "" {
 		lrcType = "lyrics"
 	}
 
-	tok := strings.TrimPrefix(Config.AuthorizationToken, "Bearer ")
+	tok := s.token()
 	mut := s.mediaUserToken()
 
-	lrc, err := lyrics.GetContext(r.Context(), sf, id, lrcType, Config.Language, format, tok, mut)
+	lrc, err := lyrics.GetContext(r.Context(), sf, id, lrcType, s.lang(r), format, tok, mut)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -1454,26 +1558,28 @@ func (s *APIServer) handleLyrics(w http.ResponseWriter, r *http.Request) {
 // ── Export handlers ───────────────────────────────────────────────────────────
 
 func (s *APIServer) handleExportCreate(w http.ResponseWriter, r *http.Request) {
-	if !s.checkAuth(w) {
-		return
-	}
 	var req export.ExportRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Inject auth from server config if caller omitted them.
+	// Prefer request-level tokens (from browser renderer) over cached session.
 	if req.Token == "" {
-		req.Token = bearerToken()
+		req.Token = s.token()
 	}
 	if req.MUT == "" {
 		req.MUT = s.mediaUserToken()
 	}
+	if req.Token == "" || req.MUT == "" {
+		http.Error(w, "not authenticated — provide token+mediaUserToken in request body or start playback first", http.StatusUnauthorized)
+		return
+	}
+	s.setToken(req.Token)
 	if req.Storefront == "" {
 		req.Storefront = s.storefront()
 	}
 	if req.Language == "" {
-		req.Language = Config.Language
+		req.Language = s.lang(r)
 	}
 	job, err := s.em.Enqueue(req)
 	if err != nil {
@@ -1546,8 +1652,8 @@ func (s *APIServer) handleCatalogSearch(w http.ResponseWriter, r *http.Request) 
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
-	tok := bearerToken()
-	results, err := ampapi.Search(sf, q, types, Config.Language, tok, limit, 0)
+	tok := s.token()
+	results, err := ampapi.Search(sf, q, types, s.lang(r), tok, limit, 0)
 	if err != nil {
 		http.Error(w, "search failed: "+err.Error(), http.StatusBadGateway)
 		return
@@ -1564,8 +1670,8 @@ func (s *APIServer) handleCatalogAlbum(w http.ResponseWriter, r *http.Request) {
 	if sf == "" {
 		sf = "us"
 	}
-	tok := bearerToken()
-	album, err := ampapi.GetAlbumResp(sf, id, Config.Language, tok)
+	tok := s.token()
+	album, err := ampapi.GetAlbumResp(sf, id, s.lang(r), tok)
 	if err != nil {
 		http.Error(w, "album fetch failed: "+err.Error(), http.StatusBadGateway)
 		return
@@ -1582,8 +1688,8 @@ func (s *APIServer) handleCatalogPlaylist(w http.ResponseWriter, r *http.Request
 	if sf == "" {
 		sf = "us"
 	}
-	tok := bearerToken()
-	playlist, err := ampapi.GetPlaylistResp(sf, id, Config.Language, tok)
+	tok := s.token()
+	playlist, err := ampapi.GetPlaylistResp(sf, id, s.lang(r), tok)
 	if err != nil {
 		http.Error(w, "playlist fetch failed: "+err.Error(), http.StatusBadGateway)
 		return
@@ -1600,7 +1706,7 @@ func (s *APIServer) handleCatalogArtist(w http.ResponseWriter, r *http.Request) 
 	if sf == "" {
 		sf = "us"
 	}
-	tok := bearerToken()
+	tok := s.token()
 	// Apple Music catalog API for artists.
 	req, err := http.NewRequest("GET",
 		fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/artists/%s", sf, id), nil)
@@ -1615,7 +1721,7 @@ func (s *APIServer) handleCatalogArtist(w http.ResponseWriter, r *http.Request) 
 	query.Set("include", "albums,songs")
 	query.Set("limit[albums]", "20")
 	query.Set("limit[songs]", "10")
-	query.Set("l", Config.Language)
+	query.Set("l", s.lang(r))
 	req.URL.RawQuery = query.Encode()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1683,24 +1789,9 @@ func cors(h http.HandlerFunc) http.HandlerFunc {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-func (s *APIServer) checkAuth(w http.ResponseWriter) bool {
-	if bearerToken() == "" || s.mediaUserToken() == "" {
-		http.Error(w, "not authenticated — check config", http.StatusUnauthorized)
-		return false
-	}
-	return true
-}
-
-// mediaUserToken returns the Media User Token.
-//
-// Precedence: Config.MediaUserToken (explicit override) > session MUSIC_TOKEN file.
-// The session is the canonical runtime source; Config is an escape hatch for
-// manual configuration and testing. This avoids duplicated state and picks up
-// wrapper token refreshes automatically on every call.
+// mediaUserToken returns the Media User Token from the DRM session file.
+// Refreshed on every call so wrapper token rotations are picked up automatically.
 func (s *APIServer) mediaUserToken() string {
-	if Config.MediaUserToken != "" {
-		return Config.MediaUserToken
-	}
 	if s.session != nil {
 		if mt := s.session.ReadMusicToken(); mt != "" {
 			return mt
@@ -1709,17 +1800,10 @@ func (s *APIServer) mediaUserToken() string {
 	return ""
 }
 
-// storefront returns the storefront identifier.
-//
-// Precedence: Config.Storefront (explicit override) > session STOREFRONT_ID file.
-// The raw session value is normalized via drm.NormalizeStorefrontID before use
-// (strips the platform/content-class suffix the wrapper appends, e.g.
-// "143467-2,31" → "143467"). If Config.Storefront is set it is used verbatim
-// (expected to already be normalized, e.g. "us", "in", "143467").
+// storefront returns the storefront identifier from the DRM session file.
+// The raw session value is normalized (strips the platform/content-class suffix
+// the wrapper appends, e.g. "143467-2,31" → "143467").
 func (s *APIServer) storefront() string {
-	if Config.Storefront != "" {
-		return Config.Storefront
-	}
 	if s.session != nil {
 		if sf := s.session.ReadStorefrontID(); sf != "" {
 			return drm.NormalizeStorefrontID(sf)
@@ -1728,8 +1812,38 @@ func (s *APIServer) storefront() string {
 	return ""
 }
 
-func bearerToken() string {
-	return strings.TrimPrefix(Config.AuthorizationToken, "Bearer ")
+// token returns the bearer token cached from the most recent browser request.
+func (s *APIServer) token() string {
+	s.tokenMu.RLock()
+	t := s.cachedToken
+	s.tokenMu.RUnlock()
+	return t
+}
+
+// setToken caches a bearer token received from the browser renderer so
+// unauthenticated handlers (metadata, lyrics, catalog) can use it without
+// requiring a config entry.
+func (s *APIServer) setToken(tok string) {
+	if tok == "" {
+		return
+	}
+	s.tokenMu.Lock()
+	s.cachedToken = tok
+	s.tokenMu.Unlock()
+}
+
+// lang returns the language tag for catalog API calls.
+// The request's Accept-Language header is preferred so per-user locale is
+// respected automatically; falls back to "en-US".
+func (s *APIServer) lang(r *http.Request) string {
+	if al := r.Header.Get("Accept-Language"); al != "" {
+		tag := strings.SplitN(al, ",", 2)[0]
+		tag = strings.SplitN(tag, ";", 2)[0]
+		if tag = strings.TrimSpace(tag); tag != "" {
+			return tag
+		}
+	}
+	return "en-US"
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -1809,7 +1923,9 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.tokenMu.Lock()
 	s.vlcSessionID = req.SessionID
+	s.tokenMu.Unlock()
 	w.WriteHeader(http.StatusOK)
 }
 

@@ -5,7 +5,14 @@ node_modules/
 *.AppImage
 *.run
 dist/
+build/
 .installer-stage/
+
+# Electron chromedriver (downloaded for automation, not part of the build)
+electron/chromedriver/
+
+# Debug / development helper scripts
+electron/debug_app.py
 
 # Electron: auto-generated JS bundles (rebuilt by esbuild from src/)
 electron/engine-bundle.js
@@ -66,6 +73,9 @@ drm/rootfs/data/data/com.apple.android.music/files/fsi.pdat
 drm/rootfs/data/data/com.apple.android.music/files/IC-Info.sids
 drm/rootfs/data/data/com.apple.android.music/files/engine-session.lock
 drm/rootfs/data/data/com.apple.android.music/files/mpl_db/
+drm/rootfs/data/data/com.apple.android.music/files/drm-state
+drm/rootfs/data/data/com.apple.android.music/files/531EA4BB8D4B206263577F83ADB3948181F99DA3
+drm/rootfs/data/data/com.apple.android.music/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA
 drm/rootfs/home/
 drm/rootfs/tmp/
 
