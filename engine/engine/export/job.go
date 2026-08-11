@@ -37,6 +37,7 @@ type ExportCapabilities struct {
 	Lossless bool `json:"lossless"` // ALAC
 	Atmos    bool `json:"atmos"`    // Dolby Atmos
 	Video    bool `json:"video"`    // Music Video
+	Playlist bool `json:"playlist"` // expand playlist → per-track jobs
 }
 
 // ExportOptions controls post-processing of the downloaded file.
@@ -66,6 +67,13 @@ type ExportOptions struct {
 	ConvertToFLAC bool   `json:"convertToFlac"`
 	FFmpegPath    string `json:"ffmpegPath"`
 	KeepOriginal  bool   `json:"keepOriginal"`
+
+	// Tag markers appended to {tag} in the filename template.
+	// Defaults: "[E]" explicit, "[C]" clean, "[M]" Apple Digital Master.
+	// Set to "" to disable the corresponding marker.
+	ExplicitChoice string `json:"explicitChoice"`
+	CleanChoice    string `json:"cleanChoice"`
+	MasterChoice   string `json:"masterChoice"`
 }
 
 // FilenameTemplate is a path template relative to OutputDir.
@@ -105,6 +113,7 @@ type ExportRequest struct {
 
 	// What to export
 	Capabilities ExportCapabilities `json:"capabilities"`
+	MVMaxHeight  int                `json:"mvMaxHeight,omitempty"` // 0 = auto (defaults to 1080p in provider)
 
 	// Where to write
 	OutputDir        string           `json:"outputDir"`
@@ -112,6 +121,12 @@ type ExportRequest struct {
 
 	// Post-processing
 	Options ExportOptions `json:"options"`
+
+	// Hints — optional metadata supplied by the client so the job row
+	// shows title/artist/artwork immediately without waiting for catalog resolution.
+	HintTitle   string `json:"hintTitle,omitempty"`
+	HintArtist  string `json:"hintArtist,omitempty"`
+	HintArtwork string `json:"hintArtwork,omitempty"`
 }
 
 // ExportEvent is emitted for each significant state transition and is
@@ -128,14 +143,19 @@ type ExportEvent struct {
 // ExportJob is the public view of an in-flight or completed export job.
 // Its fields are safe to serialise to JSON and return to API clients.
 type ExportJob struct {
-	ID        string    `json:"jobId"`
-	AssetID   string    `json:"assetId"`
-	Phase     Phase     `json:"phase"`
-	Percent   int       `json:"percent"`
-	Output    string    `json:"output,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID         string    `json:"jobId"`
+	AssetID    string    `json:"assetId"`
+	Phase      Phase     `json:"phase"`
+	Percent    int       `json:"percent"`
+	QueuePos   int64     `json:"queuePos"` // monotonically increasing enqueue order
+	Title      string    `json:"title,omitempty"`
+	ArtistName string    `json:"artistName,omitempty"`
+	ArtworkURL string    `json:"artworkUrl,omitempty"`
+	BytesDone  int64     `json:"bytesDone,omitempty"`
+	Output     string    `json:"output,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 
 	// cancel is called to request cancellation; not exported.
 	cancel func()

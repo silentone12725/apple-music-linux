@@ -92,6 +92,7 @@ contextBridge.exposeInMainWorld('amlBridge', {
     setNavOpacity:     (v)        => ipcRenderer.send('view:nav-opacity', v),
     eqSaveFile:   (filename, content) => ipcRenderer.invoke('eq:save-file', { filename, content }),
     eqOpenFile:   (filters)           => ipcRenderer.invoke('eq:open-file', filters ? { filters } : undefined),
+    chooseDownloadDir: ()             => ipcRenderer.invoke('dialog:choose-download-dir'),
     mprisUpdate:    (d)         => ipcRenderer.send('mpris:update', d),
     onMprisCmd:     (cb)        => ipcRenderer.on('mpris:cmd', (_, cmd) => cb(cmd)),
 });

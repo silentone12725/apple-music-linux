@@ -90,7 +90,7 @@ type hlsSource struct {
 }
 
 func (s *hlsSource) Stream(ctx context.Context, w io.Writer) error {
-	return runv3.DownloadSegments(ctx, s.urls, w)
+	return runv3.DownloadSegmentsParallel(ctx, s.urls, w, 3)
 }
 
 // HLSSeekableSource returns a pipeline.SeekableSource backed by a full HLS
@@ -106,12 +106,35 @@ type hlsSeekableSource struct {
 }
 
 func (s *hlsSeekableSource) Stream(ctx context.Context, w io.Writer) error {
-	return runv3.DownloadSegments(ctx, s.media.AllURLs(), w)
+	return runv3.DownloadSegmentsParallel(ctx, s.media.AllURLs(), w, 3)
 }
 
 func (s *hlsSeekableSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
 	urls, actual := s.media.URLsFrom(startSec)
 	return &hlsSource{urls: urls}, actual
+}
+
+// HLSMVVideoSource returns a pipeline.SeekableSource for an MV video playlist,
+// using the separate MV segment cache (larger capacity, independently toggleable).
+func HLSMVVideoSource(med *hls.Media) pipeline.SeekableSource {
+	return &hlsMVVideoSource{media: med}
+}
+
+type hlsMVVideoSource struct{ media *hls.Media }
+
+func (s *hlsMVVideoSource) Stream(ctx context.Context, w io.Writer) error {
+	return runv3.DownloadMVSegmentsParallel(ctx, s.media.AllURLs(), w, 3)
+}
+
+func (s *hlsMVVideoSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
+	urls, actual := s.media.URLsFrom(startSec)
+	return &hlsMVVideoRaw{urls: urls}, actual
+}
+
+type hlsMVVideoRaw struct{ urls []string }
+
+func (s *hlsMVVideoRaw) Stream(ctx context.Context, w io.Writer) error {
+	return runv3.DownloadMVSegmentsParallel(ctx, s.urls, w, 3)
 }
 
 // ── Passthrough (AAC clear content) ──────────────────────────────────────────

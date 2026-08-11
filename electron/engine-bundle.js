@@ -17,6 +17,69 @@
 
 const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
 
+// ── Power Budget ───────────────────────────────────────────────────────────────
+// Classifies runtime into full / reduced / minimal based on battery state and
+// measured RAF jitter (proxy for CPU throttle). UI timing constants adapt;
+// playback-critical intervals (bufPoll) are fixed regardless of power mode.
+const _TIMINGS = {
+    full:    { poll: 250,  debounce: 150, losslessWait: 1500,  sseWait: 4000,  qualityRace: 200,  mkCheck: 50  },
+    reduced: { poll: 250,  debounce: 350, losslessWait: 3500,  sseWait: 8000,  qualityRace: 500,  mkCheck: 100 },
+    minimal: { poll: 250,  debounce: 700, losslessWait: 6000,  sseWait: 12000, qualityRace: 1200, mkCheck: 200 },
+};
+// MV buffer poll is always 250ms regardless of power mode.
+// Downloads happen in the Go engine (out-of-process) and are unaffected by
+// Chromium throttling; keeping the poll fixed prevents coarser stall detection
+// that would make pauses feel longer on battery.
+const BUF_POLL_MS = 250;
+let _powerMode = 'full';
+// null = unknown (assume plugged in until Battery API resolves)
+let _isCharging = null;
+function T() { return _TIMINGS[_powerMode]; }
+
+function _setPowerMode(mode) {
+    if (mode === _powerMode) return;
+    // Never throttle when definitively on AC power.
+    if (_isCharging === true && mode !== 'full') return;
+    _powerMode = mode;
+    console.log(`[AML Power] mode=${mode}`);
+    // Restart VLC poll at new interval if one is active
+    if (_vlcMode && _vlcPollTimer) { const a = getMKAudio(); if (a) startVLCPoll(a); }
+}
+
+// Battery API — reclassify on charge/level changes
+navigator.getBattery?.().then(bat => {
+    const upd = () => {
+        _isCharging = bat.charging;
+        if (bat.charging)          _setPowerMode('full');
+        else if (bat.level > 0.25) _setPowerMode('reduced');
+        else                       _setPowerMode('minimal');
+    };
+    bat.addEventListener('chargingchange', upd);
+    bat.addEventListener('levelchange', upd);
+    upd();
+}).catch(() => {
+    // No Battery API (desktop without battery) — always full.
+    _isCharging = true;
+});
+
+// RAF jitter probe — delayed 3 s so page-load jitter doesn't falsely trigger.
+// Threshold 55 ms (two missed 30fps frames) is a reliable signal of CPU throttle.
+// Skipped entirely when charging is confirmed.
+;(function probeJitter() {
+    setTimeout(() => {
+        if (_isCharging === true) return;
+        let n = 0, sum = 0, prev = performance.now();
+        const probe = now => {
+            if (n > 0) sum += now - prev;
+            prev = now;
+            if (++n < 16) { requestAnimationFrame(probe); return; }
+            const avg = sum / (n - 1);
+            if (avg > 55 && _powerMode === 'full') _setPowerMode('reduced');
+        };
+        requestAnimationFrame(probe);
+    }, 3000);
+})();
+
 // ── Raw audio capture module ──────────────────────────────────────────────────
 // Stores raw chunk bytes + deep MP4 parse for every audio append so the
 // external debug_app.py inspector can retrieve and analyse them.
@@ -134,11 +197,11 @@ const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
 // Suppress MusicKit's high-frequency event-queue overflow spam so it doesn't
 // drown useful [AML *] diagnostic messages in the renderer console.
 (() => {
-    const _orig = console.log;
-    console.log = (...args) => {
-        if (typeof args[0] === 'string' && args[0].includes('eventQueue overflow')) return;
-        _orig.apply(console, args);
-    };
+    const _suppress = s => typeof s === 'string' && s.includes('eventQueue overflow');
+    for (const method of ['log', 'warn', 'error', 'info']) {
+        const _orig = console[method];
+        console[method] = (...args) => { if (!_suppress(args[0])) _orig.apply(console, args); };
+    }
 })();
 
 // ── Native handles ─────────────────────────────────────────────────────────────
@@ -174,6 +237,18 @@ const _origFnApply    = Function.prototype.apply;
 let _vlcMode       = false; // true when VLC is handling playback (MSE bypassed)
 let _vlcPosMs      = 0;     // last polled VLC position (frozen during seek)
 let _vlcPaused     = false; // virtual paused state (overrides audio.paused in VLC mode)
+let _vlcLyricsFreezeTimer = null; // fires timeupdate at frozen pos while VLC paused (keeps karaoke at exact word)
+
+function _startLyricsFreeze(mkAudio) {
+    if (_vlcLyricsFreezeTimer) return;
+    _vlcLyricsFreezeTimer = setInterval(
+        () => mkAudio.dispatchEvent(new Event('timeupdate')), 100);
+}
+function _stopLyricsFreeze() {
+    if (!_vlcLyricsFreezeTimer) return;
+    clearInterval(_vlcLyricsFreezeTimer);
+    _vlcLyricsFreezeTimer = null;
+}
 let _vlcPollTimer  = null;  // setInterval handle
 let _vlcSeekTimer  = null;  // debounce: actual VLC seek fires after scrubbing stops
 let _vlcSeekFrozen    = false; // true during scrub → poll won't overwrite _vlcPosMs
@@ -205,7 +280,9 @@ let _msePaused        = false; // true while user has manually paused in MSE mod
 
 // ── Engine capability snapshot (from SSE) ─────────────────────────────────────
 
-let _engineCaps      = { lossless: false, atmos: false };
+let _engineCaps       = { lossless: false, atmos: false };
+let _streamingQuality  = 'lossless'; // 'high-quality' | 'lossless' | 'hi-res-lossless'
+let _downloadsQuality  = 'lossless'; // same options, applied to export requests
 let _losslessWaitDone = false;  // true after waitForLossless has timed out once — skip future waits
 let _snapshotEventId  = -1;     // SSE meta.id of the last engine.snapshot — drm events older than this are stale replays
 
@@ -359,7 +436,7 @@ function installMKSeekInterceptor(mk) {
                 console.log(`[AML VLC] seek UNFREEZE`);
                 // Emit Seeked signal so MPRIS clients re-anchor their seek bar.
                 window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000, seeked: true });
-            }, 150);
+            }, T().debounce);
         } else {
             // MSE path: set currentTime via the native prototype setter.
             // This fires the DOM 'seeking' event which our onSeeking handler
@@ -387,7 +464,7 @@ function waitForMusicKit() {
                 const mk = window.MusicKit?.getInstance?.();
                 if (mk && 'nowPlayingItem' in mk) return resolve(mk);
             } catch (_) {}
-            setTimeout(check, 50);
+            setTimeout(check, T().mkCheck);
         };
         check();
     });
@@ -439,21 +516,89 @@ let _mvVideoHeights = []; // available variant heights from HLS master, set per-
 
 // ── Quality badge ─────────────────────────────────────────────────────────────
 
-function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
-    let badge = document.getElementById('aml-quality-badge');
+// Lossless SVG icon (from AMP.UI.Controls, fill switched to white)
+const _losslessSVG = `<svg viewBox="0 0 69 44" xmlns="http://www.w3.org/2000/svg" style="height:12px;width:auto;display:block;flex-shrink:0"><path d="M36.8269026,4 C42.3794214,4 45.7184513,10.5183153 48.20334,17.4261699 L48.4450486,18.1066712 L48.6815356,18.788389 L48.9130884,19.4700271 C49.6770268,21.7405814 50.36352,23.9882073 51.0204784,25.9968947 C52.5296562,19.7123189 51.7381954,18.3629096 53.3551269,18.3629096 C53.9565751,18.3629096 54.5652965,18.7717786 54.5652965,19.5168498 C54.5652965,19.8184059 54.0740356,23.0143253 53.391361,26.2165815 L53.2651959,26.7982368 L53.1352128,27.3761743 C52.9156151,28.3341623 52.6817778,29.2605867 52.4420448,30.075084 C59.3914285,48.2833991 64.5514879,24.299737 65.134561,19.3973484 C65.2196627,18.6903693 65.7520794,18.3629223 66.2903224,18.3629223 C67.0092304,18.3629223 67.5985395,18.9043683 67.4862017,19.7191497 C66.2419581,27.647702 64.3284002,40 56.4607867,40 C52.1189889,40 49.6781873,36.6024859 47.7506208,32.7092263 C46.4116896,30.0790205 45.2734117,26.952661 44.2263394,23.8087368 L43.9767371,23.0541028 C43.8940827,22.8026091 43.811956,22.5512479 43.7303009,22.3002645 L43.4866946,21.5486922 C41.1040436,14.1741911 39.0830717,7.34159293 35.9851696,7.34159293 C34.4711899,7.34159293 33.3487598,8.92234593 33.2709954,8.92234593 C33.128169,8.92234593 33.0160746,8.27828447 31.602332,6.51365955 C32.9478242,4.97723054 34.8023002,4 36.8269026,4 Z M11.0614865,4.01937104 C23.4500006,4.01937104 24.5519172,36.7070003 31.5633281,36.7070003 C32.3865195,36.7070003 33.2738509,36.2079668 34.2437613,35.0776923 C34.7806086,35.9871115 35.3308882,36.7945268 35.9004521,37.5054184 C34.500923,39.1028534 32.7595403,39.9988275 30.578884,39.9988275 C22.7448451,39.9977315 19.3788608,26.8790797 16.4819088,18.0220558 C15.7996486,20.8631751 15.4455023,23.434387 15.3068631,24.5887478 C15.2208267,25.3223111 14.6831215,25.6566526 14.1414468,25.6566526 C13.5407541,25.6566526 12.9351571,25.2454896 12.9351571,24.5116332 C12.9351571,24.4569356 12.9385248,24.4004537 12.9455035,24.3422131 C13.346708,21.4307464 14.1551865,17.0196557 15.0604448,13.9441978 C13.8554484,10.7869356 12.3503425,7.33621492 10.1329104,7.33621492 C5.65625092,7.33621492 3.09261157,18.5867088 2.37169324,24.5887478 C2.28565683,25.3223111 1.74795163,25.6566526 1.20627691,25.6566526 C0.605597004,25.6566526 0,25.2454896 0,24.5116332 C0,24.4569356 0.00336770017,24.4004537 0.0103463944,24.3422131 C0.114233957,23.5883333 0.225608359,22.8207923 0.346678477,22.046953 L0.452878843,21.3822914 C0.470991821,21.2713147 0.48931555,21.1602523 0.50785647,21.0491258 L0.621759807,20.3817689 C2.0405473,12.2570738 4.68538356,4.01937104 11.0614865,4.01937104 Z M23.9155499,4.00146557 C26.1404345,4.00146557 28.5270839,5.15921632 30.5844926,7.87545613 C30.6994554,8.00734485 31.8526558,9.79953527 32.2166235,10.4208612 C33.474197,12.6992201 34.5694223,15.4837436 35.5796467,18.378952 L35.8413062,19.1364745 C38.7427747,27.6177062 40.980016,36.7463669 44.4650259,36.7463669 C45.2911112,36.7463669 46.1873164,36.2334422 47.1790849,35.0773864 C47.7158553,35.9867291 48.2660581,36.794068 48.835558,37.5049086 C47.4394606,39.099438 45.6989231,39.9988275 43.5140667,39.9988275 C31.1995909,39.9969924 29.8609621,7.32900175 23.0764932,7.32900175 C21.5454317,7.32900175 20.4138588,8.92244789 20.3357358,8.92244789 C20.1928455,8.92244789 20.0806102,8.27846289 18.6670468,6.51397816 C20.048649,4.9358122 21.9168263,4.00146557 23.9155499,4.00146557 Z" fill="white" fill-rule="nonzero"/></svg>`;
 
-    let text, color;
-    if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural') {
-        text  = 'SPATIAL AUDIO';
-        color = '#bf5af2';
+// State shared across showQualityBadge calls (populated by handleTrackChange)
+let _qualityBadgeInfo = { codec: null, sampleRate: null, bitDepth: null, spatialAudio: null };
+
+function _buildQualityPopup() {
+    let pop = document.getElementById('aml-quality-popup');
+    if (!pop) {
+        pop = document.createElement('div');
+        pop.id = 'aml-quality-popup';
+        Object.assign(pop.style, {
+            position: 'fixed', zIndex: '1000002',
+            background: 'rgba(30,30,32,0.92)',
+            backdropFilter: 'blur(60px) saturate(200%)',
+            WebkitBackdropFilter: 'blur(60px) saturate(200%)',
+            border: '0.5px solid rgba(255,255,255,0.11)',
+            borderRadius: '12px',
+            padding: '9px 13px 10px',
+            color: '#fff',
+            fontFamily: '-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif',
+            fontSize: '13px', lineHeight: '1.38',
+            display: 'none', pointerEvents: 'none',
+            boxShadow: '0 4px 24px rgba(0,0,0,0.55), 0 1px 3px rgba(0,0,0,0.4)',
+            whiteSpace: 'nowrap',
+        });
+        document.body.appendChild(pop);
+    }
+    return pop;
+}
+
+function _showQualityPopup(anchorEl) {
+    const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
+    const pop = _buildQualityPopup();
+
+    // macOS Music app tooltip style: title + single detail line
+    let title = '', detail = '';
+    if (spatialAudio === 'binaural-lossless') {
+        title  = 'Spatial Audio';
+        detail = 'Dolby Atmos · Lossless Binaural';
+    } else if (spatialAudio === 'binaural') {
+        title  = 'Spatial Audio';
+        detail = 'Dolby Atmos · Binaural';
     } else if (codec === 'alac') {
         const hiRes = sampleRate > 48000 || bitDepth > 16;
-        text  = hiRes
-            ? `HI-RES LOSSLESS  ·  ${(sampleRate / 1000).toFixed(0)} kHz / ${bitDepth}-bit`
-            : 'LOSSLESS';
-        color = '#30d158';
+        const khz   = sampleRate ? `${(sampleRate / 1000).toFixed(sampleRate % 1000 ? 1 : 0)} kHz` : '';
+        const bits  = bitDepth && bitDepth > 16 ? `${bitDepth}-bit ` : '';
+        title  = hiRes ? 'Lossless' : 'Lossless';
+        detail = `${bits}${khz} ALAC`.trim();
+    }
+
+    pop.innerHTML =
+        `<div style="font-size:13px;font-weight:590;letter-spacing:-0.01em;color:#fff;margin-bottom:1px">${title}</div>` +
+        `<div style="font-size:12px;font-weight:400;color:rgba(255,255,255,0.55)">${detail}</div>`;
+
+    pop.style.display = 'block';
+    const r = anchorEl.getBoundingClientRect();
+    // Position above the badge, centered
+    const pw = pop.offsetWidth || 130;
+    const ph = pop.offsetHeight || 52;
+    let left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    const top = Math.max(8, r.top - ph - 6);
+    pop.style.left = left + 'px';
+    pop.style.top  = top + 'px';
+}
+
+function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
+    _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
+    let badge = document.getElementById('aml-quality-badge');
+
+    let color, isHiRes = false, isSpatial = false, label = '';
+    if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural') {
+        color    = '#bf5af2';
+        label    = 'SPATIAL AUDIO';
+        isSpatial = true;
+    } else if (codec === 'alac') {
+        isHiRes  = sampleRate > 48000 || bitDepth > 16;
+        color    = '#30d158';
+        label    = isHiRes ? 'HI-RES' : '';
     } else {
         if (badge) badge.style.display = 'none';
+        document.getElementById('aml-quality-popup')?.style && (document.getElementById('aml-quality-popup').style.display = 'none');
         return;
     }
 
@@ -461,34 +606,202 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
         badge = document.createElement('div');
         badge.id = 'aml-quality-badge';
         badge.style.cssText =
-            'font-size:8px;font-weight:700;letter-spacing:.07em;' +
+            'display:inline-flex;align-items:center;gap:3px;' +
+            'border-radius:3px;padding:1px 4px;' +
+            'cursor:pointer;z-index:9999;white-space:nowrap;' +
+            'font-size:7.5px;font-weight:700;letter-spacing:.07em;' +
             'font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;' +
-            'border-radius:3px;' +
-            'padding:1px 4px;pointer-events:none;z-index:9999;white-space:nowrap;';
+            'transition:opacity 0.12s;';
 
-        // Inject into the player LCD area so it moves with the player.
-        // Fall back to a fixed overlay if the LCD isn't in the DOM yet.
-        const lcd = document.querySelector('.player-lcd');
-        if (lcd) {
-            if (getComputedStyle(lcd).position === 'static') lcd.style.position = 'relative';
-            badge.style.position = 'absolute';
-            badge.style.bottom   = '3px';
-            badge.style.left     = '4px';
-            lcd.appendChild(badge);
-        } else {
-            badge.style.position  = 'fixed';
-            badge.style.bottom    = '14px';
-            badge.style.left      = '50%';
-            badge.style.transform = 'translateX(-50%)';
-            document.body.appendChild(badge);
+        badge.addEventListener('mouseenter', () => { badge.style.opacity = '0.75'; });
+        badge.addEventListener('mouseleave', () => {
+            badge.style.opacity = '1';
+            // Hide popup when mouse leaves badge
+            setTimeout(() => {
+                const pop = document.getElementById('aml-quality-popup');
+                if (pop) pop.style.display = 'none';
+            }, 200);
+        });
+        badge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const pop = document.getElementById('aml-quality-popup');
+            if (pop && pop.style.display !== 'none') {
+                pop.style.display = 'none';
+            } else {
+                _showQualityPopup(badge);
+            }
+        });
+        // Click anywhere else closes popup
+        document.addEventListener('click', () => {
+            const pop = document.getElementById('aml-quality-popup');
+            if (pop) pop.style.display = 'none';
+        }, true);
+
+        // Insert badge directly after the ★ inside marquee__menu-slot-container.
+        badge.style.flexShrink = '0';
+        badge.style.alignSelf  = 'center';
+        badge.style.marginLeft = '2px';
+
+        function _insertBadgeIntoSlot(attempt) {
+            const lcd = document.querySelector(
+                '[data-testid="lcd-metadata"], .player-lcd, .web-chrome-playback-lcd'
+            );
+            const slot = lcd?.querySelector('.marquee--primary .marquee__menu-slot-container');
+            const favEl = slot?.querySelector('.favorite-badge, [data-testid="favorite-button"]');
+            if (slot && favEl) {
+                slot.style.display    = 'flex';
+                slot.style.alignItems = 'center';
+                slot.style.maxHeight  = 'none';
+                slot.style.overflow   = 'visible';
+                // Do NOT touch marquee-line overflow — breaks the marquee animation.
+                favEl.insertAdjacentElement('afterend', badge);
+
+                // Apple Music's JS sets inset-inline-start inline during animation
+                // to hide the slot. Override via setProperty 'important' flag which
+                // beats plain inline styles. Guard against re-entrancy with a flag.
+                let _pinning = false;
+                const _pinSlot = () => {
+                    if (_pinning) return;
+                    const cur = parseFloat(getComputedStyle(slot).insetInlineStart);
+                    if (cur > 250) { // pushed off-screen (container is ~282px wide)
+                        _pinning = true;
+                        slot.style.setProperty('inset-inline-start', 'auto', 'important');
+                        slot.style.setProperty('inset-inline-end', '0', 'important');
+                        requestAnimationFrame(() => { _pinning = false; });
+                    }
+                };
+                const ml = slot.closest('[data-testid="marquee-line"]');
+                new MutationObserver(_pinSlot).observe(slot, { attributes: true, attributeFilter: ['style'] });
+                if (ml) new MutationObserver(_pinSlot).observe(ml, { attributes: true, attributeFilter: ['class', 'style'] });
+                _pinSlot();
+                return;
+            }
+            if (attempt < 10) {
+                setTimeout(() => _insertBadgeIntoSlot(attempt + 1), 200);
+            } else {
+                badge.style.position  = 'fixed';
+                badge.style.bottom    = '14px';
+                badge.style.left      = '50%';
+                badge.style.transform = 'translateX(-50%)';
+                document.body.appendChild(badge);
+            }
         }
+        _insertBadgeIntoSlot(0);
     }
 
     badge.style.color  = color;
-    badge.style.border = `1px solid ${color}`;
-    badge.textContent  = text;
-    badge.style.display = '';
+    badge.style.border = 'none';
+
+    if (isSpatial) {
+        badge.innerHTML = `<span>${label}</span>`;
+    } else {
+        badge.innerHTML = _losslessSVG;
+    }
+
+    badge.style.display = 'inline-flex';
+
+    window._syncNpBadge?.();
 }
+
+// ── Now Playing overlay quality badge (fullscreen lyrics + vertical panel) ───
+(function () {
+    let _npBadge = null;
+
+    function _npContent() {
+        const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
+        if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural')
+            return { show: true, label: 'Spatial Audio', icon: false };
+        if (codec === 'alac') {
+            const hi = sampleRate > 48000 || bitDepth > 16;
+            return { show: true, label: hi ? 'Hi-Res Lossless' : 'Lossless', icon: true };
+        }
+        return { show: false };
+    }
+
+    function _alignBadge() {
+        if (!_npBadge?.isConnected || _npBadge.style.display === 'none') return;
+        const sr = _npBadge.parentNode;
+        const ref = sr?.querySelector?.('.time.elapsed') || sr?.querySelector?.('.time.remaining');
+        if (!ref) return;
+        const badgeH = _npBadge.offsetHeight || 19;
+        const top = ref.offsetTop + (ref.offsetHeight - badgeH) / 2;
+        if (top > 0) _npBadge.style.top = top + 'px';
+    }
+
+    function _syncBadge() {
+        if (!_npBadge) return;
+        const { show, label, icon } = _npContent();
+        if (!show) { _npBadge.style.display = 'none'; return; }
+        _npBadge.innerHTML = (icon ? _losslessSVG : '') + `<span>${label}</span>`;
+        _npBadge.style.display = 'inline-flex';
+        _alignBadge();
+    }
+
+    function _fmtDur(secs) {
+        const m = Math.floor(secs / 60), s = Math.round(secs % 60);
+        return `-${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function _attach(scrubber) {
+        if (document.getElementById('aml-np-badge')) return;
+        const sr = scrubber.shadowRoot;
+        if (!sr) return;
+
+        _npBadge = document.createElement('div');
+        _npBadge.id = 'aml-np-badge';
+        _npBadge.style.cssText =
+            'display:none;align-items:center;gap:5px;' +
+            'padding:3.5px 7px;border-radius:5px;' +
+            'font-size:11px;font-weight:500;letter-spacing:0em;' +
+            'line-height:1;white-space:nowrap;user-select:none;cursor:pointer;' +
+            'color:rgba(255,255,255,0.65);' +
+            'background:rgba(255,255,255,0.08);' +
+            'transition:opacity 0.12s;' +
+            'position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:2;';
+        _npBadge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const pop = document.getElementById('aml-quality-popup');
+            if (pop && pop.style.display !== 'none') { pop.style.display = 'none'; }
+            else { _showQualityPopup(_npBadge); }
+        });
+        _npBadge.addEventListener('mouseenter', () => { _npBadge.style.opacity = '0.75'; });
+        _npBadge.addEventListener('mouseleave', () => {
+            _npBadge.style.opacity = '1';
+            setTimeout(() => {
+                const pop = document.getElementById('aml-quality-popup');
+                if (pop) pop.style.display = 'none';
+            }, 200);
+        });
+
+        // Make scrubber host a positioning context so absolute badge works
+        scrubber.style.position = 'relative';
+        // Inject directly into shadow root so badge sits between timestamps
+        sr.appendChild(_npBadge);
+        _syncBadge();
+    }
+
+    function _check() {
+        if (_npBadge && !_npBadge.isConnected) _npBadge = null;
+        if (_npBadge && _npBadge.isConnected) {
+            _syncBadge();
+            // Fix "--:--" remaining time for VLC tracks
+            const dur = window.MusicKit?.getInstance?.()?.currentPlaybackDuration;
+            if (dur > 0) {
+                const rem = _npBadge.parentNode?.querySelector?.('.time.remaining');
+                if (rem && rem.textContent === '--:--') rem.textContent = _fmtDur(dur);
+            }
+            return;
+        }
+
+        const scrubber =
+            document.querySelector('[data-testid="lyrics-fullscreen-modal"] amp-playback-controls-progress') ||
+            document.querySelector('div.now-playing-structure amp-playback-controls-progress');
+        if (scrubber) _attach(scrubber);
+    }
+
+    setInterval(_check, 800);
+    window._syncNpBadge = _syncBadge;
+})();
 
 function deleteSession(id) {
     if (id) fetch(`${ENGINE}/api/v1/playback/${id}`, { method: 'DELETE' }).catch(() => {});
@@ -1235,7 +1548,7 @@ async function startMVPipeline() {
             // manually if the generation hasn't advanced (i.e. no natural restart happened).
             const _genSnap = _generation;
             _abortCtrl.abort();
-            setTimeout(() => { if (_generation === _genSnap && _mkInstance) handleTrackChange(_mkInstance); }, 200);
+            setTimeout(() => { if (_generation === _genSnap && _mkInstance) handleTrackChange(_mkInstance); }, T().qualityRace);
         });
         _qualityMenu.appendChild(opt);
     });
@@ -1528,7 +1841,7 @@ async function startMVPipeline() {
         if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
         if (timeRemain)  timeRemain.textContent  = '-' + _fmtTime(max - t);
     };
-    const _seekSyncInterval = setInterval(_updateProgress, 250);
+    const _seekSyncInterval = setInterval(_updateProgress, T().poll);
     const onNativeSeeked  = null;
     const onNativeVolume  = null;
 
@@ -1550,12 +1863,91 @@ async function startMVPipeline() {
         return;
     }
     URL.revokeObjectURL(audioBlobUrl);
-    // Start mkAudio as soon as audio data arrives so MK exits "loading" state early,
-    // preventing the seek bar loading-blink that occurs while the video MSE is still
-    // filling (which can take seconds).  onVideoPlay will re-sync currentTime if needed.
-    mkAudio.addEventListener('canplay', function _onAudCanPlay() {
-        if (mkAudio.paused && !_abortCtrl.signal.aborted) mkAudio.play().catch(() => {});
-    }, { once: true });
+    // ── A/V sync gate ─────────────────────────────────────────────────────────────
+    // Both streams must reach canplay AND video must have ≥2s buffered before either
+    // starts. Prevents: (a) audio leading video at the start; (b) A/V drift from
+    // hitting the first HLS segment boundary before the buffer is established.
+    let _audioCanPlay = false, _videoCanPlay = false, _avStarted = false;
+    // _videoStalled: set when video fires 'waiting'; cleared in onVideoPlaying
+    let _videoStalled = false;
+
+    // ── Proactive buffer guard ──────────────────────────────────────────────────
+    // Every 500ms monitors video buffer lead. When lead drops below LOW_WATER we
+    // pre-emptively pause (hidden from MK — onVideoPause is guarded by _bufPaused)
+    // and mute audio so MK sees "playing but silent" rather than a pause event.
+    // We resume only after buffer reaches HIGH_WATER, giving a clear hysteresis gap
+    // that prevents oscillation and ensures smooth play windows between pauses.
+    //
+    // Why watermarks not fill-rate:
+    //   Fill-rate projection is noisy at 500ms — it's 0 between segment deliveries
+    //   and spikes on arrival. With marginal bandwidth the pattern is: drain at
+    //   -1s/s (playback) then spike when a segment lands. At that exact spike tick
+    //   the "resume" condition became true even with only 2s buffered, causing
+    //   rapid pause→resume oscillation. Fixed watermarks with a 4s hysteresis gap
+    //   are predictable and prevent the churn.
+    //
+    // Why mute instead of pause mkAudio:
+    //   MK owns that element; pausing it triggers state=3 which can cause
+    //   track-skip under sustained stalls. Muting keeps MK in "playing" state.
+    const BUF_LOW  = 1.0; // pause when lead falls below this
+    const BUF_HIGH = 5.0; // resume only when lead rises above this (4s hysteresis gap)
+
+    let _dynBufTimer = null;
+    let _bufPaused   = false; // true while hidden-paused for buffering
+
+    const _getVidLead = () => {
+        const ct = videoEl.currentTime;
+        for (let i = 0; i < videoEl.buffered.length; i++) {
+            if (videoEl.buffered.start(i) <= ct + 0.1 && ct <= videoEl.buffered.end(i))
+                return videoEl.buffered.end(i) - ct;
+        }
+        return 0;
+    };
+
+    const _startDynBuf = () => {
+        if (_dynBufTimer) return;
+        _dynBufTimer = setInterval(() => {
+            if (!_avStarted || _abortCtrl?.signal.aborted) { clearInterval(_dynBufTimer); _dynBufTimer = null; return; }
+            if (ms.readyState === 'ended') return; // stream done — let it drain naturally
+
+            const lead = _getVidLead();
+
+            if (_bufPaused) {
+                if (lead >= BUF_HIGH) {
+                    _bufPaused = false;
+                    mkAudio.currentTime = videoEl.currentTime; // re-anchor while still muted
+                    mkAudio.muted = false;
+                    _iframePlay.call(videoEl).catch(() => {}); // onVideoPlay → mkAudio.play()
+                    console.log(`[AML MV buf:resume] lead=${lead.toFixed(2)}s ct=${videoEl.currentTime.toFixed(2)}`);
+                } else {
+                    console.debug(`[AML MV buf:waiting] lead=${lead.toFixed(2)}s (need ${BUF_HIGH}s to resume)`);
+                }
+            } else {
+                if (lead < BUF_LOW && !videoEl.paused) {
+                    _bufPaused = true;
+                    videoEl.pause();      // onVideoPause suppressed via _bufPaused guard
+                    mkAudio.muted = true; // silent but still "playing" — MK sees no pause
+                    console.warn(`[AML MV buf:pre-pause] lead=${lead.toFixed(2)}s ct=${videoEl.currentTime.toFixed(2)}`);
+                } else {
+                    console.debug(`[AML MV buf:ok] lead=${lead.toFixed(2)}s`);
+                }
+            }
+        }, BUF_POLL_MS);
+    };
+
+    const tryStart = () => {
+        if (_avStarted || !_audioCanPlay || !_videoCanPlay || _abortCtrl?.signal.aborted) return;
+        _avStarted = true;
+        // Sync video time to audio (audio loads faster; set video to audio reference)
+        if (Math.abs(videoEl.currentTime - mkAudio.currentTime) > 0.05)
+            videoEl.currentTime = mkAudio.currentTime;
+        console.log(`[AML MV buf:gate] A/V gate open — starting playback audio=${mkAudio.currentTime.toFixed(2)} video=${videoEl.currentTime.toFixed(2)}`);
+        // onVideoPlay fires on the 'play' event and calls mkAudio.play()
+        _iframePlay.call(videoEl).catch(e => console.warn('[AML MV] av-gate play rejected:', e.message));
+        _startDynBuf();
+    };
+
+    mkAudio.addEventListener('canplay', () => { _audioCanPlay = true; tryStart(); }, { once: true });
     const audioSb = audioMs.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
     const audioUrl = `${ENGINE}/api/v1/playback/${_sessionId}/audio?raw=1`;
     let _audioPipeCtrl = new AbortController();
@@ -1811,8 +2203,20 @@ async function startMVPipeline() {
     // blocks MK's savedPause.call(nativeVidEl) that fires on 'playing'.
     const onVideoPlaying = () => {
         nativeVidEl?.dispatchEvent(new Event('playing', { bubbles: false }));
+        if (_videoStalled) {
+            _videoStalled = false;
+            const drift = mkAudio.currentTime - videoEl.currentTime;
+            // Resync while muted — seek is inaudible. Unmute after sync.
+            if (Math.abs(drift) > 0.05) {
+                console.log(`[AML MV buf:sync] stall recovery drift=${drift.toFixed(2)}s, snapping audio ct=${videoEl.currentTime.toFixed(2)}`);
+                mkAudio.currentTime = videoEl.currentTime;
+            }
+            mkAudio.muted = false;
+            console.log(`[AML MV buf:sync] audio unmuted, video resumed ct=${videoEl.currentTime.toFixed(2)}`);
+        }
     };
     const onVideoPause = () => {
+        if (_bufPaused) return; // buffer management pause — don't tell MK
         console.log(`[AML MV-V] videoEl pause ct=${videoEl.currentTime.toFixed(2)}`);
         mkAudio.pause();
         nativeVidEl?.dispatchEvent(new Event('pause', { bubbles: false }));
@@ -1823,14 +2227,27 @@ async function startMVPipeline() {
         if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
             mkAudio.currentTime = videoEl.currentTime;
     };
-    const onEnded = () => { console.log(`[AML MV-V] videoEl ended — aborting pipeline`); _abortCtrl.abort(); };
+    const onEnded = () => {
+        console.log(`[AML MV-V] videoEl ended — aborting pipeline`);
+        _abortCtrl.abort();
+        // Click Apple Music's native exit button so the player view closes
+        // after our cleanup runs. Delay slightly so cleanup finishes first.
+        setTimeout(() => exitBtn?.click(), 100);
+    };
     const onVideoError  = () => {
         const code = videoEl.error?.code;
         console.error(`[AML MV-V] videoEl error code=${code} msg="${videoEl.error?.message}"`);
         if (code === 3 || code === 4) _abortCtrl.abort();
     };
     const onVideoStall  = () => console.warn(`[AML MV-V] videoEl stalled ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
-    const onVideoWait   = () => console.warn(`[AML MV-V] videoEl waiting ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+    const onVideoWait = () => {
+        console.warn(`[AML MV buf:stall] videoEl waiting ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+        if (_avStarted && !_videoStalled && !_bufPaused) {
+            _videoStalled = true;
+            mkAudio.muted = true; // silence without pausing — MK sees "playing", no state=3
+            console.warn(`[AML MV buf:stall] audio muted during video stall ct=${mkAudio.currentTime.toFixed(2)}`);
+        }
+    };
     videoEl.addEventListener('play',    onVideoPlay);
     videoEl.addEventListener('playing', onVideoPlaying);
     videoEl.addEventListener('pause',   onVideoPause);
@@ -1844,11 +2261,30 @@ async function startMVPipeline() {
     videoEl.addEventListener('canplay', () => {
         if (_abortCtrl?.signal.aborted) return;
         console.log(`[AML MV] canplay videoWidth=${videoEl.videoWidth} videoHeight=${videoEl.videoHeight} readyState=${videoEl.readyState}`);
-        _iframePlay.call(videoEl).catch(e => console.warn('[AML MV] play rejected:', e.message));
+        // Wait until ≥4s is buffered before joining the start gate — gives the pipeline
+        // enough head-start to survive HLS segment boundaries without stutter.
+        const checkBuf = () => {
+            if (_abortCtrl?.signal.aborted) return;
+            const b = videoEl.buffered;
+            const lead = b.length > 0 ? b.end(b.length - 1) : 0;
+            if (lead >= 6.0) {
+                console.log(`[AML MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
+                _videoCanPlay = true;
+                tryStart();
+            } else {
+                console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need 6s)`);
+                videoEl.addEventListener('progress', checkBuf, { once: true });
+            }
+        };
+        checkBuf();
     }, { once: true });
 
     const cleanup = () => {
         console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation}`);
+        clearInterval(_dynBufTimer); _dynBufTimer = null;
+        _bufPaused = false;
+        _videoStalled = false;
+        if (mkAudio.muted) mkAudio.muted = false; // restore mute state on session end
         pipeCtrl.abort(); _audioPipeCtrl.abort();
         mkAudio.pause();
         videoEl.removeEventListener('play',    onVideoPlay);
@@ -1925,14 +2361,17 @@ function startVLCPoll(mkAudio) {
     let _tickCount = 0;
     let _vlcLengthSet = false;
     let _vlcFetching  = false; // skip tick if previous fetch hasn't completed
+    const mySession = _sessionId; // capture — discard responses that arrive after a track skip
     _vlcPollTimer = setInterval(async () => {
         if (_vlcFetching) return;
         _vlcFetching = true;
         try {
             const r = await fetch(`${ENGINE}/api/v1/vlc/time`);
-            if (!r.ok) return;
+            // Stale check: if track changed while fetch was in-flight, discard silently
+            if (!r.ok || _sessionId !== mySession) return;
             _errCount = 0;
             const { posMs, lengthMs, state } = await r.json();
+            if (_sessionId !== mySession) return; // second check after JSON parse
             if (!_vlcLengthSet && lengthMs > 0) {
                 _vlcLengthSet = true;
                 _durationSec = lengthMs / 1000;
@@ -2096,6 +2535,7 @@ function startVLCPoll(mkAudio) {
                 console.log(`[AML VLC] pause() → pause`);
                 _vlcPaused = true;
                 mkAudio.dispatchEvent(new Event('pause'));
+                _startLyricsFreeze(mkAudio);
                 fetch(`${ENGINE}/api/v1/vlc/pause`, { method: 'POST' }).catch(() => {});
             };
 
@@ -2127,6 +2567,7 @@ function startVLCPoll(mkAudio) {
             ctrl.signal.addEventListener('abort', () => {
                 unbridgeDuration();
                 stopVLCPoll();
+                _stopLyricsFreeze();
                 _vlcLoading = false;
                 URL.revokeObjectURL(_silentUrl);
                 delete mkAudio.paused;
@@ -2184,13 +2625,14 @@ function startVLCPoll(mkAudio) {
             if (_vlcSeekFrozen) return;
             if (state === 'playing') {
                 _vlcPaused = false;
+                _stopLyricsFreeze();
                 _vlcLoading = false; // VLC is actually playing; clear pre-warmup guard
                 // Only dispatch 'playing' for initial start (null/stopped → playing).
                 // Resume from pause is handled by _origMKPlay() — dispatching here
                 // causes PlayActivity.play() to be called twice and throws.
                 if (prev !== 'paused') mkAudio.dispatchEvent(new Event('playing'));
             }
-            if (state === 'paused')  { _vlcPaused = true;  mkAudio.dispatchEvent(new Event('pause')); }
+            if (state === 'paused') { _vlcPaused = true; mkAudio.dispatchEvent(new Event('pause')); _startLyricsFreeze(mkAudio); }
             // VLC goes playing → ended → stopped in quick succession.
             // If the 250ms poll fires after the ended state has already passed,
             // we see playing → stopped and must treat it as a track end too.
@@ -2263,7 +2705,7 @@ function startVLCPoll(mkAudio) {
         } finally {
             _vlcFetching = false;
         }
-    }, 250);
+    }, T().poll);
 }
 
 // Polls _engineCaps.lossless every 100 ms until true or timeoutMs elapses.
@@ -2271,6 +2713,7 @@ function startVLCPoll(mkAudio) {
 // _losslessWaitDone). Once it times out once we skip all future waits — CBCS
 // state won't flip mid-session and we can't pay +2.5 s per track when unavailable.
 function waitForLossless(timeoutMs) {
+    if (_streamingQuality === 'high-quality') return Promise.resolve(); // user forced AAC
     if (_engineCaps.lossless || _losslessWaitDone) return Promise.resolve();
     return new Promise(resolve => {
         const deadline = Date.now() + timeoutMs;
@@ -2304,7 +2747,7 @@ async function handleTrackChange(mk) {
     _streamComplete = false; _chunkCache = null; _msePaused = false;
     if (_seekFetchCtrl) { _seekFetchCtrl.abort(); _seekFetchCtrl = null; }
     // VLC state reset
-    _vlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0;
+    _vlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _stopLyricsFreeze(); _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0;
     if (_vlcSeekTimer) { clearTimeout(_vlcSeekTimer); _vlcSeekTimer = null; }
     stopVLCPoll();
     unbridgeDuration();
@@ -2341,10 +2784,9 @@ async function handleTrackChange(mk) {
         installPlayProxy(mkAudio);
     }
 
-    // Wait up to 800 ms for DRM to report lossless capability before opening the session.
-    // Prevents locking in a degraded AAC session when FairPlay is seconds from ready.
-    // With SSE working, the DRM state arrives in <200ms so this rarely waits at all.
-    await waitForLossless(800);
+    // Wait for DRM to report lossless capability before opening the session.
+    // Timeout scales with power mode: throttled CPUs need more time for DRM to report in.
+    await waitForLossless(T().losslessWait);
     if (myGen !== _generation) return;
 
     try {
@@ -2355,7 +2797,7 @@ async function handleTrackChange(mk) {
                 assetId:    adamId,
                 storefront: sf,
                 capabilities: {
-                    lossless: _engineCaps.lossless,
+                    lossless: _engineCaps.lossless && _streamingQuality !== 'high-quality',
                     atmos:    false,
                     video:    (item.type === 'music-videos' || item.type === 'musicVideo'),
                 },
@@ -2546,6 +2988,7 @@ async function handleTrackChange(mk) {
                 console.log(`[AML VLC] pause() → pause`);
                 _vlcPaused = true;
                 mkAudio.dispatchEvent(new Event('pause'));
+                _startLyricsFreeze(mkAudio);
                 fetch(`${ENGINE}/api/v1/vlc/pause`, { method: 'POST' }).catch(() => {});
             };
 
@@ -2577,6 +3020,7 @@ async function handleTrackChange(mk) {
             ctrl.signal.addEventListener('abort', () => {
                 unbridgeDuration();
                 stopVLCPoll();
+                _stopLyricsFreeze();
                 _vlcLoading = false;
                 URL.revokeObjectURL(_silentUrl);
                 delete mkAudio.paused;
@@ -2606,7 +3050,7 @@ async function setup() {
     // Wait for the engine's SSE snapshot instead of polling GET /api/v1/status.
     // _amlEngine is injected by engine-sse-bundle.js which loads before us.
     try {
-        const msg = await window._amlEngine?.waitFor('engine.snapshot', 4000);
+        const msg = await window._amlEngine?.waitFor('engine.snapshot', T().sseWait);
         const snap = msg?.payload?.snapshot;
         const gen  = msg?.meta?.generation ?? '?';
         const why  = msg?.meta?.reason     ?? '?';
@@ -2619,8 +3063,10 @@ async function setup() {
         console.warn('[AML Engine] Engine snapshot timeout:', e.message, '— continuing');
     }
 
-    // Push saved cache config to engine now that it's up.
+    // Push saved cache config to engine now that it's up; also load quality pref.
     window.amlBridge?.getPrefs().then(p => {
+        if (p['streaming-quality']) _streamingQuality = p['streaming-quality'];
+        if (p['downloads-quality']) _downloadsQuality  = p['downloads-quality'];
         const body = {};
         if (p.prewarmLimitMB  != null) body.prewarmLimitMB  = p.prewarmLimitMB;
         if (p.persistLimitMB  != null) body.persistLimitMB  = p.persistLimitMB;
@@ -2884,6 +3330,146 @@ async function setup() {
 
 setup().catch(e => console.error('[AML Engine] setup:', e));
 
+// ── Search suggestions portal ──────────────────────────────────────────────
+// backdrop-filter on search-input-wrapper creates a compositing layer that traps
+// descendants' blur. Portal moves .search-suggestions to <body> so both blur
+// independently. Two triggers:
+//   1. MutationObserver (synchronous, no rAF) — catches Svelte's DOM insertion
+//   2. Input/focus listeners on the search field — proactively poll as soon as
+//      the user types, before Svelte finishes rendering the suggestions node
+(function initSearchSuggestionsPortal() {
+    let portaled = null;
+
+    function positionPortal(el) {
+        const bar = document.querySelector('[class*="search-input-wrapper"]');
+        if (!bar) return;
+        const r = bar.getBoundingClientRect();
+        el.style.setProperty('position', 'fixed', 'important');
+        el.style.setProperty('top', (r.bottom + 6) + 'px', 'important');
+        el.style.setProperty('left', r.left + 'px', 'important');
+        el.style.setProperty('width', r.width + 'px', 'important');
+        el.style.setProperty('z-index', '9999', 'important');
+    }
+
+    function doPortal(sugg) {
+        if (portaled === sugg) return;
+        portaled = sugg;
+        sugg.remove();
+        positionPortal(sugg);
+        document.body.appendChild(sugg);
+    }
+
+    // Try to portal whatever suggestions exist inside the wrapper right now.
+    // Returns true if portaled, false if not found yet.
+    function tryScan() {
+        const bar = document.querySelector('[class*="search-input-wrapper"]');
+        if (!bar) return false;
+        const sugg = bar.querySelector('[class*="search-suggestions"]');
+        if (!sugg) return false;
+        doPortal(sugg);
+        return true;
+    }
+
+    // Synchronous MutationObserver — no rAF, fires before browser paint
+    const observer = new MutationObserver(mutations => {
+        for (const m of mutations) {
+            for (const node of m.addedNodes) {
+                if (node.nodeType !== 1) continue;
+                const sugg = node.matches('[class*="search-suggestions"]') ? node
+                    : node.querySelector('[class*="search-suggestions"]');
+                if (sugg && sugg.closest('[class*="search-input-wrapper"]')) {
+                    doPortal(sugg);
+                    return;
+                }
+            }
+            for (const node of m.removedNodes) {
+                if (node.nodeType !== 1) continue;
+                const gone = node.matches('[class*="search-suggestions"]') ? node
+                    : node.querySelector('[class*="search-suggestions"]');
+                if (gone === portaled) portaled = null;
+            }
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // Wire input/focus listeners onto the search field so we poll immediately
+    // on text change — Svelte renders suggestions a microtask after input fires,
+    // so a tight poll (30 ms × 20 attempts = 600 ms window) catches it early.
+    function wireSearchInput(input) {
+        if (!input || input._amlPortalWired) return;
+        input._amlPortalWired = true;
+
+        function startPoll() {
+            if (tryScan()) return;
+            let attempts = 0;
+            const t = setInterval(() => {
+                if (tryScan() || ++attempts >= 20) clearInterval(t);
+            }, 30);
+        }
+
+        input.addEventListener('input', startPoll);
+        input.addEventListener('focus', startPoll);
+    }
+
+    // Attach to the search field now, and re-attach after SPA navigations
+    function attachToSearchInput() {
+        wireSearchInput(document.querySelector(
+            '#search-input__text-field, [class*="search-input__text-field"]'
+        ));
+    }
+
+    attachToSearchInput();
+    // Re-wire whenever the DOM mutates (SPA page changes swap the input out)
+    new MutationObserver(attachToSearchInput)
+        .observe(document.documentElement, { childList: true, subtree: true });
+
+    window.addEventListener('resize', () => { if (portaled) positionPortal(portaled); }, { passive: true });
+})();
+
+// ── Tracklist stats in detail header ─────────────────────────────────────────
+// Appends "N songs, X hr Y min" inside the headings grid area (after subtitle)
+// so it flows naturally in Apple's native two-column desktop layout without
+// overriding grid-template-areas and breaking the artwork/content split.
+(function initTracklistStatsInHeader() {
+    let statsEl = null;
+    let lastText = '';
+
+    function sync() {
+        const header = document.querySelector('[class*="container-detail-header"]:not([class*="wrapper"])');
+
+        if (!header) {
+            if (statsEl) { statsEl.remove(); statsEl = null; lastText = ''; }
+            return;
+        }
+
+        // Target: the headings grid cell (contains title + subtitle)
+        const headings = header.querySelector('[class*="headings"]:not([class*="primary"]):not([class*="secondary"])');
+        if (!headings) return;
+
+        const src = document.querySelector('[data-testid="tracklist-footer-description"]')
+            || document.querySelector('[class*="tracklist-footer"] p[class*="description"]');
+        const text = src?.textContent?.trim() ?? '';
+
+        if (!statsEl || !headings.contains(statsEl)) {
+            statsEl?.remove();
+            statsEl = document.createElement('p');
+            statsEl.id = 'aml-tracklist-stats';
+            headings.appendChild(statsEl);
+            lastText = '';
+        }
+
+        if (text !== lastText) {
+            statsEl.textContent = text;
+            lastText = text;
+        }
+
+        if (src?.parentElement) src.parentElement.style.display = 'none';
+    }
+
+    new MutationObserver(sync).observe(document.body, { childList: true, subtree: true });
+    sync();
+})();
+
 // MusicKit's PlayActivity analytics throws "play() method was called without a
 // previous stop() or pause() call" as an unhandled promise rejection whenever
 // our VLC mode resumes playback — its state machine expects a real audio src.
@@ -2897,60 +3483,6 @@ window.addEventListener('unhandledrejection', (e) => {
 
 
 
-// ── Submenu viewport clamp ─────────────────────────────────────────────────
-(function clampSubmenus() {
-    const PLAYER_BAR = 72;
-    const PAD = 8;
-
-    function clamp(el) {
-        if (!el.isConnected) return;
-        el.style.removeProperty('max-height');
-        el.style.removeProperty('overflow-y');
-        const rect  = el.getBoundingClientRect();
-        const limit = window.innerHeight - PLAYER_BAR - PAD;
-        if (rect.bottom <= limit) return;
-        const parent = el.parentElement;
-        if (parent) {
-            const overflow = rect.bottom - limit;
-            const headroom = Math.max(0, rect.top - PAD);
-            const shift    = Math.min(overflow, headroom);
-            if (shift > 0) {
-                const curTop = parseFloat(parent.style.top) || 0;
-                parent.style.top = (curTop - shift) + 'px';
-            }
-        }
-        const r2 = el.getBoundingClientRect();
-        if (r2.bottom > limit) {
-            const cap = Math.max(80, limit - r2.top);
-            el.style.setProperty('max-height', cap + 'px', 'important');
-            el.style.setProperty('overflow-y', 'auto',     'important');
-        }
-    }
-
-    function clampAll() {
-        document.querySelectorAll(
-            'div.contextual-menu.contextual-menu--nested, div.contextual-menu.contextual-menu--in-submenu'
-        ).forEach(clamp);
-    }
-
-    const bodyObs = new MutationObserver(mutations => {
-        for (const m of mutations) {
-            for (const node of m.addedNodes) {
-                if (node.nodeType !== 1) continue;
-                const overlay = node.classList?.contains('contextual-menu__overlay')
-                    ? node : node.querySelector?.('.contextual-menu__overlay');
-                if (!overlay) continue;
-                const innerObs = new MutationObserver(() => setTimeout(clampAll, 0));
-                innerObs.observe(overlay, { childList: true, subtree: true });
-                const cleanupObs = new MutationObserver(() => {
-                    if (!overlay.isConnected) { innerObs.disconnect(); cleanupObs.disconnect(); }
-                });
-                cleanupObs.observe(document.body, { childList: true });
-            }
-        }
-    });
-    bodyObs.observe(document.body, { childList: true });
-})();
 
 
 // ── Engine Settings Panel ──────────────────────────────────────────────────
@@ -3039,7 +3571,11 @@ window.addEventListener('unhandledrejection', (e) => {
     function buildAccountSection(drm, onRefresh) {
         const { wrap, body } = makeSection('Engine Account');
         const drmState = drm?.state ?? drm ?? {};
-        const isSignedIn = drmState?.session === 'valid'
+        // session:valid only means mpl_db credentials exist — it stays true even
+        // when the DRM process has failed (stale cache). Only count it when the
+        // process is actually running. authentication/fairplay/cbcs are live signals.
+        const processOk = drmState?.process === 'running';
+        const isSignedIn = (processOk && drmState?.session === 'valid')
             || drmState?.authentication === 'logged_in'
             || drmState?.fairplay === 'ready'
             || drm?.capabilities?.cbcs === true;
@@ -3173,6 +3709,10 @@ window.addEventListener('unhandledrejection', (e) => {
                 padding:0 32px 32px; color:rgba(255,255,255,0.9);
                 font-family:-apple-system,SF Pro Text,system-ui,sans-serif;
             }
+            #aml-settings-close {
+                position:sticky; top:18px; float:right; z-index:10;
+                margin-left:auto; flex-shrink:0;
+            }
             #aml-settings-dialog::backdrop {
                 background:rgba(0,0,0,0.4);
             }
@@ -3187,6 +3727,12 @@ window.addEventListener('unhandledrejection', (e) => {
         `;
         document.head.appendChild(st);
         document.body.appendChild(dlg);
+        // Single capture-phase listener closes all dropdowns and handles backdrop click.
+        // Wired once here so dlDropdown/makeQualityDropdown don't each add their own.
+        dlg.addEventListener('click', e => {
+            document.querySelectorAll('.aml-qdrop-menu').forEach(m => { m.style.display = 'none'; });
+            if (e.target === dlg) closeSettings();
+        }, true);
         return dlg;
     }
 
@@ -3198,27 +3744,80 @@ window.addEventListener('unhandledrejection', (e) => {
     }
 
     // ── Open settings — anchored to the account button ─────────────────────
+    // Generation counter: each openSettings() call gets a unique ID.
+    // After each await, stale callers (whose ID was superseded by a newer call)
+    // bail out — preventing concurrent renders from appending duplicate sections.
+    let _settingsGen = 0;
     async function openSettings() {
+        const myGen = ++_settingsGen;
         const dlg = getDialog();
         dlg.innerHTML = '';
 
+        // Floating close button — sticky so it stays visible while scrolling
+        const closeBtn = document.createElement('button');
+        closeBtn.id = 'aml-settings-close';
+        closeBtn.textContent = '✕';
+        closeBtn.style.cssText = FF +
+            'background:rgba(30,30,32,0.85);border:0.5px solid rgba(255,255,255,0.13);border-radius:50%;' +
+            'width:26px;height:26px;cursor:pointer;color:rgba(255,255,255,0.6);font-size:12px;' +
+            'display:flex;align-items:center;justify-content:center;margin-top:16px;' +
+            'backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);' +
+            'transition:background 0.15s,color 0.15s;';
+        closeBtn.onmouseenter = () => { closeBtn.style.background = 'rgba(255,255,255,0.14)'; closeBtn.style.color = '#fff'; };
+        closeBtn.onmouseleave = () => { closeBtn.style.background = 'rgba(30,30,32,0.85)'; closeBtn.style.color = 'rgba(255,255,255,0.6)'; };
+        closeBtn.onclick = closeSettings;
+        dlg.appendChild(closeBtn);
+
         const titleBar = document.createElement('div');
-        titleBar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:18px 0 4px;';
+        titleBar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:4px 0 4px;margin-top:-26px;';
         const title = document.createElement('h1');
         title.textContent = 'AML Settings';
         title.style.cssText = FF + 'font-size:15px;font-weight:600;margin:0;color:rgba(255,255,255,0.95);';
-        const closeBtn = document.createElement('button');
-        closeBtn.textContent = '✕';
-        closeBtn.style.cssText = FF +
-            'background:rgba(255,255,255,0.1);border:none;border-radius:50%;width:22px;height:22px;' +
-            'cursor:pointer;color:rgba(255,255,255,0.55);font-size:11px;display:flex;align-items:center;justify-content:center;';
-        closeBtn.onclick = closeSettings;
-        titleBar.appendChild(title); titleBar.appendChild(closeBtn);
+        const savedBadge = document.createElement('span');
+        savedBadge.style.cssText = FF + 'font-size:10px;color:#30d158;opacity:0;transition:opacity 0.3s;flex-shrink:0;';
+        savedBadge.textContent = '✓ Saved';
+        let _savedTimer = null;
+        titleBar.append(title, savedBadge);
         dlg.appendChild(titleBar);
 
-        const drm   = await fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} }));
+        // Wrap setTweak so every save flashes the badge.
+        // Restore any prior open's proxy first (handles re-opens while open and bail paths).
+        const _bridge = window.amlBridge;
+        if (_bridge._settingsRestore) _bridge._settingsRestore();
+        const _realSetTweak = _bridge.setTweak.bind(_bridge);
+        const _restoreProxy = () => { _bridge.setTweak = _realSetTweak; _bridge._settingsRestore = null; };
+        _bridge._settingsRestore = _restoreProxy;
+        _bridge.setTweak = (k, v) => {
+            _realSetTweak(k, v);
+            savedBadge.style.opacity = '1';
+            clearTimeout(_savedTimer);
+            _savedTimer = setTimeout(() => { savedBadge.style.opacity = '0'; }, 1400);
+        };
+        dlg.addEventListener('close', _restoreProxy, { once: true });
+
+
+        const [drm, tools] = await Promise.all([
+            fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
+            fetch(`${ENGINE}/api/v1/tools`).then(r => r.json()).catch(() => ({})),
+        ]);
+        if (myGen !== _settingsGen) { _restoreProxy(); return; }
         const prefs = await window.amlBridge.getPrefs().catch(() => ({}));
+        if (myGen !== _settingsGen) { _restoreProxy(); return; }
         const s     = drm.state ?? {};
+
+        // Shared icon reset button — same style used throughout all sections
+        const makeMiniBtn = (label, onClick) => {
+            const b = document.createElement('button');
+            b.textContent = '↺';
+            b.title = 'Reset to default';
+            b.style.cssText = FF + 'width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;' +
+                'background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.12);border-radius:5px;' +
+                'color:rgba(255,255,255,0.35);font-size:13px;cursor:pointer;transition:all 0.15s;';
+            b.onmouseenter = () => { b.style.background = 'rgba(255,255,255,0.12)'; b.style.color = 'rgba(255,255,255,0.7)'; };
+            b.onmouseleave = () => { b.style.background = 'rgba(255,255,255,0.06)'; b.style.color = 'rgba(255,255,255,0.35)'; };
+            b.onclick = onClick;
+            return b;
+        };
 
         dlg.appendChild(buildAccountSection(drm, openSettings));
 
@@ -3325,7 +3924,7 @@ window.addEventListener('unhandledrejection', (e) => {
         bgBlurR.style.cssText = 'display:flex;align-items:center;flex:1;';
         bgBlurR.appendChild(bgBlurSl); bgBlurR.appendChild(bgBlurVal);
         bgBlurR.appendChild(makeResetBtn('background blur', () => { bgBlurSl.value = 18; bgBlurVal.textContent = '18px'; window.amlBridge.setBgBlur(18); }));
-        dBody.appendChild(makeRow('Background blur', bgBlurR, 'Wallpaper blur behind the window', false));
+        dBody.appendChild(makeRow('Background blur', bgBlurR, 'Wallpaper blur (requires a wallpaper to be set)', false));
 
         const navOpVal = document.createElement('span');
         navOpVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
@@ -3429,39 +4028,7 @@ window.addEventListener('unhandledrejection', (e) => {
             container.innerHTML = '';
             const pal = curPalette || genPalette(thInfo.systemAccent || '#fc3c44');
 
-            // Light / Dark appearance toggle
-            const appRow = document.createElement('div');
-            appRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 0 8px;';
-            const appLabel = document.createElement('span');
-            appLabel.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.5);flex:1;';
-            appLabel.textContent = 'Appearance';
-            const appSeg = document.createElement('div');
-            appSeg.style.cssText = 'display:flex;background:rgba(255,255,255,0.06);border-radius:6px;padding:2px;gap:2px;';
-            ['Dark','Light'].forEach(label => {
-                const val = label.toLowerCase();
-                const btn = document.createElement('button');
-                btn.textContent = label;
-                const activeStyle = 'background:rgba(255,255,255,0.18);color:rgba(255,255,255,0.95);';
-                const inactiveStyle = 'background:transparent;color:rgba(255,255,255,0.4);';
-                btn.style.cssText = `${FF}border:none;border-radius:5px;padding:3px 12px;font-size:12px;cursor:pointer;transition:all 0.15s;${curAppearance===val?activeStyle:inactiveStyle}`;
-                btn.onclick = async () => {
-                    curAppearance = val;
-                    window.amlBridge.setThemeAppearance(val);
-                    appSeg.querySelectorAll('button').forEach(b => {
-                        b.style.background = 'transparent';
-                        b.style.color = 'rgba(255,255,255,0.4)';
-                    });
-                    btn.style.background = 'rgba(255,255,255,0.18)';
-                    btn.style.color = 'rgba(255,255,255,0.95)';
-                    // setThemeAppearance regenerates+saves palette in main; fetch it back
-                    const info = await window.amlBridge.getThemeInfo().catch(() => null);
-                    if (info?.themePalette) { curPalette = info.themePalette; renderPaletteEditor(container); }
-                };
-                appSeg.appendChild(btn);
-            });
-            appRow.appendChild(appLabel);
-            appRow.appendChild(appSeg);
-            container.appendChild(appRow);
+            // Appearance: dark only for now
 
             const paletteKeys = [
                 { key: 'bgColor', label: 'Background' },
@@ -3667,9 +4234,180 @@ window.addEventListener('unhandledrejection', (e) => {
         renderThemeContent(curMode);
         dlg.appendChild(thWrap);
 
+        // ── Audio Quality ──────────────────────────────────────────────────
+        const { wrap: aqWrap, body: aqBody } = makeSection('Audio Quality');
+
+        // iOS-style toggle: label wraps a hidden checkbox + styled track + thumb
+        function makeIOSToggle(on, onChange) {
+            const label = document.createElement('label');
+            label.style.cssText = 'position:relative;display:inline-flex;align-items:center;cursor:pointer;flex-shrink:0;width:44px;height:26px;';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox'; cb.checked = on;
+            cb.style.cssText = 'position:absolute;opacity:0;width:0;height:0;pointer-events:none;';
+            const track = document.createElement('span');
+            track.style.cssText = `position:absolute;inset:0;border-radius:13px;transition:background 0.22s;` +
+                `background:${on ? '#fc3c44' : 'rgba(255,255,255,0.18)'};`;
+            const thumb = document.createElement('span');
+            thumb.style.cssText = `position:absolute;top:3px;left:${on ? '21px' : '3px'};` +
+                `width:20px;height:20px;border-radius:50%;background:#fff;` +
+                `box-shadow:0 1px 4px rgba(0,0,0,0.4);transition:left 0.22s;`;
+            label.append(cb, track, thumb);
+            cb.addEventListener('change', () => {
+                track.style.background = cb.checked ? '#fc3c44' : 'rgba(255,255,255,0.18)';
+                thumb.style.left = cb.checked ? '21px' : '3px';
+                onChange(cb.checked);
+            });
+            return label;
+        }
+
+        const losslessOn = prefs['lossless-enabled'] !== false;
+        aqBody.appendChild(makeRow('Lossless Audio',
+            makeIOSToggle(losslessOn, v => window.amlBridge?.setTweak('lossless-enabled', v)),
+            'Stream lossless audio (ALAC) when available', false));
+
+        // Custom macOS-style dropdown
+        const qualityOpts = [
+            { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
+            { value: 'lossless',        label: 'Lossless (ALAC up to 24-bit / 48 kHz)' },
+            { value: 'hi-res-lossless', label: 'Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)' },
+        ];
+
+        // Inject shared dropdown styles once
+        if (!document.getElementById('aml-quality-dropdown-style')) {
+            const ds = document.createElement('style');
+            ds.id = 'aml-quality-dropdown-style';
+            ds.textContent = `
+                .aml-qdrop-btn {
+                    display:flex;align-items:center;justify-content:space-between;gap:8px;
+                    padding:6px 10px 6px 12px;
+                    background:rgba(255,255,255,0.10);
+                    border:0.5px solid rgba(255,255,255,0.18);
+                    border-radius:8px;cursor:pointer;
+                    font-family:-apple-system,SF Pro Text,system-ui,sans-serif;
+                    font-size:11px;color:rgba(255,255,255,0.88);
+                    transition:background 0.15s;user-select:none;white-space:nowrap;
+                }
+                .aml-qdrop-btn:hover { background:rgba(255,255,255,0.15); }
+                .aml-qdrop-chevron { font-size:8px;color:rgba(255,255,255,0.45);flex-shrink:0; }
+                .aml-qdrop-menu {
+                    background:rgba(32,32,34,0.97);
+                    border:0.5px solid rgba(255,255,255,0.12);
+                    border-radius:10px;
+                    box-shadow:0 8px 32px rgba(0,0,0,0.7),0 1px 0 rgba(255,255,255,0.06) inset;
+                    backdrop-filter:blur(32px) saturate(1.8);
+                    -webkit-backdrop-filter:blur(32px) saturate(1.8);
+                    overflow:hidden;padding:4px 0;
+                }
+                .aml-qdrop-item {
+                    display:flex;align-items:center;gap:0;
+                    padding:0;cursor:pointer;
+                    font-family:-apple-system,SF Pro Text,system-ui,sans-serif;
+                    font-size:11px;color:rgba(255,255,255,0.88);
+                    transition:background 0.1s;
+                    border-radius:0;position:relative;white-space:nowrap;
+                }
+                .aml-qdrop-item:hover { background:rgba(255,255,255,0.07); }
+                .aml-qdrop-accent {
+                    width:3px;align-self:stretch;flex-shrink:0;
+                    background:transparent;border-radius:0;
+                    transition:background 0.15s;
+                }
+                .aml-qdrop-item.selected .aml-qdrop-accent { background:#fc3c44; }
+                .aml-qdrop-item-label {
+                    flex:1;padding:8px 16px 8px 10px;
+                }
+                .aml-qdrop-item.selected .aml-qdrop-item-label { color:#fff;font-weight:500; }
+            `;
+            document.head.appendChild(ds);
+        }
+
+        function makeQualityDropdown(prefKey) {
+            const saved = prefs[prefKey] ?? 'lossless';
+            let current = saved;
+
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'position:relative;display:inline-block;';
+
+            const btn = document.createElement('div');
+            btn.className = 'aml-qdrop-btn';
+            const btnLabel = document.createElement('span');
+            btnLabel.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            const chevron = document.createElement('span');
+            chevron.className = 'aml-qdrop-chevron';
+            chevron.innerHTML = '&#9660;';
+            btn.append(btnLabel, chevron);
+
+            // Menu lives inside the wrap (which is inside the dialog top-layer)
+            const menu = document.createElement('div');
+            menu.className = 'aml-qdrop-menu';
+            menu.style.cssText += 'display:none;position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:10;';
+
+            function setOption(value, save) {
+                current = value;
+                const opt = qualityOpts.find(o => o.value === value);
+                btnLabel.textContent = opt ? opt.label : value;
+                const sv = String(value);
+                menu.querySelectorAll('.aml-qdrop-item').forEach(el => {
+                    el.classList.toggle('selected', el.dataset.value === sv);
+                });
+                if (save) {
+                    window.amlBridge?.setTweak(prefKey, value);
+                    if (prefKey === 'streaming-quality') _streamingQuality = value;
+                }
+            }
+
+            qualityOpts.forEach(({ value, label }) => {
+                const item = document.createElement('div');
+                item.className = 'aml-qdrop-item';
+                item.dataset.value = value;
+                const accent = document.createElement('div');
+                accent.className = 'aml-qdrop-accent';
+                const lbl = document.createElement('div');
+                lbl.className = 'aml-qdrop-item-label';
+                lbl.textContent = label;
+                item.append(accent, lbl);
+                item.addEventListener('mousedown', (e) => {
+                    e.preventDefault();
+                    setOption(value, true);
+                    menu.style.display = 'none';
+                });
+                menu.appendChild(item);
+            });
+
+            setOption(current, false);
+            wrap.append(btn, menu);
+
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const open = menu.style.display !== 'none';
+                // Close any other open dropdowns first
+                document.querySelectorAll('.aml-qdrop-menu').forEach(m => { m.style.display = 'none'; });
+                if (!open) {
+                    menu.style.display = 'block';
+                    const sel = menu.querySelector('.selected');
+                    if (sel) sel.scrollIntoView({ block: 'nearest' });
+                }
+            });
+
+            return { wrap, setValue: v => setOption(v, false) };
+        }
+
+        const { wrap: sqWrap, setValue: setSQ } = makeQualityDropdown('streaming-quality');
+        const sqResetBtn = makeMiniBtn('Reset', () => {
+            setSQ('lossless');
+            window.amlBridge?.setTweak('streaming-quality', 'lossless');
+            _streamingQuality = 'lossless';
+        });
+        const sqCtrl = document.createElement('div');
+        sqCtrl.style.cssText = 'display:flex;align-items:center;gap:8px;';
+        sqCtrl.append(sqWrap, sqResetBtn);
+        aqBody.appendChild(makeRow('Streaming', sqCtrl, null, false));
+        dlg.appendChild(aqWrap);
+
         // ── Cache ──────────────────────────────────────────────────────────
         const { wrap: cWrap, body: cBody } = makeSection('Playback Cache');
         const cacheStats = await fetch(`${ENGINE}/api/v1/cache/stats`).then(r => r.json()).catch(() => null);
+        const mvCacheInfo = await fetch(`${ENGINE}/api/v1/cache/mv`).then(r => r.json()).catch(() => null);
 
         // Persistent cache section
         const persist = cacheStats?.persistent;
@@ -3677,6 +4415,11 @@ window.addEventListener('unhandledrejection', (e) => {
             const usedMB   = Math.round((persist?.sizeBytes ?? 0) / (1024 * 1024));
             const limitMB  = Math.round((persist?.limitBytes ?? 500 * 1024 * 1024) / (1024 * 1024));
             const ttlDays  = persist?.ttlDays ?? 5;
+
+            const songsSubhead = document.createElement('div');
+            songsSubhead.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;color:rgba(255,255,255,0.35);padding:12px 0 4px;text-transform:uppercase;';
+            songsSubhead.textContent = 'Songs';
+            cBody.appendChild(songsSubhead);
 
             // Progress bar
             const pct = limitMB > 0 ? Math.min(100, Math.round(usedMB / limitMB * 100)) : 0;
@@ -3695,20 +4438,25 @@ window.addEventListener('unhandledrejection', (e) => {
 
             // Size slider
             const szVal = document.createElement('span');
-            szVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:50px;text-align:right;';
+            szVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);min-width:62px;text-align:right;white-space:nowrap;flex-shrink:0;';
             szVal.textContent = `${limitMB} MB`;
             const szSl = document.createElement('input');
             szSl.type = 'range'; szSl.min = 100; szSl.max = 10000; szSl.step = 100; szSl.value = limitMB;
-            szSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
+            szSl.style.cssText = 'flex:1;accent-color:#fc3c44;';
             szSl.oninput = () => { szVal.textContent = `${szSl.value} MB`; };
             szSl.onchange = () => {
                 const v = +szSl.value;
                 window.amlBridge?.setPref('persistLimitMB', v);
                 fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ persistLimitMB: v }) }).catch(() => {});
             };
+            const szResetBtn = makeMiniBtn('Reset', () => {
+                szSl.value = 500; szVal.textContent = '500 MB';
+                window.amlBridge?.setPref('persistLimitMB', 500);
+                fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ persistLimitMB: 500 }) }).catch(() => {});
+            });
             const szRow = document.createElement('div');
-            szRow.style.cssText = 'display:flex;align-items:center;flex:1;';
-            szRow.appendChild(szSl); szRow.appendChild(szVal);
+            szRow.style.cssText = 'display:flex;align-items:center;flex:1;gap:8px;';
+            szRow.append(szSl, szVal, szResetBtn);
             cBody.appendChild(makeRow('Cache size limit', szRow, null, false));
 
             // TTL input
@@ -3729,10 +4477,16 @@ window.addEventListener('unhandledrejection', (e) => {
             ttlUnit.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);';
             ttlUnit.textContent = 'days';
             ttlWrap.appendChild(ttlUnit);
+            const ttlResetBtn = makeMiniBtn('Reset', () => {
+                ttlInp.value = 5;
+                window.amlBridge?.setPref('persistTTLDays', 5);
+                fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ persistTTLDays: 5 }) }).catch(() => {});
+            });
+            ttlWrap.appendChild(ttlResetBtn);
             cBody.appendChild(makeRow('Expiry', ttlWrap, 'Songs unused longer than this are removed', false));
 
             const clearRow = document.createElement('div');
-            clearRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;display:flex;gap:6px;';
+            clearRow.style.cssText = 'padding:10px 0;display:flex;gap:6px;';
             const clearSongsBtn = makeBtn('Clear Songs');
             clearSongsBtn.onclick = () => {
                 fetch(`${ENGINE}/api/v1/cache/playback?what=persistent`, { method: 'DELETE' }).then(() => openSettings()).catch(() => {});
@@ -3740,6 +4494,88 @@ window.addEventListener('unhandledrejection', (e) => {
             clearRow.appendChild(clearSongsBtn);
             cBody.appendChild(clearRow);
         }
+
+        // ── MV cache — inlined inside Playback Cache card ──────────────────────
+        const mvSubhead = document.createElement('div');
+        mvSubhead.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;color:rgba(255,255,255,0.35);padding:14px 0 4px;text-transform:uppercase;border-top:0.5px solid rgba(255,255,255,0.1);margin-top:2px;';
+        mvSubhead.textContent = 'Music Video';
+        cBody.appendChild(mvSubhead);
+
+        const mvEnabled = mvCacheInfo?.enabled ?? true;
+        const mvMaxBytes = mvCacheInfo?.maxBytes ?? (2 * 1024 * 1024 * 1024);
+        const mvSizeBytes = mvCacheInfo?.sizeBytes ?? 0;
+        const mvMaxGB = +(mvMaxBytes / (1024 * 1024 * 1024)).toFixed(1);
+        const mvUsedMB = Math.round(mvSizeBytes / (1024 * 1024));
+        const mvMaxMBLabel = Math.round(mvMaxBytes / (1024 * 1024));
+        const mvPct = mvMaxBytes > 0 ? Math.min(100, Math.round(mvSizeBytes / mvMaxBytes * 100)) : 0;
+
+        // MV cache used bar
+        const mvBarWrap = document.createElement('div');
+        mvBarWrap.style.cssText = 'flex:1;';
+        const mvBarBg = document.createElement('div');
+        mvBarBg.style.cssText = 'height:4px;background:rgba(255,255,255,0.12);border-radius:2px;overflow:hidden;margin-bottom:4px;';
+        const mvBarFill = document.createElement('div');
+        mvBarFill.style.cssText = `height:100%;width:${mvPct}%;background:#fc3c44;border-radius:2px;`;
+        mvBarBg.appendChild(mvBarFill);
+        const mvBarLabel = document.createElement('div');
+        mvBarLabel.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.4);';
+        const mvQuality = mvCacheInfo?.quality;
+        mvBarLabel.textContent = mvQuality
+            ? `${mvUsedMB} MB / ${mvMaxMBLabel} MB · ${mvQuality}`
+            : `${mvUsedMB} MB / ${mvMaxMBLabel} MB`;
+        mvBarWrap.appendChild(mvBarBg); mvBarWrap.appendChild(mvBarLabel);
+        cBody.appendChild(makeRow('Cache used', mvBarWrap, null, false));
+
+        const mvToggle = makeIOSToggle(mvEnabled, v => {
+            mvCapSl.disabled = !v;
+            fetch(`${ENGINE}/api/v1/cache/mv`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: v }),
+            }).catch(() => {});
+        });
+        cBody.appendChild(makeRow('Cache MV segments', mvToggle, 'Stores downloaded video segments so replays start instantly', false));
+
+        const mvMaxMB = Math.round(mvMaxGB * 1024);
+        const mvCapVal = document.createElement('span');
+        mvCapVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);min-width:62px;text-align:right;white-space:nowrap;flex-shrink:0;';
+        mvCapVal.textContent = `${mvMaxMB} MB`;
+        const mvCapSl = document.createElement('input');
+        mvCapSl.type = 'range'; mvCapSl.min = 512; mvCapSl.max = 20480; mvCapSl.step = 512;
+        mvCapSl.value = mvMaxMB;
+        mvCapSl.style.cssText = 'flex:1;accent-color:#fc3c44;';
+        mvCapSl.disabled = !mvEnabled;
+        mvCapSl.oninput = () => { mvCapVal.textContent = `${mvCapSl.value} MB`; };
+        mvCapSl.onchange = () => {
+            fetch(`${ENGINE}/api/v1/cache/mv`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ maxBytes: Math.round(+mvCapSl.value * 1024 * 1024) }),
+            }).catch(() => {});
+        };
+        const mvCapResetBtn = makeMiniBtn('Reset', () => {
+            mvCapSl.value = 2048; mvCapVal.textContent = '2048 MB';
+            fetch(`${ENGINE}/api/v1/cache/mv`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxBytes: 2 * 1024 * 1024 * 1024 }) }).catch(() => {});
+        });
+        const mvCapRow = document.createElement('div');
+        mvCapRow.style.cssText = 'display:flex;align-items:center;flex:1;gap:8px;';
+        mvCapRow.append(mvCapSl, mvCapVal, mvCapResetBtn);
+        cBody.appendChild(makeRow('Capacity limit', mvCapRow, 'LRU eviction — oldest segments removed when limit is reached', false));
+
+        const mvClearRow = document.createElement('div');
+        mvClearRow.style.cssText = 'padding:10px 0;display:flex;gap:6px;';
+        const mvClearBtn = makeBtn('Clear MV Cache');
+        mvClearBtn.onclick = () => {
+            fetch(`${ENGINE}/api/v1/cache/mv`, { method: 'DELETE' }).then(() => openSettings()).catch(() => {});
+        };
+        mvClearRow.appendChild(mvClearBtn);
+        cBody.appendChild(mvClearRow);
+
+        // ── Pre-warm section divider ───────────────────────────────────────────
+        const pwSubhead = document.createElement('div');
+        pwSubhead.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;color:rgba(255,255,255,0.35);padding:14px 0 4px;text-transform:uppercase;border-top:0.5px solid rgba(255,255,255,0.1);margin-top:2px;';
+        pwSubhead.textContent = 'Pre-warm';
+        cBody.appendChild(pwSubhead);
 
         // Prewarm cache section
         const prewarm = cacheStats?.prewarm;
@@ -3752,7 +4588,7 @@ window.addEventListener('unhandledrejection', (e) => {
         const pwBarBg = document.createElement('div');
         pwBarBg.style.cssText = 'height:4px;background:rgba(255,255,255,0.12);border-radius:2px;overflow:hidden;margin-bottom:4px;';
         const pwBarFill = document.createElement('div');
-        pwBarFill.style.cssText = `height:100%;width:${pwPct}%;background:#0a84ff;border-radius:2px;`;
+        pwBarFill.style.cssText = `height:100%;width:${pwPct}%;background:#fc3c44;border-radius:2px;`;
         pwBarBg.appendChild(pwBarFill);
         const pwBarLabel = document.createElement('div');
         pwBarLabel.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.4);';
@@ -3761,20 +4597,25 @@ window.addEventListener('unhandledrejection', (e) => {
         cBody.appendChild(makeRow('Pre-warm buffer', pwBarWrap, 'Next 2 tracks pre-loaded in memory', false));
 
         const pwSzVal = document.createElement('span');
-        pwSzVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:50px;text-align:right;';
+        pwSzVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);min-width:62px;text-align:right;white-space:nowrap;flex-shrink:0;';
         pwSzVal.textContent = `${pwLimitMB} MB`;
         const pwSzSl = document.createElement('input');
         pwSzSl.type = 'range'; pwSzSl.min = 100; pwSzSl.max = 4096; pwSzSl.step = 128; pwSzSl.value = pwLimitMB;
-        pwSzSl.style.cssText = 'flex:1;accent-color:#0a84ff;margin:0 10px;';
+        pwSzSl.style.cssText = 'flex:1;accent-color:#fc3c44;';
         pwSzSl.oninput = () => { pwSzVal.textContent = `${pwSzSl.value} MB`; };
         pwSzSl.onchange = () => {
             const v = +pwSzSl.value;
             window.amlBridge?.setPref('prewarmLimitMB', v);
             fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prewarmLimitMB: v }) }).catch(() => {});
         };
+        const pwSzResetBtn = makeMiniBtn('Reset', () => {
+            pwSzSl.value = 1024; pwSzVal.textContent = '1024 MB';
+            window.amlBridge?.setPref('prewarmLimitMB', 1024);
+            fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prewarmLimitMB: 1024 }) }).catch(() => {});
+        });
         const pwSzRow = document.createElement('div');
-        pwSzRow.style.cssText = 'display:flex;align-items:center;flex:1;';
-        pwSzRow.appendChild(pwSzSl); pwSzRow.appendChild(pwSzVal);
+        pwSzRow.style.cssText = 'display:flex;align-items:center;flex:1;gap:8px;';
+        pwSzRow.append(pwSzSl, pwSzVal, pwSzResetBtn);
         cBody.appendChild(makeRow('Pre-warm size limit', pwSzRow, null, true));
 
         const pwClearRow = document.createElement('div');
@@ -3788,12 +4629,602 @@ window.addEventListener('unhandledrejection', (e) => {
 
         dlg.appendChild(cWrap);
 
+        // ── Downloads section ──────────────────────────────────────────────────
+        const { wrap: dlWrap, body: dlBody } = makeSection('Downloads');
+
+        // Known template variables for validation
+        const DL_KNOWN_VARS = new Set([
+            'title','song','artist','album_artist','album','track_number','track',
+            'disc_number','disc','year','genre','codec','ext','quality','tag',
+            'release_date','releasedate','isrc','id','song_id','url_artist','urlartist',
+        ]);
+
+        // Sub-section heading helper
+        function dlSubhead(text) {
+            const h = document.createElement('div');
+            h.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;' +
+                'color:rgba(255,255,255,0.35);padding:14px 0 4px;text-transform:uppercase;';
+            h.textContent = text;
+            return h;
+        }
+
+        // Shared small-dropdown builder (reuses .aml-qdrop-* styles already injected)
+        function dlDropdown(options, savedValue, onSave) {
+            let current = savedValue;
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'position:relative;display:inline-block;min-width:180px;';
+            const btn = document.createElement('div');
+            btn.className = 'aml-qdrop-btn';
+            btn.style.cssText += 'font-size:12px;';
+            const btnLabel = document.createElement('span');
+            btnLabel.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            const chevron = document.createElement('span');
+            chevron.className = 'aml-qdrop-chevron';
+            chevron.innerHTML = '&#9660;';
+            btn.append(btnLabel, chevron);
+            const menu = document.createElement('div');
+            menu.className = 'aml-qdrop-menu';
+            menu.style.cssText += 'display:none;position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:20;min-width:100%;';
+            function setOpt(v, save) {
+                current = v;
+                const opt = options.find(o => o.value === v);
+                btnLabel.textContent = opt ? opt.label : v;
+                const sv = String(v);
+                menu.querySelectorAll('.aml-qdrop-item').forEach(el =>
+                    el.classList.toggle('selected', el.dataset.value === sv));
+                if (save) onSave(v);
+            }
+            options.forEach(({ value, label }) => {
+                const item = document.createElement('div');
+                item.className = 'aml-qdrop-item';
+                item.dataset.value = value;
+                const accent = document.createElement('div'); accent.className = 'aml-qdrop-accent';
+                const lbl = document.createElement('div'); lbl.className = 'aml-qdrop-item-label';
+                lbl.textContent = label;
+                item.append(accent, lbl);
+                item.addEventListener('mousedown', e => { e.preventDefault(); setOpt(value, true); menu.style.display = 'none'; });
+                menu.appendChild(item);
+            });
+            setOpt(current, false);
+            wrap.append(btn, menu);
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const open = menu.style.display !== 'none';
+                document.querySelectorAll('.aml-qdrop-menu').forEach(m => { m.style.display = 'none'; });
+                if (!open) { menu.style.display = 'block'; menu.querySelector('.selected')?.scrollIntoView({ block: 'nearest' }); }
+            });
+            return { wrap, getValue: () => current, setValue: v => setOpt(v, false) };
+        }
+
+        // ── Save Location ────────────────────────────────────────────────────
+        dlBody.appendChild(dlSubhead('Save Location'));
+
+        // Save-to directory
+        const dlDirCurrent = prefs['download-dir'] || '';
+        const dlSaveRow = document.createElement('div');
+        dlSaveRow.style.cssText = 'display:flex;align-items:center;gap:10px;padding:4px 0 8px;';
+        const dlDirDisplay = document.createElement('span');
+        dlDirDisplay.style.cssText = FF + 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+            'color:rgba(255,255,255,0.45);font-size:12px;min-width:0;';
+        dlDirDisplay.textContent = dlDirCurrent || '~/Music/AML-Downloads (default)';
+        const dlDirBtn = document.createElement('button');
+        dlDirBtn.textContent = 'Choose…';
+        dlDirBtn.style.cssText = FF + 'padding:3px 10px;background:rgba(255,255,255,0.10);' +
+            'border:0.5px solid rgba(255,255,255,0.15);border-radius:5px;color:rgba(255,255,255,0.82);' +
+            'font-size:12px;cursor:pointer;flex-shrink:0;transition:background 0.15s;';
+        dlDirBtn.onmouseenter = () => { dlDirBtn.style.background = 'rgba(255,255,255,0.18)'; };
+        dlDirBtn.onmouseleave = () => { dlDirBtn.style.background = 'rgba(255,255,255,0.10)'; };
+        dlDirBtn.onclick = async () => {
+            const result = await window.amlBridge?.chooseDownloadDir();
+            if (result && !result.canceled && result.filePaths?.[0]) {
+                const dir = result.filePaths[0];
+                dlDirDisplay.textContent = dir;
+                window.amlBridge?.setTweak('download-dir', dir);
+                updatePreview();
+            }
+        };
+        const dlDirResetBtn = makeMiniBtn('Reset', () => {
+            prefs['download-dir'] = '';
+            dlDirDisplay.textContent = '~/Music/AML-Downloads (default)';
+            window.amlBridge?.setTweak('download-dir', null);
+            dlDirResetBtn.style.display = 'none';
+            updatePreview();
+        });
+        dlDirResetBtn.style.display = dlDirCurrent ? '' : 'none';
+        dlSaveRow.append(dlDirDisplay, dlDirBtn, dlDirResetBtn);
+        dlBody.appendChild(makeRow('Save to', dlSaveRow, null, false));
+
+        // Album folder presets
+        const ALBUM_PRESETS = [
+            { value: '{album_artist}/{album}',                       label: '{album_artist}/{album}' },
+            { value: '{album_artist}/{year} - {album}',              label: '{album_artist}/{year} - {album}' },
+            { value: '{album_artist}/{album} ({year})',               label: '{album_artist}/{album} ({year})' },
+            { value: '{album_artist}/{album} [{codec}]',             label: '{album_artist}/{album} [{codec}]' },
+            { value: '{album_artist}/{year} - {album} [{quality}]',  label: '{album_artist}/{year} - {album} [{quality}]' },
+            { value: '{year} - {album}',                             label: '{year} - {album}' },
+            { value: '{album}',                                      label: '{album}' },
+            { value: '{url_artist}/{album}',                         label: '{url_artist}/{album}' },
+        ];
+        const SONG_PRESETS = [
+            { value: '{track_number:02d} - {title}',                       label: '{track_number:02d} - {title}' },
+            { value: '{track_number:02d}. {title}',                        label: '{track_number:02d}. {title}' },
+            { value: '{track_number:02d} - {title} {tag}',                 label: '{track_number:02d} - {title} {tag}' },
+            { value: '{track_number:02d} - {artist} - {title}',            label: '{track_number:02d} - {artist} - {title}' },
+            { value: '{track_number:02d} - {title} [{quality}]',           label: '{track_number:02d} - {title} [{quality}]' },
+            { value: '{track_number:02d} - {title} [{codec}]',             label: '{track_number:02d} - {title} [{codec}]' },
+            { value: '{disc_number}-{track_number:02d} - {title}',         label: '{disc_number}-{track_number:02d} - {title}' },
+            { value: '{disc_number}-{track_number:02d} - {title} {tag}',   label: '{disc_number}-{track_number:02d} - {title} {tag}' },
+            { value: '{title}',                                            label: '{title}' },
+            { value: '{id} - {title}',                                     label: '{id} - {title}' },
+        ];
+
+        // Read from the same keys that controls write to
+        const savedAlbumFolder = prefs['download-album-folder'] || '{album_artist}/{album}';
+        const savedSongPart    = (prefs['download-song-file']   || '{track_number:02d} - {title}').replace(/\.\{ext\}$/, '');
+
+        // Validate a template string — returns '' (valid) or error message
+        const validateTemplate = tmpl => {
+            const matches = tmpl.match(/\{([^}:]+)(?::[^}]+)?\}/g) || [];
+            const unknown = matches
+                .map(m => m.match(/\{([^}:]+)/)[1].toLowerCase())
+                .filter(n => !DL_KNOWN_VARS.has(n));
+            return unknown.length ? `Unknown variables: ${unknown.map(n => '{'+n+'}').join(', ')}` : '';
+        };
+
+        // Example renderers — substitute placeholder values for display
+        const EX = {
+            album_artist: 'Artist Name', artist: 'Artist Name', album: 'Album Title',
+            year: '2024', codec: 'alac', quality: 'Lossless', url_artist: 'artist-name',
+            'track_number:02d': '01', track_number: '1', disc_number: '1',
+            title: 'Song Title', tag: '[E]', ext: 'm4a',
+            id: '1234567890', isrc: 'USRC12345678', release_date: '2024-01-15',
+        };
+        const renderTemplate = val =>
+            (val || '').replace(/\{([^}:]+)(?::[^}]+)?\}/g, (_, k) => EX[k] || EX[k.toLowerCase()] || `{${k}}`);
+
+        // Live path preview — declared before makeTemplateRow so updatePreview is
+        // accessible when syncMode fires during row construction.
+        const previewEl = document.createElement('div');
+        previewEl.style.cssText = FF + 'font-size:10.5px;color:rgba(255,255,255,0.35);padding:4px 0 2px;' +
+            'word-break:break-all;font-family:ui-monospace,monospace;line-height:1.5;';
+
+        const updatePreview = () => {
+            const baseDir = (prefs['download-dir'] || '~/Music/AML-Downloads').replace(/\/$/, '');
+            const af = renderTemplate(prefs['download-album-folder'] || savedAlbumFolder);
+            const sf = renderTemplate(prefs['download-song-file'] || savedSongPart);
+            previewEl.textContent = `${baseDir}/${af}/${sf}.m4a`;
+        };
+
+        // Template row: dropdown + Custom toggle + per-row example + Reset button
+        const makeTemplateRow = (label, presets, savedValue, prefKey, suffix) => {
+            const isCustom = !presets.some(p => p.value === savedValue);
+            const rowWrap = document.createElement('div');
+            rowWrap.style.cssText = 'display:flex;flex-direction:column;gap:5px;';
+
+            const topRow = document.createElement('div');
+            topRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+
+            const customLbl = document.createElement('label');
+            customLbl.style.cssText = FF + 'display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.4);font-size:11px;cursor:pointer;flex-shrink:0;';
+            const customCb = document.createElement('input');
+            customCb.type = 'checkbox'; customCb.checked = isCustom;
+            customCb.style.cssText = 'accent-color:#fc3c44;cursor:pointer;';
+            customLbl.append(customCb, document.createTextNode('Custom'));
+
+            const resetBtn = document.createElement('button');
+            resetBtn.textContent = 'Reset';
+            resetBtn.title = 'Restore default';
+            resetBtn.style.cssText = FF + 'padding:2px 8px;background:rgba(255,255,255,0.06);' +
+                'border:0.5px solid rgba(255,255,255,0.12);border-radius:5px;' +
+                'color:rgba(255,255,255,0.38);font-size:10.5px;cursor:pointer;flex-shrink:0;' +
+                'transition:all 0.15s;';
+            resetBtn.onmouseenter = () => { resetBtn.style.background = 'rgba(255,255,255,0.12)'; resetBtn.style.color = 'rgba(255,255,255,0.7)'; };
+            resetBtn.onmouseleave = () => { resetBtn.style.background = 'rgba(255,255,255,0.06)'; resetBtn.style.color = 'rgba(255,255,255,0.38)'; };
+
+            const { wrap: ddWrap, getValue, setValue } = dlDropdown(presets, isCustom ? presets[0].value : savedValue, v => {
+                window.amlBridge?.setTweak(prefKey, v);
+                exampleEl.textContent = renderTemplate(v) + (suffix || '');
+                updatePreview();
+            });
+
+            // Per-row example preview
+            const exampleEl = document.createElement('div');
+            exampleEl.style.cssText = FF + 'font-size:10.5px;color:rgba(255,255,255,0.32);' +
+                'font-family:ui-monospace,monospace;padding:1px 0;min-height:14px;';
+
+            // Custom input + validator
+            const customWrap = document.createElement('div');
+            customWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+            const customInp = document.createElement('input');
+            customInp.type = 'text';
+            customInp.value = isCustom ? savedValue : (getValue() || '');
+            customInp.placeholder = prefKey.includes('album') ? '{album_artist}/{year} - {album}' : '{track_number:02d} - {title}';
+            customInp.style.cssText = FF + 'width:100%;padding:5px 10px;border-radius:7px;' +
+                'background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);' +
+                'color:rgba(255,255,255,0.88);font-size:12px;box-sizing:border-box;outline:none;transition:border-color 0.15s;';
+            customInp.onfocus = () => { customInp.style.borderColor = 'rgba(252,60,68,0.45)'; };
+            customInp.onblur  = () => {
+                const err = validateTemplate(customInp.value);
+                customInp.style.borderColor = err ? 'rgba(255,69,58,0.5)' : customInp.value ? 'rgba(48,209,88,0.4)' : 'rgba(255,255,255,0.15)';
+            };
+            const validMsg = document.createElement('div');
+            validMsg.style.cssText = FF + 'font-size:10.5px;min-height:14px;';
+
+            const applyCustom = val => {
+                const err = validateTemplate(val);
+                if (err) {
+                    validMsg.style.color = '#ff453a';
+                    validMsg.textContent = '⚠ ' + err;
+                    customInp.style.borderColor = 'rgba(255,69,58,0.5)';
+                    exampleEl.textContent = '';
+                } else {
+                    validMsg.style.color = '#30d158';
+                    validMsg.textContent = val ? '✓ Valid' : '';
+                    customInp.style.borderColor = val ? 'rgba(48,209,88,0.4)' : 'rgba(255,255,255,0.15)';
+                    window.amlBridge?.setTweak(prefKey, val);
+                    exampleEl.textContent = val ? (renderTemplate(val) + (suffix || '')) : '';
+                    updatePreview();
+                }
+            };
+            customInp.oninput = () => applyCustom(customInp.value);
+            customWrap.append(customInp, validMsg);
+
+            const syncMode = () => {
+                const custom = customCb.checked;
+                ddWrap.style.display = custom ? 'none' : 'inline-block';
+                customWrap.style.display = custom ? 'block' : 'none';
+                resetBtn.style.display = (custom || getValue() === presets[0].value) ? 'none' : 'inline-block';
+                if (custom) {
+                    customInp.value = getValue();
+                    applyCustom(customInp.value);
+                } else {
+                    window.amlBridge?.setTweak(prefKey, getValue());
+                    exampleEl.textContent = renderTemplate(getValue()) + (suffix || '');
+                    updatePreview();
+                }
+            };
+
+            resetBtn.onclick = () => {
+                customCb.checked = false;
+                setValue(presets[0].value);
+                window.amlBridge?.setTweak(prefKey, presets[0].value);
+                exampleEl.textContent = renderTemplate(presets[0].value) + (suffix || '');
+                updatePreview();
+                syncMode();
+            };
+
+            customCb.onchange = syncMode;
+            syncMode();
+
+            topRow.append(ddWrap, customLbl, resetBtn);
+            rowWrap.append(topRow, customWrap, exampleEl);
+            return rowWrap;
+        };
+
+        const albumFolderRow = makeTemplateRow('Album folder', ALBUM_PRESETS, savedAlbumFolder, 'download-album-folder', '');
+        const songFileRow    = makeTemplateRow('Song filename', SONG_PRESETS,  savedSongPart,         'download-song-file',    '.m4a');
+        dlBody.appendChild(makeRow('Album folder', albumFolderRow, null, false));
+        dlBody.appendChild(makeRow('Song filename', songFileRow, null, false));
+        updatePreview();
+        dlBody.appendChild(previewEl);
+
+        // ── Quality & Format ─────────────────────────────────────────────────
+        dlBody.appendChild(dlSubhead('Quality & Format'));
+
+        const { wrap: dqWrap, setValue: setDQ } = makeQualityDropdown('downloads-quality');
+        const dqResetBtn = makeMiniBtn('Reset', () => {
+            setDQ('lossless');
+            window.amlBridge?.setTweak('downloads-quality', 'lossless');
+        });
+        const dqCtrl = document.createElement('div');
+        dqCtrl.style.cssText = 'display:flex;align-items:center;gap:8px;';
+        dqCtrl.append(dqWrap, dqResetBtn);
+        dlBody.appendChild(makeRow('Audio quality', dqCtrl, null, false));
+
+        // ── MV video quality segmented control ───────────────────────────────
+        const MV_QUALITY_OPTS = [
+            { value: 0,    label: 'Best' },
+            { value: 2160, label: '4K'   },
+            { value: 1080, label: '1080p' },
+            { value: 720,  label: '720p'  },
+            { value: 480,  label: '480p'  },
+        ];
+        const savedMVH = parseInt(prefs['mv-max-height'] ?? '0', 10) || 0;
+
+        const mvSeg = document.createElement('div');
+        mvSeg.style.cssText = 'display:flex;align-items:center;border-radius:8px;overflow:hidden;' +
+            'border:0.5px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.06);flex-shrink:0;';
+
+        MV_QUALITY_OPTS.forEach(({ value, label }) => {
+            const btn = document.createElement('button');
+            btn.textContent = label;
+            btn.dataset.val = value;
+            const active = value === savedMVH;
+            btn.style.cssText = FF + `padding:4px 10px;font-size:12px;border:none;border-radius:0;cursor:pointer;` +
+                `background:${active ? '#fc3c44' : 'transparent'};` +
+                `color:${active ? '#fff' : 'rgba(255,255,255,0.55)'};` +
+                `transition:background 0.15s,color 0.15s;border-right:0.5px solid rgba(255,255,255,0.1);`;
+            btn.onmouseenter = () => { if (btn.dataset.val != mvSeg.dataset.active) btn.style.background = 'rgba(255,255,255,0.1)'; };
+            btn.onmouseleave = () => { if (btn.dataset.val != mvSeg.dataset.active) btn.style.background = 'transparent'; };
+            btn.onclick = () => {
+                mvSeg.dataset.active = value;
+                mvSeg.querySelectorAll('button').forEach(b => {
+                    const sel = b.dataset.val == value;
+                    b.style.background = sel ? '#fc3c44' : 'transparent';
+                    b.style.color = sel ? '#fff' : 'rgba(255,255,255,0.55)';
+                });
+                const v = parseInt(value, 10);
+                window.amlBridge?.setTweak('mv-max-height', v === 0 ? null : v);
+            };
+            if (active) mvSeg.dataset.active = value;
+            mvSeg.appendChild(btn);
+        });
+        // Remove last right border
+        mvSeg.lastChild.style.borderRight = 'none';
+        dlBody.appendChild(makeRow('Video quality', mvSeg, null, false));
+
+        const OVERWRITE_OPTS = [
+            { value: 'skip',      label: 'Skip — keep existing file' },
+            { value: 'overwrite', label: 'Overwrite — replace existing file' },
+            { value: 'rename',    label: 'Rename — append (1), (2)…' },
+        ];
+        const { wrap: owDd } = dlDropdown(OVERWRITE_OPTS, prefs['download-overwrite'] || 'skip',
+            v => window.amlBridge?.setTweak('download-overwrite', v));
+        dlBody.appendChild(makeRow('If file exists', owDd, null, false));
+
+        const ffmpegOk   = !!(tools.ffmpeg?.available);
+        const ffmpegPath = tools.ffmpeg?.path || '';
+
+        const flacToggle = makeIOSToggle(!!(prefs['convert-to-flac']), v => {
+            window.amlBridge?.setTweak('convert-to-flac', v);
+            keepRow.style.display = v ? '' : 'none';
+        });
+        dlBody.appendChild(makeRow('Convert to FLAC', flacToggle, null, false));
+
+        // FFmpeg status row
+        const ffStatusWrap = document.createElement('div');
+        ffStatusWrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        const ffDot = document.createElement('span');
+        ffDot.style.cssText = `width:7px;height:7px;border-radius:50%;flex-shrink:0;background:${ffmpegOk ? '#30d158' : '#ff453a'};`;
+        const ffLabel = document.createElement('span');
+        ffLabel.style.cssText = FF + `font-size:11.5px;color:${ffmpegOk ? 'rgba(255,255,255,0.6)' : 'rgba(255,69,58,0.85)'};font-family:ui-monospace,monospace;`;
+        ffLabel.textContent = ffmpegOk ? ffmpegPath : 'not found in PATH';
+        ffStatusWrap.append(ffDot, ffLabel);
+
+        // Custom binary path toggle
+        const ffCustomOn = !!(prefs['ffmpeg-path']);
+        const ffCustomLbl = document.createElement('label');
+        ffCustomLbl.style.cssText = FF + 'display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.4);font-size:11px;cursor:pointer;';
+        const ffCustomCb = document.createElement('input');
+        ffCustomCb.type = 'checkbox'; ffCustomCb.checked = ffCustomOn;
+        ffCustomCb.style.cssText = 'accent-color:#fc3c44;cursor:pointer;';
+        ffCustomLbl.append(ffCustomCb, document.createTextNode('Custom path'));
+        ffStatusWrap.appendChild(ffCustomLbl);
+
+        const ffPathInp = document.createElement('input');
+        ffPathInp.type = 'text';
+        ffPathInp.value = prefs['ffmpeg-path'] || '';
+        ffPathInp.placeholder = '/usr/local/bin/ffmpeg';
+        ffPathInp.style.cssText = FF + 'width:100%;padding:5px 10px;border-radius:7px;margin-top:4px;' +
+            'background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);' +
+            'color:rgba(255,255,255,0.88);font-size:12px;font-family:ui-monospace,monospace;' +
+            'box-sizing:border-box;outline:none;transition:border-color 0.15s;' +
+            (ffCustomOn ? '' : 'display:none;');
+        ffPathInp.onfocus = () => { ffPathInp.style.borderColor = 'rgba(252,60,68,0.45)'; };
+        ffPathInp.onblur  = () => { ffPathInp.style.borderColor = 'rgba(255,255,255,0.15)'; };
+        ffPathInp.oninput = () => window.amlBridge?.setTweak('ffmpeg-path', ffPathInp.value || null);
+
+        ffCustomCb.onchange = () => {
+            ffPathInp.style.display = ffCustomCb.checked ? '' : 'none';
+            if (!ffCustomCb.checked) window.amlBridge?.setTweak('ffmpeg-path', null);
+        };
+
+        const ffWrap = document.createElement('div');
+        ffWrap.style.cssText = 'display:flex;flex-direction:column;gap:0;';
+        ffWrap.append(ffStatusWrap, ffPathInp);
+        dlBody.appendChild(makeRow('FFmpeg', ffWrap, null, false));
+
+        const keepToggle = makeIOSToggle(!!(prefs['keep-original']), v => window.amlBridge?.setTweak('keep-original', v));
+        const keepRow = makeRow('Keep original M4A', keepToggle, null, false);
+        keepRow.style.display = prefs['convert-to-flac'] ? '' : 'none';
+        dlBody.appendChild(keepRow);
+
+        // ── Artwork ──────────────────────────────────────────────────────────
+        dlBody.appendChild(dlSubhead('Artwork'));
+
+        const artToggle = makeIOSToggle(prefs['embed-artwork'] !== false, v => window.amlBridge?.setTweak('embed-artwork', v));
+        dlBody.appendChild(makeRow('Embed cover art', artToggle, null, false));
+        const ART_SIZE_OPTS = [
+            { value: '600',  label: '600 × 600' },
+            { value: '1200', label: '1200 × 1200' },
+            { value: '3000', label: '3000 × 3000 (default)' },
+            { value: '5000', label: '5000 × 5000' },
+        ];
+        const savedArtSize = String(prefs['artwork-size'] || '3000');
+        const artSzIsCustom = !ART_SIZE_OPTS.some(o => o.value === savedArtSize);
+        const { wrap: artSzDd, getValue: getArtSzVal } = dlDropdown(ART_SIZE_OPTS, artSzIsCustom ? '3000' : savedArtSize,
+            v => window.amlBridge?.setTweak('artwork-size', v));
+
+        const artSzCustomInp = document.createElement('input');
+        artSzCustomInp.type = 'number';
+        artSzCustomInp.min = '100';
+        artSzCustomInp.max = '10000';
+        artSzCustomInp.step = '100';
+        artSzCustomInp.value = artSzIsCustom ? savedArtSize : '3000';
+        artSzCustomInp.placeholder = 'e.g. 4000';
+        artSzCustomInp.style.cssText = FF + 'width:90px;padding:4px 8px;border-radius:7px;' +
+            'background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);' +
+            'color:rgba(255,255,255,0.88);font-size:12px;outline:none;' +
+            'transition:border-color 0.15s;display:none;';
+        artSzCustomInp.onfocus = () => { artSzCustomInp.style.borderColor = 'rgba(252,60,68,0.5)'; };
+        artSzCustomInp.onblur  = () => { artSzCustomInp.style.borderColor = 'rgba(255,255,255,0.15)'; };
+        artSzCustomInp.oninput = () => {
+            const v = parseInt(artSzCustomInp.value, 10);
+            if (v >= 100 && v <= 10000) window.amlBridge?.setTweak('artwork-size', String(v));
+        };
+
+        const artSzCustomLbl = document.createElement('label');
+        artSzCustomLbl.style.cssText = FF + 'display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.45);font-size:11px;cursor:pointer;flex-shrink:0;';
+        const artSzCustomCb = document.createElement('input');
+        artSzCustomCb.type = 'checkbox';
+        artSzCustomCb.checked = artSzIsCustom;
+        artSzCustomCb.style.cssText = 'accent-color:#fc3c44;cursor:pointer;';
+        artSzCustomLbl.append(artSzCustomCb, document.createTextNode('Custom'));
+
+        artSzCustomCb.onchange = () => {
+            const custom = artSzCustomCb.checked;
+            artSzDd.style.display = custom ? 'none' : 'inline-block';
+            artSzCustomInp.style.display = custom ? 'inline-block' : 'none';
+            if (custom) {
+                artSzCustomInp.value = getArtSzVal();
+                window.amlBridge?.setTweak('artwork-size', artSzCustomInp.value);
+            } else {
+                window.amlBridge?.setTweak('artwork-size', getArtSzVal());
+            }
+        };
+        if (artSzIsCustom) { artSzDd.style.display = 'none'; artSzCustomInp.style.display = 'inline-block'; }
+
+        const artSzWrap = document.createElement('div');
+        artSzWrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        artSzWrap.append(artSzDd, artSzCustomInp, artSzCustomLbl);
+        dlBody.appendChild(makeRow('Artwork size', artSzWrap, null, false));
+
+        // ── Lyrics ───────────────────────────────────────────────────────────
+        dlBody.appendChild(dlSubhead('Lyrics'));
+
+        const lyrToggle = makeIOSToggle(prefs['embed-lyrics'] !== false, v => window.amlBridge?.setTweak('embed-lyrics', v));
+        dlBody.appendChild(makeRow('Embed lyrics', lyrToggle, null, false));
+        const LYR_TYPE_OPTS = [
+            { value: 'lyrics',           label: 'Standard (time-synced)' },
+            { value: 'syllable-lyrics',  label: 'Syllable (word-level)' },
+        ];
+        const { wrap: lyrTypeDd } = dlDropdown(LYR_TYPE_OPTS, prefs['lyrics-type'] || 'lyrics',
+            v => window.amlBridge?.setTweak('lyrics-type', v));
+        dlBody.appendChild(makeRow('Lyrics type', lyrTypeDd, null, false));
+        const LYR_FMT_OPTS = [
+            { value: 'lrc',  label: 'LRC' },
+            { value: 'ttml', label: 'TTML' },
+        ];
+        const { wrap: lyrFmtDd } = dlDropdown(LYR_FMT_OPTS, prefs['lyrics-format'] || 'lrc',
+            v => window.amlBridge?.setTweak('lyrics-format', v));
+        dlBody.appendChild(makeRow('Lyrics format', lyrFmtDd, null, false));
+        const sidecarToggle = makeIOSToggle(!!(prefs['save-lrc-sidecar']), v => window.amlBridge?.setTweak('save-lrc-sidecar', v));
+        dlBody.appendChild(makeRow('Save .lrc sidecar', sidecarToggle, 'Writes a .lrc file alongside the audio', false));
+
+        // ── Content & Tags ───────────────────────────────────────────────────
+        dlBody.appendChild(dlSubhead('Content & Tags'));
+
+        // Helper: small inline marker text input
+        const makeMarkerInput = (prefKey, defaultVal) => {
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.value = prefs[prefKey] || defaultVal;
+            inp.maxLength = 8;
+            inp.style.cssText = FF + 'width:60px;padding:4px 8px;border-radius:7px;text-align:center;' +
+                'background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);' +
+                'color:rgba(255,255,255,0.88);font-size:12.5px;font-family:ui-monospace,monospace;outline:none;' +
+                'transition:border-color 0.15s;';
+            inp.onfocus = () => { inp.style.borderColor = 'rgba(252,60,68,0.5)'; };
+            inp.onblur  = () => { inp.style.borderColor = 'rgba(255,255,255,0.15)'; };
+            inp.oninput = () => window.amlBridge?.setTweak(prefKey, inp.value);
+            return inp;
+        };
+
+        // Helper: marker input + inline reset button
+        const makeMarkerControl = (prefKey, defaultVal) => {
+            const inp = makeMarkerInput(prefKey, defaultVal);
+            const resetBtn = makeMiniBtn('Reset', () => {
+                inp.value = defaultVal;
+                window.amlBridge?.setTweak(prefKey, defaultVal);
+            });
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'display:flex;align-items:center;gap:6px;';
+            wrap.append(inp, resetBtn);
+            return wrap;
+        };
+
+        // Helper: indented sub-row (shown/hidden by parent toggle)
+        const makeDependentRow = (label, control) => {
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'display:flex;align-items:center;padding:9px 0 9px 14px;' +
+                'border-bottom:0.5px solid rgba(255,255,255,0.07);';
+            const lbl = document.createElement('div');
+            lbl.style.cssText = FF + 'flex:1;font-size:13px;color:rgba(255,255,255,0.45);';
+            lbl.textContent = label;
+            if (control.style) control.style.marginLeft = 'auto';
+            wrap.append(lbl, control);
+            return wrap;
+        };
+
+        // Explicit content
+        const explicitOn = prefs['explicit-enabled'] !== false;
+        const explicitInpRow = makeDependentRow('Marker text', makeMarkerControl('explicit-marker', '[E]'));
+        explicitInpRow.style.display = explicitOn ? '' : 'none';
+        dlBody.appendChild(makeRow('Explicit content',
+            makeIOSToggle(explicitOn, v => {
+                window.amlBridge?.setTweak('explicit-enabled', v);
+                explicitInpRow.style.display = v ? '' : 'none';
+            }),
+            'Add [E] to filenames of explicit tracks', false));
+        dlBody.appendChild(explicitInpRow);
+
+        // Clean content (off by default — most users don't want [C] in filenames)
+        const cleanOn = !!(prefs['clean-enabled']);
+        const cleanInpRow = makeDependentRow('Marker text', makeMarkerControl('clean-marker', '[C]'));
+        cleanInpRow.style.display = cleanOn ? '' : 'none';
+        dlBody.appendChild(makeRow('Clean content',
+            makeIOSToggle(cleanOn, v => {
+                window.amlBridge?.setTweak('clean-enabled', v);
+                cleanInpRow.style.display = v ? '' : 'none';
+            }),
+            'Add [C] to filenames of clean/censored tracks', false));
+        dlBody.appendChild(cleanInpRow);
+
+        // Apple Digital Masters
+        const admOn = prefs['adm-enabled'] !== false;
+        const admInpRow = makeDependentRow('Marker text', makeMarkerControl('adm-marker', '[M]'));
+        admInpRow.style.display = admOn ? '' : 'none';
+        dlBody.appendChild(makeRow('Apple Digital Masters',
+            makeIOSToggle(admOn, v => {
+                window.amlBridge?.setTweak('adm-enabled', v);
+                admInpRow.style.display = v ? '' : 'none';
+            }),
+            'Add [M] to filenames of tracks mastered for Apple Music', false));
+        dlBody.appendChild(admInpRow);
+
+        // Playlist metadata
+        dlBody.appendChild(makeRow('Playlist metadata',
+            makeIOSToggle(!!(prefs['use-songinfo-for-playlist']), v =>
+                window.amlBridge?.setTweak('use-songinfo-for-playlist', v)),
+            'Use original album track number and album name instead of playlist position when downloading a playlist',
+            true));
+
+        // ── Queue ────────────────────────────────────────────────────────────
+        dlBody.appendChild(dlSubhead('Queue'));
+
+        // Retry on fail toggle
+        const retryToggle = makeIOSToggle(!!(prefs['retry-on-fail'] !== false), v => window.amlBridge?.setTweak('retry-on-fail', v));
+        dlBody.appendChild(makeRow('Retry on fail', retryToggle, 'Automatically retry a failed download', false));
+
+        // Retry timeout dropdown
+        const RETRY_TIMEOUT_OPTS = [
+            { value: 15,  label: '15 seconds' },
+            { value: 30,  label: '30 seconds' },
+            { value: 60,  label: '1 minute' },
+            { value: 300, label: '5 minutes' },
+        ];
+        const { wrap: retryToDd } = dlDropdown(RETRY_TIMEOUT_OPTS, parseInt(prefs['retry-timeout'] ?? '30', 10),
+            v => window.amlBridge?.setTweak('retry-timeout', parseInt(v, 10)));
+        dlBody.appendChild(makeRow('Retry after', retryToDd, null, false));
+
+        dlg.appendChild(dlWrap);
+
         // ── Developer section ──────────────────────────────────────────────────
         const { wrap: devWrap, body: devBody } = makeSection('Developer');
         const debugToggle = document.createElement('input');
         debugToggle.type = 'checkbox';
         debugToggle.checked = !!(prefs.debug);
-        debugToggle.style.cssText = 'width:16px;height:16px;accent-color:#0a84ff;cursor:pointer;';
+        debugToggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
         debugToggle.onchange = () => {
             window.amlBridge?.setPref('debug', debugToggle.checked);
         };
@@ -3808,9 +5239,11 @@ window.addEventListener('unhandledrejection', (e) => {
         }
     }
 
-    // ── Settings cog next to account row ──────────────────────────────────
+    // ── Settings cog + downloads button next to account row ───────────────
     // Apple SF Symbols–style gearshape.fill — 8-tooth gear with circular centre hole
     const COG_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:17%"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.05-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.03-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>`;
+    // Apple Music Android ic_swipe_download — bold solid downward arrow
+    const DOWNLOAD_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:19%"><path d="M11.9952,21.1159C12.3277,21.1159 12.6697,20.9829 12.8977,20.7359L19.12,14.5136C19.3765,14.2571 19.5,13.9531 19.5,13.6396C19.5,12.9462 19.006,12.4522 18.341,12.4522C17.9801,12.4522 17.6856,12.6042 17.4671,12.8322L15.3011,14.9791L13.1352,17.4395L13.2112,15.3781L13.2112,4.254C13.2112,3.5035 12.7172,3 11.9952,3C11.2733,3 10.7793,3.5035 10.7793,4.254L10.7793,15.3781L10.8648,17.4395L8.6894,14.9791L6.5329,12.8322C6.3049,12.6042 6.0199,12.4522 5.659,12.4522C4.994,12.4522 4.5,12.9462 4.5,13.6396C4.5,13.9531 4.6235,14.2571 4.88,14.5136L11.0928,20.7359C11.3303,20.9829 11.6628,21.1159 11.9952,21.1159Z"/></svg>`;
 
     function findAccountRow() {
         return (
@@ -3831,48 +5264,59 @@ window.addEventListener('unhandledrejection', (e) => {
         // Match the avatar circle size
         const avatarEl = accountRow.querySelector('img, [class*="avatar"], [class*="Avatar"], [class*="profile"], [class*="Profile"]');
         const avatarSize = avatarEl ? Math.round(avatarEl.getBoundingClientRect().width) || 28 : 28;
-        const sz = Math.max(avatarSize, 28) + 'px';
+        const szN = Math.max(avatarSize, 28);
+        const sz = szN + 'px';
 
-        const cog = document.createElement('button');
-        cog.id = 'aml-settings-cog';
-        cog.title = 'AML Settings';
-        cog.innerHTML = COG_SVG;
-        cog.style.cssText = [
-            'position:absolute',
-            'right:10px',
-            'top:50%',
-            'transform:translateY(-50%)',
-            'z-index:100',
-            `width:${sz}`,
-            `height:${sz}`,
-            'border-radius:50%',
-            'border:none',
-            'background:rgba(255,255,255,0.10)',
-            'color:rgba(255,255,255,0.55)',
-            'cursor:pointer',
-            'display:flex',
-            'align-items:center',
-            'justify-content:center',
-            'transition:background 0.15s,color 0.15s',
-            '-webkit-app-region:no-drag',
-            'flex-shrink:0',
-            'box-sizing:border-box',
-        ].join(';');
-        cog.onmouseenter = () => { cog.style.background = 'rgba(255,255,255,0.20)'; cog.style.color = 'rgba(255,255,255,0.9)'; };
-        cog.onmouseleave = () => { cog.style.background = 'rgba(255,255,255,0.10)'; cog.style.color = 'rgba(255,255,255,0.55)'; };
-        cog.onclick = (e) => { e.stopPropagation(); openSettings(); };
+        function makeNavBtn(id, title, svg, rightPx) {
+            const btn = document.createElement('button');
+            btn.id = id;
+            btn.title = title;
+            btn.innerHTML = svg;
+            btn.style.cssText = [
+                'position:absolute',
+                `right:${rightPx}px`,
+                'top:50%',
+                'transform:translateY(-50%)',
+                'z-index:100',
+                `width:${sz}`,
+                `height:${sz}`,
+                'border-radius:50%',
+                'border:none',
+                'background:rgba(255,255,255,0.10)',
+                'color:rgba(255,255,255,0.55)',
+                'cursor:pointer',
+                'display:flex',
+                'align-items:center',
+                'justify-content:center',
+                'transition:background 0.15s,color 0.15s',
+                '-webkit-app-region:no-drag',
+                'flex-shrink:0',
+                'box-sizing:border-box',
+            ].join(';');
+            btn.onmouseenter = () => { btn.style.background = 'rgba(255,255,255,0.20)'; btn.style.color = 'rgba(255,255,255,0.9)'; };
+            btn.onmouseleave = () => { btn.style.background = 'rgba(255,255,255,0.10)'; btn.style.color = 'rgba(255,255,255,0.55)'; };
+            return btn;
+        }
 
         // Make parent relative so absolute positioning works
         const parent = accountRow.closest('li, [class*="account"], [class*="Account"]') || accountRow;
         if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
-        parent.appendChild(cog);
 
+        const gap = 8;
+        const cog = makeNavBtn('aml-settings-cog', 'AML Settings', COG_SVG, 10);
+        cog.onclick = (e) => { e.stopPropagation(); openSettings(); };
+
+        const dlBtn = makeNavBtn('aml-downloads-btn', 'Downloads', DOWNLOAD_SVG, 10 + szN + gap);
+        dlBtn.onclick = (e) => { e.stopPropagation(); window.__amlToggleDownloads?.(); };
+
+        parent.appendChild(cog);
+        parent.appendChild(dlBtn);
     }
 
     // Watch the entire document so the cog re-mounts after SPA navigation
     // replaces the sidebar (observing only parent misses parent-level removals).
     const cogWatcher = new MutationObserver(() => {
-        if (findAccountRow() && !document.getElementById('aml-settings-cog')) mountSettingsCog();
+        if (findAccountRow() && (!document.getElementById('aml-settings-cog') || !document.getElementById('aml-downloads-btn'))) mountSettingsCog();
     });
     if (findAccountRow()) mountSettingsCog();
     cogWatcher.observe(document.documentElement, { childList: true, subtree: true });
@@ -3880,4 +5324,765 @@ window.addEventListener('unhandledrejection', (e) => {
     window.__amlOpenEngineSettings = openSettings;
 
     // Kill gradient/vignette overlay elements that CSS selectors miss
+})();
+
+// ── Downloads: context menu injection + panel + export API ────────────────────
+(function initAMLDownloads() {
+    // ── SVG icon injection — direct DOM + per-container observer ─────────────
+    // Never mutate button title/text (breaks Glimmer's VDOM reconciliation).
+    // Instead: inject our <svg> as a sibling inside the icon container, hide
+    // Apple's native svg via inline style, and re-inject immediately if Glimmer
+    // blows our node away.  CSS handles the "Copy Embed Code → Download" rename
+    // via ::before so the real title attribute stays untouched.
+
+    const PIN_PATH   = 'M12.219,22.208C12.281,22.208 12.361,22.137 12.46,21.994C12.558,21.851 12.658,21.664 12.758,21.432C12.859,21.199 12.943,20.945 13.012,20.668C13.08,20.391 13.115,20.119 13.115,19.853L13.115,15.075L11.32,15.075L11.32,19.853C11.32,20.119 11.353,20.391 11.421,20.668C11.489,20.945 11.573,21.199 11.674,21.432C11.776,21.664 11.876,21.851 11.975,21.994C12.073,22.137 12.155,22.208 12.219,22.208ZM6.926,15.874L17.506,15.874C17.919,15.874 18.249,15.753 18.496,15.512C18.744,15.271 18.868,14.951 18.868,14.553C18.868,13.91 18.7,13.287 18.364,12.684C18.028,12.082 17.558,11.543 16.953,11.067C16.349,10.59 15.644,10.211 14.838,9.93C14.032,9.649 13.159,9.508 12.219,9.508C11.278,9.508 10.405,9.649 9.597,9.93C8.789,10.211 8.084,10.59 7.481,11.067C6.878,11.543 6.408,12.082 6.07,12.684C5.733,13.287 5.564,13.91 5.564,14.553C5.564,14.951 5.689,15.271 5.938,15.512C6.187,15.753 6.517,15.874 6.926,15.874ZM7.35,14.334C7.202,14.334 7.141,14.248 7.167,14.078C7.22,13.709 7.379,13.342 7.644,12.978C7.909,12.613 8.264,12.282 8.709,11.985C9.153,11.687 9.671,11.449 10.264,11.27C10.856,11.091 11.508,11.001 12.219,11.001C12.926,11.001 13.576,11.091 14.169,11.27C14.762,11.449 15.281,11.687 15.724,11.985C16.168,12.282 16.523,12.613 16.789,12.978C17.055,13.342 17.214,13.709 17.267,14.078C17.293,14.248 17.231,14.334 17.082,14.334L7.35,14.334ZM6.621,3.2C6.621,3.503 6.737,3.802 6.97,4.097C7.109,4.28 7.304,4.483 7.556,4.707C7.808,4.93 8.096,5.163 8.418,5.406C8.741,5.648 9.082,5.89 9.441,6.131L9.129,10.756L10.749,10.756L11.064,5.425C11.071,5.278 11.021,5.176 10.912,5.118C10.66,4.985 10.424,4.852 10.202,4.718C9.981,4.583 9.783,4.456 9.607,4.335C9.431,4.215 9.284,4.107 9.166,4.013C9.048,3.918 8.965,3.847 8.919,3.799C8.884,3.754 8.875,3.716 8.893,3.684C8.911,3.651 8.941,3.635 8.984,3.635L15.45,3.635C15.491,3.635 15.52,3.651 15.538,3.684C15.556,3.716 15.549,3.754 15.515,3.799C15.467,3.847 15.385,3.918 15.269,4.013C15.152,4.107 15.006,4.215 14.83,4.335C14.654,4.456 14.456,4.583 14.233,4.718C14.011,4.852 13.773,4.985 13.519,5.118C13.413,5.176 13.365,5.278 13.376,5.425L13.683,10.756L15.305,10.756L14.99,6.131C15.351,5.89 15.694,5.648 16.019,5.406C16.343,5.163 16.63,4.93 16.88,4.707C17.129,4.483 17.323,4.28 17.461,4.097C17.698,3.802 17.817,3.503 17.817,3.2C17.817,2.907 17.714,2.665 17.507,2.474C17.301,2.282 17.036,2.186 16.711,2.186L7.726,2.186C7.398,2.186 7.131,2.282 6.927,2.474C6.723,2.665 6.621,2.907 6.621,3.2Z';
+    const TRASH_PATH = 'M16.4187,22.4626C17.571,22.4626 18.2679,21.8214 18.3144,20.6691L18.9091,7.0924L20.303,7.0924C20.684,7.0924 21,6.7672 21,6.3862C21,6.0052 20.684,5.6892 20.303,5.6892L16.1585,5.6892L16.1585,4.2674C16.1585,2.8642 15.2385,2 13.7517,2L10.2297,2C8.7429,2 7.8229,2.8642 7.8229,4.2674L7.8229,5.6892L3.697,5.6892C3.3252,5.6892 3,6.0052 3,6.3862C3,6.7765 3.3252,7.0924 3.697,7.0924L5.1002,7.0924L5.6949,20.6691C5.7414,21.8214 6.4383,22.4626 7.5813,22.4626L16.4187,22.4626ZM14.4858,5.6892L9.5049,5.6892L9.5049,4.3604C9.5049,3.8957 9.8301,3.5798 10.332,3.5798L13.6588,3.5798C14.1606,3.5798 14.4858,3.8957 14.4858,4.3604L14.4858,5.6892ZM9.0589,19.8049C8.7243,19.8049 8.492,19.5911 8.4827,19.2566L8.1946,9.1368C8.1853,8.8116 8.4177,8.5885 8.7801,8.5885C9.1053,8.5885 9.3469,8.8023 9.3562,9.1275L9.635,19.2566C9.6443,19.5818 9.412,19.8049 9.0589,19.8049ZM12.0046,19.8049C11.6515,19.8049 11.4006,19.5818 11.4006,19.2566L11.4006,9.1368C11.4006,8.8116 11.6515,8.5885 12.0046,8.5885C12.3578,8.5885 12.5994,8.8116 12.5994,9.1368L12.5994,19.2566C12.5994,19.5818 12.3578,19.8049 12.0046,19.8049ZM14.9411,19.8049C14.588,19.8049 14.3557,19.5818 14.365,19.2566L14.6438,9.1368C14.6531,8.8023 14.8947,8.5885 15.2199,8.5885C15.5731,8.5885 15.8147,8.8116 15.8054,9.1368L15.5173,19.2566C15.508,19.5911 15.2757,19.8049 14.9411,19.8049Z';
+    const DL_PATH    = 'M11.9952,21.1159C12.3277,21.1159 12.6697,20.9829 12.8977,20.7359L19.12,14.5136C19.3765,14.2571 19.5,13.9531 19.5,13.6396C19.5,12.9462 19.006,12.4522 18.341,12.4522C17.9801,12.4522 17.6856,12.6042 17.4671,12.8322L15.3011,14.9791L13.1352,17.4395L13.2112,15.3781L13.2112,4.254C13.2112,3.5035 12.7172,3 11.9952,3C11.2733,3 10.7793,3.5035 10.7793,4.254L10.7793,15.3781L10.8648,17.4395L8.6894,14.9791L6.5329,12.8322C6.3049,12.6042 6.0199,12.4522 5.659,12.4522C4.994,12.4522 4.5,12.9462 4.5,13.6396C4.5,13.9531 4.6235,14.2571 4.88,14.5136L11.0928,20.7359C11.3303,20.9829 11.6628,21.1159 11.9952,21.1159Z';
+
+    // Build inline SVG strings (no URL-encoding needed — straight DOM injection).
+    const mkSvg = (path, transform) => {
+        const inner = transform ? `<g transform="${transform}"><path d="${path}"/></g>` : `<path d="${path}"/>`;
+        return `<svg viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" width="16" height="16" style="display:block;flex-shrink:0">${inner}</svg>`;
+    };
+    const _PIN  = mkSvg(PIN_PATH,   'rotate(-45 12 12)');
+    const _TRASH = mkSvg(TRASH_PATH, '');
+    const ICON_SVG = {
+        'Pin Album':             _PIN,
+        'Unpin Album':           _PIN,
+        'Pin Music Video':       _PIN,
+        'Unpin Music Video':     _PIN,
+        'Pin Song':              _PIN,
+        'Unpin Song':            _PIN,
+        'Pin Playlist':          _PIN,
+        'Unpin Playlist':        _PIN,
+        'Delete from Library':   _TRASH,
+        'Remove from Library':   _TRASH,
+        'Copy Embed Code':       mkSvg(DL_PATH, ''),
+    };
+
+    // One-time CSS: hides Apple's native SVGs and renames "Copy Embed Code".
+    // All hiding is CSS-only so we never touch Glimmer-managed element styles
+    // (inline style mutations on Glimmer nodes trigger its reconciler and can
+    // drop orphan <li> nodes into the menu list).
+    ;(function injectContextMenuCSS() {
+        if (document.getElementById('aml-ctx-icons')) return;
+        // Build FULL selectors (including descendant) inside the map — joining
+        // comma-separated parent-only selectors then appending a descendant
+        // suffix only attaches it to the last item, making earlier items match
+        // the bare li and get the rule applied to the entire row.
+        const li = t => `li.contextual-menu-item:has(button[title='${t}'])`;
+        const con = t => `${li(t)} .contextual-menu-item__icon-container`;
+        const svg = t => `${con(t)} > svg`;
+
+        const PIN_TITLES   = ['Pin Album','Unpin Album','Pin Music Video','Unpin Music Video','Pin Song','Unpin Song','Pin Playlist','Unpin Playlist'];
+        const TRASH_TITLES = ['Delete from Library','Remove from Library'];
+        const EMBED_TITLE  = 'Copy Embed Code';
+
+        const ALL_CON = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(con).join(',\n');
+        const ALL_SVG = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(svg).join(',\n');
+        const EMBED_LI  = li(EMBED_TITLE);
+        const EMBED_CON = con(EMBED_TITLE);
+
+        const s = document.createElement('style');
+        s.id = 'aml-ctx-icons';
+        s.textContent = `
+/* position:relative so our absolute span is clipped to the container */
+${ALL_CON} { position:relative !important; }
+
+/* hide Apple's SVG via CSS — never touch inline styles on Glimmer elements */
+${ALL_SVG} { opacity:0 !important; }
+
+/* rename "Copy Embed Code" → "Download" purely via CSS */
+${EMBED_LI} .contextual-menu-item__option-text { font-size:0 !important; }
+${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; font-size:13px !important; }`;
+        document.head.appendChild(s);
+    })();
+
+    // Inject our SVG into one icon container and set up a guard observer that
+    // re-injects the moment Glimmer replaces the container's children.
+    // We NEVER mutate Apple's existing elements — CSS handles hiding the native SVG.
+    function _armContainer(container, svgHtml) {
+        if (container._amlArmed) return;
+        container._amlArmed = true;
+
+        const inject = () => {
+            if (container.querySelector('[data-aml]')) return;
+            const span = document.createElement('span');
+            span.setAttribute('data-aml', '1');
+            span.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;';
+            span.innerHTML = svgHtml;
+            container.appendChild(span);
+        };
+
+        inject();
+
+        // Re-inject after every Glimmer reconciliation pass on this container.
+        const obs = new MutationObserver(() => {
+            obs.disconnect();
+            inject();
+            obs.observe(container, { childList: true, subtree: true });
+        });
+        obs.observe(container, { childList: true, subtree: true });
+    }
+
+    // Walk every button in `menu` and arm matching icon containers.
+    function injectMenuIcons(menu) {
+        if (!menu) return;
+        menu.querySelectorAll('button').forEach(btn => {
+            const title = btn.title
+                || btn.querySelector('.contextual-menu-item__option-text')?.textContent?.trim()
+                || '';
+            const svgHtml = ICON_SVG[title];
+            if (!svgHtml) return;
+            // Container may be inside the button OR elsewhere in the same li.
+            const container = btn.querySelector('.contextual-menu-item__icon-container')
+                || btn.closest('li')?.querySelector('.contextual-menu-item__icon-container');
+            if (container) _armContainer(container, svgHtml);
+        });
+    }
+
+    // ── Capture contextmenu target for track resolution ────────────────────
+    // mousedown captures ⋯ button clicks (no contextmenu event); contextmenu
+    // covers right-click. Both update _ctxTarget before the menu opens.
+    // Guard: don't overwrite _ctxTarget when the click is inside amp-contextual-menu
+    // itself — that would replace the song element with the Download button.
+    let _ctxTarget = null;
+    document.addEventListener('mousedown', e => {
+        if (!e.target.closest('amp-contextual-menu')) _ctxTarget = e.target;
+    }, true);
+    document.addEventListener('contextmenu', e => { _ctxTarget = e.target; }, true);
+
+    function _parseAMHref(href) {
+        if (!href || !href.includes('music.apple.com')) return null;
+        const sfM = href.match(/\/([a-z]{2,3})\//);
+        const sf  = sfM?.[1] || 'us';
+        // Song in album: ?i=catalogId
+        const songM = href.match(/[?&]i=(\d+)/);
+        if (songM) return { type: 'song', id: songM[1], storefront: sf };
+        // Direct song page: /song/name/id
+        const songD = href.match(/\/song\/[^/?#]+\/(\d+)/);
+        if (songD) return { type: 'song', id: songD[1], storefront: sf };
+        // Music video: /music-video/name/id
+        const mvM = href.match(/\/music-video\/[^/?#]+\/(\d+)/);
+        if (mvM) return { type: 'video', id: mvM[1], storefront: sf };
+        // Playlist: /playlist/name/pl.xxx
+        const plM = href.match(/\/playlist\/[^/?#]+(\/pl\.[a-f0-9]+)/i);
+        if (plM) return { type: 'playlist', id: plM[1].slice(1), storefront: sf };
+        // Album: /album/name/id
+        const albumM = href.match(/\/album\/[^/?#]+\/(\d+)/);
+        if (albumM) return { type: 'album', id: albumM[1], storefront: sf };
+        return null;
+    }
+
+    function resolveTrackInfo(target) {
+        // The ⋯ button and its catalog <a> are siblings, not ancestor/descendant.
+        // Walk up parent chain; at each level also search children for catalog links.
+        let el = target;
+        for (let i = 0; i < 25 && el && el !== document.body; i++) {
+            // Check the element itself
+            const directHref = el.href || el.getAttribute?.('href') || '';
+            if (directHref) {
+                const info = _parseAMHref(directHref);
+                if (info) return info;
+            }
+            // Search within this ancestor for any catalog link (catches sibling <a>)
+            const childLink = el.querySelector?.('a[href*="music.apple.com"]');
+            if (childLink) {
+                const info = _parseAMHref(childLink.href);
+                if (info) return info;
+            }
+            el = el.parentElement;
+        }
+        // Fallback: page URL (works when on an album/song detail page)
+        return _parseAMHref(location.href);
+    }
+
+    // Try to find metadata for an ID in the MusicKit queue/nowPlaying (synchronous).
+    function _mkMetaForId(id) {
+        try {
+            const mk = window.MusicKit?.getInstance?.();
+            const candidates = [mk?.nowPlayingItem, ...(mk?.queue?.items || [])].filter(Boolean);
+            for (const item of candidates) {
+                const pid = String(item.id || item.attributes?.playParams?.id || '');
+                if (pid === String(id)) {
+                    return {
+                        title:   item.attributes?.name        || '',
+                        artist:  item.attributes?.artistName  || '',
+                        artwork: item.attributes?.artwork?.url || '',
+                    };
+                }
+            }
+        } catch (_) {}
+        return null;
+    }
+
+    // ── Post a download job to the engine ─────────────────────────────────
+    async function startDownload(info) {
+        if (!info) { console.warn('[AML] startDownload: no track info'); return; }
+        const mk = window.MusicKit?.getInstance?.();
+        const prefs = await window.amlBridge?.getPrefs().catch(() => ({})) || {};
+        const qual = prefs['downloads-quality'] || _downloadsQuality || 'lossless';
+        const isLossless = qual !== 'high-quality';
+
+        // Pre-fetch metadata so the download row shows title/artwork immediately.
+        // Try MusicKit first (synchronous), then engine catalog (async, ~200-400ms).
+        let hintTitle = '', hintArtist = '', hintArtwork = '';
+        const mkMeta = _mkMetaForId(info.id);
+        if (mkMeta && mkMeta.title) {
+            hintTitle = mkMeta.title; hintArtist = mkMeta.artist; hintArtwork = mkMeta.artwork;
+        } else {
+            try {
+                const sf = encodeURIComponent(info.storefront || 'us');
+                const meta = await fetch(`${ENGINE}/api/v1/metadata/${info.id}?sf=${sf}`, {
+                    signal: AbortSignal.timeout(6000),
+                }).then(r => r.ok ? r.json() : null).catch(() => null);
+                if (meta) {
+                    hintTitle   = meta.title      || '';
+                    hintArtist  = meta.artistName || '';
+                    hintArtwork = meta.artworkUrl || '';
+                }
+            } catch (_) {}
+        }
+
+        // Build combined filename template from saved folder + song parts
+        const _af = prefs['download-album-folder'] || '{album_artist}/{album}';
+        const _sf = prefs['download-song-file']    || '{track_number:02d} - {title}';
+        const filenameTemplate = `${_af}/${_sf}`;
+
+        const body = {
+            AssetID:          info.id,
+            Storefront:       info.storefront,
+            Token:            mk?.developerToken || '',
+            MUT:              mk?.musicUserToken  || '',
+            Language:         navigator.language || 'en-US',
+            Capabilities: {
+                Lossless:  isLossless,
+                Atmos:     false,
+                Video:     info.type === 'video',
+                Playlist:  info.type === 'playlist',
+            },
+            MVMaxHeight:  parseInt(prefs['mv-max-height'] ?? '0', 10) || 0,
+            OutputDir:        prefs['download-dir'] || '',
+            FilenameTemplate: filenameTemplate,
+            Options: {
+                EmbedArtwork:  prefs['embed-artwork']   !== false,
+                ArtworkSize:   parseInt(prefs['artwork-size'] || '3000', 10),
+                EmbedLyrics:   prefs['embed-lyrics']    !== false,
+                LrcType:       prefs['lyrics-type']     || 'lyrics',
+                LrcFormat:     prefs['lyrics-format']   || 'lrc',
+                SaveLrcSidecar: !!(prefs['save-lrc-sidecar']),
+                OverwritePolicy: prefs['download-overwrite'] || 'skip',
+                ConvertToFLAC: !!(prefs['convert-to-flac']),
+                FFmpegPath:    prefs['ffmpeg-path'] || '',
+                KeepOriginal:  !!(prefs['keep-original']),
+                ExplicitChoice: prefs['explicit-enabled'] !== false ? (prefs['explicit-marker'] || '[E]') : '',
+                CleanChoice:    prefs['clean-enabled']              ? (prefs['clean-marker']    || '[C]') : '',
+                MasterChoice:   prefs['adm-enabled']    !== false   ? (prefs['adm-marker']      || '[M]') : '',
+            },
+            HintTitle:   hintTitle,
+            HintArtist:  hintArtist,
+            HintArtwork: hintArtwork,
+        };
+
+        try {
+            const res = await fetch(`${ENGINE}/api/v1/export`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) throw new Error(`engine ${res.status}`);
+            const job = await res.json();
+            openDownloadsPanel();
+            return job;
+        } catch (e) {
+            console.error('[AML] download error:', e);
+        }
+    }
+
+    // ── Context menu injection ─────────────────────────────────────────────
+    // Icons: CSS pseudo-elements in #aml-ctx-icons (Glimmer-proof, no DOM writes).
+    // Download: rename text+title on every render; click handled by delegation on
+    // the amp-contextual-menu node so Glimmer button replacement can't remove it.
+
+    // Clamp any open submenu lists to stop just above the player bar (72 px from bottom).
+    // Targets ul.contextual-menu__list so the container div keeps its border/shadow intact.
+    function clampSubmenus(root) {
+        const PLAYER_BAR_H = 72;
+        const maxBottom = window.innerHeight - PLAYER_BAR_H;
+        root.querySelectorAll(
+            'div.contextual-menu.contextual-menu--nested, div.contextual-menu.contextual-menu--in-submenu'
+        ).forEach(sub => {
+            const list = sub.querySelector('ul.contextual-menu__list');
+            if (!list) return;
+            const top = sub.getBoundingClientRect().top;
+            if (top <= 0) return; // not yet positioned — skip
+            const available = maxBottom - top - 10; // 10 px breathing room above bar
+            if (available > 0) {
+                list.style.setProperty('max-height', `${available}px`, 'important');
+                list.style.setProperty('overflow-y', 'auto', 'important');
+            }
+        });
+    }
+
+    // Watch body (childList only, no subtree) for amp-contextual-menu insertion.
+    // Apple creates it fresh per open (both ⋯ click and right-click) as a direct body child.
+    const _menuObservers = new Map();
+
+    new MutationObserver(muts => {
+        for (const m of muts) {
+            for (const node of m.addedNodes) {
+                if (node.nodeType !== 1 || node.tagName !== 'AMP-CONTEXTUAL-MENU') continue;
+
+                // Event delegation: one listener on the stable amp-contextual-menu node.
+                // Survives all Glimmer button replacements. Title stays 'Copy Embed Code'
+                // (we never mutate it), so check for both names for robustness.
+                node.addEventListener('click', e => {
+                    const btn = e.target.closest('button');
+                    if (!btn) return;
+                    const title = btn.title || btn.querySelector('.contextual-menu-item__option-text')?.textContent?.trim() || '';
+                    if (title !== 'Download' && title !== 'Copy Embed Code' && !title.includes('Embed Code')) return;
+                    e.stopPropagation();
+                    const trackInfo = resolveTrackInfo(_ctxTarget);
+                    startDownload(trackInfo);
+                    document.body.click();
+                }, true);
+
+                const inner = new MutationObserver(() => {
+                    injectMenuIcons(node.querySelector('.contextual-menu'));
+                    clampSubmenus(node);
+                });
+                inner.observe(node, { childList: true, subtree: true });
+                _menuObservers.set(node, inner);
+                // Initial injection — buttons may not be in DOM yet; retry once after paint.
+                setTimeout(() => injectMenuIcons(node.querySelector('.contextual-menu')), 80);
+            }
+            for (const node of m.removedNodes) {
+                if (node.nodeType !== 1 || node.tagName !== 'AMP-CONTEXTUAL-MENU') continue;
+                const obs = _menuObservers.get(node);
+                if (obs) { obs.disconnect(); _menuObservers.delete(node); }
+            }
+        }
+    }).observe(document.body, { childList: true });
+
+    // ── Downloads panel ────────────────────────────────────────────────────
+    let _panelEl   = null;
+    // Inject download panel CSS once
+    if (!document.getElementById('aml-dl-kf')) {
+        const _kfs = document.createElement('style');
+        _kfs.id = 'aml-dl-kf';
+        _kfs.textContent = `
+@keyframes aml-dl-scan{0%{background-position:0% 0%}50%{background-position:100% 0%}100%{background-position:0% 0%}}
+@keyframes aml-dl-dot{0%,100%{opacity:.35}50%{opacity:1}}
+@keyframes aml-dl-skel{0%{opacity:.4}50%{opacity:.8}100%{opacity:.4}}
+.aml-dl-pill{display:inline-flex;align-items:center;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:500;letter-spacing:0.1px;flex-shrink:0}
+.aml-dl-pill-q{background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.38)}
+.aml-dl-pill-r{background:rgba(255,214,10,0.13);color:rgba(255,210,80,0.85)}
+.aml-dl-pill-dl{background:rgba(252,60,68,0.15);color:#fc3c44}
+.aml-dl-pill-ok{background:rgba(48,209,88,0.14);color:#30d158}
+.aml-dl-pill-err{background:rgba(255,69,58,0.15);color:#ff453a}
+.aml-dl-pill-x{background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.25)}
+.aml-dl-skel-line{border-radius:3px;background:rgba(255,255,255,0.10);animation:aml-dl-skel 1.4s ease-in-out infinite}
+.aml-dl-art-skel{background:linear-gradient(135deg,rgba(255,255,255,0.08) 0%,rgba(255,255,255,0.04) 100%);animation:aml-dl-skel 1.4s ease-in-out infinite}`;
+        document.head.appendChild(_kfs);
+    }
+
+    let _pollTimer = null;
+    const _failedAt = new Map(); // jobId → scheduled-retry timer id
+
+    function openDownloadsPanel() {
+        if (!_panelEl) _panelEl = buildDownloadsPanel();
+        if (!document.body.contains(_panelEl)) document.body.appendChild(_panelEl);
+        _panelEl.style.display = 'flex';
+        startPolling();
+    }
+
+    function closeDownloadsPanel() {
+        if (_panelEl) _panelEl.style.display = 'none';
+        stopPolling();
+    }
+
+    window.__amlToggleDownloads = () => {
+        if (!_panelEl || _panelEl.style.display === 'none') openDownloadsPanel();
+        else closeDownloadsPanel();
+    };
+
+    function buildDownloadsPanel() {
+        const panel = document.createElement('div');
+        panel.id = 'aml-downloads-panel';
+        panel.style.cssText = [
+            'position:fixed',
+            'bottom:72px',
+            'left:16px',
+            'width:340px',
+            'max-height:480px',
+            'background:rgba(24,24,26,0.92)',
+            'backdrop-filter:blur(40px) saturate(1.8)',
+            '-webkit-backdrop-filter:blur(40px) saturate(1.8)',
+            'border:0.5px solid rgba(255,255,255,0.12)',
+            'border-radius:14px',
+            'box-shadow:0 16px 48px rgba(0,0,0,0.75),0 1px 0 rgba(255,255,255,0.06) inset',
+            'z-index:99999',
+            'display:flex',
+            'flex-direction:column',
+            'overflow:hidden',
+            'font-family:-apple-system,SF Pro Text,system-ui,sans-serif',
+        ].join(';');
+
+        // Header
+        const hdr = document.createElement('div');
+        hdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:13px 14px 11px;border-bottom:0.5px solid rgba(255,255,255,0.09);flex-shrink:0;gap:8px;';
+
+        const titleGroup = document.createElement('div');
+        titleGroup.style.cssText = 'display:flex;align-items:baseline;gap:7px;flex:1;min-width:0;';
+        const title = document.createElement('span');
+        title.textContent = 'Downloads';
+        title.style.cssText = 'color:#fff;font-size:14px;font-weight:600;letter-spacing:-0.2px;';
+        const countBadge = document.createElement('span');
+        countBadge.id = 'aml-dl-count';
+        countBadge.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.30);font-weight:400;display:none;';
+        titleGroup.append(title, countBadge);
+
+        const btnGroup = document.createElement('div');
+        btnGroup.style.cssText = 'display:flex;align-items:center;gap:6px;flex-shrink:0;';
+
+        const clearBtn = document.createElement('button');
+        clearBtn.id = 'aml-dl-cleardone';
+        clearBtn.textContent = 'Clear done';
+        clearBtn.style.cssText = 'background:none;border:none;color:rgba(255,255,255,0.32);cursor:pointer;font-size:11px;padding:3px 6px;border-radius:5px;transition:color 0.15s,background 0.15s;display:none;';
+        clearBtn.onmouseenter = () => { clearBtn.style.color = 'rgba(255,255,255,0.75)'; clearBtn.style.background = 'rgba(255,255,255,0.07)'; };
+        clearBtn.onmouseleave = () => { clearBtn.style.color = 'rgba(255,255,255,0.32)'; clearBtn.style.background = 'none'; };
+        clearBtn.onclick = clearDoneJobs;
+
+        const closeBtn = document.createElement('button');
+        closeBtn.innerHTML = `<svg viewBox="0 0 14 14" fill="currentColor" width="14" height="14"><path d="M1.4 1.4a1 1 0 0 1 1.414 0L7 5.586l4.186-4.186a1 1 0 1 1 1.414 1.414L8.414 7l4.186 4.186a1 1 0 1 1-1.414 1.414L7 8.414 2.814 12.6A1 1 0 0 1 1.4 11.186L5.586 7 1.4 2.814A1 1 0 0 1 1.4 1.4z"/></svg>`;
+        closeBtn.style.cssText = 'background:none;border:none;color:rgba(255,255,255,0.40);cursor:pointer;padding:4px;display:flex;align-items:center;border-radius:50%;transition:color 0.15s,background 0.15s;';
+        closeBtn.onmouseenter = () => { closeBtn.style.color = '#fff'; closeBtn.style.background = 'rgba(255,255,255,0.10)'; };
+        closeBtn.onmouseleave = () => { closeBtn.style.color = 'rgba(255,255,255,0.40)'; closeBtn.style.background = 'none'; };
+        closeBtn.onclick = closeDownloadsPanel;
+
+        btnGroup.append(clearBtn, closeBtn);
+        hdr.append(titleGroup, btnGroup);
+        panel.appendChild(hdr);
+
+        // Job list
+        const list = document.createElement('div');
+        list.id = 'aml-downloads-list';
+        list.style.cssText = 'flex:1;overflow-y:auto;padding:8px 0;';
+        panel.appendChild(list);
+
+        return panel;
+    }
+
+    function renderJobs(jobs) {
+        const list = document.getElementById('aml-downloads-list');
+        if (!list) return;
+
+        const countEl = document.getElementById('aml-dl-count');
+        const clearEl = document.getElementById('aml-dl-cleardone');
+
+        if (!jobs?.length) {
+            list.innerHTML = '';
+            const empty = document.createElement('div');
+            empty.style.cssText = 'padding:36px 16px;text-align:center;color:rgba(255,255,255,0.28);font-size:12px;letter-spacing:-0.1px;';
+            empty.textContent = 'No downloads yet';
+            list.appendChild(empty);
+            if (countEl) { countEl.textContent = ''; countEl.style.display = 'none'; }
+            if (clearEl) clearEl.style.display = 'none';
+            return;
+        }
+
+        // Update count badge
+        const active = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed' && j.phase !== 'cancelled').length;
+        const done   = jobs.filter(j => j.phase === 'done' || j.phase === 'failed' || j.phase === 'cancelled').length;
+        if (countEl) {
+            countEl.textContent = active > 0 ? `${active} active` : `${jobs.length}`;
+            countEl.style.display = '';
+        }
+        if (clearEl) clearEl.style.display = done > 0 ? '' : 'none';
+
+        // FIFO order — sort by createdAt ascending (enqueue order = artist/playlist order)
+        jobs.sort((a, b) => (a.queuePos ?? 0) - (b.queuePos ?? 0));
+
+        // Remove rows for jobs that no longer exist
+        const newIds = new Set(jobs.map(j => j.jobId));
+        list.querySelectorAll('[data-job-id]').forEach(el => {
+            if (!newIds.has(el.dataset.jobId)) el.remove();
+        });
+
+        // Update existing rows in-place; insert new rows at the correct sorted position.
+        // Existing rows are NEVER moved — that causes visible jumping on every poll tick.
+        for (let i = 0; i < jobs.length; i++) {
+            const job = jobs[i];
+            let row = list.querySelector(`[data-job-id="${job.jobId}"]`);
+            if (row) {
+                updateJobRow(row, job);
+            } else {
+                row = buildJobRow(job);
+                // Find the first already-rendered row that belongs after this one
+                let anchor = null;
+                for (let j = i + 1; j < jobs.length; j++) {
+                    anchor = list.querySelector(`[data-job-id="${jobs[j].jobId}"]`);
+                    if (anchor) break;
+                }
+                list.insertBefore(row, anchor); // anchor=null → appendChild
+            }
+        }
+
+        // Auto-retry failed jobs after the configured timeout
+        const retryEnabled = prefs['retry-on-fail'] !== false;
+        const retryDelay   = (parseInt(prefs['retry-timeout'] ?? '30', 10) || 30) * 1000;
+        for (const job of jobs) {
+            if (job.phase === 'failed' && retryEnabled) {
+                if (!_failedAt.has(job.jobId)) {
+                    const t = setTimeout(() => {
+                        _failedAt.delete(job.jobId);
+                        retryJob(job.jobId);
+                    }, retryDelay);
+                    _failedAt.set(job.jobId, t);
+                }
+            } else {
+                const t = _failedAt.get(job.jobId);
+                if (t !== undefined) { clearTimeout(t); _failedAt.delete(job.jobId); }
+            }
+        }
+    }
+
+    const PHASE_LABEL = {
+        queued:      'Queued',
+        resolving:   'Resolving…',
+        downloading: 'Downloading',
+        tagging:     'Tagging…',
+        moving:      'Saving…',
+        done:        'Done',
+        failed:      'Failed',
+        cancelled:   'Cancelled',
+    };
+
+    function _fmtBytes(n) {
+        if (!n) return '';
+        if (n < 1024) return n + ' B';
+        if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+        if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+        return (n / 1073741824).toFixed(2) + ' GB';
+    }
+
+    function _artThumb(url, size) {
+        if (!url) return '';
+        return url.replace('{w}', size).replace('{h}', size);
+    }
+
+    const PILL_CLASS = {
+        queued:      'aml-dl-pill aml-dl-pill-q',
+        resolving:   'aml-dl-pill aml-dl-pill-r',
+        downloading: 'aml-dl-pill aml-dl-pill-dl',
+        tagging:     'aml-dl-pill aml-dl-pill-dl',
+        moving:      'aml-dl-pill aml-dl-pill-dl',
+        done:        'aml-dl-pill aml-dl-pill-ok',
+        failed:      'aml-dl-pill aml-dl-pill-err',
+        cancelled:   'aml-dl-pill aml-dl-pill-x',
+    };
+
+    function buildJobRow(job) {
+        const row = document.createElement('div');
+        row.dataset.jobId = job.jobId;
+        row.style.cssText = 'padding:10px 14px;border-bottom:0.5px solid rgba(255,255,255,0.06);display:flex;gap:11px;align-items:flex-start;';
+
+        // Artwork thumbnail
+        const art = document.createElement('div');
+        art.className = 'aml-dl-art';
+        art.style.cssText = 'width:42px;height:42px;border-radius:8px;flex-shrink:0;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,0.4);margin-top:1px;';
+        const artImg = document.createElement('img');
+        artImg.style.cssText = 'width:100%;height:100%;object-fit:cover;display:none;';
+        art.appendChild(artImg);
+        // Skeleton fills art until image loads
+        const artSkel = document.createElement('div');
+        artSkel.className = 'aml-dl-art-skel';
+        artSkel.style.cssText = 'width:100%;height:100%;';
+        art.appendChild(artSkel);
+
+        // Right column
+        const col = document.createElement('div');
+        col.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;';
+
+        // Row 1: title + cancel
+        const titleRow = document.createElement('div');
+        titleRow.style.cssText = 'display:flex;align-items:center;gap:6px;';
+
+        const name = document.createElement('span');
+        name.className = 'aml-dl-name';
+        name.style.cssText = 'flex:1;color:rgba(255,255,255,0.92);font-size:12.5px;font-weight:590;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-0.15px;';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'aml-dl-cancel';
+        cancelBtn.innerHTML = `<svg viewBox="0 0 10 10" width="9" height="9"><line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`;
+        cancelBtn.style.cssText = 'background:none;border:none;color:rgba(255,255,255,0.20);cursor:pointer;padding:3px;display:flex;align-items:center;flex-shrink:0;border-radius:4px;transition:color 0.15s;';
+        cancelBtn.onmouseenter = () => { cancelBtn.style.color = 'rgba(255,255,255,0.65)'; };
+        cancelBtn.onmouseleave = () => { cancelBtn.style.color = 'rgba(255,255,255,0.20)'; };
+        cancelBtn.onclick = () => cancelJob(job.jobId);
+        titleRow.append(name, cancelBtn);
+
+        // Row 2: artist + pill
+        const metaRow = document.createElement('div');
+        metaRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;';
+
+        const artist = document.createElement('span');
+        artist.className = 'aml-dl-artist';
+        artist.style.cssText = 'color:rgba(255,255,255,0.40);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+
+        const pill = document.createElement('span');
+        pill.className = 'aml-dl-pill aml-dl-pill-q';
+        metaRow.append(artist, pill);
+
+        // Row 3: progress bar + size (hidden for non-active)
+        const progRow = document.createElement('div');
+        progRow.className = 'aml-dl-prog-row';
+        progRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+
+        const bar = document.createElement('div');
+        bar.style.cssText = 'flex:1;height:3px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;';
+        const fill = document.createElement('div');
+        fill.className = 'aml-dl-fill';
+        fill.style.cssText = 'height:100%;border-radius:2px;width:0%;transition:width 0.4s ease;background:#fc3c44;';
+        bar.appendChild(fill);
+
+        const sizeLabel = document.createElement('span');
+        sizeLabel.className = 'aml-dl-size';
+        sizeLabel.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.28);flex-shrink:0;font-variant-numeric:tabular-nums;min-width:44px;text-align:right;';
+        progRow.append(bar, sizeLabel);
+
+        col.append(titleRow, metaRow, progRow);
+        row.append(art, col);
+        updateJobRow(row, job);
+        return row;
+    }
+
+    function updateJobRow(row, job) {
+        const name      = row.querySelector('.aml-dl-name');
+        const artist    = row.querySelector('.aml-dl-artist');
+        const pill      = row.querySelector('.aml-dl-pill');
+        const fill      = row.querySelector('.aml-dl-fill');
+        const size      = row.querySelector('.aml-dl-size');
+        const artEl     = row.querySelector('.aml-dl-art');
+        const artImg    = artEl?.querySelector('img');
+        const artSkel   = artEl?.querySelector('.aml-dl-art-skel');
+        const cancelBtn = row.querySelector('.aml-dl-cancel');
+        const progRow   = row.querySelector('.aml-dl-prog-row');
+        const phase     = job.phase || '';
+        const hasTitle  = !!(job.title || job.output);
+        const isTerminal = phase === 'done' || phase === 'failed' || phase === 'cancelled';
+        const isActive   = phase === 'downloading' || phase === 'tagging' || phase === 'moving' || phase === 'resolving';
+
+        // Title: skeleton lines when unresolved, real text otherwise
+        if (name) {
+            if (hasTitle) {
+                name.textContent = job.title || job.output.split('/').pop();
+                name.style.cssText = 'flex:1;color:rgba(255,255,255,0.92);font-size:12.5px;font-weight:590;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-0.15px;';
+            } else {
+                name.textContent = '';
+                name.style.cssText = 'flex:1;height:11px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.10);animation:aml-dl-skel 1.4s ease-in-out infinite;max-width:70%;';
+            }
+        }
+
+        // Artist: skeleton when unresolved
+        if (artist) {
+            if (hasTitle) {
+                artist.textContent = job.artistName || '';
+                artist.style.cssText = 'color:rgba(255,255,255,0.40);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+            } else {
+                artist.textContent = '';
+                artist.style.cssText = 'flex:1;height:9px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.07);animation:aml-dl-skel 1.4s ease-in-out infinite;max-width:45%;';
+            }
+        }
+
+        // Status pill
+        if (pill) {
+            pill.className = PILL_CLASS[phase] || 'aml-dl-pill aml-dl-pill-q';
+            pill.textContent = PHASE_LABEL[phase] || phase;
+        }
+
+        // Progress fill
+        if (fill) {
+            if (isActive) {
+                fill.style.cssText = [
+                    'height:100%;border-radius:2px;width:100%;transition:none;',
+                    'background:linear-gradient(90deg,rgba(252,60,68,0.25) 0%,#fc3c44 50%,rgba(252,60,68,0.25) 100%);',
+                    'background-size:200% 100%;animation:aml-dl-scan 1.8s ease-in-out infinite;',
+                ].join('');
+            } else {
+                const BG = { done: '#30d158', failed: '#ff453a', cancelled: 'rgba(255,255,255,0.10)' };
+                fill.style.cssText = `height:100%;border-radius:2px;width:${isTerminal ? 100 : (job.percent ?? 0)}%;transition:width 0.4s ease;background:${BG[phase] || '#fc3c44'};`;
+            }
+        }
+
+        // Size label
+        if (size) size.textContent = _fmtBytes(job.bytesDone);
+
+        // Progress row visibility: hide for queued/done/cancelled
+        if (progRow) progRow.style.display = (phase === 'queued' || phase === 'cancelled') ? 'none' : 'flex';
+
+        // Artwork: reveal once URL resolves; hide skeleton
+        if (artImg && job.artworkUrl) {
+            if (artImg.style.display === 'none') {
+                artImg.src = _artThumb(job.artworkUrl, 84);
+                artImg.style.display = 'block';
+            }
+            if (artSkel) artSkel.style.display = 'none';
+        }
+
+        // Cancel button: hide for terminal phases
+        if (cancelBtn) cancelBtn.style.display = isTerminal ? 'none' : 'flex';
+
+        // Retry button for failed/cancelled
+        let retryBtn = row.querySelector('.aml-dl-retry');
+        if (phase === 'failed' || phase === 'cancelled') {
+            if (!retryBtn) {
+                retryBtn = document.createElement('button');
+                retryBtn.className = 'aml-dl-retry';
+                retryBtn.textContent = 'Retry';
+                retryBtn.style.cssText = 'margin-top:2px;padding:3px 10px;background:rgba(252,60,68,0.13);border:0.5px solid rgba(252,60,68,0.30);border-radius:5px;color:#fc3c44;font-size:10px;cursor:pointer;font-weight:500;transition:background 0.15s;align-self:flex-start;';
+                retryBtn.onmouseenter = () => { retryBtn.style.background = 'rgba(252,60,68,0.28)'; };
+                retryBtn.onmouseleave = () => { retryBtn.style.background = 'rgba(252,60,68,0.13)'; };
+                retryBtn.onclick = () => retryJob(job.jobId);
+                row.querySelector('[style*="flex-direction:column"]')?.appendChild(retryBtn);
+            }
+        } else {
+            retryBtn?.remove();
+        }
+    }
+
+    async function clearDoneJobs() {
+        const res = await fetch(`${ENGINE}/api/v1/export`).then(r => r.json()).catch(() => []);
+        const terminal = (Array.isArray(res) ? res : []).filter(j => j.phase === 'done' || j.phase === 'failed' || j.phase === 'cancelled');
+        await Promise.all(terminal.map(j => fetch(`${ENGINE}/api/v1/export/${j.jobId}`, { method: 'DELETE' }).catch(() => {})));
+        pollJobs();
+    }
+
+    async function cancelJob(id) {
+        await fetch(`${ENGINE}/api/v1/export/${id}`, { method: 'DELETE' }).catch(() => {});
+        pollJobs();
+    }
+
+    async function retryJob(id) {
+        await fetch(`${ENGINE}/api/v1/export/${id}/retry`, { method: 'POST' }).catch(() => {});
+        pollJobs();
+    }
+
+    let _pollSeq = 0;
+    async function pollJobs() {
+        const seq = ++_pollSeq;
+        try {
+            const jobs = await fetch(`${ENGINE}/api/v1/export`).then(r => r.json());
+            if (seq === _pollSeq) renderJobs(Array.isArray(jobs) ? jobs : []);
+        } catch (_) {}
+    }
+
+    function startPolling() {
+        if (_pollTimer) return;
+        pollJobs();
+        _pollTimer = setInterval(pollJobs, 2000);
+    }
+
+    function stopPolling() {
+        if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+    }
 })();

@@ -59,7 +59,7 @@ const (
 	processM3U8AddrDefault    = "127.0.0.1:20020"
 	processAccountAddrDefault = "127.0.0.1:30020"
 	portProbeInterval         = 5 * time.Second
-	portProbeTimeout          = 200 * time.Millisecond
+	portProbeTimeout          = 500 * time.Millisecond
 )
 
 // ProcessConfig holds transport details that are internal to ProcessBackend.

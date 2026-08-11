@@ -219,8 +219,8 @@ func (m *Manager) Release(id string) {
 // ── Internal ──────────────────────────────────────────────────────────────────
 
 func (m *Manager) store(sess *Session, pctx *playContext) {
+	m.contexts.Store(sess.ID, pctx) // context first — lookup won't see the session without its context
 	m.sessions.Store(sess.ID, sess)
-	m.contexts.Store(sess.ID, pctx)
 }
 
 func (m *Manager) lookup(id string) (*Session, *playContext, bool) {

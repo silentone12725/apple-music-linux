@@ -87,6 +87,35 @@ func GetAlbumResp(storefront string, id string, language string, token string) (
 	return obj, nil
 }
 
+func GetAlbumRespContext(ctx context.Context, storefront, id, language, token string) (*AlbumResp, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/albums/%s", storefront, id), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("Origin", "https://music.apple.com")
+	q := url.Values{}
+	q.Set("omit[resource]", "autos")
+	q.Set("include", "tracks,artists")
+	q.Set("include[songs]", "artists")
+	q.Set("l", language)
+	req.URL.RawQuery = q.Encode()
+	do, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer do.Body.Close()
+	if do.StatusCode != http.StatusOK {
+		return nil, errors.New(do.Status)
+	}
+	obj := new(AlbumResp)
+	if err := json.NewDecoder(do.Body).Decode(obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
 func GetAlbumRespByHref(href string, language string, token string) (*AlbumResp, error) {
 	return GetAlbumRespByHrefContext(context.Background(), href, language, token)
 }
