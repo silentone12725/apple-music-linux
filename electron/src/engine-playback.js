@@ -5734,8 +5734,9 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         document.head.appendChild(_kfs);
     }
 
-    let _pollTimer = null;
-    const _failedAt = new Map(); // jobId → scheduled-retry timer id
+    let _pollTimer      = null;
+    let _countdownTimer = null; // 1-s ticker to refresh auto-retry countdown labels
+    const _failedAt = new Map(); // jobId → { timer, deadline }
 
     function openDownloadsPanel() {
         if (!_panelEl) _panelEl = buildDownloadsPanel();
@@ -5812,6 +5813,64 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         hdr.append(titleGroup, btnGroup);
         panel.appendChild(hdr);
 
+        // ── Search bar ────────────────────────────────────────────────────
+        const searchWrap = document.createElement('div');
+        searchWrap.style.cssText = 'padding:8px 10px 6px;border-bottom:0.5px solid rgba(255,255,255,0.07);flex-shrink:0;display:flex;gap:6px;';
+
+        const searchInput = document.createElement('input');
+        searchInput.type = 'search';
+        searchInput.id = 'aml-dl-search-input';
+        searchInput.placeholder = 'Search to download…';
+        searchInput.autocomplete = 'off';
+        searchInput.spellcheck = false;
+        searchInput.style.cssText = [
+            'flex:1;background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.10)',
+            'border-radius:8px;padding:5px 9px;color:#fff;font-size:12px;outline:none',
+            'font-family:inherit;transition:border-color 0.15s,background 0.15s',
+            "appearance:none;-webkit-appearance:none",
+        ].join(';');
+        searchInput.addEventListener('focus', () => { searchInput.style.borderColor = 'rgba(252,60,68,0.55)'; searchInput.style.background = 'rgba(255,255,255,0.09)'; });
+        searchInput.addEventListener('blur', () => { searchInput.style.borderColor = 'rgba(255,255,255,0.10)'; searchInput.style.background = 'rgba(255,255,255,0.06)'; });
+
+        const typeSelect = document.createElement('select');
+        typeSelect.id = 'aml-dl-search-type';
+        typeSelect.style.cssText = 'background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.10);border-radius:8px;padding:5px 6px;color:rgba(255,255,255,0.70);font-size:11px;outline:none;cursor:pointer;font-family:inherit;';
+        [['Songs','songs'],['Albums','albums'],['Artists','artists'],['Videos','music-videos']].forEach(([label, val]) => {
+            const o = document.createElement('option');
+            o.value = val; o.textContent = label;
+            typeSelect.appendChild(o);
+        });
+
+        searchWrap.append(searchInput, typeSelect);
+        panel.appendChild(searchWrap);
+
+        // ── Search results overlay (shown above job list when searching) ──
+        const searchResults = document.createElement('div');
+        searchResults.id = 'aml-dl-search-results';
+        searchResults.style.cssText = 'flex:1;overflow-y:auto;padding:4px 0;display:none;';
+        panel.appendChild(searchResults);
+
+        // Wire up search: debounce 350ms, clear on empty
+        let _searchDebounce = null;
+        searchInput.addEventListener('input', () => {
+            clearTimeout(_searchDebounce);
+            const q = searchInput.value.trim();
+            if (!q) {
+                searchResults.style.display = 'none';
+                list.style.display = '';
+                searchResults.innerHTML = '';
+                return;
+            }
+            _searchDebounce = setTimeout(() => runSearch(q, typeSelect.value), 350);
+        });
+        typeSelect.addEventListener('change', () => {
+            const q = searchInput.value.trim();
+            if (q) runSearch(q, typeSelect.value);
+        });
+        searchInput.addEventListener('keydown', e => {
+            if (e.key === 'Escape') { searchInput.value = ''; searchInput.dispatchEvent(new Event('input')); }
+        });
+
         // Job list
         const list = document.createElement('div');
         list.id = 'aml-downloads-list';
@@ -5819,6 +5878,124 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         panel.appendChild(list);
 
         return panel;
+    }
+
+    // ── Search to download ─────────────────────────────────────────────────
+    async function runSearch(q, type) {
+        const searchResults = document.getElementById('aml-dl-search-results');
+        const list          = document.getElementById('aml-downloads-list');
+        if (!searchResults) return;
+
+        searchResults.style.display = '';
+        list.style.display = 'none';
+        searchResults.innerHTML = '<div style="padding:20px 16px;text-align:center;color:rgba(255,255,255,0.28);font-size:11px;">Searching…</div>';
+
+        try {
+            const mk = window.MusicKit?.getInstance?.();
+            const sf = mk?.storefrontId || 'us';
+            const url = `${ENGINE}/api/v1/catalog/search?q=${encodeURIComponent(q)}&types=${type}&sf=${sf}&limit=20`;
+            const data = await fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
+            if (!data) throw new Error('no data');
+
+            const results = data.results;
+            const items = [];
+
+            if (type === 'songs' && results?.songs?.data) {
+                for (const s of results.songs.data) {
+                    const a = s.attributes || {};
+                    items.push({ id: s.id, type: 'song', title: a.name || '', artist: a.artistName || '', extra: a.albumName || '', artwork: a.artwork?.url || '', storefront: sf });
+                }
+            } else if (type === 'albums' && results?.albums?.data) {
+                for (const s of results.albums.data) {
+                    const a = s.attributes || {};
+                    items.push({ id: s.id, type: 'album', title: a.name || '', artist: a.artistName || '', extra: `${a.trackCount || ''} tracks`, artwork: a.artwork?.url || '', storefront: sf });
+                }
+            } else if (type === 'artists' && results?.artists?.data) {
+                for (const s of results.artists.data) {
+                    const a = s.attributes || {};
+                    items.push({ id: s.id, type: 'artist', title: a.name || '', artist: a.genreNames?.[0] || '', extra: '', artwork: a.artwork?.url || '', storefront: sf });
+                }
+            } else if (type === 'music-videos' && results?.['music-videos']?.data) {
+                for (const s of results['music-videos'].data) {
+                    const a = s.attributes || {};
+                    items.push({ id: s.id, type: 'video', title: a.name || '', artist: a.artistName || '', extra: a.albumName || '', artwork: a.artwork?.url || '', storefront: sf });
+                }
+            }
+
+            renderSearchResults(items);
+        } catch (_) {
+            if (searchResults) searchResults.innerHTML = '<div style="padding:20px 16px;text-align:center;color:rgba(255,255,255,0.28);font-size:11px;">No results</div>';
+        }
+    }
+
+    function renderSearchResults(items) {
+        const el = document.getElementById('aml-dl-search-results');
+        if (!el) return;
+        if (!items.length) {
+            el.innerHTML = '<div style="padding:20px 16px;text-align:center;color:rgba(255,255,255,0.28);font-size:11px;">No results</div>';
+            return;
+        }
+        el.innerHTML = '';
+        for (const item of items) {
+            const row = document.createElement('div');
+            row.style.cssText = 'padding:8px 12px;display:flex;gap:9px;align-items:center;cursor:pointer;border-bottom:0.5px solid rgba(255,255,255,0.05);transition:background 0.12s;';
+            row.onmouseenter = () => { row.style.background = 'rgba(255,255,255,0.05)'; };
+            row.onmouseleave = () => { row.style.background = ''; };
+
+            const art = document.createElement('div');
+            art.style.cssText = `width:38px;height:38px;border-radius:${item.type === 'artist' ? '50%' : '6px'};overflow:hidden;flex-shrink:0;background:rgba(255,255,255,0.06);`;
+            if (item.artwork) {
+                const img = document.createElement('img');
+                img.src = item.artwork.replace('{w}', '76').replace('{h}', '76');
+                img.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+                img.onerror = () => { img.style.display = 'none'; };
+                art.appendChild(img);
+            }
+
+            const info = document.createElement('div');
+            info.style.cssText = 'flex:1;min-width:0;';
+            const nameEl = document.createElement('div');
+            nameEl.textContent = item.title;
+            nameEl.style.cssText = 'color:rgba(255,255,255,0.88);font-size:12px;font-weight:530;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+            const subEl = document.createElement('div');
+            subEl.textContent = [item.artist, item.extra].filter(Boolean).join(' · ');
+            subEl.style.cssText = 'color:rgba(255,255,255,0.38);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px;';
+            info.append(nameEl, subEl);
+
+            // Action button — Download for songs/albums/videos; Navigate for artists
+            const dlBtn = document.createElement('button');
+            if (item.type === 'artist') {
+                dlBtn.innerHTML = `<svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/></svg>`;
+                dlBtn.title = 'Go to artist';
+                dlBtn.style.cssText = 'background:rgba(255,255,255,0.07);border:0.5px solid rgba(255,255,255,0.12);border-radius:6px;color:rgba(255,255,255,0.55);padding:5px 7px;cursor:pointer;display:flex;align-items:center;flex-shrink:0;transition:background 0.12s;';
+                dlBtn.onmouseenter = () => { dlBtn.style.background = 'rgba(255,255,255,0.13)'; };
+                dlBtn.onmouseleave = () => { dlBtn.style.background = 'rgba(255,255,255,0.07)'; };
+                dlBtn.onclick = e => {
+                    e.stopPropagation();
+                    const artistUrl = `https://music.apple.com/${item.storefront}/artist/${item.id}`;
+                    // Navigate the Apple Music webview to the artist page
+                    try { history.pushState({}, '', artistUrl); window.dispatchEvent(new PopStateEvent('popstate', { state: {} })); } catch (_) {}
+                    // Clear search to show queue
+                    const si = document.getElementById('aml-dl-search-input');
+                    if (si) { si.value = ''; si.dispatchEvent(new Event('input')); }
+                };
+            } else {
+                dlBtn.innerHTML = `<svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 1a1 1 0 0 1 1 1v7.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4A1 1 0 0 1 4.707 7.293L7 9.586V2a1 1 0 0 1 1-1zM2 14a1 1 0 0 1 1-1h10a1 1 0 0 1 0 2H3a1 1 0 0 1-1-1z"/></svg>`;
+                dlBtn.title = item.type === 'album' ? 'Download album' : 'Download';
+                dlBtn.style.cssText = 'background:rgba(252,60,68,0.12);border:0.5px solid rgba(252,60,68,0.25);border-radius:6px;color:#fc3c44;padding:5px 7px;cursor:pointer;display:flex;align-items:center;flex-shrink:0;transition:background 0.12s;';
+                dlBtn.onmouseenter = () => { dlBtn.style.background = 'rgba(252,60,68,0.25)'; };
+                dlBtn.onmouseleave = () => { dlBtn.style.background = 'rgba(252,60,68,0.12)'; };
+                dlBtn.onclick = e => {
+                    e.stopPropagation();
+                    dlBtn.style.opacity = '0.4';
+                    dlBtn.disabled = true;
+                    startDownload({ type: item.type, id: item.id, storefront: item.storefront });
+                };
+            }
+
+            row.append(art, info, dlBtn);
+            el.appendChild(row);
+        }
     }
 
     function renderJobs(jobs) {
@@ -5882,15 +6059,16 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         for (const job of jobs) {
             if (job.phase === 'failed' && retryEnabled) {
                 if (!_failedAt.has(job.jobId)) {
+                    const deadline = Date.now() + retryDelay;
                     const t = setTimeout(() => {
                         _failedAt.delete(job.jobId);
                         retryJob(job.jobId);
                     }, retryDelay);
-                    _failedAt.set(job.jobId, t);
+                    _failedAt.set(job.jobId, { timer: t, deadline });
                 }
             } else {
-                const t = _failedAt.get(job.jobId);
-                if (t !== undefined) { clearTimeout(t); _failedAt.delete(job.jobId); }
+                const entry = _failedAt.get(job.jobId);
+                if (entry !== undefined) { clearTimeout(entry.timer); _failedAt.delete(job.jobId); }
             }
         }
     }
@@ -5950,6 +6128,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
 
         // Right column
         const col = document.createElement('div');
+        col.className = 'aml-dl-col';
         col.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;';
 
         // Row 1: title + cancel
@@ -6080,21 +6259,50 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         // Cancel button: hide for terminal phases
         if (cancelBtn) cancelBtn.style.display = isTerminal ? 'none' : 'flex';
 
-        // Retry button for failed/cancelled
-        let retryBtn = row.querySelector('.aml-dl-retry');
+        // Retry button + auto-retry countdown for failed/cancelled
+        const col        = row.querySelector('.aml-dl-col');
+        let retryBtn     = row.querySelector('.aml-dl-retry');
+        let countdownEl  = row.querySelector('.aml-dl-countdown');
+
         if (phase === 'failed' || phase === 'cancelled') {
-            if (!retryBtn) {
+            if (!retryBtn && col) {
                 retryBtn = document.createElement('button');
                 retryBtn.className = 'aml-dl-retry';
-                retryBtn.textContent = 'Retry';
                 retryBtn.style.cssText = 'margin-top:2px;padding:3px 10px;background:rgba(252,60,68,0.13);border:0.5px solid rgba(252,60,68,0.30);border-radius:5px;color:#fc3c44;font-size:10px;cursor:pointer;font-weight:500;transition:background 0.15s;align-self:flex-start;';
                 retryBtn.onmouseenter = () => { retryBtn.style.background = 'rgba(252,60,68,0.28)'; };
                 retryBtn.onmouseleave = () => { retryBtn.style.background = 'rgba(252,60,68,0.13)'; };
-                retryBtn.onclick = () => retryJob(job.jobId);
-                row.querySelector('[style*="flex-direction:column"]')?.appendChild(retryBtn);
+                retryBtn.onclick = () => {
+                    // Cancel any pending auto-retry, then retry now
+                    const entry = _failedAt.get(job.jobId);
+                    if (entry) { clearTimeout(entry.timer); _failedAt.delete(job.jobId); }
+                    retryBtn.textContent = 'Retrying…';
+                    retryBtn.disabled = true;
+                    if (countdownEl) countdownEl.textContent = '';
+                    retryJob(job.jobId);
+                };
+                col.appendChild(retryBtn);
+            }
+            if (retryBtn) retryBtn.textContent = retryBtn.disabled ? 'Retrying…' : 'Retry';
+
+            // Countdown label for auto-retry
+            const entry = _failedAt.get(job.jobId);
+            if (entry && phase === 'failed') {
+                if (!countdownEl && col) {
+                    countdownEl = document.createElement('span');
+                    countdownEl.className = 'aml-dl-countdown';
+                    countdownEl.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.28);margin-top:1px;align-self:flex-start;';
+                    col.appendChild(countdownEl);
+                }
+                if (countdownEl) {
+                    const secs = Math.max(0, Math.ceil((entry.deadline - Date.now()) / 1000));
+                    countdownEl.textContent = secs > 0 ? `Auto-retry in ${secs}s` : 'Retrying…';
+                }
+            } else {
+                countdownEl?.remove();
             }
         } else {
             retryBtn?.remove();
+            countdownEl?.remove();
         }
     }
 
@@ -6124,13 +6332,26 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         } catch (_) {}
     }
 
+    function _tickCountdowns() {
+        document.querySelectorAll('.aml-dl-countdown').forEach(el => {
+            const jobId = el.closest('[data-job-id]')?.dataset.jobId;
+            if (!jobId) return;
+            const entry = _failedAt.get(jobId);
+            if (!entry) { el.textContent = ''; return; }
+            const secs = Math.max(0, Math.ceil((entry.deadline - Date.now()) / 1000));
+            el.textContent = secs > 0 ? `Auto-retry in ${secs}s` : 'Retrying…';
+        });
+    }
+
     function startPolling() {
         if (_pollTimer) return;
         pollJobs();
         _pollTimer = setInterval(pollJobs, 2000);
+        _countdownTimer = setInterval(_tickCountdowns, 1000);
     }
 
     function stopPolling() {
         if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+        if (_countdownTimer) { clearInterval(_countdownTimer); _countdownTimer = null; }
     }
 })();
