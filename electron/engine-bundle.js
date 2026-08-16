@@ -914,6 +914,11 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
         ms.endOfStream();
         _streamComplete = true;
         console.log(`[AML Engine] Stream complete +${((performance.now()-t0)/1000).toFixed(2)}s`);
+        // Restore native audio.load() so MK can advance the queue when the
+        // audio element fires 'ended'. Without this, MK's queue-advance call
+        // to audio.load() hits our no-op shadow and hangs indefinitely —
+        // nowPlayingItemDidChange never fires and the next track never starts.
+        try { delete audio.load; } catch (_) {}
     }
     } finally {
         reader.cancel().catch(() => {});
@@ -2070,6 +2075,9 @@ async function startMVPipeline() {
         }
         await _waitAudIdle().catch(() => {});
         if (!signal.aborted && audioMs.readyState === 'open') {
+            // Restore native audio.load() before endOfStream so MK can advance
+            // the queue when mkAudio fires 'ended'. Same fix as AAC pipeToSourceBuffer.
+            try { delete mkAudio.load; } catch (_) {}
             try { audioMs.endOfStream(); } catch (_) {}
         }
     };
@@ -2228,11 +2236,33 @@ async function startMVPipeline() {
             mkAudio.currentTime = videoEl.currentTime;
     };
     const onEnded = () => {
-        console.log(`[AML MV-V] videoEl ended — aborting pipeline`);
+        if (_abortCtrl?.signal.aborted) return; // already cleaning up
+        console.log(`[AML MV-V] videoEl/audio ended — advancing queue`);
+        // Restore native audio.load() so MK's queue-advance machinery can run.
+        // The shadow may already be deleted by runAudioPipe (audio-ends-first path),
+        // but guard here for the video-ends-first path.
+        try { delete mkAudio.load; } catch (_) {}
         _abortCtrl.abort();
-        // Click Apple Music's native exit button so the player view closes
-        // after our cleanup runs. Delay slightly so cleanup finishes first.
-        setTimeout(() => exitBtn?.click(), 100);
+        // Advance queue via MK API (mirrors VLC skipToNextItem pattern).
+        const _mkInst = window.MusicKit?.getInstance?.();
+        if (_mkInst) {
+            let _advanced = false;
+            const _clearAdv = () => { _advanced = true; clearTimeout(_skipTimer); };
+            _mkInst.addEventListener('nowPlayingItemDidChange', _clearAdv, { once: true });
+            const _skipTimer = setTimeout(() => {
+                if (!_advanced) {
+                    try { delete mkAudio.load; } catch (_) {}
+                    mkAudio.dispatchEvent(new Event('ended'));
+                }
+            }, 3000);
+            _mkInst.skipToNextItem().catch(e => {
+                _clearAdv();
+                console.warn('[AML MV] skipToNextItem failed:', e?.message, '→ ended fallback');
+                try { delete mkAudio.load; } catch (_) {}
+                mkAudio.dispatchEvent(new Event('ended'));
+            });
+        }
+        setTimeout(() => exitBtn?.click(), 200);
     };
     const onVideoError  = () => {
         const code = videoEl.error?.code;
@@ -2281,6 +2311,9 @@ async function startMVPipeline() {
 
     const cleanup = () => {
         console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation}`);
+        // Always clear the load() shadow so the next handleTrackChange or MK queue
+        // advance isn't blocked. Harmless if already deleted; re-set by handleTrackChange.
+        try { delete mkAudio.load; } catch (_) {}
         clearInterval(_dynBufTimer); _dynBufTimer = null;
         _bufPaused = false;
         _videoStalled = false;
@@ -2733,8 +2766,20 @@ function waitForLossless(timeoutMs) {
 // ── Core playback handler ─────────────────────────────────────────────────────
 
 async function handleTrackChange(mk) {
-    const item = mk.nowPlayingItem;
-    if (!item) return;
+    let item = mk.nowPlayingItem;
+    if (!item) {
+        // MK briefly fires nowPlayingItemDidChange with null nowPlayingItem during queue
+        // transitions. Block audio.load for 100ms so MK can't cascade to the next song
+        // while the item settles, then retry once.
+        const tmpAudio = getMKAudio();
+        if (tmpAudio) tmpAudio.load = () => {};
+        const genSnapshot = _generation;
+        await new Promise(r => setTimeout(r, 100));
+        if (tmpAudio) { try { delete tmpAudio.load; } catch (_) {} }
+        if (_generation !== genSnapshot) return;  // another handler already took over
+        item = mk.nowPlayingItem;
+        if (!item) return;
+    }
 
     const myGen = ++_generation;
 
@@ -2776,7 +2821,9 @@ async function handleTrackChange(mk) {
 
     const mkAudio = getMKAudio();
     if (mkAudio) {
-        if (!mkAudio.paused) mkAudio.pause(); // skip if already paused — avoids poking MK state machine needlessly
+        // Skip pause if audio already ended (natural track end): calling pause() on an ended
+        // MediaSource element re-fires 'ended', causing a spurious double-advance through the queue.
+        if (!mkAudio.paused && !mkAudio.ended) mkAudio.pause();
         // Absorb MK's load() calls so it can't reset our MSE stream.
         // We lift this shadow for our own controlled _nativeLoad() call below.
         mkAudio.load = () => {};
@@ -3211,7 +3258,11 @@ async function setup() {
             case 'playpause': mk.playbackState === window.MusicKit?.PlaybackStates?.playing
                 ? mk.pause() : mk.play().catch(() => {}); break;
             case 'next':      mk.skipToNextItem().catch(() => {}); break;
-            case 'previous':  mk.skipToPreviousItem().catch(() => {}); break;
+            case 'previous':
+                // Android GoBackAsync: restart if past 3s, else go to previous item.
+                if (mk.currentPlaybackTime > 3) mk.seekToTime(0);
+                else mk.skipToPreviousItem().catch(() => {});
+                break;
         }
     });
 

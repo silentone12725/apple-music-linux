@@ -106,7 +106,8 @@ class SmartCache {
             context: { type, id: id ?? null, reason },
             currentIndex: currentIndex ?? -1,
             tracks: tracks.map((t, i) => {
-                const assetId = t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;
+                const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId
+                    ?? t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;
                 if (!assetId) return null;
                 const entry = this._counts[assetId] ?? {};
                 return {
