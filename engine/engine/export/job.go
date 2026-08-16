@@ -34,10 +34,11 @@ const (
 
 // ExportCapabilities selects the content variant to export.
 type ExportCapabilities struct {
-	Lossless bool `json:"lossless"` // ALAC
-	Atmos    bool `json:"atmos"`    // Dolby Atmos
-	Video    bool `json:"video"`    // Music Video
-	Playlist bool `json:"playlist"` // expand playlist → per-track jobs
+	Lossless        bool `json:"lossless"`        // ALAC
+	Atmos           bool `json:"atmos"`           // Dolby Atmos
+	Video           bool `json:"video"`           // Music Video
+	Playlist        bool `json:"playlist"`        // expand playlist → per-track jobs
+	LibraryPlaylist bool `json:"libraryPlaylist"` // use library API (p.xxx IDs)
 }
 
 // ExportOptions controls post-processing of the downloaded file.

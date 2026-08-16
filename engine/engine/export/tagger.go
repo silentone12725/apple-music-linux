@@ -118,17 +118,32 @@ func fetchArtworkPicture(urlTemplate string, size int) (*mp4tag.MP4Picture, erro
 }
 
 // downloadArtworkBytes fetches raw artwork bytes and returns (data, contentType, error).
+// Retries up to 3 times with exponential backoff to handle transient CDN failures.
 // Used by both fetchArtworkPicture (mp4 tagging) and FLAC conversion (ffmpeg input).
 func downloadArtworkBytes(urlTemplate string, size int) ([]byte, string, error) {
 	if size <= 0 {
 		size = 3000
 	}
-	url := artworkURL(urlTemplate, size)
+	u := artworkURL(urlTemplate, size)
 
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*2) * time.Second)
+		}
+		data, ct, err := fetchArtworkURL(u)
+		if err == nil {
+			return data, ct, nil
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
+}
+
+func fetchArtworkURL(u string) ([]byte, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, "", err
 	}

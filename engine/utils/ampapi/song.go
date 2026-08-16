@@ -148,6 +148,8 @@ type SongRespData struct {
 						Kind string `json:"kind"`
 					} `json:"playParams"`
 					ReleaseDate string `json:"releaseDate"`
+					RecordLabel string `json:"recordLabel"`
+					Copyright   string `json:"copyright"`
 					TrackCount  int    `json:"trackCount"`
 					Upc         string `json:"upc"`
 					URL         string `json:"url"`
