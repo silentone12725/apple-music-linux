@@ -5468,10 +5468,44 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         // Playlist: /playlist/name/pl.xxx
         const plM = href.match(/\/playlist\/[^/?#]+(\/pl\.[a-f0-9]+)/i);
         if (plM) return { type: 'playlist', id: plM[1].slice(1), storefront: sf };
+        // Library playlist: /library/playlists/p.xxx  (user's personal playlists)
+        const libPlM = href.match(/\/library\/playlists\/(p\.[A-Za-z0-9]+)/);
+        if (libPlM) return { type: 'playlist', id: libPlM[1], storefront: sf, isLibrary: true };
         // Album: /album/name/id
         const albumM = href.match(/\/album\/[^/?#]+\/(\d+)/);
         if (albumM) return { type: 'album', id: albumM[1], storefront: sf };
         return null;
+    }
+
+    // Ask the open amp-contextual-menu for the authoritative URL by intercepting
+    // its "Copy Link" action before the clipboard write completes.
+    // Returns the URL string, or null if "Copy Link" isn't present or times out.
+    // This is more reliable than DOM walking because Apple's code already knows
+    // exactly which item was right-clicked, regardless of whether the row has an <a> tag.
+    function _resolveViaMenuLink(menuNode) {
+        return new Promise(resolve => {
+            const copyBtn = Array.from(menuNode.querySelectorAll('button')).find(b => {
+                const t = b.querySelector('.contextual-menu-item__option-text')?.textContent?.trim()
+                    || b.title || b.getAttribute('aria-label') || '';
+                return t === 'Copy Link';
+            });
+            if (!copyBtn) return resolve(null);
+
+            const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+            const timer = setTimeout(() => {
+                navigator.clipboard.writeText = orig;
+                resolve(null);
+            }, 1000);
+
+            navigator.clipboard.writeText = async text => {
+                clearTimeout(timer);
+                navigator.clipboard.writeText = orig;
+                resolve(text);
+                return orig(text).catch(() => {});
+            };
+
+            copyBtn.click();
+        });
     }
 
     function resolveTrackInfo(target) {
@@ -5556,10 +5590,11 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             MUT:              mk?.musicUserToken  || '',
             Language:         navigator.language || 'en-US',
             Capabilities: {
-                Lossless:  isLossless,
-                Atmos:     false,
-                Video:     info.type === 'video',
-                Playlist:  info.type === 'playlist',
+                Lossless:        isLossless,
+                Atmos:           false,
+                Video:           info.type === 'video',
+                Playlist:        info.type === 'playlist',
+                LibraryPlaylist: !!(info.isLibrary),
             },
             MVMaxHeight:  parseInt(prefs['mv-max-height'] ?? '0', 10) || 0,
             OutputDir:        prefs['download-dir'] || '',
@@ -5636,15 +5671,28 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 // Event delegation: one listener on the stable amp-contextual-menu node.
                 // Survives all Glimmer button replacements. Title stays 'Copy Embed Code'
                 // (we never mutate it), so check for both names for robustness.
-                node.addEventListener('click', e => {
+                node.addEventListener('click', async e => {
                     const btn = e.target.closest('button');
                     if (!btn) return;
                     const title = btn.title || btn.querySelector('.contextual-menu-item__option-text')?.textContent?.trim() || '';
                     if (title !== 'Download' && title !== 'Copy Embed Code' && !title.includes('Embed Code')) return;
                     e.stopPropagation();
-                    const trackInfo = resolveTrackInfo(_ctxTarget);
-                    startDownload(trackInfo);
-                    document.body.click();
+                    e.preventDefault();
+
+                    // Get authoritative URL from Apple's "Copy Link" action in the same menu.
+                    // This bypasses DOM walking and handles artist-page top songs, library items,
+                    // and any context where the row has no direct <a href> to the song.
+                    let trackInfo = null;
+                    try {
+                        const clipUrl = await _resolveViaMenuLink(node);
+                        if (clipUrl) trackInfo = _parseAMHref(clipUrl);
+                    } catch (_) {}
+
+                    // Fallback: DOM walk (works on album/song detail pages with direct links).
+                    if (!trackInfo) trackInfo = resolveTrackInfo(_ctxTarget);
+
+                    document.body.click(); // close menu (may already be closed by Copy Link click)
+                    if (trackInfo) startDownload(trackInfo);
                 }, true);
 
                 const inner = new MutationObserver(() => {

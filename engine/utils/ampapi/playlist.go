@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 func GetPlaylistRespContext(ctx context.Context, storefront string, id string, language string, token string, mut string) (*PlaylistResp, error) {
@@ -76,6 +77,90 @@ func GetPlaylistRespContext(ctx context.Context, storefront string, id string, l
 		next = page.Next
 	}
 	return obj, nil
+}
+
+// LibraryPlaylistTrackItem represents one track in a user library playlist.
+// Library tracks use "library-songs" / "library-music-videos" types; the
+// catalog ID lives in playParams.catalogId and is what the engine downloads.
+type LibraryPlaylistTrackItem struct {
+	ID   string `json:"id"`
+	Type string `json:"type"` // "library-songs" | "library-music-videos"
+	Attributes struct {
+		Name       string `json:"name"`
+		ArtistName string `json:"artistName"`
+		PlayParams struct {
+			CatalogId string `json:"catalogId"`
+			Kind      string `json:"kind"` // "song" | "musicVideo"
+		} `json:"playParams"`
+	} `json:"attributes"`
+}
+
+type LibraryPlaylistTrackResp struct {
+	Data []LibraryPlaylistTrackItem `json:"data"`
+	Next string                     `json:"next"`
+}
+
+// GetLibraryPlaylistTracksContext fetches tracks from a user library playlist
+// (IDs starting with "p."). Requires a valid MUT.
+// Each track's CatalogId is the ID to pass to the export engine.
+func GetLibraryPlaylistTracksContext(ctx context.Context, id, language, token, mut string) (*LibraryPlaylistTrackResp, error) {
+	if mut == "" {
+		return nil, errors.New("library playlist requires MUT (user must be signed in)")
+	}
+	if token == "" {
+		var err error
+		token, err = GetToken()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	fetch := func(rawURL string) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Media-User-Token", mut)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("Origin", "https://music.apple.com")
+		return http.DefaultClient.Do(req)
+	}
+
+	q := url.Values{}
+	q.Set("include[library-songs]", "catalog")
+	q.Set("include[library-music-videos]", "catalog")
+	q.Set("l", language)
+	q.Set("limit", "100")
+	baseURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/me/library/playlists/%s/tracks?%s", id, q.Encode())
+
+	out := &LibraryPlaylistTrackResp{}
+	next := baseURL
+	for next != "" {
+		resp, err := fetch(next)
+		if err != nil {
+			return nil, err
+		}
+		var page LibraryPlaylistTrackResp
+		decErr := json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if decErr != nil {
+			return nil, decErr
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("library playlist HTTP %d", resp.StatusCode)
+		}
+		out.Data = append(out.Data, page.Data...)
+		if strings.HasPrefix(page.Next, "/") {
+			next = "https://amp-api.music.apple.com" + page.Next
+		} else {
+			next = page.Next
+		}
+	}
+	if len(out.Data) == 0 {
+		return nil, fmt.Errorf("library playlist %s: no tracks", id)
+	}
+	return out, nil
 }
 
 func GetPlaylistResp(storefront string, id string, language string, token string) (*PlaylistResp, error) {

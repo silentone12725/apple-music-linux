@@ -205,23 +205,48 @@ func (m *Manager) execute(item *workItem) {
 
 	// ── Playlist expansion (before per-track resolution) ─────────────────
 	if req.Capabilities.Playlist {
-		pl, err := ampapi.GetPlaylistRespContext(ctx, sf, req.AssetID, lang, req.Token, req.MUT)
-		if err != nil || len(pl.Data) == 0 || len(pl.Data[0].Relationships.Tracks.Data) == 0 {
-			m.fail(job, fmt.Errorf("playlist %s: %w", req.AssetID, err))
-			return
-		}
-		for _, track := range pl.Data[0].Relationships.Tracks.Data {
-			if track.Type != "songs" && track.Type != "music-videos" {
-				continue
+		if req.Capabilities.LibraryPlaylist {
+			// Library playlists (p.xxx) need the /me/library/playlists API.
+			tracks, err := ampapi.GetLibraryPlaylistTracksContext(ctx, req.AssetID, lang, req.Token, req.MUT)
+			if err != nil || len(tracks.Data) == 0 {
+				m.fail(job, fmt.Errorf("library playlist %s: %w", req.AssetID, err))
+				return
 			}
-			trackReq := req
-			trackReq.AssetID = track.ID
-			trackReq.Capabilities.Playlist = false
-			if track.Type == "music-videos" {
-				trackReq.Capabilities.Video = true
+			for _, track := range tracks.Data {
+				catalogID := track.Attributes.PlayParams.CatalogId
+				if catalogID == "" {
+					continue
+				}
+				trackReq := req
+				trackReq.AssetID = catalogID
+				trackReq.Capabilities.Playlist = false
+				trackReq.Capabilities.LibraryPlaylist = false
+				if track.Type == "library-music-videos" {
+					trackReq.Capabilities.Video = true
+				}
+				m.Enqueue(trackReq) //nolint:errcheck
 			}
-			m.Enqueue(trackReq) //nolint:errcheck
+		} else {
+			pl, err := ampapi.GetPlaylistRespContext(ctx, sf, req.AssetID, lang, req.Token, req.MUT)
+			if err != nil || len(pl.Data) == 0 || len(pl.Data[0].Relationships.Tracks.Data) == 0 {
+				m.fail(job, fmt.Errorf("playlist %s: %w", req.AssetID, err))
+				return
+			}
+			for _, track := range pl.Data[0].Relationships.Tracks.Data {
+				if track.Type != "songs" && track.Type != "music-videos" {
+					continue
+				}
+				trackReq := req
+				trackReq.AssetID = track.ID
+				trackReq.Capabilities.Playlist = false
+				if track.Type == "music-videos" {
+					trackReq.Capabilities.Video = true
+				}
+				m.Enqueue(trackReq) //nolint:errcheck
+			}
 		}
+		// Playlist expansion is complete — remove the routing job so the UI
+		// only shows per-track jobs.
 		m.mu.Lock()
 		delete(m.jobs, job.ID)
 		delete(m.requests, job.ID)
@@ -248,6 +273,9 @@ func (m *Manager) execute(item *workItem) {
 		isMastered    bool
 	)
 
+	var trackTotal int
+	var copyright, recordLabel, upc string
+
 	if req.Capabilities.Video {
 		mv, err := ampapi.GetMusicVideoRespContext(ctx, sf, req.AssetID, lang, req.Token)
 		if err != nil || len(mv.Data) == 0 {
@@ -263,6 +291,14 @@ func (m *Manager) execute(item *workItem) {
 		durationMs, isrc = a.DurationInMillis, a.Isrc
 		trackNumber, discNumber = a.TrackNumber, a.DiscNumber
 		releaseDate, contentRating = a.ReleaseDate, a.ContentRating
+		
+		if len(mv.Data[0].Relationships.Albums.Data) > 0 {
+			al := mv.Data[0].Relationships.Albums.Data[0].Attributes
+			trackTotal = al.TrackCount
+			copyright = al.Copyright
+			recordLabel = al.RecordLabel
+			upc = al.Upc
+		}
 	} else {
 		song, err := ampapi.GetSongRespContext(ctx, sf, req.AssetID, lang, req.Token)
 		if err != nil || len(song.Data) == 0 {
@@ -302,6 +338,14 @@ func (m *Manager) execute(item *workItem) {
 		releaseDate, contentRating = a.ReleaseDate, a.ContentRating
 		composerName, hasLyrics, audioTraits = a.ComposerName, a.HasLyrics, a.AudioTraits
 		isMastered = a.IsMasteredForItunes || a.IsAppleDigitalMaster
+
+		if len(song.Data[0].Relationships.Albums.Data) > 0 {
+			al := song.Data[0].Relationships.Albums.Data[0].Attributes
+			trackTotal = al.TrackCount
+			copyright = al.Copyright
+			recordLabel = al.RecordLabel
+			upc = al.Upc
+		}
 	}
 
 	codec, ext := "aac", "m4a"
@@ -313,7 +357,11 @@ func (m *Manager) execute(item *workItem) {
 	case req.Capabilities.Lossless:
 		codec = "alac"
 	}
-	if req.Options.ConvertToFLAC && req.Capabilities.Lossless {
+	// Only change the extension to FLAC for audio-only lossless exports.
+	// Video exports are muxed into MP4; forcing ".flac" here can produce a
+	// temp filename without a standard container extension and cause
+	// ffmpeg to fail choosing an output format.
+	if req.Options.ConvertToFLAC && req.Capabilities.Lossless && !req.Capabilities.Video {
 		ext = "flac"
 	}
 
@@ -329,11 +377,15 @@ func (m *Manager) execute(item *workItem) {
 		AlbumArtist:   artistName,
 		AlbumName:     albumName,
 		TrackNumber:   trackNumber,
+		TrackTotal:    trackTotal,
 		DiscNumber:    discNumber,
 		ReleaseDate:   releaseDate,
 		Genre:         genreStr,
 		Composer:      composerName,
+		Copyright:     copyright,
+		RecordLabel:   recordLabel,
 		Isrc:          isrc,
+		UPC:           upc,
 		ContentRating: contentRating,
 		DurationMs:    durationMs,
 		ArtworkURL:    artworkURL,
@@ -429,7 +481,9 @@ func (m *Manager) execute(item *workItem) {
 		m.fail(job, fmt.Errorf("mkdir %s: %w", filepath.Dir(finalPath), err))
 		return
 	}
-	tmpPath := finalPath + ".am-export.tmp"
+	// Use job ID in tmp path so concurrent post-process goroutines never collide,
+	// even when two tracks resolve to the same final filename.
+	tmpPath := filepath.Join(filepath.Dir(finalPath), "."+job.ID+".am-export.tmp")
 
 	if req.Capabilities.Video {
 		// Stream video track to disk.
@@ -545,7 +599,8 @@ func (m *Manager) execute(item *workItem) {
 		}
 
 		// ── Phase 8: Format conversion (optional) ────────────────────────
-		if req.Options.ConvertToFLAC && req.Capabilities.Lossless {
+		// Skip FLAC conversion for music-video exports (video tracks).
+		if req.Options.ConvertToFLAC && req.Capabilities.Lossless && !req.Capabilities.Video {
 			flacTmp := tmpPath + ".flac"
 			artTmp := ""
 			if req.Options.EmbedArtwork && meta.ArtworkURL != "" {
@@ -560,7 +615,7 @@ func (m *Manager) execute(item *workItem) {
 					}
 				}
 			}
-			if err := convertToFLAC(tmpPath, flacTmp, req.Options.FFmpegPath, artTmp); err != nil {
+			if err := convertToFLAC(tmpPath, flacTmp, req.Options.FFmpegPath, artTmp, meta); err != nil {
 				fmt.Printf("export %s: flac conversion failed: %v — keeping .m4a\n", req.AssetID, err)
 				finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
 			} else {
@@ -677,11 +732,11 @@ func copyFile(src, dst string) error {
 
 // convertToFLAC invokes ffmpeg to transcode src (ALAC .m4a) to dst (.flac).
 // artPath is an optional cover image file path (see runFFmpeg).
-func convertToFLAC(src, dst, ffmpegPath, artPath string) error {
+func convertToFLAC(src, dst, ffmpegPath, artPath string, meta TrackMeta) error {
 	if ffmpegPath == "" {
 		ffmpegPath = "ffmpeg"
 	}
-	if err := runFFmpeg(ffmpegPath, src, artPath, dst); err != nil {
+	if err := runFFmpeg(ffmpegPath, src, artPath, dst, meta); err != nil {
 		return fmt.Errorf("ffmpeg: %w", err)
 	}
 	return nil

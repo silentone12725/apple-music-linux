@@ -634,7 +634,7 @@ function createWindow() {
             nodeIntegration: false,
             sandbox: _hasSandbox,
             partition: 'persist:apple-music',
-            devTools: true,
+            devTools: !app.isPackaged,
         },
     });
 
