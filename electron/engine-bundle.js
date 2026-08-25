@@ -2736,21 +2736,16 @@ async function _prewarmNextAlac() {
 async function handleTrackChange(mk) {
     let item = mk.nowPlayingItem;
     if (!item) {
-        if (_allowCDNTransition) {
-            // _amlGoto is in a controlled changeToMediaAtIndex call with the CDN block
-            // lifted. MK fires a null NPIDF first; the real item follows once MK's
-            // audio pipeline has set src + load. Don't block audio.load here — doing so
-            // prevents MK from completing the transition and the settled NPIDF never fires.
-            return;
-        }
-        // MK fires a null NPIDF during queue transitions (external play button clicks).
-        // In VLC mode the audio element's load() is overridden to a no-op so VLC
-        // owns the element. That no-op blocks MK from resetting the element for the
-        // new track — real NPIDF never fires. Delete the instance override so MK
-        // can call load() and proceed to real NPIDF.
+        // MK fires a null NPIDF during queue transitions (setQueue resets the element).
+        // Always delete the load() instance override so MK can proceed — whether the gate
+        // came from an external play click or from _amlGoto (delete is a no-op if gone).
         if (_vlcMode) {
             const tmpAudio = getMKAudio();
             if (tmpAudio) { try { delete tmpAudio.load; } catch (_) {} }
+        }
+        if (_allowCDNTransition) {
+            // CDN gate is open: null NPIDF is expected during setQueue; real NPIDF follows.
+            return;
         }
         const genSnapshot = _generation;
         await new Promise(r => setTimeout(r, 200));
@@ -3736,18 +3731,22 @@ async function setup() {
             // handleTrackChange reinstalls mkAudio.load for the new track.
             const mkAudioEl = getMKAudio();
             if (mkAudioEl) { try { delete mkAudioEl.load; } catch (_) {} }
+            // Stop VLC poll: its timeupdate/playing events confuse MK's audio pipeline
+            // while setQueue is resolving the new context (same reason as _amlGoto).
+            stopVLCPoll();
             console.log('[AML click] external play while VLC active — opening CDN gate');
             _allowCDNTransition = true;
             _ourBlobUrl = null;
             if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
             _externalPlayGateTimer = setTimeout(() => {
-                // No track change happened — restore load override to protect VLC stream.
+                // No track change happened — restore VLC state and close gate.
                 const el = getMKAudio();
                 if (el && _vlcMode) el.load = () => {};
+                if (_vlcMode) startVLCPoll(el);
                 _allowCDNTransition = false;
                 _externalPlayGateTimer = null;
                 console.log('[AML click] CDN gate reset (safety timeout)');
-            }, 15000);
+            }, 20000);
         }
 
         const PS = window.MusicKit?.PlaybackStates;
