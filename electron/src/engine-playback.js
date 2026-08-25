@@ -3646,8 +3646,17 @@ async function setup() {
         } else if (ci + 1 < _sessionContainers.length) {
             // Cross into the next container.
             await _amlGoto(ci + 1, 0);
+        } else {
+            // End of our snapshot — check if MK loaded more tracks (station/radio queues
+            // append tracks dynamically; our container only captured the initial batch).
+            const mkItems = mk.queue?.items ?? [];
+            const freshIds = mkItems.map(_extractItemId).filter(id => id && !cur.items.includes(id));
+            if (freshIds.length) {
+                cur.items.push(...freshIds);
+                await _amlGoto(ci, ii + 1);
+            }
+            // else: truly at the end (or live radio — MK handles it natively)
         }
-        // else: end of all containers, nothing to do
     }
 
     async function _amlPrev() {
