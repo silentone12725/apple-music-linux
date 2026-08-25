@@ -3871,6 +3871,27 @@ async function setup() {
 
     setupQueueHistory(mk); // async; fire-and-forget: loads history, then enables listener + inject
 
+    // Persistent listener: whenever MK appends tracks to the queue (station/autoplay
+    // fetches the next batch asynchronously), sync them into the active container so
+    // _amlNext and gapless pre-warm see the full list immediately.
+    mk.addEventListener('queueItemsDidChange', () => {
+        const activeCur = _sessionContainers[_sessionContainerIdx];
+        if (!activeCur) return;
+        const mkLive = mk.queue?.items ?? [];
+        let added = 0;
+        for (const mkItem of mkLive) {
+            const id = _extractItemId(mkItem);
+            if (id && !activeCur.items.includes(id)) {
+                activeCur.items.push(id);
+                added++;
+            }
+        }
+        if (added) {
+            console.log(`[AML Station] queueItemsDidChange — added ${added} new item(s) to container, total=${activeCur.items.length}`);
+            _updateTransportButtons();
+        }
+    });
+
     mk.addEventListener('nowPlayingItemDidChange', async () => {
         // During a controlled _amlGoto transition, filter out spurious NPIDFs.
         // setQueue fires a null NPIDF (item === null) that must be fully suppressed —
