@@ -3687,20 +3687,38 @@ async function setup() {
         const hasPrev = ci > 0 || ii > 0;
         const hasNext = repeat !== 0 || (cur && (ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length));
 
+        // Only target the transport skip buttons — not queue/up-next/menu buttons.
+        // Match: "skip to previous", "skip to next", "previous track", "next track", etc.
+        // Exclude: "up next" (queue panel), anything without "skip" or "track" in the label.
         const allBtns = document.querySelectorAll(
-            '[aria-label], [data-testid*="skip"], [data-testid*="previous"], [data-testid*="next"]'
+            '[data-testid*="skip-back"], [data-testid*="skip-forward"], [data-testid*="skip-previous"], [data-testid*="skip-next"], [data-testid*="transport-previous"], [data-testid*="transport-next"]'
         );
         for (const btn of allBtns) {
-            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-            const tid   = (btn.getAttribute('data-testid') || '').toLowerCase();
-            const isPrev = label.includes('previous') || label.includes('back') || tid.includes('previous') || tid.includes('skip-back');
-            const isNext = label.includes('next') || tid.includes('next') || tid.includes('skip-forward');
+            const tid = (btn.getAttribute('data-testid') || '').toLowerCase();
+            const isPrev = tid.includes('previous') || tid.includes('skip-back');
+            const isNext = tid.includes('next') || tid.includes('skip-forward');
             if (isPrev) {
-                btn.style.opacity        = hasPrev ? '' : '0.35';
-                btn.style.pointerEvents  = hasPrev ? '' : 'none';
+                btn.style.opacity       = hasPrev ? '' : '0.35';
+                btn.style.pointerEvents = hasPrev ? '' : 'none';
             } else if (isNext) {
-                btn.style.opacity        = hasNext ? '' : '0.35';
-                btn.style.pointerEvents  = hasNext ? '' : 'none';
+                btn.style.opacity       = hasNext ? '' : '0.35';
+                btn.style.pointerEvents = hasNext ? '' : 'none';
+            }
+        }
+
+        // Also match by aria-label but require "skip" to avoid hitting queue/up-next buttons.
+        const labelBtns = document.querySelectorAll('[aria-label*="skip" i], [aria-label*="previous track" i], [aria-label*="next track" i]');
+        for (const btn of labelBtns) {
+            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+            if (label.includes('up next')) continue; // queue panel — skip
+            const isPrev = label.includes('previous') || label.includes('back');
+            const isNext = label.includes('next') || label.includes('forward');
+            if (isPrev) {
+                btn.style.opacity       = hasPrev ? '' : '0.35';
+                btn.style.pointerEvents = hasPrev ? '' : 'none';
+            } else if (isNext) {
+                btn.style.opacity       = hasNext ? '' : '0.35';
+                btn.style.pointerEvents = hasNext ? '' : 'none';
             }
         }
     }
