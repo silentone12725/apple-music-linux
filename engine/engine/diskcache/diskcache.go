@@ -62,6 +62,22 @@ func (c *Cache) filename(assetID, qualifier string) string {
 	return safe(assetID) + "-" + safe(qualifier) + ".m4a"
 }
 
+// Path returns the absolute on-disk path of a committed cache entry without
+// opening a file descriptor, or ("", false) on miss or TTL expiry.
+func (c *Cache) Path(assetID, qualifier string) (string, bool) {
+	path := filepath.Join(c.dir, c.filename(assetID, qualifier))
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false
+	}
+	ttl := c.ttlDays.Load()
+	if ttl > 0 && time.Since(info.ModTime()) > time.Duration(ttl)*24*time.Hour {
+		os.Remove(path)
+		return "", false
+	}
+	return path, true
+}
+
 // Get returns an open *os.File for the cached track, or (nil, false) on miss.
 // The caller must close the file.  A hit may still return false if the entry
 // has expired (it is deleted and treated as a miss).

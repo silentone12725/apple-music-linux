@@ -313,23 +313,21 @@ func SanitizeInit(init *mp4.InitSegment) error {
 	// Every audio track contains two of these boxes because two IVs are needed to decrypt the
 	// track. The two boxes become identical after removing encryption info.
 	stsd := traks[0].Mdia.Minf.Stbl.Stsd
-	if stsd.SampleCount == 1 {
-		return nil
-	}
-	if stsd.SampleCount > 2 {
+	if stsd.SampleCount == 2 {
+		children := stsd.Children
+		if children[0].Type() != children[1].Type() {
+			return errors.New("children in stsd are not of the same type")
+		}
+		stsd.Children = children[:1]
+		stsd.SampleCount = 1
+	} else if stsd.SampleCount > 2 {
 		return fmt.Errorf("expected only 1 or 2 entries in stsd, got %d", stsd.SampleCount)
 	}
-	children := stsd.Children
-	if children[0].Type() != children[1].Type() {
-		return errors.New("children in stsd are not of the same type")
-	}
-	stsd.Children = children[:1]
-	stsd.SampleCount = 1
 
-	// Inject mvex box so players (mpv, ffmpeg libavformat) know this is a fragmented MP4.
-	// Without this, they will stop reading after the first moof+mdat chunk (~14s).
+	// Inject mvex so players (VLC, mpv, ffmpeg) know this is a fragmented MP4.
+	// Without this, they stop reading after the first moof+mdat chunk and skip forward.
+	// Must happen regardless of stsd count — some tracks have a single stsd entry.
 	trackID := traks[0].Tkhd.TrackID
-	fmt.Printf("cbcs: SanitizeInit using TrackID %d\n", trackID)
 	if init.Moov.Mvex == nil {
 		mvex := mp4.NewMvexBox()
 		trex := mp4.CreateTrex(trackID)

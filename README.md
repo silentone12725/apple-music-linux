@@ -9,7 +9,7 @@
 An Apple Music desktop client for Linux — lossless audio, music videos, downloads, and a native-feeling UI.
 
 <div align="center">
-  <img src="assets/screenshots/Accented-preview.png" alt="Accented-preview" width="49%"/>
+  <img src="assets/screenshots/Preview_logged_out.png" alt="Logged out" width="49%"/>
   <img src="assets/screenshots/Preview_logged_in.png" alt="Logged in" width="49%"/>
 </div>
 
@@ -18,9 +18,17 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 > [!IMPORTANT]
 > **Disclaimer**
 >
-> This project is not affiliated with, authorized by, or endorsed by Apple Inc. in any way. "Apple Music", "Apple", and related names are trademarks of Apple Inc. used here for identification purposes only.
+> **No Affiliation**
 >
-> This app is provided "AS IS" with no warranty. Use at your own risk. An active Apple Music subscription is required.
+> This project and its contributors are not affiliated with, authorized by, endorsed by, or in any way officially connected with Apple Inc. or any of its subsidiaries or affiliates. This is an independent, unofficial client developed for personal use.
+>
+> **Trademarks**
+>
+> "Apple Music", "Apple", and related names, marks, and logos are registered trademarks of Apple Inc. Any use of these trademarks is for identification and reference purposes only and does not imply any association with the trademark holder.
+>
+> **Limitation of Liability**
+>
+> This application is provided "AS IS". The developers are not liable for any claim, damages, or legal consequences arising from its use. You use it entirely at your own risk. An active Apple Music subscription is required.
 
 ## Contents
 
@@ -58,7 +66,8 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 - Light and dark mode support
 
 <div align="center">
-  <img src="assets/screenshots/Features.png" alt="Features" width="600"/>
+  <img src="assets/screenshots/Accented-preview.png" alt="Accented theme preview" width="49%"/>
+  <img src="assets/screenshots/Features.png" alt="Features" width="49%"/>
 </div>
 
 ### Compositor & Blur
@@ -79,6 +88,7 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 - **Wayland + X11** — tested on Hyprland, KDE Plasma, GNOME, and Sway
 
 ### Other
+- **Play History** — last 30 songs shown in the native Up Next panel; click any to replay; persists across restarts
 - Back / Forward navigation buttons in the sidebar header
 - Smart segment cache — tracks pre-warmed before you press play
 - Separate cache for music video segments (2 GiB by default, adjustable)

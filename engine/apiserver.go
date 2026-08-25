@@ -18,6 +18,7 @@ package main
 //   POST   /api/v1/playback              → create session
 //   GET    /api/v1/playback/{id}/audio   → stream audio (ALAC / AAC / Atmos)
 //   GET    /api/v1/playback/{id}/video   → stream video (MV only)
+//   POST   /api/v1/playback/{id}/precache → background disk-cache download (gapless)
 //   DELETE /api/v1/playback/{id}         → release session
 //   PUT    /api/v1/playback/context      → signal user context; triggers cache warming
 //
@@ -65,6 +66,10 @@ import (
 	"engine/utils/lyrics"
 	"engine/utils/runv3"
 )
+
+// artworkClient is used for proxying artwork and catalog API responses.
+// http.DefaultClient has no timeout and can hang indefinitely on slow CDN responses.
+var artworkClient = &http.Client{Timeout: 10 * time.Second}
 
 // ── Request / response types ──────────────────────────────────────────────────
 
@@ -117,13 +122,6 @@ type EpochInfo struct {
 	Since      time.Time   `json:"since"` // when this epoch began
 }
 
-// EngineEpoch tracks the engine's authoritative state generation.
-// The event bus reads it; subsystems advance it through engineLifecycle.
-type EngineEpoch interface {
-	Current() EpochInfo
-	Advance(reason EpochReason) EpochInfo
-}
-
 type epochManager struct {
 	mu   sync.Mutex
 	info EpochInfo
@@ -160,11 +158,11 @@ func (e *epochManager) Current() EpochInfo {
 // directly; they call named methods, which advance it with the correct reason.
 // This keeps epoch semantics in one place as the engine grows.
 type engineLifecycle struct {
-	epoch          EngineEpoch
+	epoch          *epochManager
 	lastDRMSession atomic.Value // stores string; tracks session transitions
 }
 
-func newEngineLifecycle(epoch EngineEpoch) *engineLifecycle {
+func newEngineLifecycle(epoch *epochManager) *engineLifecycle {
 	l := &engineLifecycle{epoch: epoch}
 	l.lastDRMSession.Store("")
 	return l
@@ -205,13 +203,13 @@ type eventBus struct {
 	mu      sync.Mutex
 	clients map[string]chan sseEvent
 	seq     int64              // monotonic event ID; ALL allocations go through mu
-	epoch   EngineEpoch        // engine epoch; advanced by subsystems, not by the bus
+	epoch   *epochManager        // engine epoch; advanced by subsystems, not by the bus
 	ring    [ringSize]sseEvent // circular replay buffer
 	ringPos int                // next write slot (unbounded; masked on access)
 	ringLen int                // valid entries (0 .. ringSize)
 }
 
-func newEventBus(epoch EngineEpoch) *eventBus {
+func newEventBus(epoch *epochManager) *eventBus {
 	return &eventBus{
 		clients: make(map[string]chan sseEvent),
 		epoch:   epoch,
@@ -324,7 +322,7 @@ type APIServer struct {
 	em          *export.Manager
 	dm          *drm.DRMManager
 	session     *drm.SessionManager // canonical source for MUT + storefront
-	epoch       EngineEpoch         // shared engine epoch; advanced by subsystems
+	epoch       *epochManager         // shared engine epoch; advanced by subsystems
 	lifecycle   *engineLifecycle    // single coordinator for epoch advancement
 	events      *eventBus
 	drmReady    bool   // true when drm binary was found at startup
@@ -335,10 +333,9 @@ type APIServer struct {
 	backendSel  drm.BackendSelection // non-nil when a fallback composite is in use
 	scheduler   *prefetch.Scheduler  // background cache-warming scheduler
 	diskCache   *diskcache.Cache     // per-track decrypted audio disk cache
-	vlcPlayer   *vlc.Player          // nil when libvlc is not available
-	vlcSessionID string              // session backing the current VLC stream
+	vlcPlayer *vlc.Player // nil when libvlc is not available
 
-	tokenMu     sync.RWMutex
+	tokenMu sync.RWMutex
 	cachedToken string // bearer token cached from the most recent browser request
 }
 
@@ -496,6 +493,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("POST /api/v1/playback", cors(s.handleCreatePlayback))
 	mux.HandleFunc("GET /api/v1/playback/{id}/audio", cors(s.handlePlaybackAudio))
 	mux.HandleFunc("GET /api/v1/playback/{id}/video", cors(s.handlePlaybackVideo))
+	mux.HandleFunc("POST /api/v1/playback/{id}/precache", cors(s.handlePlaybackPrecache))
 	mux.HandleFunc("DELETE /api/v1/playback/{id}", cors(s.handleDeletePlayback))
 
 	// Playback context — renderer signals user intent; scheduler decides what to warm.
@@ -533,7 +531,6 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 
 	// Catalog — search and entity detail endpoints for frontend UIs.
 	// These are purely additive and proxy the Apple Music catalog API.
-	mux.HandleFunc("GET /api/v1/catalog/search", cors(s.handleCatalogSearch))
 	mux.HandleFunc("GET /api/v1/catalog/albums/{id}", cors(s.handleCatalogAlbum))
 	mux.HandleFunc("GET /api/v1/catalog/playlists/{id}", cors(s.handleCatalogPlaylist))
 	mux.HandleFunc("GET /api/v1/catalog/artists/{id}", cors(s.handleCatalogArtist))
@@ -1042,10 +1039,10 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Disk cache: pre-download the full track so the response has
-	// Accept-Ranges: bytes and VLC can seek natively via libvlc_media_player_set_time.
-	// Serve cached files for all requests (including ?t= seeks) so VLC always reads
-	// from local disk rather than re-downloading from the CDN on every seek.
+	// Disk cache: serve cached files for non-seek requests so replays skip CDN.
+	// Seeks (seekSec > 0) bypass the cache — the cached file may be truncated from a
+	// prior partial download, and http.ServeContent ignores the ?t= parameter anyway.
+	// For seeks, pm.StreamFrom serves the correct fMP4 fragment directly from the CDN.
 	// INTERCEPT: wrap writer for MV sessions to count/log bytes sent to browser.
 	if sess.Type == "mv" {
 		cw := &countingWriter{w: w}
@@ -1059,7 +1056,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 
 	// MV sessions stream audio direct to MSE — skip disk cache to avoid
 	// colliding with same-AssetID song cache entries.
-	if s.diskCache != nil && sess.Type != "mv" {
+	if s.diskCache != nil && sess.Type != "mv" && seekSec == 0 {
 		qualifier := sess.Codec
 		if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
 			defer f.Close()
@@ -1067,7 +1064,12 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 			http.ServeContent(w, r, "", time.Time{}, f)
 			return
 		}
-		// Cache miss: download the whole track to disk, then serve.
+		// Cache miss: download the entire track to disk first, then serve with
+		// http.ServeContent so VLC gets a byte-range-capable response. This
+		// one-time download enables accurate SetTime seeks on every subsequent
+		// play (VLC builds an mp4 fragment index from the complete file).
+		// For ALAC, the full track must be downloaded anyway before VLC can
+		// seek — byte-range seeking on a streaming endpoint is not possible.
 		if pw, _ := s.diskCache.BeginPut(sess.AssetID, qualifier); pw != nil {
 			err := s.pm.Stream(r.Context(), id, pipeline.KindAudio, pw)
 			if err != nil {
@@ -1109,6 +1111,45 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 	streamMedia(w, r, func(dst io.Writer) error {
 		return s.pm.Stream(r.Context(), id, pipeline.KindAudio, dst)
 	}, "audio/mp4")
+}
+
+// handlePlaybackPrecache triggers a background disk-cache download for an ALAC
+// session so VLC can load it instantly on the next track change. Returns 202
+// immediately; the download runs in a detached goroutine.
+func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, ok := s.pm.GetSession(id)
+	if !ok {
+		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
+	if s.diskCache == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	qualifier := sess.Codec
+	if _, inCache := s.diskCache.Get(sess.AssetID, qualifier); inCache {
+		w.WriteHeader(http.StatusNoContent) // already in cache
+		return
+	}
+	bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	go func() {
+		defer cancel()
+		pw, err := s.diskCache.BeginPut(sess.AssetID, qualifier)
+		if err != nil || pw == nil {
+			return
+		}
+		if err := s.pm.Stream(bgCtx, id, pipeline.KindAudio, pw); err != nil {
+			pw.Discard()
+			return
+		}
+		if err := pw.Commit(); err != nil {
+			pw.Discard()
+			return
+		}
+		log.Printf("[precache] disk cache populated assetId=%s sessionId=%s", sess.AssetID, id)
+	}()
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) {
@@ -1512,7 +1553,7 @@ func (s *APIServer) handleArtwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	imgResp, err := http.Get(fmtArtworkURL(rawURL, size))
+	imgResp, err := artworkClient.Get(fmtArtworkURL(rawURL, size))
 	if err != nil {
 		http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
 		return
@@ -1547,9 +1588,12 @@ func (s *APIServer) handleLyrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if format == "ttml" {
+	switch format {
+	case "ttml":
 		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	} else {
+	case "vtt":
+		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	default:
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
 	fmt.Fprint(w, lrc)
@@ -1629,37 +1673,6 @@ func (s *APIServer) handleExportRetry(w http.ResponseWriter, r *http.Request) {
 
 // ── Catalog handlers ──────────────────────────────────────────────────────────
 
-func (s *APIServer) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	if q == "" {
-		http.Error(w, "q is required", http.StatusBadRequest)
-		return
-	}
-	types := r.URL.Query().Get("types")
-	if types == "" {
-		types = "songs,albums,artists"
-	}
-	sf := r.URL.Query().Get("sf")
-	if sf == "" {
-		sf = s.storefront()
-	}
-	if sf == "" {
-		sf = "us"
-	}
-	limitStr := r.URL.Query().Get("limit")
-	limit := 25
-	fmt.Sscanf(limitStr, "%d", &limit)
-	if limit <= 0 || limit > 100 {
-		limit = 25
-	}
-	tok := s.token()
-	results, err := ampapi.Search(sf, q, types, s.lang(r), tok, limit, 0)
-	if err != nil {
-		http.Error(w, "search failed: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	writeJSON(w, http.StatusOK, results)
-}
 
 func (s *APIServer) handleCatalogAlbum(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -1723,7 +1736,7 @@ func (s *APIServer) handleCatalogArtist(w http.ResponseWriter, r *http.Request) 
 	query.Set("limit[songs]", "10")
 	query.Set("l", s.lang(r))
 	req.URL.RawQuery = query.Encode()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := artworkClient.Do(req)
 	if err != nil {
 		http.Error(w, "artist fetch failed: "+err.Error(), http.StatusBadGateway)
 		return
@@ -1854,7 +1867,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 
 func fmtArtworkURL(template string, size int) string {
-	s := fmt.Sprintf("%d", size)
+	s := strconv.Itoa(size)
 	out := strings.ReplaceAll(template, "{w}", s)
 	return strings.ReplaceAll(out, "{h}", s)
 }
@@ -1915,17 +1928,23 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sessionId required", http.StatusBadRequest)
 		return
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio?raw=1", s.port, req.SessionID)
-	if req.StartMs > 0 {
-		url += fmt.Sprintf("&t=%.3f", float64(req.StartMs)/1000.0)
-	}
+	// Always load via HTTP so VLC gets a byte-range-capable response (http.ServeContent).
+	// The audio endpoint downloads the full track to disk on first access and then
+	// serves it with Accept-Ranges support — enabling accurate SetTime seeks.
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
+	log.Printf("[vlc] load url=%s startMs=%d", url, req.StartMs)
+
 	if err := s.vlcPlayer.Load(url); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.tokenMu.Lock()
-	s.vlcSessionID = req.SessionID
-	s.tokenMu.Unlock()
+	// If a specific start position was requested, seek there after VLC reaches
+	// playing state. SetTime is async and polls until VLC is ready.
+	if req.StartMs > 0 {
+		s.vlcPlayer.SetTime(req.StartMs)
+		log.Printf("[vlc] SetTime startMs=%d queued after load", req.StartMs)
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -1973,12 +1992,18 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Use native libvlc set_time to seek within the disk-cached full-track file.
-	// This avoids a full CDN re-download on every seek (the old URL-reload approach).
-	// The cached file is served with Accept-Ranges so VLC can byte-range seek.
+	log.Printf("[vlc seek] API recv posMs=%d sessionId=%s", req.PosMs, req.SessionID)
+
+	// SetTime seeks within the currently loaded HTTP media. The audio endpoint
+	// serves the full cached ALAC file with Accept-Ranges, so libvlc can issue a
+	// byte-range request for the target fragment directly — no full reload needed.
+	// This avoids the ~1s pause that SeekReload causes by stopping and restarting
+	// VLC from scratch.
 	s.vlcPlayer.SetTime(req.PosMs)
+	log.Printf("[vlc seek] SetTime posMs=%d dispatched", req.PosMs)
 	writeJSON(w, http.StatusOK, map[string]any{"actualStartMs": req.PosMs})
 }
+
 
 func (s *APIServer) handleVLCVolume(w http.ResponseWriter, r *http.Request) {
 	if s.vlcPlayer == nil {

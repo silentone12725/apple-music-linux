@@ -62,10 +62,13 @@ type ExportOptions struct {
 	// "rename"          — append a counter suffix to produce a unique name.
 	OverwritePolicy string `json:"overwritePolicy"`
 
-	// ConvertToFLAC invokes ffmpeg to convert ALAC→FLAC after tagging.
-	// Requires ffmpeg to be installed and on PATH (or FFmpegPath to be set).
+	// ConvertToFLAC converts ALAC→FLAC after tagging.
+	// VLC is used for the audio decode (correctly handles Apple's fragmented MP4
+	// with identical tfdts); ffmpeg handles metadata tagging via -c copy.
+	// If VLCPath is empty, "cvlc" then "vlc" are tried from PATH.
 	// The original .m4a is removed unless KeepOriginal is true.
 	ConvertToFLAC bool   `json:"convertToFlac"`
+	VLCPath       string `json:"vlcPath"`
 	FFmpegPath    string `json:"ffmpegPath"`
 	KeepOriginal  bool   `json:"keepOriginal"`
 
@@ -153,6 +156,7 @@ type ExportJob struct {
 	ArtistName string    `json:"artistName,omitempty"`
 	ArtworkURL string    `json:"artworkUrl,omitempty"`
 	BytesDone  int64     `json:"bytesDone,omitempty"`
+	BytesTotal int64     `json:"bytesTotal,omitempty"`
 	Output     string    `json:"output,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
