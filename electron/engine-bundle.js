@@ -599,6 +599,82 @@ const _losslessSVG = `<svg viewBox="0 0 69 44" xmlns="http://www.w3.org/2000/svg
 // State shared across showQualityBadge calls (populated by handleTrackChange)
 let _qualityBadgeInfo = { codec: null, sampleRate: null, bitDepth: null, spatialAudio: null };
 
+// Marquee slot badge state — shared so re-slot can happen on track change
+let _slotBadgeObs   = null; // MutationObserver watching the marquee slot
+let _slotBadgeRetry = null; // setTimeout handle for slot-find retry
+
+// Insert (or re-insert) the quality badge into the primary marquee slot.
+// Retries indefinitely on a back-off schedule — never falls back to position:fixed.
+// Clears any forced !important pin from a previous insertion so short-title tracks
+// are not locked to the right edge.
+function _insertBadgeIntoSlot(badge, attempt) {
+    if (_slotBadgeRetry) { clearTimeout(_slotBadgeRetry); _slotBadgeRetry = null; }
+    if (_slotBadgeObs)  { _slotBadgeObs.disconnect(); _slotBadgeObs = null; }
+
+    const lcd = document.querySelector(
+        '[data-testid="lcd-metadata"], .player-lcd, .web-chrome-playback-lcd'
+    );
+    const slot  = lcd?.querySelector('.marquee--primary .marquee__menu-slot-container');
+    const favEl = slot?.querySelector('.favorite-badge, [data-testid="favorite-button"]');
+
+    if (slot && favEl) {
+        // Clear any forced !important pin from a prior track so the slot can
+        // return to its natural position for short titles.
+        slot.style.removeProperty('inset-inline-start');
+        slot.style.removeProperty('inset-inline-end');
+
+        slot.style.display    = 'flex';
+        slot.style.alignItems = 'center';
+        slot.style.maxHeight  = 'none';
+        slot.style.overflow   = 'visible';
+
+        // Move badge into slot (handles first-insert and re-insert after DOM refresh).
+        if (badge.parentNode !== slot) {
+            if (badge.parentNode) badge.parentNode.removeChild(badge);
+            favEl.insertAdjacentElement('afterend', badge);
+        }
+
+        // Pin the slot to the LCD right edge only when the marquee animation has
+        // scrolled it out of view. When visible, remove the pin so position tracks
+        // the title length naturally.
+        let _pinning = false;
+        const _pinSlot = () => {
+            if (_pinning || !badge.isConnected) return;
+            const slotRect = slot.getBoundingClientRect();
+            const lcdRect  = lcd.getBoundingClientRect();
+            const outOfBounds =
+                slotRect.right > lcdRect.right + 10 ||
+                slotRect.left  < lcdRect.left  - 10;
+            if (outOfBounds) {
+                _pinning = true;
+                slot.style.setProperty('inset-inline-start', 'auto', 'important');
+                slot.style.setProperty('inset-inline-end',   '0',    'important');
+                requestAnimationFrame(() => { _pinning = false; });
+            } else {
+                slot.style.removeProperty('inset-inline-start');
+                slot.style.removeProperty('inset-inline-end');
+            }
+        };
+
+        _slotBadgeObs = new MutationObserver(() => {
+            if (!slot.isConnected || !badge.isConnected) {
+                _slotBadgeObs?.disconnect(); _slotBadgeObs = null;
+                return;
+            }
+            _pinSlot();
+        });
+        _slotBadgeObs.observe(slot, { attributes: true, attributeFilter: ['style'] });
+        const ml = slot.closest('[data-testid="marquee-line"]');
+        if (ml) _slotBadgeObs.observe(ml, { attributes: true, attributeFilter: ['class', 'style'] });
+        _pinSlot();
+        return;
+    }
+
+    // Slot not ready yet — retry with back-off (fast first, then slow, no fixed fallback).
+    const delay = attempt < 10 ? 200 : 2000;
+    _slotBadgeRetry = setTimeout(() => _insertBadgeIntoSlot(badge, attempt + 1), delay);
+}
+
 function _buildQualityPopup() {
     let pop = document.getElementById('aml-quality-popup');
     if (!pop) {
@@ -714,57 +790,15 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
             if (pop) pop.style.display = 'none';
         }, true);
 
-        // Insert badge directly after the ★ inside marquee__menu-slot-container.
         badge.style.flexShrink = '0';
         badge.style.alignSelf  = 'center';
         badge.style.marginLeft = '2px';
-
-        function _insertBadgeIntoSlot(attempt) {
-            const lcd = document.querySelector(
-                '[data-testid="lcd-metadata"], .player-lcd, .web-chrome-playback-lcd'
-            );
-            const slot = lcd?.querySelector('.marquee--primary .marquee__menu-slot-container');
-            const favEl = slot?.querySelector('.favorite-badge, [data-testid="favorite-button"]');
-            if (slot && favEl) {
-                slot.style.display    = 'flex';
-                slot.style.alignItems = 'center';
-                slot.style.maxHeight  = 'none';
-                slot.style.overflow   = 'visible';
-                // Do NOT touch marquee-line overflow — breaks the marquee animation.
-                favEl.insertAdjacentElement('afterend', badge);
-
-                // Apple Music's JS sets inset-inline-start inline during animation
-                // to hide the slot. Override via setProperty 'important' flag which
-                // beats plain inline styles. Guard against re-entrancy with a flag.
-                let _pinning = false;
-                const _pinSlot = () => {
-                    if (_pinning) return;
-                    const cur = parseFloat(getComputedStyle(slot).insetInlineStart);
-                    if (cur > 250) { // pushed off-screen (container is ~282px wide)
-                        _pinning = true;
-                        slot.style.setProperty('inset-inline-start', 'auto', 'important');
-                        slot.style.setProperty('inset-inline-end', '0', 'important');
-                        requestAnimationFrame(() => { _pinning = false; });
-                    }
-                };
-                const ml = slot.closest('[data-testid="marquee-line"]');
-                new MutationObserver(_pinSlot).observe(slot, { attributes: true, attributeFilter: ['style'] });
-                if (ml) new MutationObserver(_pinSlot).observe(ml, { attributes: true, attributeFilter: ['class', 'style'] });
-                _pinSlot();
-                return;
-            }
-            if (attempt < 10) {
-                setTimeout(() => _insertBadgeIntoSlot(attempt + 1), 200);
-            } else {
-                badge.style.position  = 'fixed';
-                badge.style.bottom    = '14px';
-                badge.style.left      = '50%';
-                badge.style.transform = 'translateX(-50%)';
-                document.body.appendChild(badge);
-            }
-        }
-        _insertBadgeIntoSlot(0);
+        _insertBadgeIntoSlot(badge, 0);
     }
+
+    // Re-slot if the badge was detached (Apple Music can refresh the marquee DOM
+    // on track change, orphaning the badge from its slot container).
+    if (!badge.isConnected) _insertBadgeIntoSlot(badge, 0);
 
     badge.style.color  = color;
     badge.style.border = 'none';
@@ -2606,10 +2640,15 @@ function startVLCPoll(mkAudio) {
                     }, 500);
                     return;
                 }
-                console.log('[AML VLC] ended → _amlNext');
-                // _amlGoto deletes VLC property overrides from mkAudio before
-                // changeToMediaAtIndex so audio.load() executes and MK transitions.
-                _amlNext().catch(() => {});
+                if (_allowCDNTransition) {
+                    // CDN gate is open: user already clicked an external play button.
+                    // The NPIDF triggered by that click will handle the track change;
+                    // calling _amlNext here would advance to the wrong track.
+                    console.log('[AML VLC] ended — _amlNext suppressed (CDN gate open)');
+                } else {
+                    console.log('[AML VLC] ended → _amlNext');
+                    _amlNext().catch(() => {});
+                }
             }
         } catch (_) {
             // Stop polling after 5 consecutive errors (engine exited or unreachable).
@@ -3575,6 +3614,7 @@ async function setup() {
         // clicks aren't swallowed. The NPIDF filter (_amlGotoTarget) and session-state
         // tracking (_amlNavInternal, _amlPendingCI/II) continue independently.
         _clearAdvancing();
+        _updateTransportButtons();
 
         // Show MK's native loading spinner on the MSE path. Not needed for VLC —
         // that path has its own loading state via _vlcLoading.
@@ -3627,6 +3667,34 @@ async function setup() {
     // now go through our owned logic.
     mk.skipToNextItem     = () => _amlNext(true);  // UI skip: always advances
     mk.skipToPreviousItem = _amlPrev;
+
+    // Grey out next/previous transport buttons when no track to go to.
+    // Uses aria-label heuristics covering both old and new Apple Music DOM shapes.
+    function _updateTransportButtons() {
+        const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+        const cur = _sessionContainers[ci];
+        const repeat = mk.repeatMode ?? 0;
+
+        const hasPrev = ci > 0 || ii > 0;
+        const hasNext = repeat !== 0 || (cur && (ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length));
+
+        const allBtns = document.querySelectorAll(
+            '[aria-label], [data-testid*="skip"], [data-testid*="previous"], [data-testid*="next"]'
+        );
+        for (const btn of allBtns) {
+            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+            const tid   = (btn.getAttribute('data-testid') || '').toLowerCase();
+            const isPrev = label.includes('previous') || label.includes('back') || tid.includes('previous') || tid.includes('skip-back');
+            const isNext = label.includes('next') || tid.includes('next') || tid.includes('skip-forward');
+            if (isPrev) {
+                btn.style.opacity        = hasPrev ? '' : '0.35';
+                btn.style.pointerEvents  = hasPrev ? '' : 'none';
+            } else if (isNext) {
+                btn.style.opacity        = hasNext ? '' : '0.35';
+                btn.style.pointerEvents  = hasNext ? '' : 'none';
+            }
+        }
+    }
 
     // ── MPRIS helpers ──────────────────────────────────────────────────────────
     function mprisTrackId(item) {
@@ -3863,6 +3931,7 @@ async function setup() {
             }
         }
         handleTrackChange(mk);
+        _updateTransportButtons();
         // Signal queue context to the prefetch scheduler.
         window._amlSmartCache?.onTrackChange(mk);
         if (item) {
