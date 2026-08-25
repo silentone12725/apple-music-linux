@@ -3938,6 +3938,18 @@ async function setup() {
                     }
                 }
             }
+
+            // On every track load, sync MK's live queue into the current container.
+            // Station/radio queues grow track-by-track; this catches new additions
+            // before _amlNext fires so prev/next state and gapless pre-warm are accurate.
+            const activeCur = _sessionContainers[_sessionContainerIdx];
+            if (activeCur) {
+                const mkLive = mk.queue?.items ?? [];
+                for (const mkItem of mkLive) {
+                    const id = _extractItemId(mkItem);
+                    if (id && !activeCur.items.includes(id)) activeCur.items.push(id);
+                }
+            }
         }
         handleTrackChange(mk);
         _updateTransportButtons();
