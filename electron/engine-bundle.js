@@ -210,7 +210,8 @@ let _nativeSrcSet = null; // saved by blockAppleCDN() for our own src writes
 let _nativeCTSet  = null; // native currentTime setter — used by MSE seek to fire 'seeking'
 let _nativePlay   = null; // saved when play() proxy is installed on the element
 let _ourBlobUrl   = null; // current blob URL we own; blocks MK from replacing it
-let _allowCDNTransition = false; // temporarily lifted during changeToMediaAtIndex so MK can settle NPIDF
+let _allowCDNTransition  = false; // temporarily lifted during changeToMediaAtIndex so MK can settle NPIDF
+let _externalPlayGateTimer = null; // safety reset timer for _allowCDNTransition
 
 // The music.apple.com origin's HTMLMediaElement.prototype.play is gated by Chromium's
 // autoplay policy for that realm, which blocks play() on elements managed by the native
@@ -241,11 +242,35 @@ let _vlcPaused     = false; // virtual paused state (overrides audio.paused in V
 let _vlcVolPersist = 100;   // volume (0-200) persisted across track transitions
 let _amlTransitioning = false; // true during _amlGoto (set before setQueue, cleared after NPIDF)
 
-// ── Session history ────────────────────────────────────────────────────────────
-// Accumulates every song ID played this session so next/prev can slide freely
-// across the full play history, even across queue replacements.
-let _sessionHistory    = []; // song IDs in play order (grows as tracks play)
-let _sessionHistoryIdx = -1; // current position in _sessionHistory (-1 = nothing yet)
+// ── Session queue ─────────────────────────────────────────────────────────────
+// The session queue is a list of containers. Each container is one play context
+// (album, playlist, single) represented as an ordered array of song IDs.
+// next/prev traverse within the current container first, then cross into adjacent
+// containers. repeat-all loops only the current container — matching Android.
+// Cross-container prev gives history navigation Android doesn't have.
+let _sessionContainers   = []; // [{items:[songId,...]}, ...]
+let _sessionContainerIdx = -1; // which container is active (-1 = nothing yet)
+let _sessionItemIdx      = -1; // position within current container
+let _amlNavInternal      = false; // true when NPIDF is expected from our _amlGoto call
+let _amlPendingCI        = -1;   // container index to apply in NPIDF (set by _amlGoto)
+let _amlPendingII        = -1;   // item index to apply in NPIDF
+
+const _extractItemId = (item) =>
+    item?.playParams?.catalogId
+    ?? item?.attributes?.playParams?.catalogId
+    ?? item?.id
+    ?? item?.playParams?.id
+    ?? item?.attributes?.playParams?.id
+    ?? null;
+
+function _sessionFlatIds() {
+    return _sessionContainers.flatMap(c => c.items);
+}
+function _sessionFlatIdx(ci, ii) {
+    let n = 0;
+    for (let i = 0; i < ci; i++) n += _sessionContainers[i].items.length;
+    return n + ii;
+}
 let _vlcLyricsFreezeTimer = null; // fires timeupdate at frozen pos while VLC paused (keeps karaoke at exact word)
 
 function _startLyricsFreeze(mkAudio) {
@@ -2718,17 +2743,26 @@ async function handleTrackChange(mk) {
             // prevents MK from completing the transition and the settled NPIDF never fires.
             return;
         }
-        // MK briefly fires nowPlayingItemDidChange with null nowPlayingItem during queue
-        // transitions. Block audio.load for 100ms so MK can't cascade to the next song
-        // while the item settles, then retry once.
-        const tmpAudio = getMKAudio();
-        if (tmpAudio) tmpAudio.load = () => {};
+        // MK fires a null NPIDF during queue transitions (external play button clicks).
+        // In VLC mode the audio element's load() is overridden to a no-op so VLC
+        // owns the element. That no-op blocks MK from resetting the element for the
+        // new track — real NPIDF never fires. Delete the instance override so MK
+        // can call load() and proceed to real NPIDF.
+        if (_vlcMode) {
+            const tmpAudio = getMKAudio();
+            if (tmpAudio) { try { delete tmpAudio.load; } catch (_) {} }
+        }
         const genSnapshot = _generation;
-        await new Promise(r => setTimeout(r, 100));
-        if (tmpAudio) { try { delete tmpAudio.load; } catch (_) {} }
-        if (_generation !== genSnapshot) return;  // another handler already took over
+        await new Promise(r => setTimeout(r, 200));
+        if (_generation !== genSnapshot) return;  // real NPIDF handler already took over
         item = mk.nowPlayingItem;
         if (!item) return;
+    }
+
+    // Close CDN gate opened by external play-button click (now we own the transition).
+    if (_allowCDNTransition) {
+        _allowCDNTransition = false;
+        if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
     }
 
     const myGen = ++_generation;
@@ -3291,19 +3325,35 @@ async function setup() {
 
     blockAppleCDN();
 
-    // Suppress Apple Music's spurious error dialog during track transitions.
-    // PlayActivity.stop() throws with no descriptor when _amlGoto calls mk.setQueue().
-    // Intercept setAttribute('open') on the error dialog to prevent it from rendering at all.
-    const _origSetAttr = Element.prototype.setAttribute;
-    Element.prototype.setAttribute = function(name, value) {
-        if (name === 'open' && _amlTransitioning &&
-            this.tagName === 'DIALOG' && this.dataset?.testid === 'dialog' &&
-            this.classList.contains('error')) {
-            console.log('[AML] Suppressed error dialog (transition active)');
+    // Suppress Apple Music's spurious error dialog triggered by PlayActivity.stop()
+    // throwing "A method was called without a previous descriptor" during setQueue.
+    // Two issues to handle:
+    //   1. Apple Music opens the dialog with showModal(), not setAttribute('open'),
+    //      so a setAttribute intercept alone is insufficient.
+    //   2. React defers rendering, so the dialog can open AFTER _amlTransitioning is
+    //      already cleared by NPIDF — use a 1s timestamp window instead.
+    let _amlLastGotoMs = 0; // updated each time _amlGoto starts
+    const _inGotoWindow = () => performance.now() - _amlLastGotoMs < 1000;
+    const _isSpuriousDialog = (el) =>
+        el?.tagName === 'DIALOG' &&
+        el?.dataset?.testid === 'dialog' &&
+        el?.classList?.contains('error');
+
+    const _origShowModal = HTMLDialogElement.prototype.showModal;
+    HTMLDialogElement.prototype.showModal = function() {
+        if (_isSpuriousDialog(this) && _inGotoWindow()) {
+            console.log('[AML] Suppressed error dialog showModal (goto window)');
             return;
         }
-        return _origSetAttr.call(this, name, value);
+        return _origShowModal.call(this);
     };
+
+    // Fallback: MutationObserver catches dialogs that slip through (e.g. show() path).
+    new MutationObserver(() => {
+        if (!_inGotoWindow()) return;
+        const dlg = document.querySelector('dialog[data-testid="dialog"].error[open]');
+        if (dlg) { dlg.close(); console.log('[AML] Closed spurious error dialog (goto window)'); }
+    }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['open'] });
 
     // Feature-detect native ALAC MSE support (Chromium 116+ / Electron 38+).
     // Wait for the engine's SSE snapshot instead of polling GET /api/v1/status.
@@ -3438,12 +3488,18 @@ async function setup() {
         _amlAdvancingTimer = null;
     }
 
-    async function _amlGoto(idx) {
-        if (_amlAdvancing) { console.log('[AML] _amlGoto busy, ignoring idx=', idx); return; }
+    // Navigate to container ci, item ii within that container.
+    async function _amlGoto(ci, ii) {
+        if (_amlAdvancing) { console.log('[AML] _amlGoto busy, ignoring ci=', ci, 'ii=', ii); return; }
         _amlAdvancing = true;
-        _amlTransitioning = true; // suppress error dialog until NPIDF settles
-        _amlGotoTarget = idx; // placeholder; updated to clamped targetIdx after allIds is built
-        console.log('[AML] _amlGoto sessionIdx=', idx);
+        _amlTransitioning = true;
+        _amlLastGotoMs = performance.now(); // open 1s suppression window for error dialog
+        _amlNavInternal = true;
+        _amlPendingCI = ci;
+        _amlPendingII = ii;
+        const targetFlat = _sessionFlatIdx(ci, ii);
+        _amlGotoTarget = targetFlat;
+        console.log('[AML] _amlGoto ci=', ci, 'ii=', ii, 'flat=', targetFlat);
 
         // Stop the VLC poll first — it dispatches timeupdate events that cause MK's
         // AudioPlayer to access its detached SourceBuffer (InvalidStateError) on
@@ -3481,50 +3537,49 @@ async function setup() {
         // track, which prevents MK's changeToMediaAtIndex from advancing the queue.
         _vlcMode = false;
 
-        // Immediately update MPRIS so the desktop media player shows the right
-        // track while MK is still loading — avoids the frozen-UI feeling.
-        const targetItem = mk.queue?.items?.[idx];
+        // MPRIS pre-update: find target item in current MK queue by song ID.
+        const targetSongId = _sessionContainers[ci]?.items[ii];
+        const targetItem = targetSongId
+            ? (mk.queue?.items ?? []).find(it => _extractItemId(it) === targetSongId)
+            : null;
         if (targetItem) sendMprisMetadata(targetItem);
 
-        // Safety valves: if nowPlayingItemDidChange never fires (network stall,
-        // MK internal error), clear both locks after 6s so next/prev still work.
+        // Safety valve: if NPIDF never fires (ctmi failed silently), reset NPIDF state after 6s.
+        // _amlAdvancing itself is released right after ctmi below, so this only cleans up
+        // the remaining NPIDF-tracking flags (_amlGotoTarget, _amlNavInternal, pending coords).
         _amlAdvancingTimer = setTimeout(() => {
-            _clearAdvancing();
-            _amlGotoTarget = null;       // clear NPIDF filter on timeout
-            _allowCDNTransition = false; // restore CDN block on timeout
+            _amlGotoTarget = null;
+            _allowCDNTransition = false;
             _amlTransitioning = false;
+            _amlNavInternal = false;
+            _amlPendingCI = -1;
+            _amlPendingII = -1;
+            // Belt-and-suspenders: also clear advancing in case ctmi truly never fired.
+            _clearAdvancing();
         }, 6000);
 
-        // Build the combined queue: full session history + upcoming MK tracks not yet played.
-        // This lets next/prev slide freely across the entire session — even across queue
-        // replacements — without dropping history.
-        const _extractId = (item) =>
-            item?.playParams?.catalogId
-            ?? item?.attributes?.playParams?.catalogId
-            ?? item?.id
-            ?? item?.playParams?.id
-            ?? item?.attributes?.playParams?.id
-            ?? null;
-        const mkItems = mk.queue?.items ?? [];
-        const mkPos   = mk.queue?.position ?? 0;
-        // Upcoming = MK queue items AFTER current position, minus anything already in history.
-        // Current track is already in _sessionHistory, so we start at mkPos+1.
-        const historySet = new Set(_sessionHistory);
-        const upcoming = mkItems.slice(mkPos + 1).map(_extractId).filter(id => id && !historySet.has(id));
-        const allIds = [..._sessionHistory, ...upcoming];
+        // Build the flat queue: all containers in order (history + upcoming in current container).
+        const allIds = _sessionFlatIds();
         if (!allIds.length) {
+            clearTimeout(_amlAdvancingTimer);
             _clearAdvancing();
             _amlGotoTarget = null;
             _allowCDNTransition = false;
             _amlTransitioning = false;
+            _amlNavInternal = false;
+            _amlPendingCI = -1;
+            _amlPendingII = -1;
             return;
         }
-        // idx is a session-history index. Clamp to valid range.
-        const targetIdx = Math.max(0, Math.min(idx, allIds.length - 1));
-        // Update NPIDF filter to the real target position in the new queue.
+        const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
         _amlGotoTarget = targetIdx;
         await mk.setQueue({ songs: allIds }).catch(() => {});
         await mk.changeToMediaAtIndex(targetIdx).catch(() => {});
+
+        // ctmi has been sent — release the advancing lock immediately so rapid prev/next
+        // clicks aren't swallowed. The NPIDF filter (_amlGotoTarget) and session-state
+        // tracking (_amlNavInternal, _amlPendingCI/II) continue independently.
+        _clearAdvancing();
 
         // Show MK's native loading spinner on the MSE path. Not needed for VLC —
         // that path has its own loading state via _vlcLoading.
@@ -3536,36 +3591,41 @@ async function setup() {
     // manual=true  → explicit user skip (always advances past current track)
     async function _amlNext(manual = false) {
         const repeat = mk.repeatMode ?? 0; // 0=none, 1=one, 2=all
+        const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+        const cur = _sessionContainers[ci];
+
         if (repeat === 1 && !manual) {
-            await _amlGoto(_sessionHistoryIdx); // repeat-one: restart same track
+            // Repeat-one: restart same track (ci/ii unchanged).
+            if (ci >= 0) await _amlGoto(ci, ii);
             return;
         }
-        // Check if there is a next track in MK's queue or session history.
-        const mkItems = mk.queue?.items ?? [];
-        const mkPos   = mk.queue?.position ?? 0;
-        const historySet = new Set(_sessionHistory);
-        const upcoming = mkItems.slice(mkPos + 1).map(i =>
-            i?.playParams?.catalogId ?? i?.attributes?.playParams?.catalogId
-            ?? i?.id ?? i?.playParams?.id ?? i?.attributes?.playParams?.id
-        ).filter(id => id && !historySet.has(id));
-        const totalLen = _sessionHistory.length + upcoming.length;
-        const nextIdx = _sessionHistoryIdx + 1;
-        if (nextIdx < totalLen) {
-            await _amlGoto(nextIdx);
-        } else if (repeat === 2 && totalLen > 0) {
-            await _amlGoto(0); // repeat-all: wrap to start of session history
+
+        if (!cur) return; // no container yet
+
+        if (ii + 1 < cur.items.length) {
+            // Next item within the same container.
+            await _amlGoto(ci, ii + 1);
+        } else if (repeat === 2) {
+            // Repeat-all: wrap to start of current container only (Android-matching).
+            await _amlGoto(ci, 0);
+        } else if (ci + 1 < _sessionContainers.length) {
+            // Cross into the next container.
+            await _amlGoto(ci + 1, 0);
         }
-        // else: end of queue, nothing to do
+        // else: end of all containers, nothing to do
     }
 
     async function _amlPrev() {
-        if (_sessionHistoryIdx > 0) {
-            await _amlGoto(_sessionHistoryIdx - 1);
-        } else if (_sessionHistoryIdx === -1 && (mk.queue?.position ?? 0) > 0) {
-            // History not yet initialized — fall back to MK queue position
-            await _amlGoto(0);
+        const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+        if (ci < 0) return; // no container yet
+        if (ii > 0) {
+            // Previous item within the same container.
+            await _amlGoto(ci, ii - 1);
+        } else if (ci > 0) {
+            // Cross back into the previous container, land at its last item.
+            await _amlGoto(ci - 1, _sessionContainers[ci - 1].items.length - 1);
         }
-        // else: at beginning of session, nothing to do
+        // else: at the very beginning of the session
     }
 
     // Block MK's native skip functions — UI skip buttons and all external callers
@@ -3654,6 +3714,42 @@ async function setup() {
         // insert at pos+1 intentionally without immediate playback advance.
         if (e.target.closest('.contextual-menu')) return;
 
+        // When VLC is playing and the user clicks a play button for a new track,
+        // MK calls audio.load() BEFORE changing the queue or firing NPIDF. Our VLC
+        // no-op blocks it, MK bails out, nothing happens. Delete the override here
+        // (capture phase, before MK's handler) so MK can reset the audio element.
+        // Also clear _ourBlobUrl so MK's subsequent blob src assignment isn't blocked.
+        // handleTrackChange restores everything once the real NPIDF fires.
+        const _dbgPlaySel = e.target.closest(
+            '[data-testid="play-button"], ' +      // track-row play button
+            '[data-testid="click-action"], ' +     // album/playlist pill play button
+            '.primary-actions__button--play, ' +   // pill wrapper (ancestor match)
+            '[class*="play-button"]'               // any play-button class variant
+            // NOTE: [aria-label*="Play"] removed — matches product-lockup nav links (false positive)
+        );
+        if (_vlcMode && _dbgPlaySel) {
+            // MK's setQueue reuses the existing mkAudio element. It calls:
+            //   mkAudio.src = ''  → fine
+            //   mkAudio.load()    → BLOCKED by our instance override → Promise hangs, NPIDF never fires
+            //   mkAudio.src = CDN → would be blocked by CDN gate too
+            // Fix: delete the load override and open the CDN gate so MK can complete setQueue.
+            // handleTrackChange reinstalls mkAudio.load for the new track.
+            const mkAudioEl = getMKAudio();
+            if (mkAudioEl) { try { delete mkAudioEl.load; } catch (_) {} }
+            console.log('[AML click] external play while VLC active — opening CDN gate');
+            _allowCDNTransition = true;
+            _ourBlobUrl = null;
+            if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
+            _externalPlayGateTimer = setTimeout(() => {
+                // No track change happened — restore load override to protect VLC stream.
+                const el = getMKAudio();
+                if (el && _vlcMode) el.load = () => {};
+                _allowCDNTransition = false;
+                _externalPlayGateTimer = null;
+                console.log('[AML click] CDN gate reset (safety timeout)');
+            }, 15000);
+        }
+
         const PS = window.MusicKit?.PlaybackStates;
         // Only intercept during active playback. Other states use setQueue/changeToMediaAtIndex
         // which fires nowPlayingItemDidChange directly — no interception needed.
@@ -3700,26 +3796,28 @@ async function setup() {
     setupQueueHistory(mk); // async; fire-and-forget: loads history, then enables listener + inject
 
     mk.addEventListener('nowPlayingItemDidChange', async () => {
-        // During a controlled _amlGoto transition, audio element resets (audio.src='')
-        // fire a spurious NPIDF for the OLD track. _amlGotoTarget stays set until the
-        // target track's NPIDF fires, so we can filter out-of-order events here.
-        // Null NPIDFs (item === null) are NOT filtered — they return early in handleTrackChange.
+        // During a controlled _amlGoto transition, filter out spurious NPIDFs.
+        // setQueue fires a null NPIDF (item === null) that must be fully suppressed —
+        // if we let it through, _clearAdvancing() releases the lock early and
+        // _amlNavInternal is consumed before the real NPIDF arrives from ctmi().
+        // Spurious non-null NPIDFs (old track, different ID) are also dropped.
         if (_amlGotoTarget !== null) {
             const item = mk.nowPlayingItem;
+            if (!item) return; // null NPIDF from setQueue — suppress entirely, wait for ctmi NPIDF
             const itemId = item?.id ?? item?.playParams?.id;
             const targetItem = mk.queue?.items?.[_amlGotoTarget];
             const targetId = targetItem?.id ?? targetItem?.playParams?.id;
-            if (item && targetId && itemId !== targetId) {
+            if (targetId && itemId !== targetId) {
                 // Spurious NPIDF for the OLD track during transition — drop it.
                 console.log('[AML] NPIDF filtered: spurious event for', item?.attributes?.name, '(advancing to idx', _amlGotoTarget, ')');
                 return;
             }
-            // Non-null item: target track arrived (or target ID indeterminate) — clear filter.
-            // Null item: keep _amlGotoTarget so subsequent spurious events are still blocked.
-            if (item) { _amlGotoTarget = null; _amlTransitioning = false; }
+            // Target track arrived (or target ID indeterminate) — clear filter and cancel safety timer.
+            _amlGotoTarget = null; _amlTransitioning = false;
+            clearTimeout(_amlAdvancingTimer); _amlAdvancingTimer = null;
         }
-        // A confirmed track change (or the target track arrived): release the
-        // advance lock so the next skip can proceed.
+        // Confirm the track change and release any residual advance lock.
+        // (_amlAdvancing is normally already false — released right after ctmi in _amlGoto.)
         _clearAdvancing();
         // MK briefly fires null during queue transitions. Poll up to 250 ms for the
         // item to settle so handleTrackChange always sees a real item, and MPRIS
@@ -3732,27 +3830,36 @@ async function setup() {
                 if (item) break;
             }
         }
-        // Maintain session history so next/prev can navigate the full play history.
+        // Maintain session container state so next/prev navigate correctly.
+        const wasInternal = _amlNavInternal;
+        _amlNavInternal = false;
         if (item) {
-            const songId = item.playParams?.catalogId
-                ?? item.attributes?.playParams?.catalogId
-                ?? item.id
-                ?? item.playParams?.id
-                ?? item.attributes?.playParams?.id;
-            if (songId) {
-                if (_sessionHistoryIdx >= 0 && _sessionHistory[_sessionHistoryIdx] === songId) {
-                    // same track (repeat-one or restart) — no change
-                } else if (_sessionHistoryIdx + 1 < _sessionHistory.length
-                        && _sessionHistory[_sessionHistoryIdx + 1] === songId) {
-                    _sessionHistoryIdx++; // forward nav within history
-                } else if (_sessionHistoryIdx > 0
-                        && _sessionHistory[_sessionHistoryIdx - 1] === songId) {
-                    _sessionHistoryIdx--; // backward nav within history
+            const songId = _extractItemId(item);
+            if (wasInternal && _amlPendingCI >= 0) {
+                // Internal navigation (_amlGoto): apply the pre-computed coordinates.
+                _sessionContainerIdx = _amlPendingCI;
+                _sessionItemIdx      = _amlPendingII;
+                _amlPendingCI = -1;
+                _amlPendingII = -1;
+            } else if (songId) {
+                // External NPIDF (user clicked a new playlist/album, or MK auto-advanced AAC).
+                const cur = _sessionContainers[_sessionContainerIdx];
+                if (cur && cur.items[_sessionItemIdx] === songId) {
+                    // Same track (repeat-one, restart) — no change.
+                } else if (cur && cur.items[_sessionItemIdx + 1] === songId) {
+                    // Auto-advance within the current container (MK-driven for AAC).
+                    _sessionItemIdx++;
                 } else {
-                    // New track or jump: truncate any forward history and append.
-                    _sessionHistory = _sessionHistory.slice(0, _sessionHistoryIdx + 1);
-                    _sessionHistory.push(songId);
-                    _sessionHistoryIdx = _sessionHistory.length - 1;
+                    // New play context: seed a fresh container from the current MK queue.
+                    // mk.queue.items holds the full new queue; mk.queue.position is where we are.
+                    const mkItems2 = mk.queue?.items ?? [];
+                    const mkPos2   = mk.queue?.position ?? 0;
+                    const newIds   = mkItems2.map(_extractItemId).filter(Boolean);
+                    if (newIds.length) {
+                        _sessionContainers.push({ items: newIds });
+                        _sessionContainerIdx = _sessionContainers.length - 1;
+                        _sessionItemIdx      = mkPos2;
+                    }
                 }
             }
         }
@@ -3963,7 +4070,8 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 window.addEventListener('unhandledrejection', (e) => {
     const msg = e.reason?.message ?? '';
     if (msg.includes('play() method was called without a previous') ||
-        msg.includes('lyrics are not being displayed')) {
+        msg.includes('lyrics are not being displayed') ||
+        msg.includes('lyrics are already being displayed')) {
         e.preventDefault();
     }
 });
