@@ -3834,7 +3834,14 @@ async function setup() {
             // Fix: delete the load override and open the CDN gate so MK can complete setQueue.
             // handleTrackChange reinstalls mkAudio.load for the new track.
             const mkAudioEl = getMKAudio();
-            if (mkAudioEl) { try { delete mkAudioEl.load; } catch (_) {} }
+            if (mkAudioEl) {
+                try { delete mkAudioEl.load; } catch (_) {}
+                // Also delete the play proxy — otherwise MK's audio.play() call during
+                // setQueue routes to vlc/resume for the old paused track instead of
+                // letting MK initialise the new one, silently aborting the track switch.
+                try { delete mkAudioEl.play; } catch (_) {}
+            }
+            _proxyInstalled = false; // handleTrackChange will reinstall for the new track
             // Stop VLC poll: its timeupdate/playing events confuse MK's audio pipeline
             // while setQueue is resolving the new context (same reason as _amlGoto).
             stopVLCPoll();
