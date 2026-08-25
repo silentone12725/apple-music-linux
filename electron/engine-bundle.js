@@ -3647,15 +3647,21 @@ async function setup() {
             // Cross into the next container.
             await _amlGoto(ci + 1, 0);
         } else {
-            // End of our snapshot — check if MK loaded more tracks (station/radio queues
-            // append tracks dynamically; our container only captured the initial batch).
+            // End of our snapshot — check if MK already loaded more tracks.
             const mkItems = mk.queue?.items ?? [];
             const freshIds = mkItems.map(_extractItemId).filter(id => id && !cur.items.includes(id));
             if (freshIds.length) {
                 cur.items.push(...freshIds);
                 await _amlGoto(ci, ii + 1);
+            } else if (mk.queue?.playbackMode === 1 && _mkOrigSkipToNext) {
+                // Station mode: MK fetches the next batch lazily when its own
+                // skip logic runs. Call the original skipToNextItem so MK triggers
+                // the /v1/me/stations/next-tracks/ API, then wait for queueItemsDidChange
+                // (our persistent listener will extend the container and _amlGoto from there).
+                console.log('[AML Station] end of snapshot — delegating to MK native skip for station fetch');
+                _mkOrigSkipToNext();
             }
-            // else: truly at the end (or live radio — MK handles it natively)
+            // else: truly at the end (live radio — MK handles it natively)
         }
     }
 
@@ -3671,6 +3677,9 @@ async function setup() {
         }
         // else: at the very beginning of the session
     }
+
+    // Save MK's original skip before overriding — needed to trigger station refetch.
+    const _mkOrigSkipToNext = mk.skipToNextItem?.bind(mk);
 
     // Block MK's native skip functions — UI skip buttons and all external callers
     // now go through our owned logic.
