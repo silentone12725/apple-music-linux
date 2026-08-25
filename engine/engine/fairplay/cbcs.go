@@ -398,8 +398,16 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 			return fmt.Errorf("cbcs seek: EOF before startFrag %d (at %d)", s.startFrag, i)
 		}
 		offset = newOffset
-		if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Trun != nil {
-			accumulatedTfdt += frag.Moof.Traf.Trun.Duration(4096)
+		if frag.Moof != nil && frag.Moof.Traf != nil {
+			dur := uint32(4096)
+			if frag.Moof.Traf.Tfhd != nil && frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
+				if d := frag.Moof.Traf.Tfhd.DefaultSampleDuration; d > 0 {
+					dur = d
+				}
+			}
+			for _, t := range frag.Moof.Traf.Truns {
+				accumulatedTfdt += t.Duration(dur)
+			}
 		}
 	}
 
@@ -442,19 +450,29 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 				}
 				frag.Moof.Traf.Children = newChildren
 			}
+			dur := uint32(4096)
 			if frag.Moof.Traf.Tfhd != nil {
 				frag.Moof.Traf.Tfhd.TrackID = 1
 				if frag.Moof.Traf.Tfhd.HasSampleDescriptionIndex() {
 					frag.Moof.Traf.Tfhd.SampleDescriptionIndex = 1
 				}
+				if frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
+					if d := frag.Moof.Traf.Tfhd.DefaultSampleDuration; d > 0 {
+						dur = d
+					}
+				}
 			}
 			newSize := frag.Moof.Size()
 			sizeDiff := int32(newSize) - int32(oldSize)
-			if sizeDiff != 0 && frag.Moof.Traf.Trun != nil && frag.Moof.Traf.Trun.HasDataOffset() {
-				frag.Moof.Traf.Trun.DataOffset += sizeDiff
+			if sizeDiff != 0 {
+				for _, t := range frag.Moof.Traf.Truns {
+					if t.HasDataOffset() {
+						t.DataOffset += sizeDiff
+					}
+				}
 			}
-			if frag.Moof.Traf.Trun != nil {
-				accumulatedTfdt += frag.Moof.Traf.Trun.Duration(4096)
+			for _, t := range frag.Moof.Traf.Truns {
+				accumulatedTfdt += t.Duration(dur)
 			}
 		}
 
@@ -509,12 +527,8 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("cbcs: download: HTTP %d", resp.StatusCode)
 	}
-
 	if hw, ok := w.(pipeline.HeaderWriter); ok && resp.ContentLength > 0 {
-		fmt.Printf("cbcs: Setting Content-Length %d\n", resp.ContentLength)
 		hw.SetHeader("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
-	} else {
-		fmt.Printf("cbcs: Not setting Content-Length. hw? %v, cl: %d\n", ok, resp.ContentLength)
 	}
 
 	stalled := newStallDetector(resp.Body, cbcsStallTimeout, cancel)
@@ -616,23 +630,46 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 			// Force SampleDescriptionIndex and TrackID to 1, because Apple's CDN
 			// sometimes mutates these fields in subsequent fragments, causing ffmpeg
 			// to silently skip the trun box due to stsd or track mismatch.
+			defaultSampleDuration := uint32(4096) // ALAC: 4096 PCM samples per frame
 			if frag.Moof.Traf.Tfhd != nil {
 				frag.Moof.Traf.Tfhd.TrackID = 1
 				if frag.Moof.Traf.Tfhd.HasSampleDescriptionIndex() {
 					frag.Moof.Traf.Tfhd.SampleDescriptionIndex = 1
 				}
+				if frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
+					if d := frag.Moof.Traf.Tfhd.DefaultSampleDuration; d > 0 {
+						defaultSampleDuration = d
+					}
+				}
+			}
+			if i == 0 {
+				fmt.Printf("cbcs: tfhd.DefaultSampleDuration=%d (using %d) truns=%d\n",
+					func() uint32 {
+						if frag.Moof.Traf.Tfhd != nil && frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
+							return frag.Moof.Traf.Tfhd.DefaultSampleDuration
+						}
+						return 0
+					}(), defaultSampleDuration, len(frag.Moof.Traf.Truns))
 			}
 
 			newSize := frag.Moof.Size()
 			sizeDiff := int32(newSize) - int32(oldSize)
 
-			if sizeDiff != 0 && frag.Moof.Traf.Trun != nil && frag.Moof.Traf.Trun.HasDataOffset() {
-				frag.Moof.Traf.Trun.DataOffset += sizeDiff
+			if sizeDiff != 0 {
+				for _, t := range frag.Moof.Traf.Truns {
+					if t.HasDataOffset() {
+						t.DataOffset += sizeDiff
+					}
+				}
 			}
 
-			// Calculate duration for the NEXT fragment
-			if frag.Moof.Traf.Trun != nil {
-				accumulatedTfdt += frag.Moof.Traf.Trun.Duration(4096)
+			// Accumulate using ALL truns in this fragment so the next fragment's tfdt
+			// starts exactly where this one ends. Apple ALAC moofs have multiple truns
+			// (e.g. 10×16 frames + 1×1 frame); summing only the first trun produced a
+			// 65536-sample step instead of the correct 659456, causing VLC to report
+			// "Fragment sequence discontinuity" at ~28s and abort playback.
+			for _, t := range frag.Moof.Traf.Truns {
+				accumulatedTfdt += t.Duration(defaultSampleDuration)
 			}
 		}
 

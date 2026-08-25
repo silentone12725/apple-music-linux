@@ -141,15 +141,29 @@ func (m *Manager) List() []*ExportJob {
 	return out
 }
 
-// Cancel requests cancellation of job id; returns false if not found.
+// Cancel cancels or removes a job by id.
+// For in-progress jobs (queued/resolving/downloading/tagging/moving) it
+// signals cancellation and leaves the row visible so the UI can show the
+// cancelled state.  For terminal jobs (done/failed/cancelled) it removes the
+// job from the map entirely — this is what the "Clear done" button uses.
+// Returns false if the job is not found.
 func (m *Manager) Cancel(id string) bool {
-	m.mu.RLock()
+	m.mu.Lock()
 	j, ok := m.jobs[id]
-	m.mu.RUnlock()
 	if !ok {
+		m.mu.Unlock()
 		return false
 	}
-	j.cancel()
+	phase := j.Phase
+	switch phase {
+	case PhaseDone, PhaseFailed, PhaseCancelled:
+		delete(m.jobs, id)
+		delete(m.requests, id)
+		m.mu.Unlock()
+	default:
+		m.mu.Unlock()
+		j.cancel()
+	}
 	return true
 }
 
@@ -291,7 +305,9 @@ func (m *Manager) execute(item *workItem) {
 		durationMs, isrc = a.DurationInMillis, a.Isrc
 		trackNumber, discNumber = a.TrackNumber, a.DiscNumber
 		releaseDate, contentRating = a.ReleaseDate, a.ContentRating
-		
+		// MV API does not return HasLyrics; try fetching if user requested lyrics output.
+		hasLyrics = req.Options.EmbedLyrics || req.Options.SaveLrcSidecar
+
 		if len(mv.Data[0].Relationships.Albums.Data) > 0 {
 			al := mv.Data[0].Relationships.Albums.Data[0].Attributes
 			trackTotal = al.TrackCount
@@ -455,6 +471,26 @@ func (m *Manager) execute(item *workItem) {
 	// ── Phase 3: Download + decrypt via engine ────────────────────────────
 	m.advance(job, PhaseDownloading, 0)
 
+	// Estimate total bytes from duration × codec bitrate so the UI can render a
+	// determinate progress bar.  The estimate is intentionally conservative so
+	// the bar reaches ~100% just as the download finishes rather than stalling.
+	if durationMs > 0 {
+		var bitsPerSec int64
+		switch {
+		case req.Capabilities.Video:
+			bitsPerSec = 8_000_000 // rough: 1080p MV ≈ 8 Mbps
+		case req.Capabilities.Atmos:
+			bitsPerSec = 768_000 // Dolby Atmos EC-3 ≈ 768 kbps
+		case req.Capabilities.Lossless:
+			bitsPerSec = 1_500_000 // ALAC 16/44.1 ≈ 1.5 Mbps (conservative)
+		default:
+			bitsPerSec = 256_000 // AAC 256 kbps
+		}
+		m.mu.Lock()
+		job.BytesTotal = int64(durationMs) * bitsPerSec / 8_000
+		m.mu.Unlock()
+	}
+
 	sess, err := m.manager.Open(ctx, playback.OpenRequest{
 		AssetID:     req.AssetID,
 		Storefront:  sf,
@@ -569,12 +605,51 @@ func (m *Manager) execute(item *workItem) {
 
 		// ── Phase 5: Fetch lyrics if requested ───────────────────────────
 		var lrcStr string
-		if req.Options.EmbedLyrics && hasLyrics {
-			lrcStr, _ = lyrics.GetContext(ppCtx,
-				sf, req.AssetID,
-				req.Options.LrcType, lang, req.Options.LrcFormat,
-				req.Token, req.MUT,
-			)
+		if (req.Options.EmbedLyrics || req.Options.SaveLrcSidecar) && hasLyrics {
+			if req.Capabilities.Video {
+				// MV: always fetch TTML so we can embed a subtitle track and
+				// also produce the user's preferred sidecar format.
+				ttml, lerr := lyrics.GetContext(ppCtx,
+					sf, req.AssetID,
+					req.Options.LrcType, lang, "ttml",
+					req.Token, req.MUT,
+				)
+				if lerr == nil && ttml != "" {
+					// Embed subtitle track (SRT → mov_text) in the muxed MP4.
+					var srtStr string
+					srtStr, _ = lyrics.TtmlToSrt(ttml)
+					if srtStr != "" {
+						srtTmp := tmpPath + ".srt"
+						if werr := os.WriteFile(srtTmp, []byte(srtStr), 0o644); werr == nil {
+							ffPath := req.Options.FFmpegPath
+							if ffPath == "" {
+								ffPath = "ffmpeg"
+							}
+							if serr2 := addSubtitleTrack(ffPath, tmpPath, srtTmp); serr2 != nil {
+								fmt.Printf("export %s: subtitle embed warning: %v\n", req.AssetID, serr2)
+							}
+							os.Remove(srtTmp)
+						}
+					}
+					// Prepare sidecar string in user's preferred format.
+					switch req.Options.LrcFormat {
+					case "ttml":
+						lrcStr = ttml
+					case "srt":
+						lrcStr = srtStr
+					case "vtt":
+						lrcStr, _ = lyrics.TtmlToVtt(ttml)
+					default:
+						lrcStr, _ = lyrics.TtmlToLrc(ttml)
+					}
+				}
+			} else {
+				lrcStr, _ = lyrics.GetContext(ppCtx,
+					sf, req.AssetID,
+					req.Options.LrcType, lang, req.Options.LrcFormat,
+					req.Token, req.MUT,
+				)
+			}
 		}
 
 		// ── Phase 6: Tag (metadata, artwork, lyrics) ──────────────────────
@@ -602,30 +677,82 @@ func (m *Manager) execute(item *workItem) {
 		// Skip FLAC conversion for music-video exports (video tracks).
 		if req.Options.ConvertToFLAC && req.Capabilities.Lossless && !req.Capabilities.Video {
 			flacTmp := tmpPath + ".flac"
-			artTmp := ""
-			if req.Options.EmbedArtwork && meta.ArtworkURL != "" {
-				if data, ct, aerr := downloadArtworkBytes(meta.ArtworkURL, req.Options.ArtworkSize); aerr == nil {
-					ext := "jpg"
-					if ct == "image/png" {
-						ext = "png"
+			ffpathFlac := req.Options.FFmpegPath
+			if ffpathFlac == "" {
+				ffpathFlac = "ffmpeg"
+			}
+
+			// Prefer VLC for ALAC→FLAC decode: VLC's native MP4 demuxer processes
+			// all fragments in Apple's fMP4 regardless of tfdt timestamps, while
+			// ffmpeg's mov demuxer drops fragments with duplicate tfdts.
+			vlcBin, hasVLC := findVLC(req.Options.VLCPath)
+			converted := false
+			if hasVLC {
+				// VLC decodes ALAC fMP4 → raw FLAC. VLC's MP4 demuxer handles
+				// Apple's identical-tfdt fragments correctly (ffmpeg's mov demuxer
+				// does not). The raw FLAC has correct audio but STREAMINFO.total_samples=0;
+				// tagFLAC re-encodes it with ffmpeg to fix that and embed tags.
+				rawFlac := flacTmp + ".raw.flac"
+				if err := runVLCToFLAC(vlcBin, tmpPath, rawFlac); err != nil {
+					fmt.Printf("export %s: vlc transcode failed: %v — trying ffmpeg\n", req.AssetID, err)
+					os.Remove(rawFlac) //nolint:errcheck
+				} else {
+					// Download artwork fresh from the Apple CDN URL rather than
+					// extracting from the m4a — more reliable across codec variants.
+					artTmp := rawFlac + ".art.jpg"
+					hasArt := false
+					if req.Options.EmbedArtwork && meta.ArtworkURL != "" {
+						if artBytes, _, aerr := downloadArtworkBytes(meta.ArtworkURL, req.Options.ArtworkSize); aerr == nil {
+							if werr := os.WriteFile(artTmp, artBytes, 0o644); werr == nil {
+								hasArt = true
+							}
+						}
 					}
-					artTmp = tmpPath + ".art." + ext
-					if werr := os.WriteFile(artTmp, data, 0o644); werr != nil {
-						artTmp = ""
+					artArg := ""
+					if hasArt {
+						artArg = artTmp
 					}
+
+					// tagFLAC re-encodes rawFlac → FLAC so ffmpeg writes correct
+					// STREAMINFO.total_samples (fixes Duration: N/A) and embeds
+					// metadata + artwork in a single pass.
+					if tagErr := tagFLAC(ffpathFlac, rawFlac, artArg, flacTmp, meta); tagErr != nil {
+						// Artwork embed failed — retry without artwork.
+						fmt.Printf("export %s: flac tag failed: %v — retrying without art\n", req.AssetID, tagErr)
+						os.Remove(flacTmp) //nolint:errcheck
+						if tagErr2 := tagFLAC(ffpathFlac, rawFlac, "", flacTmp, meta); tagErr2 != nil {
+							fmt.Printf("export %s: flac tag failed (no art): %v — keeping raw\n", req.AssetID, tagErr2)
+							if renErr := os.Rename(rawFlac, flacTmp); renErr != nil {
+								os.Remove(rawFlac) //nolint:errcheck
+							}
+						} else {
+							os.Remove(rawFlac) //nolint:errcheck
+						}
+					} else {
+						os.Remove(rawFlac) //nolint:errcheck
+					}
+					if hasArt {
+						os.Remove(artTmp) //nolint:errcheck
+					}
+					if !req.Options.KeepOriginal {
+						os.Remove(tmpPath) //nolint:errcheck
+					}
+					tmpPath = flacTmp
+					converted = true
 				}
 			}
-			if err := convertToFLAC(tmpPath, flacTmp, req.Options.FFmpegPath, artTmp, meta); err != nil {
-				fmt.Printf("export %s: flac conversion failed: %v — keeping .m4a\n", req.AssetID, err)
-				finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
-			} else {
-				if !req.Options.KeepOriginal {
-					os.Remove(tmpPath) //nolint:errcheck
+			if !converted {
+				// Fallback: ffmpeg all-in-one (conversion + tagging). Works when
+				// the fMP4 has correct monotonic tfdts (AAC path, or patched ALAC).
+				if err := runFFmpeg(ffpathFlac, tmpPath, "", flacTmp, meta); err != nil {
+					fmt.Printf("export %s: flac conversion failed: %v — keeping .m4a\n", req.AssetID, err)
+					finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
+				} else {
+					if !req.Options.KeepOriginal {
+						os.Remove(tmpPath) //nolint:errcheck
+					}
+					tmpPath = flacTmp
 				}
-				tmpPath = flacTmp
-			}
-			if artTmp != "" {
-				os.Remove(artTmp) //nolint:errcheck
 			}
 		}
 
@@ -644,8 +771,8 @@ func (m *Manager) execute(item *workItem) {
 	}()
 }
 
-// progressWriter wraps an io.Writer and updates job.BytesDone on each write
-// so the UI can show live byte counts during PhaseDownloading.
+// progressWriter wraps an io.Writer and updates job.BytesDone + Percent on
+// each write so the UI can show live byte-based download progress.
 type progressWriter struct {
 	w   io.Writer
 	mu  *sync.RWMutex
@@ -657,6 +784,13 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	if n > 0 {
 		pw.mu.Lock()
 		pw.job.BytesDone += int64(n)
+		if total := pw.job.BytesTotal; total > 0 {
+			pct := int(pw.job.BytesDone * 79 / total)
+			if pct > 79 {
+				pct = 79
+			}
+			pw.job.Percent = pct
+		}
 		pw.mu.Unlock()
 	}
 	return n, err
@@ -722,24 +856,11 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	if err != nil {
+	if _, err = io.Copy(out, in); err != nil {
+		out.Close()
 		return err
 	}
 	return out.Close()
-}
-
-// convertToFLAC invokes ffmpeg to transcode src (ALAC .m4a) to dst (.flac).
-// artPath is an optional cover image file path (see runFFmpeg).
-func convertToFLAC(src, dst, ffmpegPath, artPath string, meta TrackMeta) error {
-	if ffmpegPath == "" {
-		ffmpegPath = "ffmpeg"
-	}
-	if err := runFFmpeg(ffmpegPath, src, artPath, dst, meta); err != nil {
-		return fmt.Errorf("ffmpeg: %w", err)
-	}
-	return nil
 }
 
 // errFFmpegUnavailable is returned when ffmpeg is not on PATH.

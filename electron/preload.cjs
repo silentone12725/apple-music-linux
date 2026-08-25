@@ -95,6 +95,10 @@ contextBridge.exposeInMainWorld('amlBridge', {
     chooseDownloadDir: ()             => ipcRenderer.invoke('dialog:choose-download-dir'),
     mprisUpdate:    (d)         => ipcRenderer.send('mpris:update', d),
     onMprisCmd:     (cb)        => ipcRenderer.on('mpris:cmd', (_, cmd) => cb(cmd)),
+    // Encrypted per-key store (backed by safeStorage in main process)
+    storeRead:   (key)        => ipcRenderer.invoke('store:read',   key),
+    storeWrite:  (key, value) => ipcRenderer.invoke('store:write',  key, value),
+    storeDelete: (key)        => ipcRenderer.invoke('store:delete', key),
 });
 
 // ── Apple Music page setup ────────────────────────────────────────────────────

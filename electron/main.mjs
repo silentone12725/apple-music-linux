@@ -1,5 +1,5 @@
 import * as electronMain from 'electron/main';
-const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme } = electronMain;
+const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
@@ -11,6 +11,7 @@ import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, readdirSync } from 'fs';
+import { readFile as readFileAsync, writeFile as writeFileAsync } from 'fs/promises';
 import os from 'os';
 
 const require = createRequire(import.meta.url);
@@ -26,6 +27,39 @@ function loadPrefs() {
 function savePrefs(p) {
     mkdirSync(CONFIG_DIR, { recursive: true });
     writeFileSync(PREF_FILE, JSON.stringify(p, null, 2));
+}
+
+// ── Encrypted store ───────────────────────────────────────────────────────────
+// Per-key AES-256-GCM encryption via Electron safeStorage (OS keyring / DPAPI).
+// Falls back to plaintext in the same file if safeStorage is unavailable.
+const STORE_FILE = path.join(CONFIG_DIR, 'aml-store.enc');
+let _storeCache = null;    // in-memory cache to avoid race on rapid writes
+let _storeDirty = false;
+let _storeFlushTimer = null;
+
+async function _storeLoad() {
+    if (_storeCache) return _storeCache;
+    try {
+        const raw = await readFileAsync(STORE_FILE);
+        const enc = safeStorage.isEncryptionAvailable();
+        _storeCache = enc
+            ? JSON.parse(safeStorage.decryptString(raw))
+            : JSON.parse(raw.toString('utf8'));
+    } catch { _storeCache = {}; }
+    return _storeCache;
+}
+
+function _storeFlush() {
+    if (_storeFlushTimer) return;
+    _storeFlushTimer = setTimeout(async () => {
+        _storeFlushTimer = null;
+        if (!_storeDirty || !_storeCache) return;
+        _storeDirty = false;
+        mkdirSync(CONFIG_DIR, { recursive: true });
+        const enc = safeStorage.isEncryptionAvailable();
+        const json = JSON.stringify(_storeCache);
+        await writeFileAsync(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
+    }, 200);
 }
 
 // ── Chromium flags ──────────────────────────────────────────────────────────
@@ -717,15 +751,22 @@ function createWindow() {
         });
     }
 
-    const visionPath  = path.join(__dirname, 'vision-bundle.js');
+    // Prefer bundles from resourcesPath (outside ASAR) so they can be updated
+    // without repacking. Falls back to __dirname (inside ASAR) if not present.
+    const _resBundle = (name) => {
+        const outside = path.join(process.resourcesPath, name);
+        const inside  = path.join(__dirname, name);
+        return existsSync(outside) ? outside : inside;
+    };
+    const visionPath  = _resBundle('vision-bundle.js');
     const visionCode  = existsSync(visionPath) ? readFileSync(visionPath, 'utf8') : '';
     // engine-sse-bundle must load first — it creates window._amlEngine which
     // smart-cache and engine-playback subscribe to in their own constructors.
-    const ssePath     = path.join(__dirname, 'engine-sse-bundle.js');
+    const ssePath     = _resBundle('engine-sse-bundle.js');
     const sseCode     = existsSync(ssePath)    ? readFileSync(ssePath,    'utf8') : '';
-    const cachePath   = path.join(__dirname, 'smart-cache-bundle.js');
+    const cachePath   = _resBundle('smart-cache-bundle.js');
     const cacheCode   = existsSync(cachePath)  ? readFileSync(cachePath,  'utf8') : '';
-    const enginePath  = path.join(__dirname, 'engine-bundle.js');
+    const enginePath  = _resBundle('engine-bundle.js');
     const engineCode  = existsSync(enginePath) ? readFileSync(enginePath, 'utf8') : '';
 
     // ── Early CSS via insertCSS — fires before first paint, no preload risk ──
@@ -1228,6 +1269,24 @@ function applyPersistedViewSettings() {
 
 // ── IPC: prefs + view controls (used by settings panel) ─────────────────────
 ipcMain.handle('prefs:get', () => loadPrefs());
+
+// Encrypted per-key store (history, play-counts, etc.)
+ipcMain.handle('store:read',  async (_, key) => {
+    const store = await _storeLoad();
+    return store[key] ?? null;
+});
+ipcMain.handle('store:write', async (_, key, value) => {
+    const store = await _storeLoad();
+    store[key] = value;
+    _storeDirty = true;
+    _storeFlush();
+});
+ipcMain.handle('store:delete', async (_, key) => {
+    const store = await _storeLoad();
+    delete store[key];
+    _storeDirty = true;
+    _storeFlush();
+});
 ipcMain.handle('dialog:choose-download-dir', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
         title: 'Choose Download Folder',

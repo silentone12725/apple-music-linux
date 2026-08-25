@@ -83,8 +83,8 @@ navigator.getBattery?.().then(bat => {
 // ── Raw audio capture module ──────────────────────────────────────────────────
 // Stores raw chunk bytes + deep MP4 parse for every audio append so the
 // external debug_app.py inspector can retrieve and analyse them.
-// Capped at 64 MB total to avoid OOM.
-(function installAudioCapture() {
+// Capped at 64 MB total to avoid OOM.  Gated: set window._amlDebug=true to enable.
+if (window._amlDebug) (function installAudioCapture() {
     const CAP_LIMIT = 64 * 1024 * 1024;
 
     window.__amlCapture = {
@@ -210,6 +210,7 @@ let _nativeSrcSet = null; // saved by blockAppleCDN() for our own src writes
 let _nativeCTSet  = null; // native currentTime setter — used by MSE seek to fire 'seeking'
 let _nativePlay   = null; // saved when play() proxy is installed on the element
 let _ourBlobUrl   = null; // current blob URL we own; blocks MK from replacing it
+let _allowCDNTransition = false; // temporarily lifted during changeToMediaAtIndex so MK can settle NPIDF
 
 // The music.apple.com origin's HTMLMediaElement.prototype.play is gated by Chromium's
 // autoplay policy for that realm, which blocks play() on elements managed by the native
@@ -237,6 +238,14 @@ const _origFnApply    = Function.prototype.apply;
 let _vlcMode       = false; // true when VLC is handling playback (MSE bypassed)
 let _vlcPosMs      = 0;     // last polled VLC position (frozen during seek)
 let _vlcPaused     = false; // virtual paused state (overrides audio.paused in VLC mode)
+let _vlcVolPersist = 100;   // volume (0-200) persisted across track transitions
+let _amlTransitioning = false; // true during _amlGoto (set before setQueue, cleared after NPIDF)
+
+// ── Session history ────────────────────────────────────────────────────────────
+// Accumulates every song ID played this session so next/prev can slide freely
+// across the full play history, even across queue replacements.
+let _sessionHistory    = []; // song IDs in play order (grows as tracks play)
+let _sessionHistoryIdx = -1; // current position in _sessionHistory (-1 = nothing yet)
 let _vlcLyricsFreezeTimer = null; // fires timeupdate at frozen pos while VLC paused (keeps karaoke at exact word)
 
 function _startLyricsFreeze(mkAudio) {
@@ -257,6 +266,14 @@ let _vlcRetryCount    = 0;    // premature-end retries for current track (reset 
 let _vlcPrevState     = null; // last VLC state seen by the poll (null forces re-emit after seek)
 let _vlcLoading       = false; // true from VLC.Load until VLC first enters 'playing' state
 let _seekBurstLog     = 0;    // ticks remaining in post-seek burst logging window
+let _vlcPostSeek      = false; // true after seek fires, clears on next 'playing' tick
+let _vlcWasPlaying    = false; // playback state captured at seek initiation
+let _vlcSeekTargetMs  = 0;    // requested seek position; used in burst logs to show Δ from actual
+
+// ── Gapless ALAC pre-warm ─────────────────────────────────────────────────────
+let _nextAlacSession = null; // { adamId, sess } — pre-warmed session for the next ALAC track
+let _nextAlacTried   = false; // prevents re-triggering within the same track
+let _nextAlacRetries = 0;    // retry attempts so far for current track (max 3)
 
 // ── MSE state (AAC-only path) ─────────────────────────────────────────────────
 
@@ -311,7 +328,7 @@ function blockAppleCDN() {
     Object.defineProperty(HTMLMediaElement.prototype, 'src', {
         get: desc.get,
         set(val) {
-            if (isAppleCDN(val)) { console.log('[AML Engine] Blocked CDN src:', val.slice(0, 80)); return; }
+            if (isAppleCDN(val) && !_allowCDNTransition) { console.log('[AML Engine] Blocked CDN src:', val.slice(0, 80)); return; }
             if (val?.startsWith('blob:') && _ourBlobUrl && val !== _ourBlobUrl) { return; }
             desc.set.call(this, val);
         },
@@ -321,11 +338,42 @@ function blockAppleCDN() {
 
     const realSetAttr = HTMLMediaElement.prototype.setAttribute;
     HTMLMediaElement.prototype.setAttribute = function(name, val) {
-        if (name === 'src' && isAppleCDN(val)) return;
+        if (name === 'src' && isAppleCDN(val) && !_allowCDNTransition) return;
         return realSetAttr.call(this, name, val);
     };
 
     console.log('[AML Engine] Apple CDN audio blocked');
+
+    // Guard MK's MSE buffer management from crashing when SourceBuffers are detached.
+    // In VLC mode we install a silent MediaSource; MK's AudioPlayer keeps stale
+    // references to the old session's SourceBuffers and reads .buffered on every
+    // timeupdate, throwing InvalidStateError. Return an empty TimeRanges instead.
+    const _sbDesc = Object.getOwnPropertyDescriptor(SourceBuffer.prototype, 'buffered');
+    if (_sbDesc) {
+        const _sbEmptyEl = document.createElement('audio'); // buffered is always empty
+        Object.defineProperty(SourceBuffer.prototype, 'buffered', {
+            configurable: true,
+            get() {
+                try { return _sbDesc.get.call(this); }
+                catch (e) {
+                    if (e instanceof DOMException && e.name === 'InvalidStateError')
+                        return _sbEmptyEl.buffered;
+                    throw e;
+                }
+            }
+        });
+        // Also guard .remove() and .abort() which throw the same error on detached buffers
+        for (const method of ['remove', 'abort', 'appendBuffer']) {
+            const orig = SourceBuffer.prototype[method];
+            if (orig) SourceBuffer.prototype[method] = function(...args) {
+                try { return orig.apply(this, args); }
+                catch (e) {
+                    if (e instanceof DOMException && e.name === 'InvalidStateError') return;
+                    throw e;
+                }
+            };
+        }
+    }
 }
 
 // ── Play proxy (instance-level, installed lazily on first track change) ────────
@@ -402,15 +450,15 @@ function installMKSeekInterceptor(mk) {
                 audio.dispatchEvent(new Event('seeking'));
                 audio.dispatchEvent(new Event('seeked'));
             }
+            // Capture playback state on first seek call; MK may pause() during the
+            // scrub gesture which would flip _vlcPaused before the timer fires.
+            if (!_vlcSeekTimer) _vlcWasPlaying = !_vlcPaused;
             clearTimeout(_vlcSeekTimer);
             _vlcSeekTimer = setTimeout(async () => {
                 _vlcSeekTimer = null;
-                console.log(`[AML VLC] seek FIRE  posMs=${_vlcPosMs}`);
-                // Signal MK to show a buffering/loading indicator while VLC loads
-                // the new segment stream. The poll will dispatch 'playing' once VLC
-                // actually starts playing at the seek position.
-                getMKAudio()?.dispatchEvent(new Event('waiting'));
                 const seekTarget = _vlcPosMs;
+                _vlcSeekTargetMs = seekTarget;
+                console.log(`[AML VLC seek] ► SEND  posMs=${seekTarget}ms  wasPlaying=${_vlcWasPlaying}  uiPos=${_vlcPosMs}ms`);
                 let actualStartMs = seekTarget;
                 try {
                     const t0 = performance.now();
@@ -419,21 +467,25 @@ function installMKSeekInterceptor(mk) {
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ posMs: seekTarget, sessionId: _sessionId }),
                     });
+                    const rtt = (performance.now() - t0).toFixed(0);
                     const seekData = await seekResp.json().catch(() => ({}));
                     actualStartMs = seekData.actualStartMs ?? seekTarget;
-                    console.log(`[AML VLC] seek DONE  target=${seekTarget}ms  actualStart=${actualStartMs}ms  rtt=${(performance.now()-t0).toFixed(0)}ms`);
-                    // Snap position to the requested target so UI stays in sync while VLC loads.
+                    console.log(`[AML VLC seek] ◄ RECV  target=${seekTarget}ms  engine.actualStart=${actualStartMs}ms  rtt=${rtt}ms`);
+                    // Snap seek bar to the requested target while VLC reloads.
                     _vlcPosMs = seekTarget;
                 } catch (e) {
-                    console.warn(`[AML VLC] seek ERROR`, e);
+                    console.warn(`[AML VLC seek] ✗ ERROR`, e);
                 }
-                // VLC reports absolute fMP4 timestamps (tfdt), so no offset is needed.
-                // _vlcPosMs = posMs (raw VLC time) gives the correct absolute position.
                 _vlcSeekOffsetMs = 0;
-                _vlcPrevState = null;          // force poll to re-emit 'playing', cancelling 'waiting'
+                _vlcPrevState = null;
                 _vlcSeekFrozen = false;
-                _seekBurstLog = 15;            // log every tick for 15 ticks (3.75s) after seek
-                console.log(`[AML VLC] seek UNFREEZE`);
+                _seekBurstLog = 20;            // log every tick for 5s after seek
+                if (_vlcWasPlaying) {
+                    _vlcPaused   = false;
+                    _vlcPostSeek = true;
+                    fetch(`${ENGINE}/api/v1/vlc/resume`, { method: 'POST' }).catch(() => {});
+                }
+                console.log(`[AML VLC seek] ↺ UNFREEZE  uiPos=${_vlcPosMs}ms  postSeek=${_vlcPostSeek}`);
                 // Emit Seeked signal so MPRIS clients re-anchor their seek bar.
                 window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000, seeked: true });
             }, T().debounce);
@@ -1225,7 +1277,7 @@ async function startMVPipeline() {
     // the video stream and surfaces them as TextTrack objects on myVid. We render
     // them ourselves so they appear on top of our video overlay, not on nativeVidEl.
     const _subDiv = document.createElement('div');
-    _subDiv.style.cssText = 'position:absolute;bottom:90px;left:5%;right:5%;text-align:center;z-index:20;pointer-events:none;font-family:inherit;';
+    _subDiv.style.cssText = 'position:absolute;bottom:10%;left:5%;right:5%;text-align:center;z-index:20;pointer-events:none;font-family:-apple-system,SF Pro Text,system-ui,sans-serif;transition:bottom 0.25s ease;';
     mvContainer.appendChild(_subDiv);
     // _ccEnabled: follows native CC button. Default true — show if tracks exist.
     // Chromium extracts EIA-608 CC from the H.264 MSE stream and surfaces them as
@@ -1249,7 +1301,10 @@ async function startMVPipeline() {
             }
         }
         if (lines.length) {
-            _subDiv.innerHTML = `<span style="display:inline-block;background:rgba(0,0,0,0.72);color:#fff;padding:3px 10px;border-radius:4px;font-size:1.05em;line-height:1.45;white-space:pre-wrap;max-width:80%">${lines.map(l => l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')).join('\n')}</span>`;
+            // Content-aware positioning: shift higher when cues are dense
+            _subDiv.style.bottom = lines.length > 2 ? '22%' : '10%';
+            const escaped = lines.map(l => l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')).join('\n');
+            _subDiv.innerHTML = `<span style="display:inline-block;background:rgba(20,20,22,0.72);backdrop-filter:blur(14px) saturate(1.8);-webkit-backdrop-filter:blur(14px) saturate(1.8);color:#fff;padding:5px 14px 6px;border-radius:7px;font-size:15px;font-weight:500;line-height:1.55;white-space:pre-wrap;max-width:84%;letter-spacing:-0.1px;text-shadow:0 1px 2px rgba(0,0,0,0.3);">${escaped}</span>`;
         } else {
             _subDiv.innerHTML = '';
         }
@@ -1262,6 +1317,33 @@ async function startMVPipeline() {
     };
     for (let i = 0; i < myVid.textTracks.length; i++) _attachTrack(myVid.textTracks[i]);
     myVid.textTracks.addEventListener('addtrack', e => _attachTrack(e.track));
+
+    // ── Lyrics subtitle track ─────────────────────────────────────────────────
+    // Fetch lyrics as WebVTT from the engine and inject a <track> element.
+    // _attachTrack / _renderSubs already handle any track added to myVid.textTracks,
+    // so no extra wiring is needed — just add the element.
+    void (async () => {
+        const lyricsId = _currentAssetId;
+        const lyricsSf = mk.storefrontId ?? 'us';
+        if (!lyricsId) return;
+        try {
+            const r = await fetch(`${ENGINE}/api/v1/lyrics/${encodeURIComponent(lyricsId)}?sf=${encodeURIComponent(lyricsSf)}&format=vtt`);
+            if (_generation !== _mvGen || !r.ok) return;
+            const vtt = await r.text();
+            if (_generation !== _mvGen || !vtt || !vtt.startsWith('WEBVTT')) return;
+            const blob = new Blob([vtt], { type: 'text/vtt' });
+            const url = URL.createObjectURL(blob);
+            const trackEl = document.createElement('track');
+            trackEl.kind = 'subtitles';
+            trackEl.srclang = 'en';
+            trackEl.label = 'Lyrics';
+            trackEl.src = url;
+            trackEl.default = true;
+            myVid.appendChild(trackEl);
+            _abortCtrl.signal.addEventListener('abort', () => URL.revokeObjectURL(url), { once: true });
+        } catch (_) {}
+    })();
+
     // Expand avpi + avp to fill the entire container so the native scrim controls
     // span the full viewport (header at top, footer at bottom, clickable in between).
     // Cancel Apple Music's transform:translateY(-256.5px) animation on avpi. Without
@@ -2243,25 +2325,7 @@ async function startMVPipeline() {
         // but guard here for the video-ends-first path.
         try { delete mkAudio.load; } catch (_) {}
         _abortCtrl.abort();
-        // Advance queue via MK API (mirrors VLC skipToNextItem pattern).
-        const _mkInst = window.MusicKit?.getInstance?.();
-        if (_mkInst) {
-            let _advanced = false;
-            const _clearAdv = () => { _advanced = true; clearTimeout(_skipTimer); };
-            _mkInst.addEventListener('nowPlayingItemDidChange', _clearAdv, { once: true });
-            const _skipTimer = setTimeout(() => {
-                if (!_advanced) {
-                    try { delete mkAudio.load; } catch (_) {}
-                    mkAudio.dispatchEvent(new Event('ended'));
-                }
-            }, 3000);
-            _mkInst.skipToNextItem().catch(e => {
-                _clearAdv();
-                console.warn('[AML MV] skipToNextItem failed:', e?.message, '→ ended fallback');
-                try { delete mkAudio.load; } catch (_) {}
-                mkAudio.dispatchEvent(new Event('ended'));
-            });
-        }
+        _amlNext().catch(() => {});
         setTimeout(() => exitBtn?.click(), 200);
     };
     const onVideoError  = () => {
@@ -2408,226 +2472,17 @@ function startVLCPoll(mkAudio) {
             if (!_vlcLengthSet && lengthMs > 0) {
                 _vlcLengthSet = true;
                 _durationSec = lengthMs / 1000;
-                bridgeDuration(mk, _durationSec);
-
-
-        // --- Extracted pipeline functions ---
-        async function startAACPipeline() {
-            // ── MSE path: native AAC fMP4 piped directly into the browser ──────
-            // Seek works via ?t= (SeekableSource on engine side).
-            // ALAC/Atmos still go through VLC below.
-
-            _seekable    = sess.capabilities?.seekable ?? false;
-            _chunkCache  = { sessionId: _sessionId, chunks: [], byteSize: 0 };
-            const audioPath  = sess.streams?.audio ?? `/api/v1/playback/${_sessionId}/audio`;
-            const streamBase = `${ENGINE}${audioPath}?raw=1`;
-            _activeStreamBase = streamBase;
-
-            const ms      = new MediaSource();
-            const blobUrl = URL.createObjectURL(ms);
-            _ourBlobUrl   = blobUrl;
-            _nativeSrcSet.call(mkAudio, blobUrl);
-
-            delete mkAudio.load;
-            HTMLMediaElement.prototype.load.call(mkAudio);
-            mkAudio.load = () => {};
-
-            await new Promise((resolve, reject) => {
-                ctrl.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-                ms.addEventListener('sourceopen', resolve, { once: true });
-            });
-            URL.revokeObjectURL(blobUrl);
-            if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
-
-            const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
-            sb.addEventListener('error', e => console.error('[AML MSE] SourceBuffer error', e));
-            _activeSb = sb; _activeMs = ms;
-
-            // ── Mirror VLC play/pause pattern ──────────────────────────────────
-            // Override pause/paused on the element instance so ALL pause() calls —
-            // from MK internals, the proxy, or anywhere — go through one handler.
-            // Without this, MK can call audio.pause() directly and bypass our flag.
-            const _nativeMSEPause = HTMLMediaElement.prototype.pause.bind(mkAudio);
-            _msePaused = false;
-            Object.defineProperty(mkAudio, 'paused', {
-                get: () => _msePaused,
-                configurable: true,
-            });
-            mkAudio.pause = () => {
-                _msePaused = true;
-                _nativeMSEPause(); // actually stop audio output
-            };
-
-            mkAudio.addEventListener('loadedmetadata', function onMeta() {
-                try {
-                    if (sb.buffered.length > 0 && sb.buffered.start(0) > mkAudio.currentTime + 0.1)
-                        mkAudio.currentTime = sb.buffered.start(0);
-                    else if (sb.buffered.length === 0)
-                        sb.addEventListener('updateend', () => { try { if (sb.buffered.length > 0 && sb.buffered.start(0) > mkAudio.currentTime + 0.1) mkAudio.currentTime = sb.buffered.start(0); } catch(_){} }, { once: true });
-                } catch (_) {}
-            }, { once: true });
-
-            _pipeCtrl = new AbortController();
-            const pipeCtrl = _pipeCtrl;
-            pipeToSourceBuffer(sb, mkAudio, streamBase, pipeCtrl.signal, ms, _durationSec, t0).catch(e => {
-                if (!pipeCtrl.signal.aborted) console.error('[AML MSE] pipe error:', e.message);
-            });
-
-            const onSeeking = () => {
-                if (ctrl.signal.aborted) return;
-                if (!_ourSeekPending) return;
-                _ourSeekPending = false;
-                mseSeekToTime(_ourSeekTarget, mkAudio, sb, ms);
-            };
-
-            const tryPlay = () => {
-                if (ctrl.signal.aborted) return;
-                mkAudio.addEventListener('seeking', onSeeking);
-                if (_ourSeekPending) {
-                    _ourSeekPending = false;
-                    mseSeekToTime(_ourSeekTarget, mkAudio, sb, ms);
-                    return;
-                }
-                _nativePlay().catch(e => console.warn('[AML MSE] play():', e));
-            };
-
-            if (mkAudio.readyState >= 3) tryPlay();
-            else mkAudio.addEventListener('canplay', tryPlay, { once: true });
-
-            ctrl.signal.addEventListener('abort', () => {
-                mkAudio.removeEventListener('seeking', onSeeking);
-                mkAudio.removeEventListener('canplay', tryPlay);
-                delete mkAudio.paused;
-                delete mkAudio.pause;
-                _msePaused = false;
-            }, { once: true });
-
-            console.log(`[AML MSE] AAC stream open +${((performance.now()-t0)/1000).toFixed(2)}s`);
-        }
-
-        async function startVLCPipeline() {
-            // ── VLC path: ALAC and Atmos routed through libvlc ──────────────────
-
-            _vlcMode = true;
-
-            // Keep mkAudio in a perpetual loading state via an open MediaSource.
-            // MK's state machine reads DOM events (playing, pause, timeupdate, ended)
-            // from this element; actual audio comes from libvlc → system sound device.
-            const _silentMs  = new MediaSource();
-            const _silentUrl = URL.createObjectURL(_silentMs);
-            _nativeSrcSet.call(mkAudio, _silentUrl);
-            delete mkAudio.load;
-            HTMLMediaElement.prototype.load.call(mkAudio);
-            mkAudio.load = () => {};
-
-            _vlcPaused = false;
-            Object.defineProperty(mkAudio, 'paused', {
-                get: () => _vlcPaused,
-                configurable: true,
-            });
-
-            _vlcPosMs = 0;
-            Object.defineProperty(mkAudio, 'currentTime', {
-                get: () => _vlcPosMs / 1000,
-                set: () => {},
-                configurable: true,
-            });
-
-            const _volDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
-            let _vlcVolume = Math.round((_volDesc.get.call(mkAudio) ?? 1) * 100) || 100;
-            let _vlcMuted = false;
-            let _vlcPreMuteVol = _vlcVolume;
-            const _postVlcVol = (vol) => fetch(`${ENGINE}/api/v1/vlc/volume`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ volume: vol }),
-            }).catch(() => {});
-
-            Object.defineProperty(mkAudio, 'volume', {
-                get: () => _vlcVolume / 100,
-                set: (v) => {
-                    _vlcVolume = Math.max(0, Math.min(200, Math.round(v * 100)));
-                    if (_vlcVolume > 0) _vlcMuted = false;
-                    _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
-                    mkAudio.dispatchEvent(new Event('volumechange'));
-                },
-                configurable: true,
-            });
-
-            Object.defineProperty(mkAudio, 'muted', {
-                get: () => _vlcMuted,
-                set: (v) => {
-                    _vlcMuted = !!v;
-                    if (_vlcMuted) { _vlcPreMuteVol = _vlcVolume || 100; _postVlcVol(0); }
-                    else { _vlcVolume = _vlcPreMuteVol; _postVlcVol(_vlcVolume); }
-                    mkAudio.dispatchEvent(new Event('volumechange'));
-                },
-                configurable: true,
-            });
-
-            mkAudio.pause = () => {
-                console.log(`[AML VLC] pause() → pause`);
-                _vlcPaused = true;
-                mkAudio.dispatchEvent(new Event('pause'));
-                _startLyricsFreeze(mkAudio);
-                fetch(`${ENGINE}/api/v1/vlc/pause`, { method: 'POST' }).catch(() => {});
-            };
-
-            _vlcLoading = true;
-            const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sessionId: _sessionId, assetId: adamId, startMs: 0 }),
-                signal: ctrl.signal,
-            });
-            if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
-
-            _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
-
-            if (ctrl.signal.aborted) return;
-
-            mkAudio.addEventListener('canplay', () => {
-                if (!ctrl.signal.aborted) {
-                    _vlcPaused = false;
-                    mkAudio.dispatchEvent(new Event('playing'));
-                    if (_vlcLoading) mkAudio.dispatchEvent(new Event('waiting'));
-                }
-            }, { once: true });
-            mkAudio.dispatchEvent(new Event('canplay'));
-
-            startVLCPoll(mkAudio);
-            console.log(`[AML Engine] VLC playing +${((performance.now()-t0)/1000).toFixed(2)}s`);
-
-            ctrl.signal.addEventListener('abort', () => {
-                unbridgeDuration();
-                stopVLCPoll();
-                _stopLyricsFreeze();
-                _vlcLoading = false;
-                URL.revokeObjectURL(_silentUrl);
-                delete mkAudio.paused;
-                delete mkAudio.currentTime;
-                delete mkAudio.volume;
-                delete mkAudio.muted;
-                delete mkAudio.pause;
-                _vlcPaused = false;
-            }, { once: true });
-        }
-
-// startMVPipeline is defined at module scope below startVLCPoll
-
-        // --- End of extracted pipeline functions ---
-
-
-
-        if (item.type === 'music-videos' || item.type === 'musicVideo') {
-        await startMVPipeline();
-        return;
-        } else if (sess.codec === 'aac') {
-        await startAACPipeline();
-        return;
-        } else {
-        await startVLCPipeline();
-        return;
-        }
+                // _mkInstance is set by bridgeDuration in handleTrackChange when the
+                // session opens. Use it here since mk is not in scope in startVLCPoll.
+                if (_mkInstance) bridgeDuration(_mkInstance, _durationSec);
+            }
+            // Gapless: pre-warm next ALAC session as soon as VLC reports the duration
+            // (first poll after track starts). Maximises time for the background
+            // disk-cache download to complete before the track ends.
+            if (!_nextAlacTried && !_nextAlacSession && _durationSec > 0) {
+                _nextAlacTried = true;
+                console.log(`[AML Gapless] trigger at track start (dur=${_durationSec.toFixed(1)}s) — starting ALAC pre-warm`);
+                _prewarmNextAlac().catch(() => {});
             }
             const prevPos = _vlcPosMs;
             // VLC reports absolute fMP4 tfdt timestamps, so posMs is already the
@@ -2639,11 +2494,12 @@ function startVLCPoll(mkAudio) {
             if (++_tickCount % 4 === 0) {
                 window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000 }); // ms → µs
             }
-            // Burst-log every tick for 15 ticks after a seek so we can diagnose
-            // exactly what VLC does immediately after loading the seek stream.
+            // Burst-log every tick for 20 ticks (5s) after a seek.
             if (_seekBurstLog > 0) {
                 _seekBurstLog--;
-                console.log(`[AML VLC seek] tick posMs=${posMs} state=${state} offset=${_vlcSeekOffsetMs} pos=${_vlcPosMs} frozen=${_vlcSeekFrozen}`);
+                const delta = posMs > 0 ? posMs - _vlcSeekTargetMs : null;
+                const deltaStr = delta !== null ? ` Δ=${delta >= 0 ? '+' : ''}${delta}ms` : '';
+                console.log(`[AML VLC seek] poll  vlc.posMs=${posMs}ms  ui.pos=${_vlcPosMs}ms  target=${_vlcSeekTargetMs}ms${deltaStr}  state=${state}  frozen=${_vlcSeekFrozen}`);
             } else if (_tickCount % 20 === 0) {
                 // Log position every ~5 seconds during normal playback.
                 console.log(`[AML VLC] pos=${posMs}ms state=${state}`);
@@ -2660,12 +2516,23 @@ function startVLCPoll(mkAudio) {
                 _vlcPaused = false;
                 _stopLyricsFreeze();
                 _vlcLoading = false; // VLC is actually playing; clear pre-warmup guard
-                // Only dispatch 'playing' for initial start (null/stopped → playing).
-                // Resume from pause is handled by _origMKPlay() — dispatching here
-                // causes PlayActivity.play() to be called twice and throws.
-                if (prev !== 'paused') mkAudio.dispatchEvent(new Event('playing'));
+                // Dispatch 'playing' for initial start OR post-seek resume.
+                // Normal pause→play resume is handled by _origMKPlay() to avoid
+                // calling PlayActivity.play() twice (which throws).
+                const fromSeek = _vlcPostSeek;
+                _vlcPostSeek = false;
+                if (prev !== 'paused' || fromSeek) mkAudio.dispatchEvent(new Event('playing'));
             }
-            if (state === 'paused') { _vlcPaused = true; mkAudio.dispatchEvent(new Event('pause')); _startLyricsFreeze(mkAudio); }
+            if (state === 'paused') {
+                // Suppress spurious pause events while waiting for VLC to resume
+                // after a seek — the poll may see a transient paused state between
+                // SetTime completing and VLC re-entering playing.
+                if (!_vlcPostSeek) {
+                    _vlcPaused = true;
+                    mkAudio.dispatchEvent(new Event('pause'));
+                    _startLyricsFreeze(mkAudio);
+                }
+            }
             // VLC goes playing → ended → stopped in quick succession.
             // If the 250ms poll fires after the ended state has already passed,
             // we see playing → stopped and must treat it as a track end too.
@@ -2678,10 +2545,7 @@ function startVLCPoll(mkAudio) {
                     _vlcPosMs = Math.round(_durationSec * 1000);
                     mkAudio.dispatchEvent(new Event('timeupdate'));
                 }
-                // Premature end: VLC got EOF at posMs≈0 because the cbcs stream failed
-                // before delivering enough data. Reload the same session URL and retry
-                // rather than skipping. Limit to 2 retries to avoid an infinite loop
-                // when the engine is genuinely broken.
+                // Premature end at posMs≈0: cbcs stream failed before delivering data.
                 if (posMs < 2000 && _durationSec > 5 && _vlcRetryCount < 2) {
                     _vlcRetryCount++;
                     _vlcSeekOffsetMs = 0;
@@ -2696,41 +2560,31 @@ function startVLCPoll(mkAudio) {
                     }, 1500);
                     return;
                 }
-                // skipToNextItem() advances the queue via MK's API without triggering
-                // PlayActivity's analytics descriptor (which we never initialise).
-                // However, it can silently fail when called from a natural track end
-                // (MK's state differs from a user-initiated skip). Guard with:
-                //  - .catch: immediate fallback if skipToNextItem rejects
-                //  - 3s timer: fallback if it resolves but nowPlayingItemDidChange
-                //    never fires (MK internal state stall)
-                // Both fallbacks dispatch 'ended' on mkAudio — this may trigger a
-                // PlayActivity "no descriptor" error in the console, but the queue
-                // still advances correctly.
-                const _mkInst = window.MusicKit?.getInstance?.();
-                if (_mkInst) {
-                    console.log('[AML VLC] ended → skipToNextItem');
-                    let _advanced = false;
-                    const _clearAdvance = () => { _advanced = true; clearTimeout(_skipTimer); };
-                    _mkInst.addEventListener('nowPlayingItemDidChange', _clearAdvance, { once: true });
-                    const _skipTimer = setTimeout(() => {
-                        if (!_advanced) {
-                            console.warn('[AML VLC] skipToNextItem stalled → ended fallback');
-                            // Restore native load() so MK can process the ended event and
-                            // advance its queue exactly once. Our handleTrackChange will
-                            // re-override it for the new track.
-                            try { delete mkAudio.load; } catch (_) {}
-                            mkAudio.dispatchEvent(new Event('ended'));
-                        }
-                    }, 3000);
-                    _mkInst.skipToNextItem().catch(e => {
-                        _clearAdvance();
-                        console.warn('[AML VLC] skipToNextItem failed:', e?.message, '→ ended fallback');
-                        try { delete mkAudio.load; } catch (_) {}
-                        mkAudio.dispatchEvent(new Event('ended'));
-                    });
-                } else {
-                    mkAudio.dispatchEvent(new Event('ended'));
+                // False end: VLC hit EOF well before the expected track duration.
+                // Use vlc/seek (SetTime) to resume — avoids CDN re-download.
+                // The server will reload from disk cache if available, then SetTime.
+                const trackEndMs = Math.round(_durationSec * 1000);
+                if (posMs > 2000 && trackEndMs > 5000 && posMs < trackEndMs - 3000 && _vlcRetryCount < 2) {
+                    _vlcRetryCount++;
+                    const resumeMs = posMs;
+                    console.warn(`[AML VLC] false end at ${posMs}ms (track=${trackEndMs}ms) — seeking to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
+                    setTimeout(() => {
+                        if (!_sessionId) return;
+                        fetch(`${ENGINE}/api/v1/vlc/seek`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ posMs: resumeMs, sessionId: _sessionId }),
+                        }).then(() => {
+                            _vlcPosMs = resumeMs;
+                            startVLCPoll(mkAudio);
+                        }).catch(() => {});
+                    }, 500);
+                    return;
                 }
+                console.log('[AML VLC] ended → _amlNext');
+                // _amlGoto deletes VLC property overrides from mkAudio before
+                // changeToMediaAtIndex so audio.load() executes and MK transitions.
+                _amlNext().catch(() => {});
             }
         } catch (_) {
             // Stop polling after 5 consecutive errors (engine exited or unreachable).
@@ -2763,11 +2617,107 @@ function waitForLossless(timeoutMs) {
 }
 
 
+// ── Gapless ALAC pre-warm ─────────────────────────────────────────────────────
+// Creates an ALAC session for the next queue item and kicks off a background
+// disk-cache download on the engine side so VLC can load the track instantly.
+async function _prewarmNextAlac() {
+    const mk = _mkInstance;
+    if (!mk) return;
+    const items = mk.queue?.items;
+    const pos   = mk.queue?.position ?? -1;
+    if (!items || pos < 0 || pos + 1 >= items.length) return;
+    const nextItem   = items[pos + 1];
+    const nextAdamId = nextItem?.playParams?.catalogId
+        ?? nextItem?.attributes?.playParams?.catalogId
+        ?? nextItem?.id
+        ?? nextItem?.playParams?.id
+        ?? nextItem?.attributes?.playParams?.id;
+    if (!nextAdamId) return;
+    // Skip if next track is a music video — VLC path doesn't apply.
+    if (nextItem?.type === 'music-videos' || nextItem?.type === 'musicVideo' ||
+        nextItem?.type === 'library-music-videos') return;
+    // Skip if user has forced AAC quality — no ALAC session needed.
+    if (!_engineCaps.lossless || _streamingQuality === 'high-quality') return;
+
+    const nextName = nextItem?.attributes?.name ?? nextAdamId;
+    const attempt  = _nextAlacRetries + 1;
+    console.log(`[AML Gapless] opening session for "${nextName}" (${nextAdamId}) attempt=${attempt}`);
+    const t0 = performance.now();
+
+    // Schedules a retry in 5s if the user is still on the same track.
+    // Only retries transient failures (network errors, 5xx) — not permanent ones
+    // (auth errors, codec mismatches).
+    const _scheduleRetry = (reason) => {
+        if (_nextAlacRetries >= 3) {
+            console.warn(`[AML Gapless] ${reason} — max retries reached, giving up`);
+            return;
+        }
+        _nextAlacRetries++;
+        console.log(`[AML Gapless] ${reason} — retry ${_nextAlacRetries}/3 in 5s`);
+        setTimeout(() => {
+            // Don't retry if the track changed or a session was already populated.
+            if (_nextAlacSession || !_nextAlacTried) return;
+            _nextAlacTried = false; // allow the poll to re-trigger
+        }, 5000);
+    };
+
+    try {
+        const sf = mk.storefrontId ?? 'us';
+        const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                assetId:    nextAdamId,
+                storefront: sf,
+                capabilities: { lossless: true, atmos: false, video: false },
+                token:          mk.developerToken ?? '',
+                mediaUserToken: getMUT(),
+            }),
+        });
+        if (!sessResp.ok) {
+            const permanent = sessResp.status === 401 || sessResp.status === 403 || sessResp.status === 404;
+            if (permanent) {
+                console.warn(`[AML Gapless] session open failed ${sessResp.status} (permanent) — will not retry`);
+            } else {
+                _scheduleRetry(`session open failed ${sessResp.status}`);
+            }
+            return;
+        }
+        const sess = await sessResp.json();
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+        // Only store lossless sessions; AAC fallback can't benefit from this path.
+        if (sess.codec !== 'alac') {
+            console.log(`[AML Gapless] skipped — engine returned ${sess.codec} (not lossless) in ${elapsed}s — will not retry`);
+            deleteSession(sess.sessionId);
+            return;
+        }
+        _nextAlacSession = { adamId: nextAdamId, sess };
+        console.log(`[AML Gapless] session ready ${sess.sessionId} dur=${(sess.durationMs/1000).toFixed(1)}s in ${elapsed}s — kicking off disk cache download`);
+        // Fire precache; response tells us whether the cache was already warm.
+        fetch(`${ENGINE}/api/v1/playback/${sess.sessionId}/precache`, { method: 'POST' })
+            .then(r => {
+                if (r.status === 204) console.log('[AML Gapless] disk cache already populated — gapless ready ✓');
+                else if (r.status === 202) console.log('[AML Gapless] disk cache download started in engine background');
+                else console.warn(`[AML Gapless] precache returned unexpected ${r.status}`);
+            })
+            .catch(() => console.warn('[AML Gapless] precache request failed — VLC will download on first play'));
+    } catch (e) {
+        _scheduleRetry(`pre-warm error: ${e?.message}`);
+    }
+}
+
 // ── Core playback handler ─────────────────────────────────────────────────────
 
 async function handleTrackChange(mk) {
     let item = mk.nowPlayingItem;
     if (!item) {
+        if (_allowCDNTransition) {
+            // _amlGoto is in a controlled changeToMediaAtIndex call with the CDN block
+            // lifted. MK fires a null NPIDF first; the real item follows once MK's
+            // audio pipeline has set src + load. Don't block audio.load here — doing so
+            // prevents MK from completing the transition and the settled NPIDF never fires.
+            return;
+        }
         // MK briefly fires nowPlayingItemDidChange with null nowPlayingItem during queue
         // transitions. Block audio.load for 100ms so MK can't cascade to the next song
         // while the item settles, then retry once.
@@ -2792,7 +2742,8 @@ async function handleTrackChange(mk) {
     _streamComplete = false; _chunkCache = null; _msePaused = false;
     if (_seekFetchCtrl) { _seekFetchCtrl.abort(); _seekFetchCtrl = null; }
     // VLC state reset
-    _vlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _stopLyricsFreeze(); _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0;
+    _vlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _stopLyricsFreeze(); _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0; _vlcPostSeek = false; _vlcWasPlaying = false; _vlcSeekTargetMs = 0;
+    _nextAlacTried = false; _nextAlacRetries = 0;
     if (_vlcSeekTimer) { clearTimeout(_vlcSeekTimer); _vlcSeekTimer = null; }
     stopVLCPoll();
     unbridgeDuration();
@@ -2813,6 +2764,13 @@ async function handleTrackChange(mk) {
     const sf     = mk.storefrontId ?? 'us';
     if (!adamId) { console.warn('[AML Engine] No Adam ID'); return; }
     _currentAssetId = adamId;
+
+    // Discard stale ALAC pre-warm if it's for a different track (user skipped).
+    if (_nextAlacSession && _nextAlacSession.adamId !== adamId) {
+        console.log(`[AML Gapless] MISS — pre-warm was for ${_nextAlacSession.adamId}, playing ${adamId} — discarding`);
+        deleteSession(_nextAlacSession.sess.sessionId);
+        _nextAlacSession = null;
+    }
 
     // Music videos play natively through MusicKit — don't intercept.
 
@@ -2837,25 +2795,35 @@ async function handleTrackChange(mk) {
     if (myGen !== _generation) return;
 
     try {
-        const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                assetId:    adamId,
-                storefront: sf,
-                capabilities: {
-                    lossless: _engineCaps.lossless && _streamingQuality !== 'high-quality',
-                    atmos:    false,
-                    video:    (item.type === 'music-videos' || item.type === 'musicVideo'),
-                },
-                mvMaxHeight:    _mvMaxHeight,
-                token:          mk.developerToken ?? '',
-                mediaUserToken: getMUT(),
-            }),
-        });
-        if (!sessResp.ok) throw new Error(`Session ${sessResp.status}: ${await sessResp.text()}`);
-
-        const sess = await sessResp.json();
+        // Gapless: reuse the pre-warmed ALAC session if available, skipping the
+        // webplayback API round-trip (~1–2 s) and CDN download (~2–5 s).
+        const isVideo = item.type === 'music-videos' || item.type === 'musicVideo' || item.type === 'library-music-videos';
+        const losslessWanted = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+        let sess;
+        if (!isVideo && losslessWanted && _nextAlacSession?.adamId === adamId) {
+            sess = _nextAlacSession.sess;
+            _nextAlacSession = null;
+            console.log(`[AML Gapless] ✓ HIT — using pre-warmed ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs/1000).toFixed(1)}s (saved ~2–5s webplayback+CDN)`);
+        } else {
+            const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    assetId:    adamId,
+                    storefront: sf,
+                    capabilities: {
+                        lossless: losslessWanted,
+                        atmos:    false,
+                        video:    isVideo,
+                    },
+                    mvMaxHeight:    _mvMaxHeight,
+                    token:          mk.developerToken ?? '',
+                    mediaUserToken: getMUT(),
+                }),
+            });
+            if (!sessResp.ok) throw new Error(`Session ${sessResp.status}: ${await sessResp.text()}`);
+            sess = await sessResp.json();
+        }
 
         if (myGen !== _generation) { deleteSession(sess.sessionId); return; }
 
@@ -2982,6 +2950,9 @@ async function handleTrackChange(mk) {
             // Keep mkAudio in a perpetual loading state via an open MediaSource.
             // MK's state machine reads DOM events (playing, pause, timeupdate, ended)
             // from this element; actual audio comes from libvlc → system sound device.
+            // Re-enable CDN block now that VLC has taken over — any CDN URLs set by
+            // MK after this point should be blocked (we own the audio element).
+            _allowCDNTransition = false;
             const _silentMs  = new MediaSource();
             const _silentUrl = URL.createObjectURL(_silentMs);
             _nativeSrcSet.call(mkAudio, _silentUrl);
@@ -3002,21 +2973,31 @@ async function handleTrackChange(mk) {
                 configurable: true,
             });
 
-            const _volDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
-            let _vlcVolume = Math.round((_volDesc.get.call(mkAudio) ?? 1) * 100) || 100;
+            let _vlcVolume = _vlcVolPersist; // restore volume from previous track
             let _vlcMuted = false;
             let _vlcPreMuteVol = _vlcVolume;
+            let _vlcVolSetting = false; // re-entry guard: prevents setter→volumechange→setter loop
             const _postVlcVol = (vol) => fetch(`${ENGINE}/api/v1/vlc/volume`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ volume: vol }),
             }).catch(() => {});
+            const _dispatchVolChange = () => {
+                if (_vlcVolSetting) return;
+                _vlcVolSetting = true;
+                try { mkAudio.dispatchEvent(new Event('volumechange')); }
+                finally { _vlcVolSetting = false; }
+            };
             Object.defineProperty(mkAudio, 'volume', {
                 get: () => _vlcVolume / 100,
                 set: (v) => {
-                    _vlcVolume = Math.max(0, Math.min(200, Math.round(v * 100)));
+                    if (_vlcVolSetting) return;
+                    const newVol = Math.max(0, Math.min(200, Math.round(v * 100)));
+                    if (newVol === _vlcVolume) return; // MK sync no-op — value unchanged
+                    _vlcVolume = newVol;
+                    _vlcVolPersist = newVol; // save for next track
                     if (_vlcVolume > 0) _vlcMuted = false;
                     _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
-                    mkAudio.dispatchEvent(new Event('volumechange'));
+                    _dispatchVolChange();
                 },
                 configurable: true,
             });
@@ -3025,8 +3006,8 @@ async function handleTrackChange(mk) {
                 set: (v) => {
                     _vlcMuted = !!v;
                     if (_vlcMuted) { _vlcPreMuteVol = _vlcVolume || 100; _postVlcVol(0); }
-                    else { _vlcVolume = _vlcPreMuteVol; _postVlcVol(_vlcVolume); }
-                    mkAudio.dispatchEvent(new Event('volumechange'));
+                    else { _vlcVolume = _vlcPreMuteVol; _vlcVolPersist = _vlcVolume; _postVlcVol(_vlcVolume); }
+                    _dispatchVolChange();
                 },
                 configurable: true,
             });
@@ -3085,6 +3066,223 @@ async function handleTrackChange(mk) {
     }
 }
 
+// ── Queue History Panel ───────────────────────────────────────────────────────
+
+const _HIST_KEY = 'aml_play_history';
+const _HIST_MAX = 50;
+
+let _queueHistory = [];
+
+// Load from encrypted store (async). Falls back to legacy localStorage on first run.
+async function _histLoadAsync() {
+    try {
+        const raw = await window.amlBridge?.storeRead(_HIST_KEY);
+        if (raw) { _queueHistory = JSON.parse(raw); return; }
+    } catch (_) {}
+    // Migration: read legacy plaintext localStorage and re-save encrypted
+    try {
+        const legacy = localStorage.getItem(_HIST_KEY);
+        if (legacy) {
+            _queueHistory = JSON.parse(legacy);
+            await window.amlBridge?.storeWrite(_HIST_KEY, legacy);
+            localStorage.removeItem(_HIST_KEY);
+        }
+    } catch (_) {}
+}
+
+async function _histSaveAsync() {
+    try {
+        await window.amlBridge?.storeWrite(_HIST_KEY, JSON.stringify(_queueHistory));
+    } catch (_) {}
+}
+
+function _histArtUrl(artwork, size = 48) {
+    if (!artwork?.url) return null;
+    return artwork.url.replace('{w}', size).replace('{h}', size);
+}
+
+function _histEscape(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _histFmtDur(ms) {
+    if (!ms) return '';
+    const s = Math.round(ms / 1000);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function _histPush(item) {
+    if (!item) return;
+    const entry = {
+        name:       item.attributes?.name       || '',
+        artist:     item.attributes?.artistName || '',
+        artworkUrl: _histArtUrl(item.attributes?.artwork),
+        duration:   _histFmtDur(item.attributes?.durationInMillis),
+        id:         item.id,
+        catalogId:  item.playParams?.catalogId  || item.attributes?.playParams?.catalogId || item.id,
+        ts:         Date.now(),
+    };
+    if (!entry.name || _queueHistory[0]?.id === entry.id) return;
+    _queueHistory.unshift(entry);
+    if (_queueHistory.length > _HIST_MAX) _queueHistory.length = _HIST_MAX;
+    _histSaveAsync();
+    _histRender();
+}
+
+function _histClear() {
+    _queueHistory = [];
+    window.amlBridge?.storeDelete(_HIST_KEY).catch(() => {});
+    _histRender();
+}
+
+function _histRender() {
+    const section = document.getElementById('aml-history-section');
+    if (!section) return;
+    if (_queueHistory.length === 0) { section.style.display = 'none'; return; }
+    section.style.display = '';
+    // Use data attrs — inline onclick is blocked by Apple Music's CSP.
+    // Event delegation listener lives on the section div (set once in _histInject).
+    section.innerHTML = `
+        <div class="aml-hs-header">
+            <span class="aml-hs-title">History</span>
+        </div>
+        <div class="aml-hs-list">
+        ${_queueHistory.slice(0, 30).map(h => `
+            <div class="aml-hs-item" data-catalog-id="${_histEscape(h.catalogId)}">
+                ${h.artworkUrl
+                    ? `<img class="aml-hs-art" src="${_histEscape(h.artworkUrl)}" loading="lazy">`
+                    : `<div class="aml-hs-art aml-hs-art-ph"></div>`}
+                <div class="aml-hs-meta">
+                    <div class="aml-hs-name">${_histEscape(h.name)}</div>
+                    <div class="aml-hs-artist">${_histEscape(h.artist)}</div>
+                </div>
+                ${h.duration ? `<span class="aml-hs-dur">${_histEscape(h.duration)}</span>` : ''}
+            </div>`).join('')}
+        </div>`;
+}
+
+function _histInjectStyles() {
+    if (document.getElementById('aml-hist-css')) return;
+    const s = document.createElement('style');
+    s.id = 'aml-hist-css';
+    s.textContent = `
+#aml-history-section {
+    border-bottom: 1px solid var(--separator, rgba(128,128,128,.18));
+    padding-bottom: 8px;
+    margin-bottom: 4px;
+}
+.aml-hs-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px var(--side-panel-horizontal-padding, 20px) 8px;
+}
+.aml-hs-title {
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: normal;
+    text-transform: none;
+    opacity: 1;
+}
+.aml-hs-list { padding-bottom: 4px; max-height: 300px; overflow-y: auto; scrollbar-width: thin; }
+.aml-hs-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px var(--side-panel-horizontal-padding, 20px);
+    min-height: 44px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background .12s;
+    box-sizing: border-box;
+}
+.aml-hs-item:hover { background: var(--systemFillTertiary, rgba(128,128,128,.14)); }
+.aml-hs-art {
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: rgba(128,128,128,.18);
+}
+.aml-hs-art-ph { background: rgba(128,128,128,.18); }
+.aml-hs-meta { min-width: 0; flex: 1; }
+.aml-hs-name {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.aml-hs-artist {
+    font-size: 11px;
+    opacity: .55;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.aml-hs-dur {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    opacity: .55;
+    flex-shrink: 0;
+    padding-left: 6px;
+}`;
+    document.head.appendChild(s);
+}
+
+let _histEnabled = true;
+
+function _histInject() {
+    const panel = document.querySelector('.side-panel');
+    if (!panel) return;
+    // Remove section if history was disabled.
+    if (!_histEnabled) {
+        panel.querySelector('#aml-history-section')?.remove();
+        return;
+    }
+    // Guard: do NOT call _histRender() here — that triggers another mutation,
+    // which re-fires this observer, causing an infinite loop.
+    if (panel.querySelector('#aml-history-section')) return;
+    const div = document.createElement('div');
+    div.id = 'aml-history-section';
+    // Event delegation: set once on the container div, survives innerHTML updates.
+    // Inline onclick is blocked by Apple Music's CSP — data attrs + delegation is the fix.
+    div.addEventListener('click', (e) => {
+        const item = e.target.closest('.aml-hs-item');
+        if (item?.dataset.catalogId) window._amlHistPlay(item.dataset.catalogId);
+    });
+    panel.prepend(div);
+    _histRender();
+}
+
+async function setupQueueHistory(mk) {
+    _histInjectStyles();
+
+    window._amlHistClear = _histClear;
+    window._amlHistPlay  = (catalogId) => {
+        if (!catalogId) return;
+        mk.setQueue({ song: catalogId }).then(() => mk.play()).catch(() => {});
+    };
+
+    // Load history-enabled pref and history from encrypted store before first render.
+    try {
+        const pref = await window.amlBridge?.storeRead('historyEnabled');
+        if (pref !== null && pref !== undefined) _histEnabled = pref !== 'false' && pref !== false;
+    } catch (_) {}
+    await _histLoadAsync();
+
+    // Push current song to history the moment it changes away.
+    mk.addEventListener('nowPlayingItemWillChange', () => _histPush(mk.nowPlayingItem));
+
+    // Watch body for the side-panel to appear (renders at ≥1000px viewport,
+    // conditionally mounted by Svelte based on playback state + viewport).
+    // Also re-inject when Svelte re-renders wipe the panel children.
+    const obs = new MutationObserver(_histInject);
+    obs.observe(document.body, { childList: true, subtree: true });
+    _histInject();
+}
+
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 async function setup() {
@@ -3092,6 +3290,20 @@ async function setup() {
     window.__amlEngineMounted = true;
 
     blockAppleCDN();
+
+    // Suppress Apple Music's spurious error dialog during track transitions.
+    // PlayActivity.stop() throws with no descriptor when _amlGoto calls mk.setQueue().
+    // Intercept setAttribute('open') on the error dialog to prevent it from rendering at all.
+    const _origSetAttr = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {
+        if (name === 'open' && _amlTransitioning &&
+            this.tagName === 'DIALOG' && this.dataset?.testid === 'dialog' &&
+            this.classList.contains('error')) {
+            console.log('[AML] Suppressed error dialog (transition active)');
+            return;
+        }
+        return _origSetAttr.call(this, name, value);
+    };
 
     // Feature-detect native ALAC MSE support (Chromium 116+ / Electron 38+).
     // Wait for the engine's SSE snapshot instead of polling GET /api/v1/status.
@@ -3204,6 +3416,163 @@ async function setup() {
 
     installMKSeekInterceptor(mk);
 
+    // ── Owned queue advancement ────────────────────────────────────────────────
+    // MK's skipToNextItem/skipToPreviousItem are unreliable wrappers — they can
+    // stall, reject, or double-fire. We block them entirely and own the logic:
+    // compute the target index ourselves, call changeToMediaAtIndex directly.
+    // changeToMediaAtIndex always fires nowPlayingItemDidChange with a settled item.
+    //
+    // _amlAdvancing prevents concurrent invocations from double-advancing.
+    // The nowPlayingItemDidChange listener resets it once a change is confirmed.
+
+    let _amlAdvancing = false;
+    let _amlAdvancingTimer = null;
+    let _amlGotoTarget = null; // queue index we're transitioning TO (set by _amlGoto)
+
+    function _clearAdvancing() {
+        _amlAdvancing = false;
+        // NOTE: do NOT clear _amlGotoTarget here. It stays set until the target
+        // track's NPIDF fires (or the 6s timeout), so the NPIDF filter can still
+        // block spurious events for the old track after the null NPIDF clears _amlAdvancing.
+        clearTimeout(_amlAdvancingTimer);
+        _amlAdvancingTimer = null;
+    }
+
+    async function _amlGoto(idx) {
+        if (_amlAdvancing) { console.log('[AML] _amlGoto busy, ignoring idx=', idx); return; }
+        _amlAdvancing = true;
+        _amlTransitioning = true; // suppress error dialog until NPIDF settles
+        _amlGotoTarget = idx; // placeholder; updated to clamped targetIdx after allIds is built
+        console.log('[AML] _amlGoto sessionIdx=', idx);
+
+        // Stop the VLC poll first — it dispatches timeupdate events that cause MK's
+        // AudioPlayer to access its detached SourceBuffer (InvalidStateError) on
+        // every tick. Must stop before changeToMediaAtIndex so MK gets a clean run.
+        stopVLCPoll();
+
+        // Reset the audio element src to empty using the native setter so MK gets
+        // a clean HAVE_NOTHING state before changeToMediaAtIndex. The silent MediaSource
+        // URL (from VLC mode) has no data, so MK's internal state machine would wait
+        // forever for audio to be playable. Setting src='' fires 'emptied' cleanly
+        // (no 'error' event) so MK resets state without losing the queue context.
+        // We do NOT revoke _silentUrl here — the abort will happen in handleTrackChange.
+        const _gotoAudio = getMKAudio();
+        if (_gotoAudio && _nativeSrcSet) {
+            _nativeSrcSet.call(_gotoAudio, '');
+            HTMLMediaElement.prototype.load.call(_gotoAudio);
+        }
+        if (_gotoAudio) {
+            try { delete _gotoAudio.load;        } catch (_) {}
+            try { delete _gotoAudio.paused;      } catch (_) {}
+            try { delete _gotoAudio.currentTime; } catch (_) {}
+            try { delete _gotoAudio.volume;      } catch (_) {}
+            try { delete _gotoAudio.muted;       } catch (_) {}
+            try { delete _gotoAudio.pause;       } catch (_) {}
+            // Delete the play proxy so MK's internal audio.play() call during
+            // changeToMediaAtIndex uses native play. The VLC-mode proxy would
+            // dispatch 'playing' for the OLD track and call vlc/resume, causing
+            // MK's AudioPlayer to crash before nowPlayingItemDidChange fires.
+            try { delete _gotoAudio.play;        } catch (_) {}
+        }
+        // Allow handleTrackChange to reinstall the proxy for the next track.
+        _proxyInstalled = false;
+        // Clear VLC mode so the mk.play()/mk.pause() overrides use MSE paths during
+        // the transition. While in VLC mode, mk.play() calls vlc/resume for the OLD
+        // track, which prevents MK's changeToMediaAtIndex from advancing the queue.
+        _vlcMode = false;
+
+        // Immediately update MPRIS so the desktop media player shows the right
+        // track while MK is still loading — avoids the frozen-UI feeling.
+        const targetItem = mk.queue?.items?.[idx];
+        if (targetItem) sendMprisMetadata(targetItem);
+
+        // Safety valves: if nowPlayingItemDidChange never fires (network stall,
+        // MK internal error), clear both locks after 6s so next/prev still work.
+        _amlAdvancingTimer = setTimeout(() => {
+            _clearAdvancing();
+            _amlGotoTarget = null;       // clear NPIDF filter on timeout
+            _allowCDNTransition = false; // restore CDN block on timeout
+            _amlTransitioning = false;
+        }, 6000);
+
+        // Build the combined queue: full session history + upcoming MK tracks not yet played.
+        // This lets next/prev slide freely across the entire session — even across queue
+        // replacements — without dropping history.
+        const _extractId = (item) =>
+            item?.playParams?.catalogId
+            ?? item?.attributes?.playParams?.catalogId
+            ?? item?.id
+            ?? item?.playParams?.id
+            ?? item?.attributes?.playParams?.id
+            ?? null;
+        const mkItems = mk.queue?.items ?? [];
+        const mkPos   = mk.queue?.position ?? 0;
+        // Upcoming = MK queue items AFTER current position, minus anything already in history.
+        // Current track is already in _sessionHistory, so we start at mkPos+1.
+        const historySet = new Set(_sessionHistory);
+        const upcoming = mkItems.slice(mkPos + 1).map(_extractId).filter(id => id && !historySet.has(id));
+        const allIds = [..._sessionHistory, ...upcoming];
+        if (!allIds.length) {
+            _clearAdvancing();
+            _amlGotoTarget = null;
+            _allowCDNTransition = false;
+            _amlTransitioning = false;
+            return;
+        }
+        // idx is a session-history index. Clamp to valid range.
+        const targetIdx = Math.max(0, Math.min(idx, allIds.length - 1));
+        // Update NPIDF filter to the real target position in the new queue.
+        _amlGotoTarget = targetIdx;
+        await mk.setQueue({ songs: allIds }).catch(() => {});
+        await mk.changeToMediaAtIndex(targetIdx).catch(() => {});
+
+        // Show MK's native loading spinner on the MSE path. Not needed for VLC —
+        // that path has its own loading state via _vlcLoading.
+        const mkAudio = document.querySelector('audio');
+        if (mkAudio && !_vlcMode) mkAudio.dispatchEvent(new Event('waiting'));
+    }
+
+    // manual=false → auto-advance (respects repeat-one: restarts same track)
+    // manual=true  → explicit user skip (always advances past current track)
+    async function _amlNext(manual = false) {
+        const repeat = mk.repeatMode ?? 0; // 0=none, 1=one, 2=all
+        if (repeat === 1 && !manual) {
+            await _amlGoto(_sessionHistoryIdx); // repeat-one: restart same track
+            return;
+        }
+        // Check if there is a next track in MK's queue or session history.
+        const mkItems = mk.queue?.items ?? [];
+        const mkPos   = mk.queue?.position ?? 0;
+        const historySet = new Set(_sessionHistory);
+        const upcoming = mkItems.slice(mkPos + 1).map(i =>
+            i?.playParams?.catalogId ?? i?.attributes?.playParams?.catalogId
+            ?? i?.id ?? i?.playParams?.id ?? i?.attributes?.playParams?.id
+        ).filter(id => id && !historySet.has(id));
+        const totalLen = _sessionHistory.length + upcoming.length;
+        const nextIdx = _sessionHistoryIdx + 1;
+        if (nextIdx < totalLen) {
+            await _amlGoto(nextIdx);
+        } else if (repeat === 2 && totalLen > 0) {
+            await _amlGoto(0); // repeat-all: wrap to start of session history
+        }
+        // else: end of queue, nothing to do
+    }
+
+    async function _amlPrev() {
+        if (_sessionHistoryIdx > 0) {
+            await _amlGoto(_sessionHistoryIdx - 1);
+        } else if (_sessionHistoryIdx === -1 && (mk.queue?.position ?? 0) > 0) {
+            // History not yet initialized — fall back to MK queue position
+            await _amlGoto(0);
+        }
+        // else: at beginning of session, nothing to do
+    }
+
+    // Block MK's native skip functions — UI skip buttons and all external callers
+    // now go through our owned logic.
+    mk.skipToNextItem     = () => _amlNext(true);  // UI skip: always advances
+    mk.skipToPreviousItem = _amlPrev;
+
     // ── MPRIS helpers ──────────────────────────────────────────────────────────
     function mprisTrackId(item) {
         const id = item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? 'unknown';
@@ -3257,11 +3626,11 @@ async function setup() {
             case 'pause':     mk.pause(); break;
             case 'playpause': mk.playbackState === window.MusicKit?.PlaybackStates?.playing
                 ? mk.pause() : mk.play().catch(() => {}); break;
-            case 'next':      mk.skipToNextItem().catch(() => {}); break;
+            case 'next':      _amlNext(true).catch(() => {}); break;
             case 'previous':
                 // Android GoBackAsync: restart if past 3s, else go to previous item.
                 if (mk.currentPlaybackTime > 3) mk.seekToTime(0);
-                else mk.skipToPreviousItem().catch(() => {});
+                else _amlPrev().catch(() => {});
                 break;
         }
     });
@@ -3278,52 +3647,118 @@ async function setup() {
     // ── Track-row play button interceptor ────────────────────────────────────────
     // When a user clicks a track in a playlist, Apple Music inserts it at
     // queue.position+1 ("Play Next") but does NOT fire nowPlayingItemDidChange.
-    // We detect the queue mutation and call skipToNextItem() to bridge the gap.
+    // We detect the queue mutation via queueItemsDidChange (MK v3) or queueDidChange
+    // (older), fall back to a 200ms timeout if neither fires, then call _amlNext.
     document.addEventListener('click', (e) => {
-        if (e.target.closest('.contextual-menu')) return; // Play Next / Add to Queue — don't interfere
+        // Exclude context-menu clicks ("Play Next", "Add to Queue" etc.) — those
+        // insert at pos+1 intentionally without immediate playback advance.
+        if (e.target.closest('.contextual-menu')) return;
 
         const PS = window.MusicKit?.PlaybackStates;
-        if (mk.playbackState !== PS?.playing) return; // only intercept during active playback
+        // Only intercept during active playback. Other states use setQueue/changeToMediaAtIndex
+        // which fires nowPlayingItemDidChange directly — no interception needed.
+        if (mk.playbackState !== PS?.playing && mk.playbackState !== PS?.paused) return;
 
         const pos      = mk.queue?.position ?? 0;
         const snapNext = _qId(mk.queue?.items?.[pos + 1]);
-        const snapNow  = _qId(mk.nowPlayingItem); // snapshot current song id at click time
+        const snapNow  = _qId(mk.nowPlayingItem);
 
-        let cancelled = false;
-        const cancel = () => { cancelled = true; };
-        mk.addEventListener('nowPlayingItemDidChange', cancel, { once: true });
+        let done = false;
 
-        const checkAdvance = () => {
-            mk.removeEventListener('queueDidChange', checkAdvance);
-            mk.removeEventListener('nowPlayingItemDidChange', cancel);
-            if (cancelled) return; // MK already fired nowPlayingItemDidChange — existing listener handles it
+        // Called once — either by a queue event or the 200ms fallback, never both.
+        const check = (itemChangeFired) => {
+            if (done) return;
+            done = true;
+            mk.removeEventListener('queueItemsDidChange', onQueue);
+            mk.removeEventListener('queueDidChange',      onQueue);
+            mk.removeEventListener('nowPlayingItemDidChange', onItem);
+
+            if (itemChangeFired) return; // MK handled it; our main listener fires handleTrackChange.
 
             const curPos = mk.queue?.position ?? 0;
-            if (curPos !== pos) return; // queue position changed (context switch, pos > 0 case)
+            if (curPos !== pos) return; // position already advanced (context switch)
 
-            // Guard context switch at pos=0: queue.items[0] updates before nowPlayingItemDidChange fires
+            // Guard pos=0 context switch: queue.items[0] updates before nowPlayingItemDidChange.
             if ((_qId(mk.queue?.items?.[curPos]) ?? null) !== snapNow) return;
 
             const newNext = _qId(mk.queue?.items?.[curPos + 1]);
             if (newNext && newNext !== snapNext) {
-                console.log('[aml] track-click: inserted at next, calling skipToNextItem');
-                mk.skipToNextItem().catch(() => {});
+                console.log('[aml] track-click: inserted at next, calling _amlNext');
+                _amlNext(true).catch(() => {});
             }
         };
 
-        mk.addEventListener('queueDidChange', checkAdvance, { once: true });
-        setTimeout(() => {
-            mk.removeEventListener('queueDidChange', checkAdvance);
-            checkAdvance();
-        }, 200);
+        const onItem  = () => check(true);
+        const onQueue = () => check(false);
+
+        mk.addEventListener('nowPlayingItemDidChange', onItem,  { once: true });
+        mk.addEventListener('queueItemsDidChange',     onQueue, { once: true });
+        mk.addEventListener('queueDidChange',          onQueue, { once: true });
+        setTimeout(() => check(false), 200);
     }, true);
 
-    mk.addEventListener('nowPlayingItemDidChange', () => {
+    setupQueueHistory(mk); // async; fire-and-forget: loads history, then enables listener + inject
+
+    mk.addEventListener('nowPlayingItemDidChange', async () => {
+        // During a controlled _amlGoto transition, audio element resets (audio.src='')
+        // fire a spurious NPIDF for the OLD track. _amlGotoTarget stays set until the
+        // target track's NPIDF fires, so we can filter out-of-order events here.
+        // Null NPIDFs (item === null) are NOT filtered — they return early in handleTrackChange.
+        if (_amlGotoTarget !== null) {
+            const item = mk.nowPlayingItem;
+            const itemId = item?.id ?? item?.playParams?.id;
+            const targetItem = mk.queue?.items?.[_amlGotoTarget];
+            const targetId = targetItem?.id ?? targetItem?.playParams?.id;
+            if (item && targetId && itemId !== targetId) {
+                // Spurious NPIDF for the OLD track during transition — drop it.
+                console.log('[AML] NPIDF filtered: spurious event for', item?.attributes?.name, '(advancing to idx', _amlGotoTarget, ')');
+                return;
+            }
+            // Non-null item: target track arrived (or target ID indeterminate) — clear filter.
+            // Null item: keep _amlGotoTarget so subsequent spurious events are still blocked.
+            if (item) { _amlGotoTarget = null; _amlTransitioning = false; }
+        }
+        // A confirmed track change (or the target track arrived): release the
+        // advance lock so the next skip can proceed.
+        _clearAdvancing();
+        // MK briefly fires null during queue transitions. Poll up to 250 ms for the
+        // item to settle so handleTrackChange always sees a real item, and MPRIS
+        // never gets a spurious Stopped between tracks.
+        let item = mk.nowPlayingItem;
+        if (!item) {
+            for (let i = 0; i < 5; i++) {
+                await new Promise(r => setTimeout(r, 50));
+                item = mk.nowPlayingItem;
+                if (item) break;
+            }
+        }
+        // Maintain session history so next/prev can navigate the full play history.
+        if (item) {
+            const songId = item.playParams?.catalogId
+                ?? item.attributes?.playParams?.catalogId
+                ?? item.id
+                ?? item.playParams?.id
+                ?? item.attributes?.playParams?.id;
+            if (songId) {
+                if (_sessionHistoryIdx >= 0 && _sessionHistory[_sessionHistoryIdx] === songId) {
+                    // same track (repeat-one or restart) — no change
+                } else if (_sessionHistoryIdx + 1 < _sessionHistory.length
+                        && _sessionHistory[_sessionHistoryIdx + 1] === songId) {
+                    _sessionHistoryIdx++; // forward nav within history
+                } else if (_sessionHistoryIdx > 0
+                        && _sessionHistory[_sessionHistoryIdx - 1] === songId) {
+                    _sessionHistoryIdx--; // backward nav within history
+                } else {
+                    // New track or jump: truncate any forward history and append.
+                    _sessionHistory = _sessionHistory.slice(0, _sessionHistoryIdx + 1);
+                    _sessionHistory.push(songId);
+                    _sessionHistoryIdx = _sessionHistory.length - 1;
+                }
+            }
+        }
         handleTrackChange(mk);
         // Signal queue context to the prefetch scheduler.
         window._amlSmartCache?.onTrackChange(mk);
-        // Track play frequency for startup warming and signal boosting.
-        const item = mk.nowPlayingItem;
         if (item) {
             const id = item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
             window._amlSmartCache?.recordPlay(id);
@@ -3526,12 +3961,71 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 // our VLC mode resumes playback — its state machine expects a real audio src.
 // This is cosmetic noise; suppress it so the console stays readable.
 window.addEventListener('unhandledrejection', (e) => {
-    if (e.reason?.message?.includes('play() method was called without a previous')) {
+    const msg = e.reason?.message ?? '';
+    if (msg.includes('play() method was called without a previous') ||
+        msg.includes('lyrics are not being displayed')) {
         e.preventDefault();
     }
 });
 
+// ── Debug / console helpers ────────────────────────────────────────────────
+// Exposed on window so they can be called from DevTools or CDP.
 
+// Stop all playback (VLC, MSE, MK) and release the engine session.
+// After this the UI is idle and a fresh handleTrackChange is needed to resume.
+window.amlClearSession = function () {
+    stopVLCPoll();
+    if (_pipeCtrl)  { _pipeCtrl.abort();  _pipeCtrl  = null; }
+    if (_abortCtrl) { _abortCtrl.abort(); _abortCtrl = null; }
+    if (_seekFetchCtrl) { _seekFetchCtrl.abort(); _seekFetchCtrl = null; }
+    deleteSession(_sessionId);
+    _sessionId = null; _currentAssetId = null; _durationSec = 0;
+    _vlcMode = false; _vlcPosMs = 0; _ourBlobUrl = null;
+    if (_nextAlacSession) { deleteSession(_nextAlacSession.sess.sessionId); _nextAlacSession = null; }
+    _nextAlacTried = false; _nextAlacRetries = 0;
+    unbridgeDuration();
+    try { _mkInstance?.pause?.(); } catch (_) {}
+    console.log('[AML] amlClearSession: all playback stopped and session released');
+};
+
+// Open a fresh engine session for adamId and return the session object.
+// Does not start playback — call handleTrackChange or pipe manually.
+window.amlStartSession = async function (adamId, sf) {
+    const mk = _mkInstance;
+    if (!mk) { console.warn('[AML] amlStartSession: no MK instance'); return null; }
+    const storefront = sf ?? mk.storefrontId ?? 'us';
+    const losslessWanted = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+    console.log(`[AML] amlStartSession adamId=${adamId} sf=${storefront} lossless=${losslessWanted}`);
+    const r = await fetch(`${ENGINE}/api/v1/playback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            assetId: adamId, storefront,
+            capabilities: { lossless: losslessWanted, atmos: false, video: false },
+            token: mk.developerToken ?? '',
+            mediaUserToken: getMUT(),
+        }),
+    });
+    if (!r.ok) { console.error(`[AML] amlStartSession: engine ${r.status}`); return null; }
+    const sess = await r.json();
+    console.log(`[AML] amlStartSession: session=${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs/1000).toFixed(1)}s`);
+    return sess;
+};
+
+// Return current MK queue snapshot — useful for debugging from DevTools.
+window.amlGetQueueInfo = function () {
+    const mk = _mkInstance;
+    return {
+        items:       mk?.queue?.items       ?? [],
+        position:    mk?.queue?.position    ?? -1,
+        nowPlaying:  mk?.nowPlayingItem     ?? null,
+        storefrontId: mk?.storefrontId      ?? 'us',
+        sessionId:   _sessionId,
+        codec:       _vlcMode ? 'alac/vlc' : 'aac/mse',
+        durationSec: _durationSec,
+        posMs:       _vlcPosMs,
+    };
+};
 
 
 
@@ -5270,6 +5764,24 @@ window.addEventListener('unhandledrejection', (e) => {
 
         dlg.appendChild(dlWrap);
 
+        // ── History section ────────────────────────────────────────────────────
+        const { wrap: histWrap, body: histBody } = makeSection('History');
+        const histEnabledRaw = await window.amlBridge?.storeRead('historyEnabled').catch(() => null);
+        const histIsEnabled = histEnabledRaw !== 'false' && histEnabledRaw !== false;
+        const histToggle = makeIOSToggle(histIsEnabled, async (v) => {
+            _histEnabled = v;
+            await window.amlBridge?.storeWrite('historyEnabled', String(v)).catch(() => {});
+            _histInject();
+        });
+        histBody.appendChild(makeRow('Show in Up Next panel', histToggle, 'Display recently played tracks above the queue', false));
+        const histClearRow = document.createElement('div');
+        histClearRow.style.cssText = 'padding:10px 0;display:flex;gap:6px;';
+        const histClearBtn = makeBtn('Clear History');
+        histClearBtn.onclick = () => { _histClear(); openSettings(); };
+        histClearRow.appendChild(histClearBtn);
+        histBody.appendChild(histClearRow);
+        dlg.appendChild(histWrap);
+
         // ── Developer section ──────────────────────────────────────────────────
         const { wrap: devWrap, body: devBody } = makeSection('Developer');
         const debugToggle = document.createElement('input');
@@ -5552,7 +6064,9 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 clearTimeout(timer);
                 navigator.clipboard.writeText = orig;
                 resolve(text);
-                return orig(text).catch(() => {});
+                // Do NOT write to clipboard — this is an internal URL extraction,
+                // not a user-initiated copy. Reject so Apple's copied UI doesn't fire.
+                return Promise.reject(new DOMException('', 'NotAllowedError'));
             };
 
             copyBtn.click();
@@ -5770,13 +6284,13 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         const _kfs = document.createElement('style');
         _kfs.id = 'aml-dl-kf';
         _kfs.textContent = `
-@keyframes aml-dl-scan{0%{background-position:0% 0%}50%{background-position:100% 0%}100%{background-position:0% 0%}}
+@keyframes aml-dl-pulse{0%,100%{opacity:0.55}50%{opacity:1}}
 @keyframes aml-dl-dot{0%,100%{opacity:.35}50%{opacity:1}}
 @keyframes aml-dl-skel{0%{opacity:.4}50%{opacity:.8}100%{opacity:.4}}
 .aml-dl-pill{display:inline-flex;align-items:center;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:500;letter-spacing:0.1px;flex-shrink:0}
 .aml-dl-pill-q{background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.38)}
 .aml-dl-pill-r{background:rgba(255,214,10,0.13);color:rgba(255,210,80,0.85)}
-.aml-dl-pill-dl{background:rgba(252,60,68,0.15);color:#fc3c44}
+.aml-dl-pill-dl{background:rgba(255,255,255,0.10);color:rgba(255,255,255,0.60)}
 .aml-dl-pill-ok{background:rgba(48,209,88,0.14);color:#30d158}
 .aml-dl-pill-err{background:rgba(255,69,58,0.15);color:#ff453a}
 .aml-dl-pill-x{background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.25)}
@@ -5806,15 +6320,23 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         else closeDownloadsPanel();
     };
 
+    function _sidebarWidth() {
+        const nav = document.querySelector('nav.navigation') ||
+                    document.querySelector('[class*="web-navigation"]') ||
+                    document.querySelector('.side-panel');
+        const w = nav ? nav.offsetWidth : 0;
+        return w > 160 ? w : 240;
+    }
+
     function buildDownloadsPanel() {
         const panel = document.createElement('div');
         panel.id = 'aml-downloads-panel';
         panel.style.cssText = [
             'position:fixed',
             'bottom:72px',
-            'left:16px',
-            'width:340px',
-            'max-height:480px',
+            'left:8px',
+            'width:320px',
+            'max-height:520px',
             'background:rgba(24,24,26,0.92)',
             'backdrop-filter:blur(40px) saturate(1.8)',
             '-webkit-backdrop-filter:blur(40px) saturate(1.8)',
@@ -5830,16 +6352,16 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
 
         // Header
         const hdr = document.createElement('div');
-        hdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:13px 14px 11px;border-bottom:0.5px solid rgba(255,255,255,0.09);flex-shrink:0;gap:8px;';
+        hdr.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:15px 16px 13px;border-bottom:0.5px solid rgba(255,255,255,0.09);flex-shrink:0;gap:8px;';
 
         const titleGroup = document.createElement('div');
-        titleGroup.style.cssText = 'display:flex;align-items:baseline;gap:7px;flex:1;min-width:0;';
+        titleGroup.style.cssText = 'display:flex;align-items:baseline;gap:8px;flex:1;min-width:0;';
         const title = document.createElement('span');
         title.textContent = 'Downloads';
-        title.style.cssText = 'color:#fff;font-size:14px;font-weight:600;letter-spacing:-0.2px;';
+        title.style.cssText = 'color:#fff;font-size:15px;font-weight:600;letter-spacing:-0.3px;';
         const countBadge = document.createElement('span');
         countBadge.id = 'aml-dl-count';
-        countBadge.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.30);font-weight:400;display:none;';
+        countBadge.style.cssText = 'font-size:11px;color:rgba(255,255,255,0.30);font-weight:400;display:none;';
         titleGroup.append(title, countBadge);
 
         const btnGroup = document.createElement('div');
@@ -5848,7 +6370,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         const clearBtn = document.createElement('button');
         clearBtn.id = 'aml-dl-cleardone';
         clearBtn.textContent = 'Clear done';
-        clearBtn.style.cssText = 'background:none;border:none;color:rgba(255,255,255,0.32);cursor:pointer;font-size:11px;padding:3px 6px;border-radius:5px;transition:color 0.15s,background 0.15s;display:none;';
+        clearBtn.style.cssText = 'background:none;border:none;color:rgba(255,255,255,0.32);cursor:pointer;font-size:12px;padding:3px 7px;border-radius:5px;transition:color 0.15s,background 0.15s;display:none;';
         clearBtn.onmouseenter = () => { clearBtn.style.color = 'rgba(255,255,255,0.75)'; clearBtn.style.background = 'rgba(255,255,255,0.07)'; };
         clearBtn.onmouseleave = () => { clearBtn.style.color = 'rgba(255,255,255,0.32)'; clearBtn.style.background = 'none'; };
         clearBtn.onclick = clearDoneJobs;
@@ -5864,189 +6386,13 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         hdr.append(titleGroup, btnGroup);
         panel.appendChild(hdr);
 
-        // ── Search bar ────────────────────────────────────────────────────
-        const searchWrap = document.createElement('div');
-        searchWrap.style.cssText = 'padding:8px 10px 6px;border-bottom:0.5px solid rgba(255,255,255,0.07);flex-shrink:0;display:flex;gap:6px;';
-
-        const searchInput = document.createElement('input');
-        searchInput.type = 'search';
-        searchInput.id = 'aml-dl-search-input';
-        searchInput.placeholder = 'Search to download…';
-        searchInput.autocomplete = 'off';
-        searchInput.spellcheck = false;
-        searchInput.style.cssText = [
-            'flex:1;background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.10)',
-            'border-radius:8px;padding:5px 9px;color:#fff;font-size:12px;outline:none',
-            'font-family:inherit;transition:border-color 0.15s,background 0.15s',
-            "appearance:none;-webkit-appearance:none",
-        ].join(';');
-        searchInput.addEventListener('focus', () => { searchInput.style.borderColor = 'rgba(252,60,68,0.55)'; searchInput.style.background = 'rgba(255,255,255,0.09)'; });
-        searchInput.addEventListener('blur', () => { searchInput.style.borderColor = 'rgba(255,255,255,0.10)'; searchInput.style.background = 'rgba(255,255,255,0.06)'; });
-
-        const typeSelect = document.createElement('select');
-        typeSelect.id = 'aml-dl-search-type';
-        typeSelect.style.cssText = 'background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.10);border-radius:8px;padding:5px 6px;color:rgba(255,255,255,0.70);font-size:11px;outline:none;cursor:pointer;font-family:inherit;';
-        [['Songs','songs'],['Albums','albums'],['Artists','artists'],['Videos','music-videos']].forEach(([label, val]) => {
-            const o = document.createElement('option');
-            o.value = val; o.textContent = label;
-            typeSelect.appendChild(o);
-        });
-
-        searchWrap.append(searchInput, typeSelect);
-        panel.appendChild(searchWrap);
-
-        // ── Search results overlay (shown above job list when searching) ──
-        const searchResults = document.createElement('div');
-        searchResults.id = 'aml-dl-search-results';
-        searchResults.style.cssText = 'flex:1;overflow-y:auto;padding:4px 0;display:none;';
-        panel.appendChild(searchResults);
-
-        // Wire up search: debounce 350ms, clear on empty
-        let _searchDebounce = null;
-        searchInput.addEventListener('input', () => {
-            clearTimeout(_searchDebounce);
-            const q = searchInput.value.trim();
-            if (!q) {
-                searchResults.style.display = 'none';
-                list.style.display = '';
-                searchResults.innerHTML = '';
-                return;
-            }
-            _searchDebounce = setTimeout(() => runSearch(q, typeSelect.value), 350);
-        });
-        typeSelect.addEventListener('change', () => {
-            const q = searchInput.value.trim();
-            if (q) runSearch(q, typeSelect.value);
-        });
-        searchInput.addEventListener('keydown', e => {
-            if (e.key === 'Escape') { searchInput.value = ''; searchInput.dispatchEvent(new Event('input')); }
-        });
-
         // Job list
         const list = document.createElement('div');
         list.id = 'aml-downloads-list';
-        list.style.cssText = 'flex:1;overflow-y:auto;padding:8px 0;';
+        list.style.cssText = 'flex:1;overflow-y:auto;padding:6px 0;';
         panel.appendChild(list);
 
         return panel;
-    }
-
-    // ── Search to download ─────────────────────────────────────────────────
-    async function runSearch(q, type) {
-        const searchResults = document.getElementById('aml-dl-search-results');
-        const list          = document.getElementById('aml-downloads-list');
-        if (!searchResults) return;
-
-        searchResults.style.display = '';
-        list.style.display = 'none';
-        searchResults.innerHTML = '<div style="padding:20px 16px;text-align:center;color:rgba(255,255,255,0.28);font-size:11px;">Searching…</div>';
-
-        try {
-            const mk = window.MusicKit?.getInstance?.();
-            const sf = mk?.storefrontId || 'us';
-            const url = `${ENGINE}/api/v1/catalog/search?q=${encodeURIComponent(q)}&types=${type}&sf=${sf}&limit=20`;
-            const data = await fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
-            if (!data) throw new Error('no data');
-
-            const results = data.results;
-            const items = [];
-
-            if (type === 'songs' && results?.songs?.data) {
-                for (const s of results.songs.data) {
-                    const a = s.attributes || {};
-                    items.push({ id: s.id, type: 'song', title: a.name || '', artist: a.artistName || '', extra: a.albumName || '', artwork: a.artwork?.url || '', storefront: sf });
-                }
-            } else if (type === 'albums' && results?.albums?.data) {
-                for (const s of results.albums.data) {
-                    const a = s.attributes || {};
-                    items.push({ id: s.id, type: 'album', title: a.name || '', artist: a.artistName || '', extra: `${a.trackCount || ''} tracks`, artwork: a.artwork?.url || '', storefront: sf });
-                }
-            } else if (type === 'artists' && results?.artists?.data) {
-                for (const s of results.artists.data) {
-                    const a = s.attributes || {};
-                    items.push({ id: s.id, type: 'artist', title: a.name || '', artist: a.genreNames?.[0] || '', extra: '', artwork: a.artwork?.url || '', storefront: sf });
-                }
-            } else if (type === 'music-videos' && results?.['music-videos']?.data) {
-                for (const s of results['music-videos'].data) {
-                    const a = s.attributes || {};
-                    items.push({ id: s.id, type: 'video', title: a.name || '', artist: a.artistName || '', extra: a.albumName || '', artwork: a.artwork?.url || '', storefront: sf });
-                }
-            }
-
-            renderSearchResults(items);
-        } catch (_) {
-            if (searchResults) searchResults.innerHTML = '<div style="padding:20px 16px;text-align:center;color:rgba(255,255,255,0.28);font-size:11px;">No results</div>';
-        }
-    }
-
-    function renderSearchResults(items) {
-        const el = document.getElementById('aml-dl-search-results');
-        if (!el) return;
-        if (!items.length) {
-            el.innerHTML = '<div style="padding:20px 16px;text-align:center;color:rgba(255,255,255,0.28);font-size:11px;">No results</div>';
-            return;
-        }
-        el.innerHTML = '';
-        for (const item of items) {
-            const row = document.createElement('div');
-            row.style.cssText = 'padding:8px 12px;display:flex;gap:9px;align-items:center;cursor:pointer;border-bottom:0.5px solid rgba(255,255,255,0.05);transition:background 0.12s;';
-            row.onmouseenter = () => { row.style.background = 'rgba(255,255,255,0.05)'; };
-            row.onmouseleave = () => { row.style.background = ''; };
-
-            const art = document.createElement('div');
-            art.style.cssText = `width:38px;height:38px;border-radius:${item.type === 'artist' ? '50%' : '6px'};overflow:hidden;flex-shrink:0;background:rgba(255,255,255,0.06);`;
-            if (item.artwork) {
-                const img = document.createElement('img');
-                img.src = item.artwork.replace('{w}', '76').replace('{h}', '76');
-                img.style.cssText = 'width:100%;height:100%;object-fit:cover;';
-                img.onerror = () => { img.style.display = 'none'; };
-                art.appendChild(img);
-            }
-
-            const info = document.createElement('div');
-            info.style.cssText = 'flex:1;min-width:0;';
-            const nameEl = document.createElement('div');
-            nameEl.textContent = item.title;
-            nameEl.style.cssText = 'color:rgba(255,255,255,0.88);font-size:12px;font-weight:530;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-            const subEl = document.createElement('div');
-            subEl.textContent = [item.artist, item.extra].filter(Boolean).join(' · ');
-            subEl.style.cssText = 'color:rgba(255,255,255,0.38);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px;';
-            info.append(nameEl, subEl);
-
-            // Action button — Download for songs/albums/videos; Navigate for artists
-            const dlBtn = document.createElement('button');
-            if (item.type === 'artist') {
-                dlBtn.innerHTML = `<svg viewBox="0 0 16 16" fill="currentColor" width="13" height="13"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06z"/></svg>`;
-                dlBtn.title = 'Go to artist';
-                dlBtn.style.cssText = 'background:rgba(255,255,255,0.07);border:0.5px solid rgba(255,255,255,0.12);border-radius:6px;color:rgba(255,255,255,0.55);padding:5px 7px;cursor:pointer;display:flex;align-items:center;flex-shrink:0;transition:background 0.12s;';
-                dlBtn.onmouseenter = () => { dlBtn.style.background = 'rgba(255,255,255,0.13)'; };
-                dlBtn.onmouseleave = () => { dlBtn.style.background = 'rgba(255,255,255,0.07)'; };
-                dlBtn.onclick = e => {
-                    e.stopPropagation();
-                    const artistUrl = `https://music.apple.com/${item.storefront}/artist/${item.id}`;
-                    // Navigate the Apple Music webview to the artist page
-                    try { history.pushState({}, '', artistUrl); window.dispatchEvent(new PopStateEvent('popstate', { state: {} })); } catch (_) {}
-                    // Clear search to show queue
-                    const si = document.getElementById('aml-dl-search-input');
-                    if (si) { si.value = ''; si.dispatchEvent(new Event('input')); }
-                };
-            } else {
-                dlBtn.innerHTML = `<svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 1a1 1 0 0 1 1 1v7.586l2.293-2.293a1 1 0 1 1 1.414 1.414l-4 4a1 1 0 0 1-1.414 0l-4-4A1 1 0 0 1 4.707 7.293L7 9.586V2a1 1 0 0 1 1-1zM2 14a1 1 0 0 1 1-1h10a1 1 0 0 1 0 2H3a1 1 0 0 1-1-1z"/></svg>`;
-                dlBtn.title = item.type === 'album' ? 'Download album' : 'Download';
-                dlBtn.style.cssText = 'background:rgba(252,60,68,0.12);border:0.5px solid rgba(252,60,68,0.25);border-radius:6px;color:#fc3c44;padding:5px 7px;cursor:pointer;display:flex;align-items:center;flex-shrink:0;transition:background 0.12s;';
-                dlBtn.onmouseenter = () => { dlBtn.style.background = 'rgba(252,60,68,0.25)'; };
-                dlBtn.onmouseleave = () => { dlBtn.style.background = 'rgba(252,60,68,0.12)'; };
-                dlBtn.onclick = e => {
-                    e.stopPropagation();
-                    dlBtn.style.opacity = '0.4';
-                    dlBtn.disabled = true;
-                    startDownload({ type: item.type, id: item.id, storefront: item.storefront });
-                };
-            }
-
-            row.append(art, info, dlBtn);
-            el.appendChild(row);
-        }
     }
 
     function renderJobs(jobs) {
@@ -6059,7 +6405,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         if (!jobs?.length) {
             list.innerHTML = '';
             const empty = document.createElement('div');
-            empty.style.cssText = 'padding:36px 16px;text-align:center;color:rgba(255,255,255,0.28);font-size:12px;letter-spacing:-0.1px;';
+            empty.style.cssText = 'padding:44px 20px;text-align:center;color:rgba(255,255,255,0.28);font-size:12.5px;letter-spacing:-0.1px;';
             empty.textContent = 'No downloads yet';
             list.appendChild(empty);
             if (countEl) { countEl.textContent = ''; countEl.style.display = 'none'; }
@@ -6162,12 +6508,12 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     function buildJobRow(job) {
         const row = document.createElement('div');
         row.dataset.jobId = job.jobId;
-        row.style.cssText = 'padding:10px 14px;border-bottom:0.5px solid rgba(255,255,255,0.06);display:flex;gap:11px;align-items:flex-start;';
+        row.style.cssText = 'padding:12px 16px;border-bottom:0.5px solid rgba(255,255,255,0.06);display:flex;gap:13px;align-items:flex-start;';
 
         // Artwork thumbnail
         const art = document.createElement('div');
         art.className = 'aml-dl-art';
-        art.style.cssText = 'width:42px;height:42px;border-radius:8px;flex-shrink:0;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,0.4);margin-top:1px;';
+        art.style.cssText = 'width:48px;height:48px;border-radius:9px;flex-shrink:0;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.5);margin-top:1px;';
         const artImg = document.createElement('img');
         artImg.style.cssText = 'width:100%;height:100%;object-fit:cover;display:none;';
         art.appendChild(artImg);
@@ -6180,7 +6526,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         // Right column
         const col = document.createElement('div');
         col.className = 'aml-dl-col';
-        col.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;';
+        col.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:5px;';
 
         // Row 1: title + cancel
         const titleRow = document.createElement('div');
@@ -6188,7 +6534,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
 
         const name = document.createElement('span');
         name.className = 'aml-dl-name';
-        name.style.cssText = 'flex:1;color:rgba(255,255,255,0.92);font-size:12.5px;font-weight:590;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-0.15px;';
+        name.style.cssText = 'flex:1;color:rgba(255,255,255,0.92);font-size:13px;font-weight:590;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-0.2px;';
 
         const cancelBtn = document.createElement('button');
         cancelBtn.className = 'aml-dl-cancel';
@@ -6205,7 +6551,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
 
         const artist = document.createElement('span');
         artist.className = 'aml-dl-artist';
-        artist.style.cssText = 'color:rgba(255,255,255,0.40);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+        artist.style.cssText = 'color:rgba(255,255,255,0.40);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
 
         const pill = document.createElement('span');
         pill.className = 'aml-dl-pill aml-dl-pill-q';
@@ -6220,12 +6566,12 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         bar.style.cssText = 'flex:1;height:3px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;';
         const fill = document.createElement('div');
         fill.className = 'aml-dl-fill';
-        fill.style.cssText = 'height:100%;border-radius:2px;width:0%;transition:width 0.4s ease;background:#fc3c44;';
+        fill.style.cssText = 'height:100%;border-radius:2px;width:0%;transition:width 0.4s ease;background:rgba(255,255,255,0.85);';
         bar.appendChild(fill);
 
         const sizeLabel = document.createElement('span');
         sizeLabel.className = 'aml-dl-size';
-        sizeLabel.style.cssText = 'font-size:10px;color:rgba(255,255,255,0.28);flex-shrink:0;font-variant-numeric:tabular-nums;min-width:44px;text-align:right;';
+        sizeLabel.style.cssText = 'font-size:10.5px;color:rgba(255,255,255,0.28);flex-shrink:0;font-variant-numeric:tabular-nums;min-width:52px;text-align:right;';
         progRow.append(bar, sizeLabel);
 
         col.append(titleRow, metaRow, progRow);
@@ -6254,7 +6600,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         if (name) {
             if (hasTitle) {
                 name.textContent = job.title || job.output.split('/').pop();
-                name.style.cssText = 'flex:1;color:rgba(255,255,255,0.92);font-size:12.5px;font-weight:590;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-0.15px;';
+                name.style.cssText = 'flex:1;color:rgba(255,255,255,0.92);font-size:13px;font-weight:590;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-0.2px;';
             } else {
                 name.textContent = '';
                 name.style.cssText = 'flex:1;height:11px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.10);animation:aml-dl-skel 1.4s ease-in-out infinite;max-width:70%;';
@@ -6265,7 +6611,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         if (artist) {
             if (hasTitle) {
                 artist.textContent = job.artistName || '';
-                artist.style.cssText = 'color:rgba(255,255,255,0.40);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+                artist.style.cssText = 'color:rgba(255,255,255,0.40);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
             } else {
                 artist.textContent = '';
                 artist.style.cssText = 'flex:1;height:9px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.07);animation:aml-dl-skel 1.4s ease-in-out infinite;max-width:45%;';
@@ -6278,22 +6624,30 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             pill.textContent = PHASE_LABEL[phase] || phase;
         }
 
-        // Progress fill
+        // Progress fill — determinate bar for all phases
         if (fill) {
-            if (isActive) {
-                fill.style.cssText = [
-                    'height:100%;border-radius:2px;width:100%;transition:none;',
-                    'background:linear-gradient(90deg,rgba(252,60,68,0.25) 0%,#fc3c44 50%,rgba(252,60,68,0.25) 100%);',
-                    'background-size:200% 100%;animation:aml-dl-scan 1.8s ease-in-out infinite;',
-                ].join('');
+            const BG = { done: '#30d158', failed: '#ff453a', cancelled: 'rgba(255,255,255,0.10)' };
+            const pct = isTerminal ? 100 : (job.percent ?? 0);
+            const bg  = BG[phase] || 'rgba(255,255,255,0.85)';
+            if (phase === 'downloading') {
+                // Real byte-based fill — smooth transition, no animation
+                fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.6s ease;background:${bg};animation:none;`;
+            } else if (isActive) {
+                // Indeterminate pulse for resolving/tagging/moving
+                fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.4s ease;background:${bg};animation:aml-dl-pulse 1.2s ease-in-out infinite;`;
             } else {
-                const BG = { done: '#30d158', failed: '#ff453a', cancelled: 'rgba(255,255,255,0.10)' };
-                fill.style.cssText = `height:100%;border-radius:2px;width:${isTerminal ? 100 : (job.percent ?? 0)}%;transition:width 0.4s ease;background:${BG[phase] || '#fc3c44'};`;
+                fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.4s ease;background:${bg};animation:none;`;
             }
         }
 
-        // Size label
-        if (size) size.textContent = _fmtBytes(job.bytesDone);
+        // Size label — show "done / total" when total is known
+        if (size) {
+            if (phase === 'downloading' && job.bytesTotal && job.bytesDone) {
+                size.textContent = `${_fmtBytes(job.bytesDone)} / ${_fmtBytes(job.bytesTotal)}`;
+            } else {
+                size.textContent = _fmtBytes(job.bytesDone);
+            }
+        }
 
         // Progress row visibility: hide for queued/done/cancelled
         if (progRow) progRow.style.display = (phase === 'queued' || phase === 'cancelled') ? 'none' : 'flex';

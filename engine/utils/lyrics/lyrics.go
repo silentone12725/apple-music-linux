@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/beevik/etree"
@@ -43,20 +44,16 @@ func GetContext(ctx context.Context, storefront, songId, lrcType, language, lrcF
 		return "", err
 	}
 
-	if lrcFormat == "ttml" {
+	switch lrcFormat {
+	case "ttml":
 		return ttml, nil
+	case "vtt":
+		return TtmlToVtt(ttml)
+	case "srt":
+		return TtmlToSrt(ttml)
+	default:
+		return TtmlToLrc(ttml)
 	}
-
-	lrc, err := TtmlToLrc(ttml)
-	if err != nil {
-		return "", err
-	}
-
-	return lrc, nil
-}
-
-func getSongLyrics(songId string, storefront string, token string, userToken string, lrcType string, language string) (string, error) {
-	return getSongLyricsContext(context.Background(), songId, storefront, token, userToken, lrcType, language)
 }
 
 func getSongLyricsContext(ctx context.Context, songId string, storefront string, token string, userToken string, lrcType string, language string) (string, error) {
@@ -264,6 +261,116 @@ func TtmlToLrc(ttml string) (string, error) {
 		}
 	}
 	return strings.Join(lrcLines, "\n"), nil
+}
+
+// TtmlToSrt converts Apple Music TTML to SubRip (SRT) subtitle format.
+func TtmlToSrt(ttml string) (string, error) { return ttmlToSubtitle(ttml, "srt") }
+
+// TtmlToVtt converts Apple Music TTML to WebVTT subtitle format.
+func TtmlToVtt(ttml string) (string, error) { return ttmlToSubtitle(ttml, "vtt") }
+
+func ttmlToSubtitle(ttml, format string) (string, error) {
+	doc := etree.NewDocument()
+	if err := doc.ReadFromString(ttml); err != nil {
+		return "", err
+	}
+	tt := doc.FindElement("tt")
+	if tt == nil {
+		return "", errors.New("no <tt> element")
+	}
+	if attr := tt.SelectAttr("itunes:timing"); attr != nil && attr.Value == "None" {
+		return "", nil // untimed lyrics — no subtitle possible
+	}
+	body := tt.FindElement("body")
+	if body == nil {
+		return "", errors.New("no <body> in TTML")
+	}
+
+	var entries []string
+	idx := 1
+	for _, div := range body.FindElements("div") {
+		for _, p := range div.ChildElements() {
+			beginStr := p.SelectAttrValue("begin", "")
+			endStr := p.SelectAttrValue("end", "")
+			if beginStr == "" || endStr == "" {
+				continue
+			}
+			beginMs := parseTtmlMs(beginStr)
+			endMs := parseTtmlMs(endStr)
+
+			// Prefer text attribute; fall back to child content.
+			text := p.SelectAttrValue("text", "")
+			if text == "" {
+				var parts []string
+				for _, child := range p.Child {
+					switch c := child.(type) {
+					case *etree.CharData:
+						parts = append(parts, c.Data)
+					case *etree.Element:
+						parts = append(parts, c.Text())
+					}
+				}
+				text = strings.TrimSpace(strings.Join(parts, ""))
+			}
+			if text == "" {
+				continue
+			}
+
+			if format == "srt" {
+				entries = append(entries, fmt.Sprintf("%d\n%s --> %s\n%s", idx, msToSubTime(beginMs, ','), msToSubTime(endMs, ','), text))
+			} else {
+				entries = append(entries, fmt.Sprintf("%s --> %s\n%s", msToSubTime(beginMs, '.'), msToSubTime(endMs, '.'), text))
+			}
+			idx++
+		}
+	}
+	if len(entries) == 0 {
+		return "", nil
+	}
+	joined := strings.Join(entries, "\n\n") + "\n"
+	if format == "vtt" {
+		return "WEBVTT\n\n" + joined, nil
+	}
+	return joined, nil
+}
+
+// parseTtmlMs parses an Apple TTML time value to milliseconds.
+// Handles: "HH:MM:SS.mmm", "MM:SS.mmm", "SS.mmm", and variants without fractions.
+func parseTtmlMs(t string) int {
+	dotIdx := strings.LastIndex(t, ".")
+	intPart := t
+	fracStr := ""
+	if dotIdx >= 0 {
+		intPart = t[:dotIdx]
+		fracStr = t[dotIdx+1:]
+	}
+
+	var h, m, s int
+	n, _ := fmt.Sscanf(intPart, "%d:%d:%d", &h, &m, &s)
+	if n < 3 {
+		n2, _ := fmt.Sscanf(intPart, "%d:%d", &m, &s)
+		if n2 < 2 {
+			s, _ = strconv.Atoi(intPart)
+		}
+	}
+
+	totalMs := (h*3600+m*60+s) * 1000
+	if fracStr != "" {
+		fracStr += strings.Repeat("0", max(0, 3-len(fracStr)))
+		if len(fracStr) > 3 {
+			fracStr = fracStr[:3]
+		}
+		ms, _ := strconv.Atoi(fracStr)
+		totalMs += ms
+	}
+	return totalMs
+}
+
+func msToSubTime(ms int, sep byte) string {
+	h := ms / 3600000; ms -= h * 3600000
+	m := ms / 60000; ms -= m * 60000
+	s := ms / 1000; ms -= s * 1000
+	return fmt.Sprintf("%02d:%02d:%02d%c%03d", h, m, s, sep, ms)
 }
 
 func conventSyllableTTMLToLRC(ttml string) (string, error) {

@@ -8,6 +8,7 @@ package vlc
 import "C"
 import (
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"sync"
@@ -110,29 +111,130 @@ func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
 	}
 }
 
-// Seek reloads the media at posMs. fMP4 is not byte-range seekable (VLC has
-// no time→byte map for fragmented files), so the engine serves a new fragment
-// stream starting at posMs via the ?t= query param, same as the ALAC path.
-func (p *Player) Seek(posMs int64) error {
+// SeekURL stops current playback, loads seekURL, and logs the actual landed
+// position once VLC reaches playing state. seekURL should be an HTTP URL with
+// a ?t= parameter so the engine can stream from the correct fMP4 fragment,
+// bypassing any truncated disk-cached file.
+func (p *Player) SeekURL(seekURL string, posMs int64) error {
+	p.mu.Lock()
+	C.libvlc_media_player_stop(p.mp)
+	p.mu.Unlock()
+
+	log.Printf("[vlc seek] ► SEND  requested=%dms  start-time=%.3fs  url=%s", posMs, float64(posMs)/1000.0, seekURL)
+
+	if err := p.Load(seekURL); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	myGen := p.loadGen
+	p.mu.Unlock()
+
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			p.mu.Lock()
+			state := C.libvlc_media_player_get_state(p.mp)
+			pos := int64(C.libvlc_media_player_get_time(p.mp))
+			gen := p.loadGen
+			p.mu.Unlock()
+			if gen != myGen {
+				log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
+				return
+			}
+			if state == C.libvlc_Playing && pos > 0 {
+				delta := pos - posMs
+				sign := "+"
+				if delta < 0 {
+					sign = ""
+				}
+				log.Printf("[vlc seek] ◄ LANDED  requested=%dms  actual=%dms  Δ=%s%dms", posMs, pos, sign, delta)
+				return
+			}
+		}
+		log.Printf("[vlc seek] ✗ TIMEOUT — VLC did not reach playing state within 5s (requested=%dms)", posMs)
+	}()
+	return nil
+}
+
+// SeekReload seeks by reloading the current media with the libvlc :start-time
+// option. This is reliable for fMP4/ALAC files where set_time silently fails
+// (Apple fMP4 fragments lack a usable time→byte index that libvlc can follow).
+// VLC estimates the byte offset from the file's duration and bitrate, then
+// scans forward to the next valid moof boundary — accurate to ±1 fragment.
+func (p *Player) SeekReload(posMs int64) error {
+	if posMs < 0 {
+		posMs = 0
+	}
 	p.mu.Lock()
 	url := p.lastURL
+	vol := p.volume
 	p.mu.Unlock()
 	if url == "" {
 		return nil
 	}
+	// Strip any existing query string from the URL so :start-time is the only
+	// seek parameter (file:// URLs do not accept query strings).
 	base := url
 	if i := strings.Index(url, "?"); i >= 0 {
 		base = url[:i]
 	}
-	seekURL := fmt.Sprintf("%s?t=%.3f&raw=1", base, float64(posMs)/1000.0)
-	fmt.Printf("[vlc] Seek posMs=%d → %s\n", posMs, seekURL)
-	// Stop current playback so VLC flushes its audio buffer before loading the
-	// seek stream. Without this, buffered audio from the old position plays out
-	// first, making seeks appear to start from the wrong position.
+
+	cURL := C.CString(base)
+	defer C.free(unsafe.Pointer(cURL))
+	media := C.libvlc_media_new_location(p.inst, cURL)
+	if media == nil {
+		return fmt.Errorf("vlc: libvlc_media_new_location failed for %s", base)
+	}
+	defer C.libvlc_media_release(media)
+
+	opt := C.CString(fmt.Sprintf(":start-time=%.3f", float64(posMs)/1000.0))
+	defer C.free(unsafe.Pointer(opt))
+	C.libvlc_media_add_option(media, opt)
+
+	log.Printf("[vlc seek] ► SEND  requested=%dms  start-time=%.3fs  url=%s", posMs, float64(posMs)/1000.0, base)
+
 	p.mu.Lock()
 	C.libvlc_media_player_stop(p.mp)
+	C.libvlc_media_player_set_media(p.mp, media)
+	p.lastURL = base
+	p.loadGen++
+	myGen := p.loadGen
 	p.mu.Unlock()
-	return p.Load(seekURL)
+
+	if ret := C.libvlc_media_player_play(p.mp); ret != 0 {
+		return fmt.Errorf("vlc: play failed (ret %d)", int(ret))
+	}
+	C.libvlc_audio_set_volume(p.mp, C.int(vol))
+	go p.reapplyVolumeOnPlay(vol, myGen)
+	// Verify actual landing position once VLC enters playing state.
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			p.mu.Lock()
+			state := C.libvlc_media_player_get_state(p.mp)
+			pos := int64(C.libvlc_media_player_get_time(p.mp))
+			gen := p.loadGen
+			p.mu.Unlock()
+			if gen != myGen {
+				log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
+				return
+			}
+			if state == C.libvlc_Playing && pos > 0 {
+				delta := pos - posMs
+				sign := "+"
+				if delta < 0 {
+					sign = ""
+				}
+				log.Printf("[vlc seek] ◄ LANDED  requested=%dms  actual=%dms  Δ=%s%dms", posMs, pos, sign, delta)
+				return
+			}
+		}
+		log.Printf("[vlc seek] ✗ TIMEOUT — VLC did not reach playing state within 5s (requested=%dms)", posMs)
+	}()
+	return nil
 }
 
 // SetTime seeks within the currently loaded media to posMs milliseconds.
