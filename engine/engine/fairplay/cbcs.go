@@ -608,6 +608,14 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		if frag.Moof != nil && frag.Moof.Traf != nil {
 			oldSize := frag.Moof.Size()
 
+			// Apple's fMP4 starts mfhd.sequence_number at 1 (ISOBMFF-legal), but VLC's
+			// mp4 demuxer tracks the value starting from 0 and reports "Fragment sequence
+			// discontinuity" when it sees 1 instead of 0 on the first fragment.
+			// Patch to 0-based monotonic so VLC never sees a gap.
+			if frag.Moof.Mfhd != nil {
+				frag.Moof.Mfhd.SequenceNumber = uint32(i)
+			}
+
 			if frag.Moof.Traf.Tfdt != nil {
 				frag.Moof.Traf.Tfdt.SetBaseMediaDecodeTime(accumulatedTfdt)
 				frag.Moof.Traf.Tfdt.Version = 1 // Force 64-bit to prevent size shrinking

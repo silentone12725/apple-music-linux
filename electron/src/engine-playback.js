@@ -3836,10 +3836,17 @@ async function setup() {
             const mkAudioEl = getMKAudio();
             if (mkAudioEl) {
                 try { delete mkAudioEl.load; } catch (_) {}
-                // Also delete the play proxy — otherwise MK's audio.play() call during
-                // setQueue routes to vlc/resume for the old paused track instead of
-                // letting MK initialise the new one, silently aborting the track switch.
                 try { delete mkAudioEl.play; } catch (_) {}
+                // Delete the VLC-mode property overrides so MK sees a clean audio element.
+                // Root cause: 'paused' override returns false (playing). MK calls audio.pause()
+                // as part of its track-change sequence, but the native element is already paused
+                // (we never natively played it), so no 'pause' event fires. MK's stop() hangs
+                // waiting for that event → setQueue never runs → NPIDF never fires → 20s timeout.
+                // Deleting 'paused' exposes native paused=true; MK skips the pause step entirely.
+                // Deleting 'currentTime' avoids MK treating VLC's position (e.g. 35s) as the
+                // start position of the new track, which could cause a seek into unbuffered data.
+                try { delete mkAudioEl.paused; } catch (_) {}
+                try { delete mkAudioEl.currentTime; } catch (_) {}
             }
             _proxyInstalled = false; // handleTrackChange will reinstall for the new track
             // Stop VLC poll: its timeupdate/playing events confuse MK's audio pipeline
@@ -3852,8 +3859,13 @@ async function setup() {
             _externalPlayGateTimer = setTimeout(() => {
                 // No track change happened — restore VLC state and close gate.
                 const el = getMKAudio();
-                if (el && _vlcMode) el.load = () => {};
-                if (_vlcMode) startVLCPoll(el);
+                if (el && _vlcMode) {
+                    el.load = () => {};
+                    // Restore the property overrides torn down above.
+                    Object.defineProperty(el, 'paused', { get: () => _vlcPaused, configurable: true });
+                    Object.defineProperty(el, 'currentTime', { get: () => _vlcPosMs / 1000, set: () => {}, configurable: true });
+                    startVLCPoll(el);
+                }
                 _allowCDNTransition = false;
                 _externalPlayGateTimer = null;
                 console.log('[AML click] CDN gate reset (safety timeout)');
