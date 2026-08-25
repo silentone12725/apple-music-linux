@@ -1719,7 +1719,12 @@ function createTray() {
         },
         {
             label: 'Exit',
-            click: () => { isQuitting = true; app.quit(); },
+            click: () => {
+                isQuitting = true;
+                stopEngine();
+                if (tray) { tray.destroy(); tray = null; }
+                app.exit(0);
+            },
         },
     ]);
 
