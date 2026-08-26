@@ -588,7 +588,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// OPTIONS, causing preflights to 405.  Chrome also requires the response
 	// to include Access-Control-Allow-Private-Network: true when fetching
 	// across localhost ports (CORS-RFC1918 / Private Network Access).
-	s.srv = &http.Server{Handler: corsPreflightHandler(mux)}
+	s.srv = &http.Server{Handler: corsPreflightHandler(mux), ReadHeaderTimeout: 10 * time.Second}
 	return s
 }
 
@@ -2006,6 +2006,7 @@ func (s *APIServer) handleLibraryIngest(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "library store not initialised", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 100<<20) // 100 MB cap
 	var payload library.IngestPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
