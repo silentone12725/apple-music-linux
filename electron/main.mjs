@@ -102,6 +102,7 @@ let win    = null;
 let tray   = null;
 let engineProc = null;
 let isQuitting = false;
+let _engineRestartDelay = 1000; // ms; doubles on each crash, resets on clean uptime
 
 // ── Engine API server ─────────────────────────────────────────────────────────
 // The engine binary decrypts Apple Music streams and exposes them as plain
@@ -282,9 +283,19 @@ async function startEngine() {
     };
     engineProc.stdout.on('data', onOut);
     engineProc.stderr.on('data', onErr);
+    const startTime = Date.now();
     engineProc.on('exit', (code) => {
         console.log('[AML] Engine exited (code', code ?? 0, ')');
         engineProc = null;
+        if (isQuitting) return;
+        // Reset backoff if engine ran for >30s (healthy uptime), otherwise double it.
+        if (Date.now() - startTime > 30_000) {
+            _engineRestartDelay = 1000;
+        } else {
+            _engineRestartDelay = Math.min(_engineRestartDelay * 2, 30_000);
+        }
+        console.log('[AML] Restarting engine in', _engineRestartDelay, 'ms…');
+        setTimeout(() => startEngine(), _engineRestartDelay);
     });
     console.log('[AML] Engine started on port', ENGINE_PORT, '(pid', engineProc.pid, ')');
 }

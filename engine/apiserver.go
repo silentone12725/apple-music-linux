@@ -58,6 +58,7 @@ import (
 	"engine/engine/diskcache"
 	"engine/engine/drm"
 	"engine/engine/export"
+	"engine/engine/library"
 	"engine/engine/pipeline"
 	"engine/engine/playback"
 	"engine/engine/prefetch"
@@ -333,10 +334,14 @@ type APIServer struct {
 	backendSel  drm.BackendSelection // non-nil when a fallback composite is in use
 	scheduler   *prefetch.Scheduler  // background cache-warming scheduler
 	diskCache   *diskcache.Cache     // per-track decrypted audio disk cache
+	libStore    *library.Store       // local library metadata cache (songs, playlists)
 	vlcPlayer *vlc.Player // nil when libvlc is not available
 
 	tokenMu sync.RWMutex
 	cachedToken string // bearer token cached from the most recent browser request
+
+	mkTokenMu    sync.RWMutex
+	mkMusicToken string // MusicKit JS Music-User-Token (web auth, not Android DRM)
 }
 
 // ServerConfig holds infrastructure values resolved once at startup.
@@ -472,6 +477,18 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		}
 	}
 
+	// Library metadata cache — songs + playlist membership for instant queue ops.
+	if cacheBase, err := os.UserCacheDir(); err == nil {
+		libCacheDir := filepath.Join(cacheBase, "apple-music-linux")
+		if err := os.MkdirAll(libCacheDir, 0o755); err == nil {
+			s.libStore = library.New(libCacheDir)
+			// Auto-sync removed: the Go-side API client cannot authenticate with
+			// Apple's API (GetToken is broken; Android DRM tokens don't pair with
+			// the web developer JWT). Sync is now driven by the JS layer via
+			// POST /api/v1/library/ingest — trigger it from Settings → Library.
+		}
+	}
+
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
 	}, 0)
@@ -528,6 +545,16 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("POST /api/v1/drm/challenge", cors(s.handleDRMChallenge))
 	mux.HandleFunc("POST /api/v1/drm/logout", cors(s.handleDRMLogout))
 	mux.HandleFunc("DELETE /api/v1/drm/session", cors(s.handleDRMClearSession))
+
+	// Library — local metadata cache (songs, playlists, playlist tracks).
+	// Mirrors what Android's MediaLibrary and Windows' AMPLibraryAgent provide:
+	// instant queue building from local SQLite instead of live Apple Music API calls.
+	mux.HandleFunc("POST /api/v1/library/token", cors(s.handleLibraryToken))
+	mux.HandleFunc("POST /api/v1/library/sync", cors(s.handleLibrarySync))
+	mux.HandleFunc("POST /api/v1/library/ingest", cors(s.handleLibraryIngest))
+	mux.HandleFunc("GET /api/v1/library/status", cors(s.handleLibraryStatus))
+	mux.HandleFunc("GET /api/v1/library/playlists", cors(s.handleLibraryPlaylists))
+	mux.HandleFunc("GET /api/v1/library/playlists/{id}/tracks", cors(s.handleLibraryPlaylistTracks))
 
 	// Catalog — search and entity detail endpoints for frontend UIs.
 	// These are purely additive and proxy the Apple Music catalog API.
@@ -970,6 +997,10 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.setToken(token)
+	// Also update the MK music user token used by library API calls.
+	// req.MUT is the media-user-token cookie from the web session — the correct
+	// web-auth Music-User-Token paired with the web developer JWT above.
+	s.setMusicUserToken(mut)
 
 	sf := req.Storefront
 	if sf == "" {
@@ -1787,6 +1818,88 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ── Library metadata cache handlers ──────────────────────────────────────────
+
+// resolveToken returns the bearer JWT, falling back to ampapi.GetToken() if the
+// browser hasn't sent one yet (e.g. sync called before first playback request).
+func (s *APIServer) resolveToken() (string, error) {
+	if t := s.token(); t != "" {
+		return t, nil
+	}
+	t, err := ampapi.GetToken()
+	if err != nil {
+		return "", fmt.Errorf("could not resolve bearer token: %w", err)
+	}
+	if t == "" {
+		return "", fmt.Errorf("developer token not available — open Apple Music first so MusicKit can push credentials")
+	}
+	s.setToken(t)
+	return t, nil
+}
+
+// handleLibrarySync is deprecated — sync is now JS-driven via POST /api/v1/library/ingest.
+func (s *APIServer) handleLibrarySync(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "use Settings → Library → Sync Now (JS-driven sync via /api/v1/library/ingest)", http.StatusGone)
+}
+
+// handleLibraryStatus returns the current cache stats.
+func (s *APIServer) handleLibraryStatus(w http.ResponseWriter, r *http.Request) {
+	if s.libStore == nil {
+		http.Error(w, "library store not initialised", http.StatusServiceUnavailable)
+		return
+	}
+	songs, playlists, syncedAt := s.libStore.Stats()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"songs":     songs,
+		"playlists": playlists,
+		"syncedAt":  syncedAt,
+		"needsSync": s.libStore.NeedsSync(),
+	})
+}
+
+// handleLibraryPlaylists returns the cached playlist list.
+func (s *APIServer) handleLibraryPlaylists(w http.ResponseWriter, r *http.Request) {
+	if s.libStore == nil {
+		http.Error(w, "library store not initialised", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"playlists": s.libStore.Playlists()})
+}
+
+// handleLibraryPlaylistTracks returns the ordered track list for a playlist.
+// Response: {"tracks": [{lid, cid}, ...]} — lid = library song ID, cid = catalog ID.
+// The JS setQueue wrapper calls this to build {songs:[...catalogIds]} instantly.
+func (s *APIServer) handleLibraryPlaylistTracks(w http.ResponseWriter, r *http.Request) {
+	if s.libStore == nil {
+		http.Error(w, "library store not initialised", http.StatusServiceUnavailable)
+		return
+	}
+	playlistID := r.PathValue("id")
+	tracks := s.libStore.PlaylistTracks(playlistID)
+	if tracks == nil {
+		// Not in cache — attempt a live fetch if authenticated.
+		tok, tokErr := s.resolveToken()
+		mut := s.musicUserToken()
+		if tokErr != nil || mut == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"tracks": []any{}, "cached": false})
+			return
+		}
+		fetched, err := library.FetchPlaylistTracksOnce(r.Context(), tok, mut, playlistID)
+		if err != nil {
+			log.Printf("[library] live fetch %s: %v", playlistID, err)
+			writeJSON(w, http.StatusOK, map[string]any{"tracks": []any{}, "cached": false, "error": err.Error()})
+			return
+		}
+		// Cache the result for next time.
+		if s.libStore != nil {
+			s.libStore.SetPlaylistTracks(playlistID, fetched)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tracks": fetched, "cached": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tracks": tracks, "cached": true})
+}
+
 // ── Per-route CORS middleware ─────────────────────────────────────────────────
 
 func cors(h http.HandlerFunc) http.HandlerFunc {
@@ -1843,6 +1956,64 @@ func (s *APIServer) setToken(tok string) {
 	s.tokenMu.Lock()
 	s.cachedToken = tok
 	s.tokenMu.Unlock()
+}
+
+// musicUserToken returns the MusicKit JS Music-User-Token if one has been
+// pushed from the renderer, otherwise falls back to the DRM session token.
+func (s *APIServer) musicUserToken() string {
+	s.mkTokenMu.RLock()
+	t := s.mkMusicToken
+	s.mkTokenMu.RUnlock()
+	if t != "" {
+		return t
+	}
+	return s.mediaUserToken()
+}
+
+func (s *APIServer) setMusicUserToken(tok string) {
+	if tok == "" {
+		return
+	}
+	s.mkTokenMu.Lock()
+	s.mkMusicToken = tok
+	s.mkTokenMu.Unlock()
+}
+
+// handleLibraryToken stores the MusicKit JS tokens sent by the renderer.
+// The JS side pushes mk.musicUserToken + the developer token at startup so
+// library sync can use the web-auth credentials instead of the Android DRM ones.
+func (s *APIServer) handleLibraryToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MusicUserToken string `json:"musicUserToken"`
+		DeveloperToken string `json:"developerToken"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.setMusicUserToken(body.MusicUserToken)
+	if body.DeveloperToken != "" {
+		s.setToken(body.DeveloperToken)
+	}
+	log.Printf("[library] received MK web tokens (mut len=%d, dev len=%d)", len(body.MusicUserToken), len(body.DeveloperToken))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleLibraryIngest accepts pre-fetched library data from the JS sync function.
+// MusicKit JS owns authentication; the engine just parses and stores the payload.
+func (s *APIServer) handleLibraryIngest(w http.ResponseWriter, r *http.Request) {
+	if s.libStore == nil {
+		http.Error(w, "library store not initialised", http.StatusServiceUnavailable)
+		return
+	}
+	var payload library.IngestPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.libStore.Ingest(payload)
+	songs, pls, at := s.libStore.Stats()
+	writeJSON(w, http.StatusOK, map[string]any{"songs": songs, "playlists": pls, "syncedAt": at})
 }
 
 // lang returns the language tag for catalog API calls.

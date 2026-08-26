@@ -212,6 +212,10 @@ let _nativePlay   = null; // saved when play() proxy is installed on the element
 let _ourBlobUrl   = null; // current blob URL we own; blocks MK from replacing it
 let _allowCDNTransition  = false; // temporarily lifted during changeToMediaAtIndex so MK can settle NPIDF
 let _externalPlayGateTimer = null; // safety reset timer for _allowCDNTransition
+let _mkApiSaved = null; // saved MK API methods during external-play gate window
+let _savedGateTracingCleanup = null; // cleanup fn for audio/MK event tracing added during gate
+let _pendingExternalClickCatalogId = null; // catalog song ID extracted from DOM at click time
+let _pendingPlaylistFetch = null;          // Promise<API response> started at click time for cross-playlist queue rebuild
 
 // The music.apple.com origin's HTMLMediaElement.prototype.play is gated by Chromium's
 // autoplay policy for that realm, which blocks play() on elements managed by the native
@@ -354,6 +358,8 @@ function blockAppleCDN() {
         get: desc.get,
         set(val) {
             if (isAppleCDN(val) && !_allowCDNTransition) { console.log('[AML Engine] Blocked CDN src:', val.slice(0, 80)); return; }
+            if (isAppleCDN(val) && _allowCDNTransition) { console.log('[AML Engine] CDN src THROUGH (gate open):', val.slice(0, 80)); }
+            if (_allowCDNTransition && val !== undefined) { console.log('[AUDIO-SRC] gate-open src set → "' + String(val).slice(0,60) + '"'); }
             if (val?.startsWith('blob:') && _ourBlobUrl && val !== _ourBlobUrl) { return; }
             desc.set.call(this, val);
         },
@@ -2784,6 +2790,7 @@ async function handleTrackChange(mk) {
         }
         if (_allowCDNTransition) {
             // CDN gate is open: null NPIDF is expected during setQueue; real NPIDF follows.
+            console.log('[NPIDF] null-item with CDN gate open — waiting for real NPIDF');
             return;
         }
         const genSnapshot = _generation;
@@ -2797,6 +2804,10 @@ async function handleTrackChange(mk) {
     if (_allowCDNTransition) {
         _allowCDNTransition = false;
         if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
+        if (_mkApiSaved) { mk.play = _mkApiSaved.play; mk.setQueue = _mkApiSaved.setQueue; mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex; _mkApiSaved = null; }
+        if (_savedGateTracingCleanup) { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
+        _pendingExternalClickCatalogId = null;
+        _pendingPlaylistFetch = null;
     }
 
     const myGen = ++_generation;
@@ -3457,6 +3468,102 @@ async function setup() {
     const mk = await waitForMusicKit();
     console.log('[AML Engine] MusicKit ready');
 
+    // Push MusicKit JS credentials to the engine so the library API can use
+    // the web-auth token pair instead of the Android DRM session token.
+    // Runs immediately and re-pushes every 60s so the engine always has fresh
+    // tokens even after an engine restart (the engine forgets them on exit).
+    const _pushLibraryTokens = () => {
+        try {
+            const mkut = mk.musicUserToken;
+            const devToken = mk.developerToken || '';
+            if (mkut) {
+                fetch(ENGINE + '/api/v1/library/token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ musicUserToken: mkut, developerToken: devToken })
+                }).catch(() => {});
+            }
+        } catch (_) {}
+    };
+    _pushLibraryTokens();
+    setInterval(_pushLibraryTokens, 60_000);
+
+    // ── Library sync via MusicKit JS ────────────────────────────────────────
+    // Uses mk.api.music() which handles auth internally — no token management.
+    // Mirrors Windows' AMPLibraryAgent pattern: native app fetches, stores locally.
+    async function _syncLibraryViaJS(onProgress) {
+        if (!onProgress) onProgress = () => {};
+        const mkInst = window.MusicKit?.getInstance?.();
+        if (!mkInst) throw new Error('MusicKit not ready');
+
+        async function fetchAll(startPath) {
+            const items = [];
+            let path = startPath;
+            while (path) {
+                const res = await mkInst.api.music(path);
+                const body = res?.data;
+                if (body?.errors?.length) throw new Error(body.errors[0]?.detail || body.errors[0]?.title || 'API error');
+                items.push(...(body?.data || []));
+                onProgress(items.length, path);
+                // Apple's next URL drops the limit param — re-attach so pages stay at 100.
+                const next = body?.next || null;
+                path = next ? (next.includes('limit=') ? next : next + '&limit=100') : null;
+            }
+            return items;
+        }
+
+        const songs = await fetchAll('/v1/me/library/songs?limit=100&include=catalog');
+        onProgress(songs.length, 'playlists');
+        const playlists = await fetchAll('/v1/me/library/playlists?limit=100');
+
+        const playlistTracks = {};
+        for (let i = 0; i < playlists.length; i++) {
+            onProgress(i, 'tracks:' + (playlists[i].attributes?.name || playlists[i].id));
+            const tracks = await fetchAll(`/v1/me/library/playlists/${playlists[i].id}/tracks?limit=100`);
+            playlistTracks[playlists[i].id] = tracks;
+        }
+
+        // Fetch current library revision for delta-sync on next launch.
+        let revision = '';
+        try {
+            const libRes = await mkInst.api.music('/v1/me/library');
+            revision = libRes?.data?.data?.[0]?.attributes?.revision
+                    || libRes?.data?.revision
+                    || libRes?.data?.data?.[0]?.id
+                    || '';
+        } catch (_) {}
+
+        const resp = await fetch(ENGINE + '/api/v1/library/ingest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ songs, playlists, playlistTracks, revision }),
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        return await resp.json();
+    }
+    window._syncLibraryViaJS = _syncLibraryViaJS;
+
+    // ── Auto-sync on startup if cache is empty or stale ──────────────────────
+    // Fires once, 8s after MK is ready (auth needs time to settle).
+    // The engine's NeedsSync() is time-gated: if the last sync was within 24h
+    // (even if it returned 0 songs), this does nothing — prevents loops on
+    // genuinely empty libraries.
+    setTimeout(async () => {
+        try {
+            const status = await fetch(ENGINE + '/api/v1/library/status').then(r => r.json()).catch(() => null);
+            if (!status?.needsSync) return;
+            console.log('[AML Library] auto-sync: cache needs refresh');
+            const result = await _syncLibraryViaJS();
+            if (result.songs === 0) {
+                console.log('[AML Library] auto-sync: library is empty — will not retry for 24h');
+            } else {
+                console.log(`[AML Library] auto-sync done: ${result.songs} songs, ${result.playlists} playlists`);
+            }
+        } catch (e) {
+            console.log('[AML Library] auto-sync failed:', e.message || e);
+        }
+    }, 8000);
+
     // Override mk.play() and mk.pause() so VLC handles audio while MK's own
     // state machine and UI stay in sync.  This is the most reliable interception
     // point: the play button always goes through mk.play()/mk.pause() before
@@ -3592,23 +3699,37 @@ async function setup() {
             _clearAdvancing();
         }, 6000);
 
-        // Build the flat queue: all containers in order (history + upcoming in current container).
-        const allIds = _sessionFlatIds();
-        if (!allIds.length) {
-            clearTimeout(_amlAdvancingTimer);
-            _clearAdvancing();
-            _amlGotoTarget = null;
-            _allowCDNTransition = false;
-            _amlTransitioning = false;
-            _amlNavInternal = false;
-            _amlPendingCI = -1;
-            _amlPendingII = -1;
-            return;
+        // Navigate to the target track. Prefer changeToMediaAtIndex alone when the target
+        // is already in MK's current queue — calling setQueue({songs:[...]}) first destroys
+        // the existing playlist context and triggers MK's "linear and non-linear traversal
+        // in same playlist" error on subsequent skips. Only rebuild with setQueue when the
+        // target track is not yet in MK's queue (cross-container/cross-playlist jump).
+        const mkCurrentItems = mk.queue?.items ?? [];
+        const mkDirectIdx = targetSongId
+            ? mkCurrentItems.findIndex(it => _extractItemId(it) === targetSongId)
+            : -1;
+
+        if (mkDirectIdx >= 0) {
+            _amlGotoTarget = mkDirectIdx;
+            await mk.changeToMediaAtIndex(mkDirectIdx).catch(() => {});
+        } else {
+            const allIds = _sessionFlatIds();
+            if (!allIds.length) {
+                clearTimeout(_amlAdvancingTimer);
+                _clearAdvancing();
+                _amlGotoTarget = null;
+                _allowCDNTransition = false;
+                _amlTransitioning = false;
+                _amlNavInternal = false;
+                _amlPendingCI = -1;
+                _amlPendingII = -1;
+                return;
+            }
+            const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
+            _amlGotoTarget = targetIdx;
+            await mk.setQueue({ songs: allIds }).catch(() => {});
+            await mk.changeToMediaAtIndex(targetIdx).catch(() => {});
         }
-        const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
-        _amlGotoTarget = targetIdx;
-        await mk.setQueue({ songs: allIds }).catch(() => {});
-        await mk.changeToMediaAtIndex(targetIdx).catch(() => {});
 
         // ctmi has been sent — release the advancing lock immediately so rapid prev/next
         // clicks aren't swallowed. The NPIDF filter (_amlGotoTarget) and session-state
@@ -3852,12 +3973,134 @@ async function setup() {
             // Stop VLC poll: its timeupdate/playing events confuse MK's audio pipeline
             // while setQueue is resolving the new context (same reason as _amlGoto).
             stopVLCPoll();
-            console.log('[AML click] external play while VLC active — opening CDN gate');
+            // Try to extract the catalog song ID from the clicked DOM element so the
+            // setQueue wrapper can substitute {songs:[catalogId]} for cross-playlist clicks
+            // (which otherwise stall on a network fetch for the full playlist).
+            _pendingExternalClickCatalogId = null;
+            try {
+                let el = e.target;
+                for (let depth = 0; depth < 12 && el; depth++) {
+                    // data-id or data-content-id attributes
+                    const did = el.dataset?.id || el.dataset?.contentId || el.dataset?.songId;
+                    if (did && /^\d{7,12}$/.test(did)) { _pendingExternalClickCatalogId = did; break; }
+                    // href on anchor containing a numeric song ID
+                    if (el.tagName === 'A' && el.href) {
+                        const m = el.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
+                        if (m) { _pendingExternalClickCatalogId = m[1]; break; }
+                    }
+                    el = el.parentElement;
+                }
+            } catch (_) {}
+            console.log('[AML click] external play while VLC active — opening CDN gate playbackState=' + mk.playbackState + ' amlGotoTarget=' + _amlGotoTarget + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null') + ' catalogId=' + (_pendingExternalClickCatalogId || 'not-found'));
+            // Pre-fetch playlist tracks from the local engine cache so the setQueue
+            // wrapper can build a full {songs:[...all]} descriptor without touching
+            // Apple's API — same as Android's LibraryItemListPlaybackQueueItemProvider
+            // building from a local SQLite snapshot at tap time.
+            _pendingPlaylistFetch = null;
+            try {
+                const m = location.href.match(/\/library\/playlist\/(p\.[A-Za-z0-9]+)/);
+                if (m) {
+                    const playlistId = m[1];
+                    _pendingPlaylistFetch = fetch(ENGINE + '/api/v1/library/playlists/' + encodeURIComponent(playlistId) + '/tracks')
+                        .then(r => r.ok ? r.json() : null)
+                        .catch(() => null);
+                    console.log('[AML click] pre-fetching playlist tracks from local cache: ' + playlistId);
+                }
+            } catch (_) {}
             _allowCDNTransition = true;
             _ourBlobUrl = null;
+
+            // ── MK API + audio-element instrumentation during CDN gate window ──────
+            _mkApiSaved = { play: mk.play, setQueue: mk.setQueue, changeToMediaAtIndex: mk.changeToMediaAtIndex };
+            mk.play = (...a) => {
+                console.log('[MK-DBG] mk.play() state=' + mk.playbackState);
+                const p = _mkApiSaved.play.apply(mk, a);
+                if (p?.then) p.then(() => console.log('[MK-DBG] mk.play() resolved'), e => console.log('[MK-DBG] mk.play() rejected:', e?.message || e));
+                return p;
+            };
+            mk.setQueue = (...a) => {
+                console.log('[MK-DBG] mk.setQueue() args=' + JSON.stringify(a).slice(0,200));
+                // setQueue({playlists:[...]}) fetches tracks from Apple's network — this stalls
+                // when DNS/network is slow, hanging for >20s and preventing NPIDF from firing.
+                // If the target startWith item is already in mk.queue.items, redirect to
+                // changeToMediaAtIndex which fires NPIDF synchronously with no network fetch.
+                const desc = a[0];
+                if (desc?.playlists && desc?.startWith?.id) {
+                    const targetId = desc.startWith.id;
+                    const qItems = mk.queue?.items || [];
+                    const idx = qItems.findIndex(item => item.id === targetId);
+                    if (idx >= 0) {
+                        console.log('[MK-DBG] setQueue → ctmi redirect: found id=' + targetId + ' at idx=' + idx);
+                        const p = _mkApiSaved.changeToMediaAtIndex.call(mk, idx);
+                        if (p?.then) p.then(() => console.log('[MK-DBG] ctmi redirect resolved'), e => console.log('[MK-DBG] ctmi redirect rejected:', e?.message || e));
+                        return p;
+                    }
+                    console.log('[MK-DBG] setQueue: id=' + targetId + ' not in queue (len=' + qItems.length + '), falling through');
+                    // Cross-playlist: build a full {songs:[...all catalog IDs]} from the local engine
+                    // cache (Android-style local snapshot) so we never stall on Apple's playlist API.
+                    if (_pendingExternalClickCatalogId) {
+                        const catalogId = _pendingExternalClickCatalogId;
+                        const fetchPromise = _pendingPlaylistFetch
+                            ? Promise.race([_pendingPlaylistFetch, new Promise(res => setTimeout(() => res(null), 3000))])
+                            : Promise.resolve(null);
+                        return fetchPromise.then(result => {
+                            const tracks = result?.tracks || [];
+                            // Filter to catalog songs only (library-only uploads have no catalogId digit string)
+                            const catalogIds = tracks
+                                .map(t => t.cid)
+                                .filter(id => id && /^\d{6,}$/.test(id));
+                            if (catalogIds.length > 1) {
+                                console.log('[MK-DBG] setQueue → local cache redirect: ' + catalogIds.length + ' tracks, startWith=' + catalogId);
+                                const pDesc = {songs: catalogIds};
+                                if (catalogIds.includes(catalogId)) pDesc.startWith = {id: catalogId};
+                                const p = _mkApiSaved.setQueue.call(mk, pDesc);
+                                if (p?.then) p.then(r => console.log('[MK-DBG] local cache redirect resolved'), e2 => console.log('[MK-DBG] local cache redirect rejected:', e2?.message || String(e2)));
+                                return p;
+                            }
+                            // Fallback: single-song (works even before first library sync)
+                            console.log('[MK-DBG] setQueue → songs redirect (no cache) catalogId=' + catalogId + ' tracks=' + tracks.length);
+                            const p = _mkApiSaved.setQueue.call(mk, {songs: [catalogId]});
+                            if (p?.then) p.then(r => console.log('[MK-DBG] songs redirect resolved'), e2 => console.log('[MK-DBG] songs redirect rejected:', e2?.message || String(e2)));
+                            return p;
+                        });
+                    }
+                }
+                const p = _mkApiSaved.setQueue.apply(mk, a);
+                if (p?.then) p.then(r => console.log('[MK-DBG] mk.setQueue() resolved r=' + JSON.stringify(r).slice(0,80)),
+                                     e => console.log('[MK-DBG] mk.setQueue() rejected:', e?.message || String(e)));
+                return p;
+            };
+            mk.changeToMediaAtIndex = (idx) => {
+                console.log('[MK-DBG] mk.changeToMediaAtIndex(' + idx + ')');
+                const p = _mkApiSaved.changeToMediaAtIndex.call(mk, idx);
+                if (p?.then) p.then(r => console.log('[MK-DBG] ctmi(' + idx + ') resolved'), e => console.log('[MK-DBG] ctmi(' + idx + ') rejected:', e?.message || e));
+                return p;
+            };
+            // Trace audio element events in the gate window so we can see MK's internal flow.
+            const _gateAudioEl = getMKAudio();
+            const _gateEvts = ['pause','play','playing','waiting','stalled','error','emptied','loadstart','canplay','canplaythrough','ended'];
+            const _gateEvtHandler = (ev) => {
+                const el = _gateAudioEl;
+                console.log('[AUDIO-EVT] ' + ev.type + ' paused=' + el?.paused + ' readyState=' + el?.readyState + ' src=' + (el?.src||'').slice(0,60));
+            };
+            if (_gateAudioEl) _gateEvts.forEach(t => _gateAudioEl.addEventListener(t, _gateEvtHandler));
+            const _gateStateListener = () => console.log('[MK-DBG] playbackStateDidChange → ' + mk.playbackState + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null'));
+            mk.addEventListener('playbackStateDidChange', _gateStateListener);
+            // Cleanup: call this when the gate closes (success or timeout).
+            const _gateTracingCleanup = () => {
+                if (_gateAudioEl) _gateEvts.forEach(t => _gateAudioEl.removeEventListener(t, _gateEvtHandler));
+                mk.removeEventListener('playbackStateDidChange', _gateStateListener);
+            };
+            if (typeof _savedGateTracingCleanup === 'function') _savedGateTracingCleanup();
+            _savedGateTracingCleanup = _gateTracingCleanup;
+
             if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
             _externalPlayGateTimer = setTimeout(() => {
                 // No track change happened — restore VLC state and close gate.
+                if (_mkApiSaved) { mk.play = _mkApiSaved.play; mk.setQueue = _mkApiSaved.setQueue; mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex; _mkApiSaved = null; }
+                if (_savedGateTracingCleanup) { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
+                _pendingExternalClickCatalogId = null;
+                _pendingPlaylistFetch = null;
                 const el = getMKAudio();
                 if (el && _vlcMode) {
                     el.load = () => {};
@@ -3939,6 +4182,7 @@ async function setup() {
     });
 
     mk.addEventListener('nowPlayingItemDidChange', async () => {
+        console.log('[NPIDF] fired item=' + (mk.nowPlayingItem?.attributes?.name || 'null') + ' allowCDN=' + _allowCDNTransition + ' amlGotoTarget=' + _amlGotoTarget);
         // During a controlled _amlGoto transition, filter out spurious NPIDFs.
         // setQueue fires a null NPIDF (item === null) that must be fully suppressed —
         // if we let it through, _clearAdvancing() releases the lock early and
@@ -6045,6 +6289,55 @@ window.amlGetQueueInfo = function () {
         histClearRow.appendChild(histClearBtn);
         histBody.appendChild(histClearRow);
         dlg.appendChild(histWrap);
+
+        // ── Library section ────────────────────────────────────────────────────
+        const { wrap: libWrap, body: libBody } = makeSection('Library');
+        const libStatus = await fetch(`${ENGINE}/api/v1/library/status`).then(r => r.json()).catch(() => ({}));
+        const libSongs = libStatus.songs ?? 0;
+        const libPl    = libStatus.playlists ?? 0;
+        const libAt    = libStatus.syncedAt ? new Date(libStatus.syncedAt) : null;
+        const libAtStr = libAt && libAt.getFullYear() > 2000
+            ? libAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+            : 'Never';
+        const libStatEl = document.createElement('span');
+        libStatEl.style.cssText = FF + 'color:rgba(255,255,255,0.45);font-size:11px;';
+        libStatEl.textContent = libSongs > 0 ? `${libSongs} songs · ${libPl} playlists · synced ${libAtStr}` : 'Not synced';
+        libBody.appendChild(makeRow('Local library cache', libStatEl,
+            'Syncs your songs and playlists for instant queue-building', false));
+
+        const libSyncRow = document.createElement('div');
+        libSyncRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        const libSyncBtn = makeBtn('Sync Now');
+        const libSyncMsg = document.createElement('span');
+        libSyncMsg.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.4);flex:1;';
+
+        libSyncBtn.onclick = async () => {
+            libSyncBtn.disabled = true;
+            libSyncBtn.textContent = 'Syncing…';
+            libSyncMsg.textContent = 'Fetching songs…';
+            try {
+                const result = await window._syncLibraryViaJS((count, phase) => {
+                    if (typeof phase === 'string' && phase.startsWith('tracks:')) {
+                        libSyncMsg.textContent = `Playlist tracks: ${phase.slice(7)}`;
+                    } else if (phase === 'playlists') {
+                        libSyncMsg.textContent = `Songs done (${count}). Fetching playlists…`;
+                    } else {
+                        libSyncMsg.textContent = `Songs: ${count}…`;
+                    }
+                });
+                libSyncMsg.textContent = `Done — ${result.songs} songs, ${result.playlists} playlists`;
+                libStatEl.textContent = `${result.songs} songs · ${result.playlists} playlists · synced just now`;
+                libSyncBtn.textContent = 'Sync Now';
+                libSyncBtn.disabled = false;
+            } catch (e) {
+                libSyncMsg.textContent = 'Error: ' + (e.message || String(e));
+                libSyncBtn.textContent = 'Sync Now';
+                libSyncBtn.disabled = false;
+            }
+        };
+        libSyncRow.append(libSyncBtn, libSyncMsg);
+        libBody.appendChild(libSyncRow);
+        dlg.appendChild(libWrap);
 
         // ── Developer section ──────────────────────────────────────────────────
         const { wrap: devWrap, body: devBody } = makeSection('Developer');
