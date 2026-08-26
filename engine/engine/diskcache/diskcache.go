@@ -100,8 +100,12 @@ func (c *Cache) Get(assetID, qualifier string) (*os.File, bool) {
 	}
 
 	// Touch mtime so LRU eviction keeps recently accessed entries.
-	now := time.Now()
-	os.Chtimes(path, now, now)
+	// Throttled to once per hour — byte-range replays for the same file
+	// would otherwise issue a utimes syscall on every range request.
+	if time.Since(info.ModTime()) > time.Hour {
+		now := time.Now()
+		os.Chtimes(path, now, now)
+	}
 
 	return f, true
 }

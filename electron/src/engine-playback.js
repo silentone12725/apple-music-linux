@@ -823,6 +823,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
 // ── Now Playing overlay quality badge (fullscreen lyrics + vertical panel) ───
 (function () {
     let _npBadge = null;
+    let _npBadgeLast = ''; // last rendered content key — skip DOM write when unchanged
 
     function _npContent() {
         const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
@@ -848,10 +849,15 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
     function _syncBadge() {
         if (!_npBadge) return;
         const { show, label, icon } = _npContent();
-        if (!show) { _npBadge.style.display = 'none'; return; }
-        _npBadge.innerHTML = (icon ? _losslessSVG : '') + `<span>${label}</span>`;
+        if (!show) { _npBadge.style.display = 'none'; _npBadgeLast = ''; return; }
+        const key = (icon ? '1' : '0') + label;
+        const changed = key !== _npBadgeLast;
+        if (changed) {
+            _npBadge.innerHTML = (icon ? _losslessSVG : '') + `<span>${label}</span>`;
+            _npBadgeLast = key;
+        }
         _npBadge.style.display = 'inline-flex';
-        _alignBadge();
+        if (changed) _alignBadge(); // offsetHeight/offsetTop read only on content change
     }
 
     function _fmtDur(secs) {
