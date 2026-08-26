@@ -8,6 +8,7 @@
 package hls
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -19,6 +20,11 @@ import (
 	"strings"
 
 	"github.com/grafov/m3u8"
+)
+
+var (
+	grRankRe = regexp.MustCompile(`_gr(\d+)_`)
+	dimRe    = regexp.MustCompile(`_?(\d+)x(\d+)`)
 )
 
 // ─── Master playlist ──────────────────────────────────────────────────────────
@@ -67,7 +73,7 @@ func OpenMaster(ctx context.Context, rawURL string) (*Master, error) {
 // matches, it falls back to the first available audio alternative so that
 // playlists with non-standard GROUP-ID names still work.
 func (m *Master) SelectAudioVariant(priorities []string) (string, error) {
-	re := regexp.MustCompile(`_gr(\d+)_`)
+	re := grRankRe
 	type candidate struct {
 		uri  string
 		rank int
@@ -110,7 +116,7 @@ func (m *Master) SelectAudioVariant(priorities []string) (string, error) {
 // Resolution is read from the RESOLUTION= m3u8 attribute first; the URL-path
 // pattern _WxH_ is used as a fallback for older playlist formats.
 func (m *Master) SelectVideoVariant(maxHeight int) (string, error) {
-	re := regexp.MustCompile(`_?(\d+)x(\d+)`)
+	re := dimRe
 	sorted := make([]Variant, len(m.Variants))
 	copy(sorted, m.Variants)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -160,7 +166,7 @@ func (m *Master) SelectVideoVariant(maxHeight int) (string, error) {
 // SelectVideoVariantWithCodec is like SelectVideoVariant but also returns the
 // CODECS= attribute string from the chosen variant.
 func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs, resolution string, err error) {
-	re := regexp.MustCompile(`_?(\d+)x(\d+)`)
+	re := dimRe
 	sorted := make([]Variant, len(m.Variants))
 	copy(sorted, m.Variants)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -237,7 +243,7 @@ func (m *Master) SelectByCodec(codec string) string {
 // the _WxH_ URL-path pattern is used as fallback.  Used by the JS quality menu
 // to filter out tiers that the playlist cannot actually satisfy.
 func (m *Master) VideoHeights() []int {
-	re := regexp.MustCompile(`_?(\d+)x(\d+)`)
+	re := dimRe
 	seen := make(map[int]struct{})
 	for _, v := range m.Variants {
 		h := 0
@@ -365,7 +371,7 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 		return nil, err
 	}
 
-	from, listType, err := m3u8.DecodeFrom(strings.NewReader(string(body)), true)
+	from, listType, err := m3u8.DecodeFrom(bytes.NewReader(body), true)
 	if err != nil {
 		return nil, fmt.Errorf("m3u8 decode: %w", err)
 	}
@@ -594,7 +600,7 @@ func OpenMasterAuth(ctx context.Context, rawURL, token, mut string) (*Master, er
 }
 
 func parseMaster(base *url.URL, rawURL string, body []byte) (*Master, error) {
-	from, listType, err := m3u8.DecodeFrom(strings.NewReader(string(body)), true)
+	from, listType, err := m3u8.DecodeFrom(bytes.NewReader(body), true)
 	if err != nil {
 		return nil, fmt.Errorf("m3u8 decode: %w", err)
 	}
