@@ -253,7 +253,7 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 			}
 			sinfInfo = strings.Join(trackInfos, " ")
 		}
-		log.Printf("[INTERCEPT] INIT stsd-entries: %s  key=%x", sinfInfo, key[:min(8, len(key))])
+		log.Printf("[INTERCEPT] INIT stsd-entries: %s  key-len=%d", sinfInfo, len(key))
 	}
 
 	decryptInfo, err := mp4.DecryptInit(init)
@@ -453,8 +453,8 @@ func StreamMvData(ctx context.Context, keyAndUrls string, w io.Writer) error {
 	}
 	urlList := strings.Split(parts[1], ";")
 
-	log.Printf("[INTERCEPT] StreamMvData: key=%x (%d bytes) urls=%d scheme=%s",
-		keyBytes, len(keyBytes), len(urlList), keyParts[0])
+	log.Printf("[INTERCEPT] StreamMvData: key-len=%d urls=%d scheme=%s",
+		len(keyBytes), len(urlList), keyParts[0])
 
 	pr, pw := io.Pipe()
 

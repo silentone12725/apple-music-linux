@@ -36,7 +36,7 @@ func GetAlbumResp(storefront string, id string, language string, token string) (
 	query.Set("extend", "editorialVideo,extendedAssetUrls")
 	query.Set("l", language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := apiClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func GetAlbumResp(storefront string, id string, language string, token string) (
 			query.Set("include", "artists")
 			query.Set("extend", "editorialVideo,extendedAssetUrls")
 			req.URL.RawQuery = query.Encode()
-			do, err := http.DefaultClient.Do(req)
+			do, err := apiClient.Do(req)
 			if err != nil {
 				return nil, err
 			}
@@ -101,7 +101,7 @@ func GetAlbumRespContext(ctx context.Context, storefront, id, language, token st
 	q.Set("include[songs]", "artists")
 	q.Set("l", language)
 	req.URL.RawQuery = q.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := apiClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +143,7 @@ func GetAlbumRespByHrefContext(ctx context.Context, href string, language string
 	query.Set("extend", "editorialVideo,extendedAssetUrls")
 	query.Set("l", language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := apiClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func GetAlbumRespByHrefContext(ctx context.Context, href string, language string
 			query.Set("include", "artists")
 			query.Set("extend", "editorialVideo,extendedAssetUrls")
 			req.URL.RawQuery = query.Encode()
-			do, err := http.DefaultClient.Do(req)
+			do, err := apiClient.Do(req)
 			if err != nil {
 				return nil, err
 			}

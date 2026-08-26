@@ -1237,6 +1237,10 @@ function buildTweakCSS(p) {
 // No direct style conflicts — the glass CSS owns its rules, we just tune vars.
 function applyGlassEffect(blur, opacity) {
     if (!win) return;
+    // Coerce to numbers before JS interpolation — raw prefs strings must not
+    // reach executeJavaScript as template-literal values (injection risk).
+    blur    = parseFloat(blur)    || 20;
+    opacity = parseFloat(opacity) || 0.07;
     const p = loadPrefs();
     p.glassBlur    = blur;
     p.glassOpacity = opacity;
@@ -1254,7 +1258,7 @@ function applyPersistedViewSettings() {
     applyGlassEffect(p.glassBlur ?? 20, p.glassOpacity ?? 0.07);
     if (p.bgBlur != null)
         win?.webContents.executeJavaScript(
-            `document.documentElement.style.setProperty('--aml-bg-blur','${p.bgBlur}px')`
+            `document.documentElement.style.setProperty('--aml-bg-blur','${parseFloat(p.bgBlur) || 18}px')`
         ).catch(() => {});
     applyTweak('__noop', null);
     // Resolve effective mode: non-Hyprland can't use blur, fall back to accent.
@@ -1282,17 +1286,23 @@ function applyPersistedViewSettings() {
 ipcMain.handle('prefs:get', () => loadPrefs());
 
 // Encrypted per-key store (history, play-counts, etc.)
+// Keys are restricted to a safe character set to prevent injection or path
+// traversal by XSS code running in the Apple Music webview.
+const _storeKeyRe = /^[a-zA-Z][a-zA-Z0-9_:.-]{0,127}$/;
 ipcMain.handle('store:read',  async (_, key) => {
+    if (typeof key !== 'string' || !_storeKeyRe.test(key)) return null;
     const store = await _storeLoad();
     return store[key] ?? null;
 });
 ipcMain.handle('store:write', async (_, key, value) => {
+    if (typeof key !== 'string' || !_storeKeyRe.test(key)) return;
     const store = await _storeLoad();
     store[key] = value;
     _storeDirty = true;
     _storeFlush();
 });
 ipcMain.handle('store:delete', async (_, key) => {
+    if (typeof key !== 'string' || !_storeKeyRe.test(key)) return;
     const store = await _storeLoad();
     delete store[key];
     _storeDirty = true;

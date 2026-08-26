@@ -12,7 +12,7 @@ func GetToken() (string, error) {
 		return "", err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -31,7 +31,7 @@ func GetToken() (string, error) {
 		return "", err
 	}
 
-	resp, err = http.DefaultClient.Do(req)
+	resp, err = apiClient.Do(req)
 	if err != nil {
 		return "", err
 	}
