@@ -3500,6 +3500,7 @@ async function setup() {
             const items = [];
             let path = startPath;
             while (path) {
+                if (items.length > 50_000) break; // guard against infinite pagination loops
                 const res = await mkInst.api.music(path);
                 const body = res?.data;
                 if (body?.errors?.length) throw new Error(body.errors[0]?.detail || body.errors[0]?.title || 'API error');
@@ -3550,6 +3551,14 @@ async function setup() {
     // genuinely empty libraries.
     setTimeout(async () => {
         try {
+            // Abort if MK hasn't finished authenticating — api.music() calls would return
+            // empty data silently, we'd ingest 0 songs, stamp synced_at, and the 24h gate
+            // would block retry. authorizationStatus 3 = authorized.
+            const mkForAuth = window.MusicKit?.getInstance?.();
+            if (!mkForAuth || mkForAuth.authorizationStatus !== 3) {
+                console.log('[AML Library] auto-sync: skipping — MK not yet authorized (status=' + mkForAuth?.authorizationStatus + ')');
+                return;
+            }
             const status = await fetch(ENGINE + '/api/v1/library/status').then(r => r.json()).catch(() => null);
             if (!status?.needsSync) return;
             console.log('[AML Library] auto-sync: cache needs refresh');
@@ -3948,6 +3957,10 @@ async function setup() {
             // NOTE: [aria-label*="Play"] removed — matches product-lockup nav links (false positive)
         );
         if (_vlcMode && _dbgPlaySel) {
+            // Guard: if the CDN gate is already open from a previous click, a second
+            // click would overwrite _mkApiSaved with already-patched methods, permanently
+            // corrupting mk.play/setQueue/changeToMediaAtIndex until page reload.
+            if (_mkApiSaved) return;
             // MK's setQueue reuses the existing mkAudio element. It calls:
             //   mkAudio.src = ''  → fine
             //   mkAudio.load()    → BLOCKED by our instance override → Promise hangs, NPIDF never fires
