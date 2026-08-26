@@ -1159,7 +1159,7 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	qualifier := sess.Codec
-	if _, inCache := s.diskCache.Get(sess.AssetID, qualifier); inCache {
+	if _, inCache := s.diskCache.Path(sess.AssetID, qualifier); inCache {
 		w.WriteHeader(http.StatusNoContent) // already in cache
 		return
 	}
@@ -1236,17 +1236,27 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 	}, "video/mp4")
 }
 
+var (
+	ffmpegOnce sync.Once
+	ffmpegPath string
+)
+
 // transcodeVideoForMSE remuxes the Apple CDN fMP4 through FFmpeg with -c:v copy:
 // strips the audio track, re-fragments for MSE (frag_keyframe+empty_moov+default_base_moof),
 // and normalises the container without re-encoding. Near-zero CPU overhead.
 // Falls back to direct pass-through if FFmpeg is not in PATH.
 func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io.Writer) error {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		log.Printf("[video] ffmpeg not found, streaming raw fMP4 (CHUNK_DEMUXER errors possible)")
+	ffmpegOnce.Do(func() {
+		ffmpegPath, _ = exec.LookPath("ffmpeg")
+		if ffmpegPath == "" {
+			log.Printf("[video] ffmpeg not found, streaming raw fMP4 (CHUNK_DEMUXER errors possible)")
+		}
+	})
+	if ffmpegPath == "" {
 		return src(dst)
 	}
 	pr, pw := io.Pipe()
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-loglevel", "error",
 		"-i", "pipe:0",
 		"-c:v", "libx264",

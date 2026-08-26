@@ -455,27 +455,44 @@ func (s *Store) Ingest(p IngestPayload) {
 	tx.Exec("DELETE FROM playlists")
 	tx.Exec("DELETE FROM playlist_tracks")
 
+	songStmt, err := tx.Prepare("INSERT INTO songs(lid,cid,name,artist,album,ms) VALUES(?,?,?,?,?,?)")
+	if err != nil {
+		log.Printf("[library] ingest prepare songs: %v", err)
+		return
+	}
+	defer songStmt.Close()
 	for _, item := range p.Songs {
 		cid := item.Attributes.PlayParams.CatalogID
 		if cid == "" {
 			cid = item.Attributes.PlayParams.ID
 		}
-		tx.Exec("INSERT INTO songs(lid,cid,name,artist,album,ms) VALUES(?,?,?,?,?,?)",
-			item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName,
+		songStmt.Exec(item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName,
 			item.Attributes.AlbumName, item.Attributes.DurationInMillis)
 	}
-	for _, item := range p.Playlists {
-		tx.Exec("INSERT INTO playlists(lid,name,track_count) VALUES(?,?,?)",
-			item.ID, item.Attributes.Name, item.Attributes.TrackCount)
+
+	plStmt, err := tx.Prepare("INSERT INTO playlists(lid,name,track_count) VALUES(?,?,?)")
+	if err != nil {
+		log.Printf("[library] ingest prepare playlists: %v", err)
+		return
 	}
+	defer plStmt.Close()
+	for _, item := range p.Playlists {
+		plStmt.Exec(item.ID, item.Attributes.Name, item.Attributes.TrackCount)
+	}
+
+	ptStmt, err := tx.Prepare("INSERT INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)")
+	if err != nil {
+		log.Printf("[library] ingest prepare playlist_tracks: %v", err)
+		return
+	}
+	defer ptStmt.Close()
 	for plID, items := range p.PlaylistTracks {
 		for i, item := range items {
 			cid := item.Attributes.PlayParams.CatalogID
 			if cid == "" {
 				cid = item.Attributes.PlayParams.ID
 			}
-			tx.Exec("INSERT INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)",
-				plID, i, item.ID, cid)
+			ptStmt.Exec(plID, i, item.ID, cid)
 		}
 	}
 	tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('synced_at',?)",
@@ -488,8 +505,7 @@ func (s *Store) Ingest(p IngestPayload) {
 		return
 	}
 
-	songs, pls, _ := s.Stats()
-	log.Printf("[library] ingested: %d songs, %d playlists", songs, pls)
+	log.Printf("[library] ingested: %d songs, %d playlists", len(p.Songs), len(p.Playlists))
 	go s.save() // encrypt and persist in background
 }
 
