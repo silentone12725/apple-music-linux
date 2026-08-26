@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,7 +65,6 @@ type PlaylistTrack struct {
 type Store struct {
 	db      *sql.DB
 	saveMu  sync.Mutex // serialises save()
-	syncMu  sync.Mutex // serialises concurrent Sync calls
 	keyPath string
 	encPath string
 }
@@ -187,7 +187,12 @@ func (s *Store) load() {
 		log.Printf("[library] load unmarshal: %v", err)
 		return
 	}
-	tx, _ := s.db.Begin()
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[library] load begin tx: %v", err)
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck
 	for _, sg := range dc.Songs {
 		tx.Exec("INSERT OR REPLACE INTO songs(lid,cid,name,artist,album,ms) VALUES(?,?,?,?,?,?)",
 			sg.LibraryID, sg.CatalogID, sg.Name, sg.Artist, sg.Album, sg.DurationMs)
@@ -204,7 +209,10 @@ func (s *Store) load() {
 	}
 	tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('synced_at',?)",
 		dc.SyncedAt.Format(time.RFC3339))
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		log.Printf("[library] load commit: %v", err)
+		return
+	}
 	log.Printf("[library] cache loaded: %d songs, %d playlists (synced %s ago)",
 		len(dc.Songs), len(dc.Playlists), time.Since(dc.SyncedAt).Round(time.Second))
 }
@@ -216,11 +224,19 @@ func (s *Store) save() {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 
-	// Dump all tables.
-	songs := s.querySongs()
-	pls := s.queryPlaylists()
-	plTracks := s.queryAllPlaylistTracks()
-	syncedAt := s.querySyncedAt()
+	// Dump all tables inside a read transaction so a concurrent Ingest() cannot
+	// delete+reinsert between our individual queries, producing a split-brain JSON.
+	rtx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[library] save begin read tx: %v", err)
+		return
+	}
+	defer rtx.Rollback() //nolint:errcheck — read tx, rollback is always safe
+	songs := s.querySongsInTx(rtx)
+	pls := s.queryPlaylistsInTx(rtx)
+	plTracks := s.queryAllPlaylistTracksInTx(rtx)
+	syncedAt := s.querySyncedAtInTx(rtx)
+	rtx.Commit() //nolint:errcheck — read-only, no changes to commit
 
 	plain, err := json.Marshal(diskCache{Songs: songs, Playlists: pls, PlTracks: plTracks, SyncedAt: syncedAt})
 	if err != nil {
@@ -239,8 +255,18 @@ func (s *Store) save() {
 
 // ── Query helpers ─────────────────────────────────────────────────────────────
 
-func (s *Store) querySongs() []SongInfo {
-	rows, _ := s.db.Query("SELECT lid,cid,name,artist,album,ms FROM songs")
+// querySongs / queryPlaylists / queryAllPlaylistTracks / querySyncedAt all have
+// *InTx variants used by save() so the full dump is one consistent snapshot.
+
+func (s *Store) querySongs() []SongInfo { return s.querySongsInTx(nil) }
+func (s *Store) querySongsInTx(tx *sql.Tx) []SongInfo {
+	q := "SELECT lid,cid,name,artist,album,ms FROM songs"
+	var rows *sql.Rows
+	if tx != nil {
+		rows, _ = tx.Query(q)
+	} else {
+		rows, _ = s.db.Query(q)
+	}
 	if rows == nil {
 		return nil
 	}
@@ -254,8 +280,15 @@ func (s *Store) querySongs() []SongInfo {
 	return out
 }
 
-func (s *Store) queryPlaylists() []PlaylistInfo {
-	rows, _ := s.db.Query("SELECT lid,name,track_count FROM playlists")
+func (s *Store) queryPlaylists() []PlaylistInfo { return s.queryPlaylistsInTx(nil) }
+func (s *Store) queryPlaylistsInTx(tx *sql.Tx) []PlaylistInfo {
+	q := "SELECT lid,name,track_count FROM playlists"
+	var rows *sql.Rows
+	if tx != nil {
+		rows, _ = tx.Query(q)
+	} else {
+		rows, _ = s.db.Query(q)
+	}
 	if rows == nil {
 		return nil
 	}
@@ -270,7 +303,16 @@ func (s *Store) queryPlaylists() []PlaylistInfo {
 }
 
 func (s *Store) queryAllPlaylistTracks() map[string][]PlaylistTrack {
-	rows, _ := s.db.Query("SELECT playlist_id,lid,cid FROM playlist_tracks ORDER BY playlist_id,position")
+	return s.queryAllPlaylistTracksInTx(nil)
+}
+func (s *Store) queryAllPlaylistTracksInTx(tx *sql.Tx) map[string][]PlaylistTrack {
+	q := "SELECT playlist_id,lid,cid FROM playlist_tracks ORDER BY playlist_id,position"
+	var rows *sql.Rows
+	if tx != nil {
+		rows, _ = tx.Query(q)
+	} else {
+		rows, _ = s.db.Query(q)
+	}
 	if rows == nil {
 		return nil
 	}
@@ -285,9 +327,14 @@ func (s *Store) queryAllPlaylistTracks() map[string][]PlaylistTrack {
 	return out
 }
 
-func (s *Store) querySyncedAt() time.Time {
+func (s *Store) querySyncedAt() time.Time { return s.querySyncedAtInTx(nil) }
+func (s *Store) querySyncedAtInTx(tx *sql.Tx) time.Time {
 	var val string
-	s.db.QueryRow("SELECT value FROM meta WHERE key='synced_at'").Scan(&val)
+	if tx != nil {
+		tx.QueryRow("SELECT value FROM meta WHERE key='synced_at'").Scan(&val)
+	} else {
+		s.db.QueryRow("SELECT value FROM meta WHERE key='synced_at'").Scan(&val)
+	}
 	if val == "" {
 		return time.Time{}
 	}
@@ -357,12 +404,16 @@ func (s *Store) SetPlaylistTracks(playlistID string, tracks []PlaylistTrack) {
 	if err != nil {
 		return
 	}
+	defer tx.Rollback() //nolint:errcheck
 	tx.Exec("DELETE FROM playlist_tracks WHERE playlist_id=?", playlistID)
 	for i, t := range tracks {
 		tx.Exec("INSERT INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)",
 			playlistID, i, t.LibraryID, t.CatalogID)
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		log.Printf("[library] set playlist tracks commit: %v", err)
+		return
+	}
 	go s.save()
 }
 
@@ -386,6 +437,7 @@ func (s *Store) Ingest(p IngestPayload) {
 		log.Printf("[library] ingest begin tx: %v", err)
 		return
 	}
+	defer tx.Rollback() //nolint:errcheck
 	tx.Exec("DELETE FROM songs")
 	tx.Exec("DELETE FROM playlists")
 	tx.Exec("DELETE FROM playlist_tracks")
@@ -491,7 +543,12 @@ func fetchPlaylistTracks(ctx context.Context, c *resty.Client, playlistID string
 			}
 			all = append(all, t)
 		}
-		path = resp.Next
+		// Apple's next URL omits the limit param on page 2+; re-attach it.
+		if resp.Next != "" && !strings.Contains(resp.Next, "limit=") {
+			path = resp.Next + fmt.Sprintf("&limit=%d", pageLimit)
+		} else {
+			path = resp.Next
+		}
 		params = nil
 	}
 	return all, nil
