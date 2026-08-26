@@ -67,6 +67,8 @@ type Store struct {
 	saveMu  sync.Mutex // serialises save()
 	keyPath string
 	encPath string
+	key     []byte // cached encryption key; loaded once in encKey()
+	keyMu   sync.Mutex
 }
 
 // New creates a Store, initialises the in-memory schema, and loads any
@@ -107,10 +109,20 @@ func (s *Store) initSchema() {
 // ── Encryption helpers ────────────────────────────────────────────────────────
 
 func (s *Store) encKey() ([]byte, error) {
-	data, err := os.ReadFile(s.keyPath)
-	if err == nil && len(data) == 32 {
-		return data, nil
+	s.keyMu.Lock()
+	defer s.keyMu.Unlock()
+	if len(s.key) == 32 {
+		return s.key, nil
 	}
+	data, err := os.ReadFile(s.keyPath)
+	if err == nil {
+		if len(data) != 32 {
+			return nil, fmt.Errorf("key file wrong length %d (expected 32) — delete %s to reset", len(data), s.keyPath)
+		}
+		s.key = data
+		return s.key, nil
+	}
+	// Key file absent: generate a fresh one.
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)
@@ -118,7 +130,8 @@ func (s *Store) encKey() ([]byte, error) {
 	if err := os.WriteFile(s.keyPath, key, 0o600); err != nil {
 		return nil, fmt.Errorf("write key: %w", err)
 	}
-	return key, nil
+	s.key = key
+	return s.key, nil
 }
 
 func (s *Store) encrypt(plain []byte) ([]byte, error) {
