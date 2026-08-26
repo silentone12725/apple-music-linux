@@ -2042,16 +2042,15 @@ func (s *APIServer) lang(r *http.Request) string {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	b, _ := json.Marshal(v)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v) //nolint:errcheck
+	w.Write(append(b, '\n')) //nolint:errcheck
 }
-
 
 func fmtArtworkURL(template string, size int) string {
 	s := strconv.Itoa(size)
-	out := strings.ReplaceAll(template, "{w}", s)
-	return strings.ReplaceAll(out, "{h}", s)
+	return strings.NewReplacer("{w}", s, "{h}", s).Replace(template)
 }
 
 func streamsFromTraits(traits []string) []StreamInfo {

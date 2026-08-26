@@ -242,7 +242,9 @@ func (lr *latencyRing) stats() (avg, p95 float64) {
 		lr.mu.Unlock()
 		return 0, 0
 	}
-	s := make([]int64, lr.n)
+	// Stack-allocate the copy to avoid a heap alloc on every stats call.
+	var tmp [latencyCap]int64
+	s := tmp[:lr.n]
 	start := lr.pos - lr.n
 	for i := range s {
 		s[i] = lr.samples[(start+i)%latencyCap]
@@ -317,9 +319,11 @@ func (q *workQueue) pop() (*workItem, bool) {
 		return nil, false // queue closed
 	}
 	best := 0
+	bestScore := q.items[0].effectiveScore()
 	for i := 1; i < len(q.items); i++ {
-		if q.items[i].effectiveScore() > q.items[best].effectiveScore() {
+		if sc := q.items[i].effectiveScore(); sc > bestScore {
 			best = i
+			bestScore = sc
 		}
 	}
 	item := q.items[best]
@@ -553,16 +557,12 @@ func (s *Scheduler) TakePreWarmed(assetID string) (sessionID string, ok bool) {
 func (s *Scheduler) PruneExpiredPreWarmed() {
 	now := time.Now()
 	s.mu.Lock()
-	var expired []string
+	var ids []string
 	for assetID, entry := range s.preWarmed {
 		if now.After(entry.expiresAt) {
-			expired = append(expired, assetID)
+			ids = append(ids, entry.sessionID)
+			delete(s.preWarmed, assetID)
 		}
-	}
-	ids := make([]string, 0, len(expired))
-	for _, assetID := range expired {
-		ids = append(ids, s.preWarmed[assetID].sessionID)
-		delete(s.preWarmed, assetID)
 	}
 	s.mu.Unlock()
 	for _, id := range ids {
