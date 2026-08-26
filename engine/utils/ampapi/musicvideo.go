@@ -40,7 +40,7 @@ func GetMusicVideoRespContext(ctx context.Context, storefront string, id string,
 	//query.Set("extend", "editorialVideo")
 	query.Set("l", language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := apiClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

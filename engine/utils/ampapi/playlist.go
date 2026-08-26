@@ -30,7 +30,7 @@ func GetPlaylistRespContext(ctx context.Context, storefront string, id string, l
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 		req.Header.Set("Origin", "https://music.apple.com")
-		return http.DefaultClient.Do(req)
+		return apiClient.Do(req)
 	}
 
 	// Catalog playlist endpoint (works for Apple-curated and user-shared playlists).
@@ -124,7 +124,7 @@ func GetLibraryPlaylistTracksContext(ctx context.Context, id, language, token, m
 		req.Header.Set("Media-User-Token", mut)
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 		req.Header.Set("Origin", "https://music.apple.com")
-		return http.DefaultClient.Do(req)
+		return apiClient.Do(req)
 	}
 
 	q := url.Values{}
@@ -189,7 +189,7 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 	query.Set("extend", "editorialVideo,extendedAssetUrls")
 	query.Set("l", language)
 	req.URL.RawQuery = query.Encode()
-	do, err := http.DefaultClient.Do(req)
+	do, err := apiClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +217,7 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 			query.Set("include", "artists")
 			query.Set("extend", "editorialVideo,extendedAssetUrls")
 			req.URL.RawQuery = query.Encode()
-			do, err := http.DefaultClient.Do(req)
+			do, err := apiClient.Do(req)
 			if err != nil {
 				return nil, err
 			}

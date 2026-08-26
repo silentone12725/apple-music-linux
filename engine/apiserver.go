@@ -577,11 +577,14 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// (goroutines, heap, GC) — things only the engine process itself can report.
 	// /debug/pprof/* serves standard profiles for flamegraphs.
 	mux.HandleFunc("GET /api/v1/debug/runtime", cors(s.handleRuntimeStats))
-	mux.HandleFunc("GET /debug/pprof/", httppprof.Index)
-	mux.HandleFunc("GET /debug/pprof/cmdline", httppprof.Cmdline)
-	mux.HandleFunc("GET /debug/pprof/profile", httppprof.Profile)
-	mux.HandleFunc("GET /debug/pprof/symbol", httppprof.Symbol)
-	mux.HandleFunc("GET /debug/pprof/trace", httppprof.Trace)
+	// pprof heap dumps expose in-memory key material; only register when AML_DEBUG=1.
+	if os.Getenv("AML_DEBUG") == "1" {
+		mux.HandleFunc("GET /debug/pprof/", httppprof.Index)
+		mux.HandleFunc("GET /debug/pprof/cmdline", httppprof.Cmdline)
+		mux.HandleFunc("GET /debug/pprof/profile", httppprof.Profile)
+		mux.HandleFunc("GET /debug/pprof/symbol", httppprof.Symbol)
+		mux.HandleFunc("GET /debug/pprof/trace", httppprof.Trace)
+	}
 
 	// Wrap the mux so that every OPTIONS request is handled before route
 	// matching.  Go 1.22+ method-prefixed routes ("GET /path") never match
@@ -1815,8 +1818,8 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 		strings.HasPrefix(origin, "http://localhost"),
 		strings.HasPrefix(origin, "http://127.0.0.1"):
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-	case origin == "null":
-		w.Header().Set("Access-Control-Allow-Origin", "null")
+	// origin == "null" (file:// or sandboxed iframe) intentionally not allowed;
+	// any local HTML file would otherwise have full access to the engine API.
 	default:
 		w.Header().Set("Access-Control-Allow-Origin", "https://music.apple.com")
 	}
