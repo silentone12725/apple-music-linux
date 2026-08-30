@@ -314,6 +314,220 @@ func (s *cbcsSkipSource) Stream(ctx context.Context, w io.Writer) error {
 	return err
 }
 
+// patchMoovDuration fixes mvhd/tkhd/mdhd duration fields so that players
+// display the correct total length. Apple Music CMAF stores duration=0 in
+// the moov box (CMAF convention); without this patch mpv stops after the
+// first fragment.
+func patchMoovDuration(init *mp4.InitSegment, durationMs int) {
+	if durationMs <= 0 || init.Moov == nil || init.Moov.Mvhd == nil {
+		return
+	}
+	ts := uint64(init.Moov.Mvhd.Timescale)
+	if ts == 0 {
+		ts = 1000
+	}
+	totalDur := uint64(durationMs) * ts / 1000
+	init.Moov.Mvhd.Duration = totalDur
+	for _, trak := range init.Moov.Traks {
+		if trak.Tkhd != nil {
+			trak.Tkhd.Duration = totalDur
+		}
+		if trak.Mdia != nil && trak.Mdia.Mdhd != nil {
+			mdhd := trak.Mdia.Mdhd
+			mdhd.Duration = uint64(durationMs) * uint64(mdhd.Timescale) / 1000
+		}
+	}
+}
+
+// skipFragTfdtDelta returns the total decode-time covered by frag without
+// modifying it. Used to keep accumulatedTfdt in sync while discarding leading
+// fragments during a seek.
+func skipFragTfdtDelta(frag *mp4.Fragment) uint64 {
+	if frag.Moof == nil || frag.Moof.Traf == nil {
+		return 0
+	}
+	traf := frag.Moof.Traf
+	dur := uint32(4096)
+	if traf.Tfhd != nil && traf.Tfhd.HasDefaultSampleDuration() {
+		if d := traf.Tfhd.DefaultSampleDuration; d > 0 {
+			dur = d
+		}
+	}
+	var total uint64
+	for _, t := range traf.Truns {
+		total += t.Duration(dur)
+	}
+	return total
+}
+
+// patchAlacFragment patches tfdt, tfhd, and data offsets in frag and returns
+// the updated accumulated decode time for the next fragment. No-op if frag has
+// no moof or traf.
+//
+// ALAC-specific: accumulates using ALL Truns (ALAC moofs carry 11 truns).
+// Using only the first trun produces a 65536-sample step instead of 659456,
+// causing VLC to report "Fragment sequence discontinuity" at ~28s.
+func patchAlacFragment(frag *mp4.Fragment, accumulatedTfdt uint64) uint64 {
+	if frag.Moof == nil || frag.Moof.Traf == nil {
+		return accumulatedTfdt
+	}
+	traf := frag.Moof.Traf
+	oldSize := frag.Moof.Size()
+
+	if traf.Tfdt != nil {
+		traf.Tfdt.SetBaseMediaDecodeTime(accumulatedTfdt)
+		traf.Tfdt.Version = 1
+	} else {
+		// ISOBMFF requires tfdt to be placed BEFORE trun.
+		tfdt := mp4.CreateTfdt(accumulatedTfdt)
+		tfdt.Version = 1
+		traf.Tfdt = tfdt
+		var newChildren []mp4.Box
+		for _, child := range traf.Children {
+			if child.Type() == "trun" {
+				newChildren = append(newChildren, tfdt)
+			}
+			newChildren = append(newChildren, child)
+		}
+		traf.Children = newChildren
+	}
+
+	// Apple's CDN sometimes mutates TrackID and SampleDescriptionIndex in
+	// subsequent fragments, causing ffmpeg to silently skip the trun box.
+	dur := uint32(4096)
+	if traf.Tfhd != nil {
+		traf.Tfhd.TrackID = 1
+		if traf.Tfhd.HasSampleDescriptionIndex() {
+			traf.Tfhd.SampleDescriptionIndex = 1
+		}
+		if traf.Tfhd.HasDefaultSampleDuration() {
+			if d := traf.Tfhd.DefaultSampleDuration; d > 0 {
+				dur = d
+			}
+		}
+	}
+
+	newSize := frag.Moof.Size()
+	sizeDiff := int32(newSize) - int32(oldSize)
+	if sizeDiff != 0 {
+		for _, t := range traf.Truns {
+			if t.HasDataOffset() {
+				t.DataOffset += sizeDiff
+			}
+		}
+	}
+
+	for _, t := range traf.Truns {
+		accumulatedTfdt += t.Duration(dur)
+	}
+	return accumulatedTfdt
+}
+
+// patchAlacFragmentSeq is like patchAlacFragment but also patches
+// mfhd.SequenceNumber to seqNum. Apple's fMP4 starts at 1 (ISOBMFF-legal)
+// but VLC's mp4 demuxer tracks from 0 and reports "Fragment sequence
+// discontinuity" on the first fragment if it sees 1.
+func patchAlacFragmentSeq(frag *mp4.Fragment, seqNum int, accumulatedTfdt uint64) uint64 {
+	if frag.Moof != nil && frag.Moof.Mfhd != nil {
+		frag.Moof.Mfhd.SequenceNumber = uint32(seqNum)
+	}
+	return patchAlacFragment(frag, accumulatedTfdt)
+}
+
+// sendInitialKey sends the seek start key to the decryption socket before the
+// first kept fragment is decrypted.
+func (s *cbcsSkipSource) sendInitialKey(rw *bufio.ReadWriter) error {
+	if s.startKey == "" {
+		return nil
+	}
+	if err := runv2.SendString(rw, s.adamID); err != nil {
+		return fmt.Errorf("cbcs seek: send adamID: %w", err)
+	}
+	if err := runv2.SendString(rw, s.startKey); err != nil {
+		return fmt.Errorf("cbcs seek: send startKey: %w", err)
+	}
+	return nil
+}
+
+// sendSeekFragKey switches decryption keys at fragment i when a new key URI is
+// present in the kept region (not the first kept fragment, which was set by
+// sendInitialKey).
+func (s *cbcsSkipSource) sendSeekFragKey(i int, rw *bufio.ReadWriter) error {
+	if i <= s.startFrag || i >= len(s.keyURIs) || s.keyURIs[i] == "" {
+		return nil
+	}
+	if err := runv2.SwitchKeys(rw); err != nil {
+		return fmt.Errorf("cbcs seek: switch keys at %d: %w", i, err)
+	}
+	if err := runv2.SendString(rw, s.adamID); err != nil {
+		return fmt.Errorf("cbcs seek: send adamID %d: %w", i, err)
+	}
+	if err := runv2.SendString(rw, s.keyURIs[i]); err != nil {
+		return fmt.Errorf("cbcs seek: send key %d: %w", i, err)
+	}
+	return nil
+}
+
+// sendFragKey sends the key URI for fragment i to the decryption socket.
+// Errors are intentionally ignored — key delivery is best-effort and a
+// failure here manifests as a decrypt error on the next fragment.
+func (s *cbcsSource) sendFragKey(i int, rw *bufio.ReadWriter) {
+	if i >= len(s.keyURIs) || s.keyURIs[i] == "" {
+		return
+	}
+	if i != 0 {
+		runv2.SwitchKeys(rw)
+	}
+	if s.keyURIs[i] == cbcsPrefetchKey {
+		runv2.SendString(rw, "0")
+	} else {
+		runv2.SendString(rw, s.adamID)
+	}
+	runv2.SendString(rw, s.keyURIs[i])
+}
+
+// skipStartFragments reads and discards startFrag fragments, accumulating
+// the total TFDT delta needed so subsequent fragments have correct timestamps.
+func skipStartFragments(inBuf *bufio.Reader, startOffset uint64, startFrag int) (accTfdt, finalOffset uint64, err error) {
+	finalOffset = startOffset
+	for i := range startFrag {
+		frag, newOffset, ferr := runv2.ReadNextFragment(inBuf, finalOffset)
+		if ferr != nil {
+			return 0, 0, fmt.Errorf("cbcs seek: skip fragment %d: %w", i, ferr)
+		}
+		if frag == nil {
+			return 0, 0, fmt.Errorf("cbcs seek: EOF before startFrag %d (at %d)", startFrag, i)
+		}
+		finalOffset = newOffset
+		accTfdt += skipFragTfdtDelta(frag)
+	}
+	return accTfdt, finalOffset, nil
+}
+
+// streamKeptFragment patches, decrypts, and writes one kept fragment; returns
+// the updated accumulated TFDT.
+func (s *cbcsSkipSource) streamKeptFragment(ctx context.Context, i int, frag *mp4.Fragment, accTfdt uint64,
+	rw *bufio.ReadWriter, outBuf *bufio.Writer, tracks map[uint32]mp4.DecryptTrackInfo, tr *bench.Tracer,
+) (uint64, error) {
+	accTfdt = patchAlacFragment(frag, accTfdt)
+	if err := s.sendSeekFragKey(i, rw); err != nil {
+		return accTfdt, err
+	}
+	if err := runv2.DecryptFragment(frag, tracks, rw); err != nil {
+		return accTfdt, fmt.Errorf("cbcs seek: decrypt fragment %d: %w", i, err)
+	}
+	if err := frag.Encode(outBuf); err != nil {
+		return accTfdt, fmt.Errorf("cbcs seek: encode fragment %d: %w", i, err)
+	}
+	if err := outBuf.Flush(); err != nil {
+		return accTfdt, fmt.Errorf("cbcs seek: flush fragment %d: %w", i, err)
+	}
+	if i == s.startFrag {
+		tr.RecordPlaybackReady()
+	}
+	return accTfdt, nil
+}
+
 func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) error {
 	dlCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -348,7 +562,6 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 	inBuf := bufio.NewReader(stalled)
 	outBuf := bufio.NewWriter(w)
 
-	// Read and transform init segment — always written to output.
 	init, offset, err := runv2.ReadInitSegment(inBuf)
 	if err != nil {
 		return fmt.Errorf("cbcs seek: read init: %w", err)
@@ -363,23 +576,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 	if err := runv2.SanitizeInit(init); err != nil {
 		fmt.Printf("cbcs seek: warning: sanitize init: %v\n", err)
 	}
-	if s.durationMs > 0 && init.Moov != nil && init.Moov.Mvhd != nil {
-		ts := uint64(init.Moov.Mvhd.Timescale)
-		if ts == 0 {
-			ts = 1000
-		}
-		totalDur := uint64(s.durationMs) * ts / 1000
-		init.Moov.Mvhd.Duration = totalDur
-		for _, trak := range init.Moov.Traks {
-			if trak.Tkhd != nil {
-				trak.Tkhd.Duration = totalDur
-			}
-			if trak.Mdia != nil && trak.Mdia.Mdhd != nil {
-				mdhd := trak.Mdia.Mdhd
-				mdhd.Duration = uint64(s.durationMs) * uint64(mdhd.Timescale) / 1000
-			}
-		}
-	}
+	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
 		return fmt.Errorf("cbcs seek: encode init: %w", err)
 	}
@@ -388,40 +585,15 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 	}
 
 	// Skip startFrag fragments: read+discard, accumulate tfdt for correct continuation.
-	var accumulatedTfdt uint64 = 0
-	for i := range s.startFrag {
-		frag, newOffset, err := runv2.ReadNextFragment(inBuf, offset)
-		if err != nil {
-			return fmt.Errorf("cbcs seek: skip fragment %d: %w", i, err)
-		}
-		if frag == nil {
-			return fmt.Errorf("cbcs seek: EOF before startFrag %d (at %d)", s.startFrag, i)
-		}
-		offset = newOffset
-		if frag.Moof != nil && frag.Moof.Traf != nil {
-			dur := uint32(4096)
-			if frag.Moof.Traf.Tfhd != nil && frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
-				if d := frag.Moof.Traf.Tfhd.DefaultSampleDuration; d > 0 {
-					dur = d
-				}
-			}
-			for _, t := range frag.Moof.Traf.Truns {
-				accumulatedTfdt += t.Duration(dur)
-			}
-		}
+	accumulatedTfdt, offset, err := skipStartFragments(inBuf, offset, s.startFrag)
+	if err != nil {
+		return err
 	}
 
-	// Set up initial key on the fresh socket before decrypting the first kept fragment.
-	if s.startKey != "" {
-		if err := runv2.SendString(rw, s.adamID); err != nil {
-			return fmt.Errorf("cbcs seek: send adamID: %w", err)
-		}
-		if err := runv2.SendString(rw, s.startKey); err != nil {
-			return fmt.Errorf("cbcs seek: send startKey: %w", err)
-		}
+	if err := s.sendInitialKey(rw); err != nil {
+		return err
 	}
 
-	// Process kept fragments (startFrag onwards) with correct tfdt values.
 	for i := s.startFrag; ; i++ {
 		frag, newOffset, err := runv2.ReadNextFragment(inBuf, offset)
 		if err != nil {
@@ -431,84 +603,15 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 			break
 		}
 		offset = newOffset
-
-		if frag.Moof != nil && frag.Moof.Traf != nil {
-			oldSize := frag.Moof.Size()
-			if frag.Moof.Traf.Tfdt != nil {
-				frag.Moof.Traf.Tfdt.SetBaseMediaDecodeTime(accumulatedTfdt)
-				frag.Moof.Traf.Tfdt.Version = 1
-			} else {
-				tfdt := mp4.CreateTfdt(accumulatedTfdt)
-				tfdt.Version = 1
-				frag.Moof.Traf.Tfdt = tfdt
-				var newChildren []mp4.Box
-				for _, child := range frag.Moof.Traf.Children {
-					if child.Type() == "trun" {
-						newChildren = append(newChildren, tfdt)
-					}
-					newChildren = append(newChildren, child)
-				}
-				frag.Moof.Traf.Children = newChildren
-			}
-			dur := uint32(4096)
-			if frag.Moof.Traf.Tfhd != nil {
-				frag.Moof.Traf.Tfhd.TrackID = 1
-				if frag.Moof.Traf.Tfhd.HasSampleDescriptionIndex() {
-					frag.Moof.Traf.Tfhd.SampleDescriptionIndex = 1
-				}
-				if frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
-					if d := frag.Moof.Traf.Tfhd.DefaultSampleDuration; d > 0 {
-						dur = d
-					}
-				}
-			}
-			newSize := frag.Moof.Size()
-			sizeDiff := int32(newSize) - int32(oldSize)
-			if sizeDiff != 0 {
-				for _, t := range frag.Moof.Traf.Truns {
-					if t.HasDataOffset() {
-						t.DataOffset += sizeDiff
-					}
-				}
-			}
-			for _, t := range frag.Moof.Traf.Truns {
-				accumulatedTfdt += t.Duration(dur)
-			}
-		}
-
-		// Key changes within kept fragments (not the first kept, which was set above).
-		if i > s.startFrag && i < len(s.keyURIs) && s.keyURIs[i] != "" {
-			if err := runv2.SwitchKeys(rw); err != nil {
-				return fmt.Errorf("cbcs seek: switch keys at %d: %w", i, err)
-			}
-			if err := runv2.SendString(rw, s.adamID); err != nil {
-				return fmt.Errorf("cbcs seek: send adamID %d: %w", i, err)
-			}
-			if err := runv2.SendString(rw, s.keyURIs[i]); err != nil {
-				return fmt.Errorf("cbcs seek: send key %d: %w", i, err)
-			}
-		}
-
-		if err := runv2.DecryptFragment(frag, tracks, rw); err != nil {
-			return fmt.Errorf("cbcs seek: decrypt fragment %d: %w", i, err)
-		}
-		if err := frag.Encode(outBuf); err != nil {
-			return fmt.Errorf("cbcs seek: encode fragment %d: %w", i, err)
-		}
-		if err := outBuf.Flush(); err != nil {
-			return fmt.Errorf("cbcs seek: flush fragment %d: %w", i, err)
-		}
-		if i == s.startFrag {
-			tr.RecordPlaybackReady()
+		accumulatedTfdt, err = s.streamKeptFragment(ctx, i, frag, accumulatedTfdt, rw, outBuf, tracks, tr)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
-	// On-the-fly streaming: open the wrapper TCP socket as soon as the CDN
-	// response arrives, then parse/decrypt/flush each moof+mdat fragment
-	// without buffering the full file in memory.
 	dlCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
@@ -533,7 +636,6 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 
 	stalled := newStallDetector(resp.Body, cbcsStallTimeout, cancel)
 
-	// Open decryption connection immediately as stream arrives.
 	tr.RecordCBCSDialStart()
 	conn, err := s.dialer.DialCBCS(ctx)
 	if err != nil {
@@ -546,7 +648,6 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 	inBuf := bufio.NewReader(stalled)
 	outBuf := bufio.NewWriter(w)
 
-	// Parse and transform the init segment (ftyp + moov boxes).
 	init, offset, err := runv2.ReadInitSegment(inBuf)
 	if err != nil {
 		return fmt.Errorf("cbcs: read init: %w", err)
@@ -561,28 +662,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 	if err := runv2.SanitizeInit(init); err != nil {
 		fmt.Printf("cbcs: warning: sanitize init: %v\n", err)
 	}
-	// Patch mvhd.Duration and tkhd.Duration so that players (mpv, VLC, etc.)
-	// know the correct total track duration.  The encrypted fMP4 from Apple
-	// stores duration=0 in the moov box (CMAF convention for fragmented files);
-	// without this patch, mpv interprets the stream as ending after the first
-	// fragment and stops playback prematurely.
-	if s.durationMs > 0 && init.Moov != nil && init.Moov.Mvhd != nil {
-		ts := uint64(init.Moov.Mvhd.Timescale)
-		if ts == 0 {
-			ts = 1000 // fallback: use ms as timescale
-		}
-		totalDur := uint64(s.durationMs) * ts / 1000
-		init.Moov.Mvhd.Duration = totalDur
-		for _, trak := range init.Moov.Traks {
-			if trak.Tkhd != nil {
-				trak.Tkhd.Duration = totalDur
-			}
-			if trak.Mdia != nil && trak.Mdia.Mdhd != nil {
-				mdhd := trak.Mdia.Mdhd
-				mdhd.Duration = uint64(s.durationMs) * uint64(mdhd.Timescale) / 1000
-			}
-		}
-	}
+	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
 		return fmt.Errorf("cbcs: encode init: %w", err)
 	}
@@ -590,108 +670,19 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("cbcs: flush init: %w", err)
 	}
 
-	// Process each fragment through the TCP socket.
-	var accumulatedTfdt uint64 = 0
+	var accumulatedTfdt uint64
 	for i := 0; ; i++ {
 		frag, newOffset, err := runv2.ReadNextFragment(inBuf, offset)
 		if err != nil {
 			return fmt.Errorf("cbcs: read fragment %d: %w", i, err)
 		}
 		if frag == nil {
-			break // clean EOF
+			break
 		}
 		offset = newOffset
 
-		// Apple Music ALAC fMP4 incorrectly sets all fragments to the EXACT SAME tfdt.
-		// We MUST patch the tfdt box with a monotonically increasing value, otherwise
-		// libavformat (mpv/ffmpeg) thinks they are overlapping duplicates and drops them.
-		if frag.Moof != nil && frag.Moof.Traf != nil {
-			oldSize := frag.Moof.Size()
-
-			// Apple's fMP4 starts mfhd.sequence_number at 1 (ISOBMFF-legal), but VLC's
-			// mp4 demuxer tracks the value starting from 0 and reports "Fragment sequence
-			// discontinuity" when it sees 1 instead of 0 on the first fragment.
-			// Patch to 0-based monotonic so VLC never sees a gap.
-			if frag.Moof.Mfhd != nil {
-				frag.Moof.Mfhd.SequenceNumber = uint32(i)
-			}
-
-			if frag.Moof.Traf.Tfdt != nil {
-				frag.Moof.Traf.Tfdt.SetBaseMediaDecodeTime(accumulatedTfdt)
-				frag.Moof.Traf.Tfdt.Version = 1 // Force 64-bit to prevent size shrinking
-			} else {
-				tfdt := mp4.CreateTfdt(accumulatedTfdt)
-				tfdt.Version = 1
-				frag.Moof.Traf.Tfdt = tfdt
-
-				// ISOBMFF requires tfdt to be placed BEFORE trun!
-				var newChildren []mp4.Box
-				for _, child := range frag.Moof.Traf.Children {
-					if child.Type() == "trun" {
-						newChildren = append(newChildren, tfdt)
-					}
-					newChildren = append(newChildren, child)
-				}
-				frag.Moof.Traf.Children = newChildren
-			}
-
-			// Force SampleDescriptionIndex and TrackID to 1, because Apple's CDN
-			// sometimes mutates these fields in subsequent fragments, causing ffmpeg
-			// to silently skip the trun box due to stsd or track mismatch.
-			defaultSampleDuration := uint32(4096) // ALAC: 4096 PCM samples per frame
-			if frag.Moof.Traf.Tfhd != nil {
-				frag.Moof.Traf.Tfhd.TrackID = 1
-				if frag.Moof.Traf.Tfhd.HasSampleDescriptionIndex() {
-					frag.Moof.Traf.Tfhd.SampleDescriptionIndex = 1
-				}
-				if frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
-					if d := frag.Moof.Traf.Tfhd.DefaultSampleDuration; d > 0 {
-						defaultSampleDuration = d
-					}
-				}
-			}
-			if i == 0 {
-				fmt.Printf("cbcs: tfhd.DefaultSampleDuration=%d (using %d) truns=%d\n",
-					func() uint32 {
-						if frag.Moof.Traf.Tfhd != nil && frag.Moof.Traf.Tfhd.HasDefaultSampleDuration() {
-							return frag.Moof.Traf.Tfhd.DefaultSampleDuration
-						}
-						return 0
-					}(), defaultSampleDuration, len(frag.Moof.Traf.Truns))
-			}
-
-			newSize := frag.Moof.Size()
-			sizeDiff := int32(newSize) - int32(oldSize)
-
-			if sizeDiff != 0 {
-				for _, t := range frag.Moof.Traf.Truns {
-					if t.HasDataOffset() {
-						t.DataOffset += sizeDiff
-					}
-				}
-			}
-
-			// Accumulate using ALL truns in this fragment so the next fragment's tfdt
-			// starts exactly where this one ends. Apple ALAC moofs have multiple truns
-			// (e.g. 10×16 frames + 1×1 frame); summing only the first trun produced a
-			// 65536-sample step instead of the correct 659456, causing VLC to report
-			// "Fragment sequence discontinuity" at ~28s and abort playback.
-			for _, t := range frag.Moof.Traf.Truns {
-				accumulatedTfdt += t.Duration(defaultSampleDuration)
-			}
-		}
-
-		if i < len(s.keyURIs) && s.keyURIs[i] != "" {
-			if i != 0 {
-				runv2.SwitchKeys(rw)
-			}
-			if s.keyURIs[i] == cbcsPrefetchKey {
-				runv2.SendString(rw, "0")
-			} else {
-				runv2.SendString(rw, s.adamID)
-			}
-			runv2.SendString(rw, s.keyURIs[i])
-		}
+		accumulatedTfdt = patchAlacFragmentSeq(frag, i, accumulatedTfdt)
+		s.sendFragKey(i, rw)
 
 		if err := runv2.DecryptFragment(frag, tracks, rw); err != nil {
 			return fmt.Errorf("cbcs: decrypt fragment %d: %w", i, err)

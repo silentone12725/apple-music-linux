@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/fatih/color"
@@ -145,51 +144,7 @@ func (a *Playlist) ShowSelect() []int {
 	input = strings.TrimSpace(input)
 	if input == "all" {
 		fmt.Println("You have selected all options:")
-		selected = arr
-	} else {
-		selectedOptions := [][]string{}
-		parts := strings.Split(input, ",")
-		for _, part := range parts {
-			if strings.Contains(part, "-") { // Range setting
-				rangeParts := strings.Split(part, "-")
-				selectedOptions = append(selectedOptions, rangeParts)
-			} else { // Single option
-				selectedOptions = append(selectedOptions, []string{part})
-			}
-		}
-		//
-		for _, opt := range selectedOptions {
-			if len(opt) == 1 { // Single option
-				num, err := strconv.Atoi(opt[0])
-				if err != nil {
-					fmt.Println("Invalid option:", opt[0])
-					continue
-				}
-				if num > 0 && num <= len(arr) {
-					selected = append(selected, num)
-					//args = append(args, urls[num-1])
-				} else {
-					fmt.Println("Option out of range:", opt[0])
-				}
-			} else if len(opt) == 2 { // Range
-				start, err1 := strconv.Atoi(opt[0])
-				end, err2 := strconv.Atoi(opt[1])
-				if err1 != nil || err2 != nil {
-					fmt.Println("Invalid range:", opt)
-					continue
-				}
-				if start < 1 || end > len(arr) || start > end {
-					fmt.Println("Range out of range:", opt)
-					continue
-				}
-				for i := start; i <= end; i++ {
-					//fmt.Println(options[i-1])
-					selected = append(selected, i)
-				}
-			} else {
-				fmt.Println("Invalid option:", opt)
-			}
-		}
 	}
+	selected = parseTrackSelection(input, arr)
 	return selected
 }

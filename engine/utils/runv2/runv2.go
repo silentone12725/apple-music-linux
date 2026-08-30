@@ -178,6 +178,40 @@ func runAttempt(adamId string, playlistUrl string, outfile string, Config struct
 	return nil
 }
 
+// sendFragmentKey sends the decryption key URI for fragment i via the DRM connection.
+func sendFragmentKey(rw *bufio.ReadWriter, key *m3u8.Key, i int, adamId string) {
+	if key == nil {
+		return
+	}
+	if i != 0 {
+		SwitchKeys(rw)
+	}
+	if key.URI == prefetchKey {
+		SendString(rw, "0")
+	} else {
+		SendString(rw, adamId)
+	}
+	SendString(rw, key.URI)
+}
+
+// flushDecryptedOutput flushes outBuf; if output was buffered in memory, writes
+// it to outfile now that the full file is ready.
+func flushDecryptedOutput(outBuf *bufio.Writer, outfile string, buf *bytes.Buffer, totalLen, maxMemory int64) error {
+	if err := outBuf.Flush(); err != nil {
+		return err
+	}
+	if totalLen > maxMemory {
+		return nil
+	}
+	ofh, err := os.Create(outfile)
+	if err != nil {
+		return err
+	}
+	defer ofh.Close()
+	_, err = ofh.Write(buf.Bytes())
+	return err
+}
+
 func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	adamId string, playlistSegments []*m3u8.MediaSegment, totalLen int64, Config structs.ConfigSet) error {
 	var buffer bytes.Buffer
@@ -258,18 +292,7 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		if segment == nil {
 			return errors.New("segment number out of sync")
 		}
-		key := segment.Key
-		if key != nil {
-			if i != 0 {
-				SwitchKeys(rw)
-			}
-			if key.URI == prefetchKey {
-				SendString(rw, "0")
-			} else {
-				SendString(rw, adamId)
-			}
-			SendString(rw, key.URI)
-		}
+		sendFragmentKey(rw, segment.Key, i, adamId)
 		// flushes the buffer
 		err = DecryptFragment(frag, tracks, rw)
 		if err != nil {
@@ -281,24 +304,7 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		}
 		bar.Add64(int64(rawoffset))
 	}
-	err = outBuf.Flush()
-	if err != nil {
-		return err
-	}
-	if totalLen <= MaxMemorySize {
-		// create output file
-		ofh, err := os.Create(outfile)
-		if err != nil {
-			return err
-		}
-		defer ofh.Close()
-
-		_, err = ofh.Write(buffer.Bytes())
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return flushDecryptedOutput(outBuf, outfile, &buffer, totalLen, MaxMemorySize)
 }
 
 // SanitizeInit removes boxes in the init segment that are known to cause

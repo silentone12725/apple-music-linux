@@ -224,6 +224,83 @@ func readNextFragment(r io.Reader, offset *uint64) (*mp4.Fragment, error) {
 //   - Optional CMAF styp/sidx between segments
 //   - CBCS and CENC encryption schemes
 //   - Unencrypted fragments ("no senc box in traf")
+func logInterceptInit(init *mp4.InitSegment, keyLen int) {
+	sinfInfo := "no-tracks"
+	if init.Moov != nil {
+		trackInfos := []string{}
+		for _, trak := range init.Moov.Traks {
+			hdlr := "?"
+			if trak.Mdia != nil && trak.Mdia.Hdlr != nil {
+				hdlr = trak.Mdia.Hdlr.HandlerType
+			}
+			entries := []string{}
+			if trak.Mdia != nil && trak.Mdia.Minf != nil &&
+				trak.Mdia.Minf.Stbl != nil && trak.Mdia.Minf.Stbl.Stsd != nil {
+				for _, c := range trak.Mdia.Minf.Stbl.Stsd.Children {
+					entries = append(entries, c.Type())
+				}
+			}
+			trackInfos = append(trackInfos, fmt.Sprintf("%s[%s]", hdlr, strings.Join(entries, ",")))
+		}
+		sinfInfo = strings.Join(trackInfos, " ")
+	}
+	log.Printf("[INTERCEPT] INIT stsd-entries: %s  key-len=%d", sinfInfo, keyLen)
+}
+
+func logInterceptDecryptInit(decryptInfo mp4.DecryptInfo) {
+	infos := []string{}
+	for _, ti := range decryptInfo.TrackInfos {
+		if ti.Sinf == nil {
+			infos = append(infos, fmt.Sprintf("track%d:sinf=nil(CLEAR-INIT→no-decrypt)", ti.TrackID))
+		} else {
+			scheme := "?"
+			if ti.Sinf.Schm != nil {
+				scheme = ti.Sinf.Schm.SchemeType
+			}
+			infos = append(infos, fmt.Sprintf("track%d:scheme=%s", ti.TrackID, scheme))
+		}
+	}
+	if len(infos) == 0 {
+		infos = []string{"NO-TRACKS-IN-DECRYPT-INFO"}
+	}
+	log.Printf("[INTERCEPT] DecryptInit result: %s", strings.Join(infos, " "))
+}
+
+func logInterceptFrag(fragNum int, frag *mp4.Fragment, tfdtT0 *int64, tfdtInitialized *bool) {
+	hasSenc := frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Senc != nil
+	sampleCount := 0
+	if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Trun != nil {
+		sampleCount = int(frag.Moof.Traf.Trun.SampleCount())
+	}
+	mdatSize := 0
+	if frag.Mdat != nil {
+		mdatSize = int(frag.Mdat.Size())
+	}
+	origTfdt := int64(0)
+	if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Tfdt != nil {
+		origTfdt = int64(frag.Moof.Traf.Tfdt.BaseMediaDecodeTime())
+	}
+	if !*tfdtInitialized {
+		*tfdtT0 = origTfdt
+		*tfdtInitialized = true
+	}
+	log.Printf("[INTERCEPT] FRAG#%d hasSenc=%v samples=%d mdat=%dB origTfdt=%d shifted=%d",
+		fragNum, hasSenc, sampleCount, mdatSize, origTfdt, origTfdt-*tfdtT0)
+}
+
+func logInterceptDecryptResult(fragNum int, decErr error, frag *mp4.Fragment) {
+	if isNoSencBox(decErr) {
+		log.Printf("[INTERCEPT] FRAG#%d → CLEAR (no senc, passthrough)", fragNum)
+		return
+	}
+	sencAfter := frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Senc != nil
+	if sencAfter {
+		log.Printf("[INTERCEPT] FRAG#%d → DECRYPT SKIPPED (sinf=nil), senc STILL PRESENT — browser cannot decode!", fragNum)
+	} else {
+		log.Printf("[INTERCEPT] FRAG#%d → decrypted OK, senc removed", fragNum)
+	}
+}
+
 func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writer) error {
 	br := bufio.NewReaderSize(r, 1<<20) // 1 MiB read-ahead
 
@@ -231,55 +308,13 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 	if err != nil {
 		return fmt.Errorf("init segment: %w", err)
 	}
-
-	// INTERCEPT stage 1: analyse init segment — sample entry types and enca presence.
-	{
-		sinfInfo := "no-tracks"
-		if init.Moov != nil {
-			trackInfos := []string{}
-			for _, trak := range init.Moov.Traks {
-				hdlr := "?"
-				if trak.Mdia != nil && trak.Mdia.Hdlr != nil {
-					hdlr = trak.Mdia.Hdlr.HandlerType
-				}
-				entries := []string{}
-				if trak.Mdia != nil && trak.Mdia.Minf != nil &&
-					trak.Mdia.Minf.Stbl != nil && trak.Mdia.Minf.Stbl.Stsd != nil {
-					for _, c := range trak.Mdia.Minf.Stbl.Stsd.Children {
-						entries = append(entries, c.Type())
-					}
-				}
-				trackInfos = append(trackInfos, fmt.Sprintf("%s[%s]", hdlr, strings.Join(entries, ",")))
-			}
-			sinfInfo = strings.Join(trackInfos, " ")
-		}
-		log.Printf("[INTERCEPT] INIT stsd-entries: %s  key-len=%d", sinfInfo, len(key))
-	}
+	logInterceptInit(init, len(key))
 
 	decryptInfo, err := mp4.DecryptInit(init)
 	if err != nil {
 		return fmt.Errorf("decrypt init: %w", err)
 	}
-
-	// INTERCEPT stage 2: what did DecryptInit find?
-	{
-		infos := []string{}
-		for _, ti := range decryptInfo.TrackInfos {
-			if ti.Sinf == nil {
-				infos = append(infos, fmt.Sprintf("track%d:sinf=nil(CLEAR-INIT→no-decrypt)", ti.TrackID))
-			} else {
-				scheme := "?"
-				if ti.Sinf.Schm != nil {
-					scheme = ti.Sinf.Schm.SchemeType
-				}
-				infos = append(infos, fmt.Sprintf("track%d:scheme=%s", ti.TrackID, scheme))
-			}
-		}
-		if len(infos) == 0 {
-			infos = []string{"NO-TRACKS-IN-DECRYPT-INFO"}
-		}
-		log.Printf("[INTERCEPT] DecryptInit result: %s", strings.Join(infos, " "))
-	}
+	logInterceptDecryptInit(decryptInfo)
 
 	if err := init.Encode(w); err != nil {
 		return fmt.Errorf("write init: %w", err)
@@ -305,27 +340,7 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		}
 		fragNum++
 
-		// INTERCEPT stage 3: per-fragment analysis before decrypt.
-		hasSenc := frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Senc != nil
-		sampleCount := 0
-		if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Trun != nil {
-			sampleCount = int(frag.Moof.Traf.Trun.SampleCount())
-		}
-		mdatSize := 0
-		if frag.Mdat != nil {
-			mdatSize = int(frag.Mdat.Size())
-		}
-		origTfdt := int64(0)
-		if frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Tfdt != nil {
-			origTfdt = int64(frag.Moof.Traf.Tfdt.BaseMediaDecodeTime())
-		}
-		if !tfdtInitialized {
-			tfdtT0 = origTfdt
-			tfdtInitialized = true
-		}
-		log.Printf("[INTERCEPT] FRAG#%d hasSenc=%v samples=%d mdat=%dB origTfdt=%d shifted=%d",
-			fragNum, hasSenc, sampleCount, mdatSize, origTfdt, origTfdt-tfdtT0)
-
+		logInterceptFrag(fragNum, frag, &tfdtT0, &tfdtInitialized)
 		shiftFragTfdt(frag, tfdtT0)
 
 		decErr := mp4.DecryptFragment(frag, decryptInfo, key)
@@ -333,19 +348,7 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 			log.Printf("[INTERCEPT] FRAG#%d DECRYPT ERROR: %v", fragNum, decErr)
 			return fmt.Errorf("decrypt fragment: %w", decErr)
 		}
-
-		// INTERCEPT stage 4: result of decrypt attempt.
-		if isNoSencBox(decErr) {
-			log.Printf("[INTERCEPT] FRAG#%d → CLEAR (no senc, passthrough)", fragNum)
-		} else {
-			// Check if senc box is STILL present after decrypt (means Sinf was nil → decrypt skipped).
-			sencAfter := frag.Moof != nil && frag.Moof.Traf != nil && frag.Moof.Traf.Senc != nil
-			if sencAfter {
-				log.Printf("[INTERCEPT] FRAG#%d → DECRYPT SKIPPED (sinf=nil), senc STILL PRESENT — browser cannot decode!", fragNum)
-			} else {
-				log.Printf("[INTERCEPT] FRAG#%d → decrypted OK, senc removed", fragNum)
-			}
-		}
+		logInterceptDecryptResult(fragNum, decErr, frag)
 
 		if err := frag.Encode(w); err != nil {
 			return fmt.Errorf("write fragment: %w", err)

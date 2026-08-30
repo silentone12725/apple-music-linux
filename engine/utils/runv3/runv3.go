@@ -449,6 +449,35 @@ func downloadAndAssemble(ctx context.Context, urls []string, w io.Writer, limite
 	writerWg.Wait()
 }
 
+// retryBackoff sleeps the exponential backoff for attempt and returns whether
+// the caller should continue (true) or abort (false, ctx done).
+func retryBackoff(ctx context.Context, attempt int) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
+		return true
+	}
+}
+
+// mvRetry returns true if a failed attempt should be retried (sleeps backoff).
+func mvRetry(ctx context.Context, attempt, maxRetries int) bool {
+	return attempt < maxRetries-1 && ctx.Err() == nil && retryBackoff(ctx, attempt)
+}
+
+// segRetry calls limiter.onFailure, logs msg if this is the final attempt, and
+// returns true if the caller should continue to the next iteration.
+func segRetry(ctx context.Context, attempt, maxRetries int, limiter *aimdLimiter, msg string) bool {
+	limiter.onFailure()
+	if attempt < maxRetries-1 && ctx.Err() == nil {
+		return retryBackoff(ctx, attempt)
+	}
+	if ctx.Err() == nil {
+		fmt.Println(msg)
+	}
+	return false
+}
+
 func downloadSegment(ctx context.Context, url string, index int, wg *sync.WaitGroup, segmentsChan chan<- Segment, client *http.Client, limiter *aimdLimiter) {
 	defer func() {
 		limiter.release()
@@ -477,52 +506,25 @@ func downloadSegment(ctx context.Context, url string, index int, wg *sync.WaitGr
 		}
 		resp, err := client.Do(req)
 		if err != nil {
-			limiter.onFailure()
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
-				continue
+			if !segRetry(ctx, attempt, maxRetries, limiter, fmt.Sprintf("segment %d: download failed: %v", index, err)) {
+				return
 			}
-			if ctx.Err() == nil {
-				fmt.Printf("segment %d: download failed: %v\n", index, err)
-			}
-			return
+			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			limiter.onFailure()
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
-				continue
+			if !segRetry(ctx, attempt, maxRetries, limiter, fmt.Sprintf("segment %d: HTTP %d", index, resp.StatusCode)) {
+				return
 			}
-			if ctx.Err() == nil {
-				fmt.Printf("segment %d: HTTP %d\n", index, resp.StatusCode)
-			}
-			return
+			continue
 		}
 		data, err = io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			limiter.onFailure()
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
-				continue
+			if !segRetry(ctx, attempt, maxRetries, limiter, fmt.Sprintf("segment %d: read body: %v", index, err)) {
+				return
 			}
-			if ctx.Err() == nil {
-				fmt.Printf("segment %d: read body: %v\n", index, err)
-			}
-			return
+			continue
 		}
 		limiter.onSuccess()
 		break
@@ -741,24 +743,14 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 		}
 		resp, err := mvHTTPClient.Do(req)
 		if err != nil {
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
+			if attempt < maxRetries-1 && ctx.Err() == nil && retryBackoff(ctx, attempt) {
 				continue
 			}
 			return nil, fmt.Errorf("fetch: %w", err)
 		}
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 			resp.Body.Close()
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
+			if attempt < maxRetries-1 && ctx.Err() == nil && retryBackoff(ctx, attempt) {
 				continue
 			}
 			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -766,12 +758,7 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 		data, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
+			if attempt < maxRetries-1 && ctx.Err() == nil && retryBackoff(ctx, attempt) {
 				continue
 			}
 			return nil, fmt.Errorf("read body: %w", err)
@@ -814,40 +801,25 @@ func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 		}
 		resp, err := mvHTTPClient.Do(req)
 		if err != nil {
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
-				continue
+			if !mvRetry(ctx, attempt, maxRetries) {
+				return nil, fmt.Errorf("fetch: %w", err)
 			}
-			return nil, fmt.Errorf("fetch: %w", err)
+			continue
 		}
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 			resp.Body.Close()
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
-				continue
+			if !mvRetry(ctx, attempt, maxRetries) {
+				return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 			}
-			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
 		}
 		data, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			if attempt < maxRetries-1 && ctx.Err() == nil {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(time.Duration(1<<attempt) * 500 * time.Millisecond):
-				}
-				continue
+			if !mvRetry(ctx, attempt, maxRetries) {
+				return nil, fmt.Errorf("read body: %w", err)
 			}
-			return nil, fmt.Errorf("read body: %w", err)
+			continue
 		}
 		if MVCacheEnabled() {
 			go PutCachedMVSegment(diskKey, data)
