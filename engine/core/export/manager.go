@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"engine/engine/pipeline"
-	"engine/engine/playback"
+	"engine/core/pipeline"
+	"engine/core/playback"
 	"engine/utils/ampapi"
 	"engine/utils/lyrics"
 )

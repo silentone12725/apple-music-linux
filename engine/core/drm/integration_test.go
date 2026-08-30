@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"engine/engine/drm"
+	"engine/core/drm"
 )
 
 // ── Test harness ──────────────────────────────────────────────────────────────

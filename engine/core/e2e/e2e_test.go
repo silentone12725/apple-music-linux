@@ -18,8 +18,8 @@ import (
 	"sync"
 	"testing"
 
-	"engine/engine/media"
-	"engine/engine/pipeline"
+	"engine/core/media"
+	"engine/core/pipeline"
 )
 
 // fakeSource writes a fixed payload; no network.

@@ -12,9 +12,9 @@ import (
 
 	"github.com/itouakirai/mp4ff/mp4"
 
-	"engine/engine/bench"
-	"engine/engine/hls"
-	"engine/engine/pipeline"
+	"engine/core/bench"
+	"engine/core/hls"
+	"engine/core/pipeline"
 	"engine/utils/runv2"
 )
 

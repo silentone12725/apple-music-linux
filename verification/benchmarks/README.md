@@ -9,7 +9,7 @@ Each file is named `<scenario>-<date>.json`.
 
 ```bash
 # Clear the segment cache first
-rm -rf ~/.cache/apple-music-cli/segments/
+rm -rf ~/.cache/apple-music-linux/segments/
 
 # Time a full ALAC download via engine
 time curl -s -X POST http://localhost:8080/api/v1/export \

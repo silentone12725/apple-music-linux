@@ -60,7 +60,7 @@ func contains(list []string, want string) bool {
 // enginePackages lists all main/engine/* packages via `go list`.
 func enginePackages(t *testing.T) []string {
 	t.Helper()
-	return goList(t, "engine/engine/...")
+	return goList(t, "engine/core/...")
 }
 
 // TestArchRunv3ImportedOnlyByFairplay: among engine packages, only
@@ -69,30 +69,30 @@ func TestArchRunv3ImportedOnlyByFairplay(t *testing.T) {
 	const runv3 = "engine/utils/runv3"
 	for _, pkg := range enginePackages(t) {
 		imports := directImports(t, pkg)
-		if contains(imports, runv3) && pkg != "engine/engine/fairplay" {
+		if contains(imports, runv3) && pkg != "engine/core/fairplay" {
 			t.Errorf("%s directly imports %s; only engine/fairplay may", pkg, runv3)
 		}
 	}
 	// And fairplay must actually import it (guards against silent refactors).
-	if !contains(directImports(t, "engine/engine/fairplay"), runv3) {
+	if !contains(directImports(t, "engine/core/fairplay"), runv3) {
 		t.Errorf("engine/fairplay no longer imports %s", runv3)
 	}
 }
 
 func TestArchPlaybackDoesNotImportRunv3(t *testing.T) {
-	if contains(directImports(t, "engine/engine/playback"), "engine/utils/runv3") {
+	if contains(directImports(t, "engine/core/playback"), "engine/utils/runv3") {
 		t.Error("engine/playback must not directly import utils/runv3")
 	}
 }
 
 func TestArchAppleDoesNotImportRunv3(t *testing.T) {
-	if contains(directImports(t, "engine/engine/apple"), "engine/utils/runv3") {
+	if contains(directImports(t, "engine/core/apple"), "engine/utils/runv3") {
 		t.Error("engine/apple must not directly import utils/runv3")
 	}
 }
 
 func TestArchHLSDoesNotImportRunv3(t *testing.T) {
-	if contains(directImports(t, "engine/engine/hls"), "engine/utils/runv3") {
+	if contains(directImports(t, "engine/core/hls"), "engine/utils/runv3") {
 		t.Error("engine/hls must not directly import utils/runv3")
 	}
 }
@@ -101,7 +101,7 @@ func TestArchHLSDoesNotImportRunv3(t *testing.T) {
 // abstraction; none of its transitive deps may be Apple/DRM specific.
 func TestArchMediaHasNoAppleSpecificDeps(t *testing.T) {
 	forbidden := []string{"apple", "ampapi", "runv3", "fairplay"}
-	for _, dep := range deps(t, "engine/engine/media") {
+	for _, dep := range deps(t, "engine/core/media") {
 		for _, bad := range forbidden {
 			if strings.Contains(dep, bad) {
 				t.Errorf("engine/media depends on %q (contains %q)", dep, bad)
@@ -135,7 +135,7 @@ func TestArchEngineDoesNotImportCmd(t *testing.T) {
 // CBCSDialer is defined in engine/fairplay so that fairplay can define it without
 // importing drm — enforcing a one-way drm → ??? dependency (drm is standalone).
 func TestArchDRMDoesNotImportFairplay(t *testing.T) {
-	if contains(deps(t, "engine/engine/drm"), "engine/engine/fairplay") {
+	if contains(deps(t, "engine/core/drm"), "engine/core/fairplay") {
 		t.Error("engine/drm must not import engine/fairplay (CBCSDialer lives in fairplay to prevent this cycle)")
 	}
 }
@@ -144,7 +144,7 @@ func TestArchDRMDoesNotImportFairplay(t *testing.T) {
 // CBCSDialer is defined in engine/fairplay so that fairplay remains importable
 // without pulling in the full DRM subsystem.
 func TestArchFairplayDoesNotImportDRM(t *testing.T) {
-	if contains(deps(t, "engine/engine/fairplay"), "engine/engine/drm") {
+	if contains(deps(t, "engine/core/fairplay"), "engine/core/drm") {
 		t.Error("engine/fairplay must not import engine/drm")
 	}
 }
@@ -192,12 +192,12 @@ func TestArchEngineDoesNotDirectlyImportStructs(t *testing.T) {
 func TestArchRunv2ImportedOnlyByFairplay(t *testing.T) {
 	const runv2 = "engine/utils/runv2"
 	for _, pkg := range enginePackages(t) {
-		if contains(directImports(t, pkg), runv2) && pkg != "engine/engine/fairplay" {
+		if contains(directImports(t, pkg), runv2) && pkg != "engine/core/fairplay" {
 			t.Errorf("%s directly imports %s; only engine/fairplay may", pkg, runv2)
 		}
 	}
 	// Guard: fairplay must actually import it until Phase 3 is complete.
-	if !contains(directImports(t, "engine/engine/fairplay"), runv2) {
+	if !contains(directImports(t, "engine/core/fairplay"), runv2) {
 		t.Log("engine/fairplay no longer imports runv2 — Phase 3 may be complete; update this test")
 	}
 }
@@ -208,8 +208,8 @@ func TestArchRunv2ImportedOnlyByFairplay(t *testing.T) {
 // those are playback-internal packages.
 // Note: transitive exposure through engine/playback is expected and permitted.
 func TestArchExportDoesNotDirectlyImportEngineInternals(t *testing.T) {
-	exportImports := directImports(t, "engine/engine/export")
-	forbidden := []string{"engine/engine/apple", "engine/engine/hls", "engine/engine/fairplay"}
+	exportImports := directImports(t, "engine/core/export")
+	forbidden := []string{"engine/core/apple", "engine/core/hls", "engine/core/fairplay"}
 	for _, imp := range exportImports {
 		for _, bad := range forbidden {
 			if imp == bad {

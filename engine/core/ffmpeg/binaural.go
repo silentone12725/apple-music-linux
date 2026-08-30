@@ -34,8 +34,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"engine/engine/autoeq"
-	"engine/engine/pipeline"
+	"engine/core/autoeq"
+	"engine/core/pipeline"
 )
 
 // BinauralSource wraps an audio source and transcodes it to binaural stereo

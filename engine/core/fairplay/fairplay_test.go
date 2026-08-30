@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"engine/engine/pipeline"
+	"engine/core/pipeline"
 )
 
 // Compile-time assertions: the exported constructors satisfy the intended

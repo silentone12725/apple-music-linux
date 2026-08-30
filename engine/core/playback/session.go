@@ -3,7 +3,7 @@ package playback
 import (
 	"time"
 
-	"engine/engine/pipeline"
+	"engine/core/pipeline"
 )
 
 // Session is the public session descriptor returned to API clients.

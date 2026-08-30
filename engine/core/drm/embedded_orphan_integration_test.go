@@ -39,7 +39,7 @@ import (
 	"testing"
 	"time"
 
-	"engine/engine/drm"
+	"engine/core/drm"
 )
 
 func TestEmbeddedBackend_StopReapsWorker(t *testing.T) {
