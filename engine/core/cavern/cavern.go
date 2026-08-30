@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"engine/engine/pipeline"
+	"engine/core/pipeline"
 )
 
 const (

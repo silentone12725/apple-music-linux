@@ -25,7 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"engine/engine/playback"
+	"engine/core/playback"
 )
 
 const (

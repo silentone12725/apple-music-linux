@@ -14,7 +14,7 @@ package media
 import (
 	"context"
 
-	"engine/engine/pipeline"
+	"engine/core/pipeline"
 )
 
 // Metadata holds the publicly-visible properties of a media item.

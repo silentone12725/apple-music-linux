@@ -3,7 +3,7 @@
   "info": {
     "title": "Apple Music Engine API",
     "version": "1.0.0",
-    "description": "HTTP API exposed by apple-music-cli when started with --api <port>. All endpoints require the server to have valid bearer token + media user token configured."
+    "description": "HTTP API exposed by apple-music-linux when started with --api <port>. All endpoints require the server to have valid bearer token + media user token configured."
   },
   "servers": [{ "url": "http://127.0.0.1:8080", "description": "Local engine" }],
   "paths": {

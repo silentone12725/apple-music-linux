@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"engine/engine/apple"
-	"engine/engine/media"
-	"engine/engine/pipeline"
+	"engine/core/apple"
+	"engine/core/media"
+	"engine/core/pipeline"
 )
 
 const sessionTTL = 4 * time.Hour

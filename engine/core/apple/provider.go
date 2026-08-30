@@ -21,11 +21,11 @@ import (
 	"strings"
 	"time"
 
-	"engine/engine/bench"
-	"engine/engine/fairplay"
-	"engine/engine/hls"
-	"engine/engine/media"
-	"engine/engine/pipeline"
+	"engine/core/bench"
+	"engine/core/fairplay"
+	"engine/core/hls"
+	"engine/core/media"
+	"engine/core/pipeline"
 	"engine/utils/ampapi"
 	"engine/utils/runv3"
 )

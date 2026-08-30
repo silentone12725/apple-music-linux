@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"engine/engine/drm"
+	"engine/core/drm"
 )
 
 // ── Mock backend ──────────────────────────────────────────────────────────────

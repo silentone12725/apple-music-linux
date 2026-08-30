@@ -30,7 +30,7 @@ import (
 
 	"encoding/hex"
 
-	"engine/engine/pipeline"
+	"engine/core/pipeline"
 	"github.com/itouakirai/mp4ff/mp4"
 )
 

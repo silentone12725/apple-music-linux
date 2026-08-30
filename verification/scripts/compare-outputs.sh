@@ -5,7 +5,7 @@
 #   ./verification/scripts/compare-outputs.sh <adamID> [storefront]
 #
 # Prerequisites:
-#   - Engine running: ./apple-music-cli --api 8080 (or set AM_ENGINE_PORT)
+#   - Engine running: ./apple-music-linux --api 8080 (or set AM_ENGINE_PORT)
 #   - config.yaml with valid token + MUT
 #   - MP4Box installed (for structural comparison)
 #   - jq installed (for JSON parsing)
@@ -35,7 +35,7 @@ ENGINE_OUT="$TMP/engine-${ADAM_ID}.m4a"
 
 # ── Legacy download ───────────────────────────────────────────────────────────
 echo "==> Legacy download (adamID=$ADAM_ID, storefront=$STOREFRONT)"
-echo "    Run: cd $REPO_ROOT && ./apple-music-cli <song URL or ID>"
+echo "    Run: cd $REPO_ROOT && ./apple-music-linux <song URL or ID>"
 echo "    Save output to: $LEGACY_OUT"
 echo "    Press Enter when done."
 read -r
