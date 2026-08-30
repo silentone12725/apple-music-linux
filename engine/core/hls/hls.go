@@ -428,12 +428,23 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 		}
 	}
 
+	logMediaParsed(rawURL, med, pl)
+	return med, nil
+}
+
+func logMediaParsed(rawURL string, med *Media, pl *m3u8.MediaPlaylist) {
 	var totalDur float64
-	for _, d := range med.SegmentDurations { totalDur += d }
+	for _, d := range med.SegmentDurations {
+		totalDur += d
+	}
 	firstSeg := "(none)"
-	if len(med.SegmentURLs) > 0 { firstSeg = med.SegmentURLs[0] }
+	if len(med.SegmentURLs) > 0 {
+		firstSeg = med.SegmentURLs[0]
+	}
 	lastSeg := "(none)"
-	if len(med.SegmentURLs) > 1 { lastSeg = med.SegmentURLs[len(med.SegmentURLs)-1] }
+	if len(med.SegmentURLs) > 1 {
+		lastSeg = med.SegmentURLs[len(med.SegmentURLs)-1]
+	}
 	encInfo := "nil"
 	if med.Encryption != nil {
 		encInfo = med.Encryption.URIPrefix + ",<kid>"
@@ -445,8 +456,6 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 	log.Printf("[hls] parseMedia url=%s nSegs=%d totalDur=%.2fs enc=%s method=%q initURL=%q first=%q last=%q",
 		rawURL, len(med.SegmentURLs), totalDur, encInfo, keyMethod,
 		med.InitURL, firstSeg, lastSeg)
-
-	return med, nil
 }
 
 // byteRangeURL appends a "#bytes=<offset>-<end>" fragment to url when the

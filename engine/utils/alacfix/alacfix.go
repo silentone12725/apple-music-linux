@@ -204,6 +204,68 @@ func riceDecompress(br *bitReader, nbSamples int, bps int, rhmEff uint32, p *ala
 	return nil
 }
 
+// readCompressedElement reads the compressed-mode body of one ALAC element.
+func readCompressedElement(br *bitReader, channels int, outputSamples uint32, extraBits, bps int, p *alacParams) error {
+	if _, err := br.read(8); err != nil { // decorr_shift
+		return err
+	}
+	if _, err := br.read(8); err != nil { // decorr_left_weight
+		return err
+	}
+	rhms := make([]uint32, channels)
+	for c := 0; c < channels; c++ {
+		if _, err := br.read(4); err != nil { // pred_type
+			return err
+		}
+		lpcQuant, err := br.read(4)
+		if err != nil {
+			return err
+		}
+		rhm, err := br.read(3)
+		if err != nil {
+			return err
+		}
+		lpcOrder, err := br.read(5)
+		if err != nil {
+			return err
+		}
+		if lpcOrder >= p.maxSamplesPerFrame || lpcQuant == 0 {
+			return fmt.Errorf("bad lpc")
+		}
+		for j := uint32(0); j < lpcOrder; j++ {
+			if _, err := br.readSigned(16); err != nil {
+				return err
+			}
+		}
+		rhms[c] = rhm
+	}
+	if extraBits != 0 {
+		need := int(outputSamples) * channels * extraBits
+		if br.left() < need {
+			return errEOF
+		}
+		if err := br.skip(need); err != nil {
+			return err
+		}
+	}
+	for c := 0; c < channels; c++ {
+		rhmEff := (rhms[c] * uint32(p.riceHistoryMult)) / 4
+		if err := riceDecompress(br, int(outputSamples), bps, rhmEff, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readUncompressedElement reads the uncompressed-mode body of one ALAC element.
+func readUncompressedElement(br *bitReader, channels int, outputSamples uint32, sampleSize int) error {
+	need := int(outputSamples) * channels * sampleSize
+	if br.left() < need {
+		return errEOF
+	}
+	return br.skip(need)
+}
+
 // scanOneElement consumes one element from br. Returns (channels_used,
 // is_end_tag, error). If an unsupported element tag is hit, returns an error.
 func scanOneElement(br *bitReader, p *alacParams) (int, bool, error) {
@@ -259,60 +321,11 @@ func scanOneElement(br *bitReader, p *alacParams) (int, bool, error) {
 	}
 
 	if isCompressed {
-		if _, err := br.read(8); err != nil { // decorr_shift
+		if err := readCompressedElement(br, channels, outputSamples, extraBits, bps, p); err != nil {
 			return 0, false, err
-		}
-		if _, err := br.read(8); err != nil { // decorr_left_weight
-			return 0, false, err
-		}
-		rhms := make([]uint32, channels)
-		for c := 0; c < channels; c++ {
-			if _, err := br.read(4); err != nil { // pred_type
-				return 0, false, err
-			}
-			lpcQuant, err := br.read(4)
-			if err != nil {
-				return 0, false, err
-			}
-			rhm, err := br.read(3)
-			if err != nil {
-				return 0, false, err
-			}
-			lpcOrder, err := br.read(5)
-			if err != nil {
-				return 0, false, err
-			}
-			if lpcOrder >= p.maxSamplesPerFrame || lpcQuant == 0 {
-				return 0, false, fmt.Errorf("bad lpc")
-			}
-			for j := uint32(0); j < lpcOrder; j++ {
-				if _, err := br.readSigned(16); err != nil {
-					return 0, false, err
-				}
-			}
-			rhms[c] = rhm
-		}
-		if extraBits != 0 {
-			need := int(outputSamples) * channels * extraBits
-			if br.left() < need {
-				return 0, false, errEOF
-			}
-			if err := br.skip(need); err != nil {
-				return 0, false, err
-			}
-		}
-		for c := 0; c < channels; c++ {
-			rhmEff := (rhms[c] * uint32(p.riceHistoryMult)) / 4
-			if err := riceDecompress(br, int(outputSamples), bps, rhmEff, p); err != nil {
-				return 0, false, err
-			}
 		}
 	} else {
-		need := int(outputSamples) * channels * int(p.sampleSize)
-		if br.left() < need {
-			return 0, false, errEOF
-		}
-		if err := br.skip(need); err != nil {
+		if err := readUncompressedElement(br, channels, outputSamples, int(p.sampleSize)); err != nil {
 			return 0, false, err
 		}
 	}
@@ -459,6 +472,83 @@ func extractAlacConfig(data []byte, sampleEntry atom) (alacParams, error) {
 	return alacParams{}, errors.New("no ALAC config inside sample entry")
 }
 
+type stscRun struct{ firstChunk, samplesPerChunk uint32 }
+
+// readSampleSizes reads sample sizes from the stsz box.
+func readSampleSizes(data []byte, stsz atom) []uint32 {
+	b := stsz.bodyOff
+	defaultSize := binary.BigEndian.Uint32(data[b+4 : b+8])
+	count := int(binary.BigEndian.Uint32(data[b+8 : b+12]))
+	sizes := make([]uint32, count)
+	if defaultSize == 0 {
+		for i := 0; i < count; i++ {
+			sizes[i] = binary.BigEndian.Uint32(data[b+12+4*i : b+16+4*i])
+		}
+	} else {
+		for i := range sizes {
+			sizes[i] = defaultSize
+		}
+	}
+	return sizes
+}
+
+// readChunkOffsets reads chunk file offsets from a stco or co64 box.
+func readChunkOffsets(data []byte, stco atom, is64 bool) []int64 {
+	b := stco.bodyOff
+	ent := int(binary.BigEndian.Uint32(data[b+4 : b+8]))
+	offsets := make([]int64, ent)
+	p := b + 8
+	if is64 {
+		for i := range offsets {
+			offsets[i] = int64(binary.BigEndian.Uint64(data[p : p+8]))
+			p += 8
+		}
+	} else {
+		for i := range offsets {
+			offsets[i] = int64(binary.BigEndian.Uint32(data[p : p+4]))
+			p += 4
+		}
+	}
+	return offsets
+}
+
+// buildSamplesPerChunk expands the stsc run-length table into a per-chunk
+// samples-per-chunk slice of length numChunks.
+func buildSamplesPerChunk(data []byte, stsc atom, numChunks int) []uint32 {
+	b := stsc.bodyOff
+	ent := int(binary.BigEndian.Uint32(data[b+4 : b+8]))
+	runs := make([]stscRun, ent)
+	p := b + 8
+	for i := range runs {
+		runs[i] = stscRun{
+			firstChunk:      binary.BigEndian.Uint32(data[p : p+4]),
+			samplesPerChunk: binary.BigEndian.Uint32(data[p+4 : p+8]),
+		}
+		p += 12
+	}
+	result := make([]uint32, numChunks)
+	for i, r := range runs {
+		var nextFC uint32
+		if i+1 < len(runs) {
+			nextFC = runs[i+1].firstChunk
+		} else {
+			nextFC = uint32(numChunks) + 1
+		}
+		for c := r.firstChunk; c < nextFC && int(c-1) < numChunks; c++ {
+			result[c-1] = r.samplesPerChunk
+		}
+	}
+	if len(runs) > 0 {
+		last := runs[len(runs)-1].samplesPerChunk
+		for i := range result {
+			if result[i] == 0 {
+				result[i] = last
+			}
+		}
+	}
+	return result
+}
+
 func readPacketLocations(data []byte, stbl atom) ([]packetLoc, error) {
 	stsz, ok := findChild(data, stbl.bodyOff, stbl.endOff, "stsz")
 	if !ok {
@@ -478,68 +568,9 @@ func readPacketLocations(data []byte, stbl atom) ([]packetLoc, error) {
 		is64 = true
 	}
 
-	b := stsz.bodyOff
-	defaultSize := binary.BigEndian.Uint32(data[b+4 : b+8])
-	count := int(binary.BigEndian.Uint32(data[b+8 : b+12]))
-	sizes := make([]uint32, count)
-	if defaultSize == 0 {
-		for i := 0; i < count; i++ {
-			sizes[i] = binary.BigEndian.Uint32(data[b+12+4*i : b+16+4*i])
-		}
-	} else {
-		for i := 0; i < count; i++ {
-			sizes[i] = defaultSize
-		}
-	}
-
-	b = stco.bodyOff
-	ent := int(binary.BigEndian.Uint32(data[b+4 : b+8]))
-	chunkOff := make([]int64, ent)
-	p := b + 8
-	if is64 {
-		for i := 0; i < ent; i++ {
-			chunkOff[i] = int64(binary.BigEndian.Uint64(data[p : p+8]))
-			p += 8
-		}
-	} else {
-		for i := 0; i < ent; i++ {
-			chunkOff[i] = int64(binary.BigEndian.Uint32(data[p : p+4]))
-			p += 4
-		}
-	}
-
-	b = stsc.bodyOff
-	ent = int(binary.BigEndian.Uint32(data[b+4 : b+8]))
-	type stscRun struct{ firstChunk, samplesPerChunk uint32 }
-	runs := make([]stscRun, ent)
-	p = b + 8
-	for i := 0; i < ent; i++ {
-		runs[i] = stscRun{
-			firstChunk:      binary.BigEndian.Uint32(data[p : p+4]),
-			samplesPerChunk: binary.BigEndian.Uint32(data[p+4 : p+8]),
-		}
-		p += 12
-	}
-
-	samplesPerChunk := make([]uint32, len(chunkOff))
-	for i, r := range runs {
-		var nextFC uint32
-		if i+1 < len(runs) {
-			nextFC = runs[i+1].firstChunk
-		} else {
-			nextFC = uint32(len(chunkOff)) + 1
-		}
-		for c := r.firstChunk; c < nextFC && int(c-1) < len(chunkOff); c++ {
-			samplesPerChunk[c-1] = r.samplesPerChunk
-		}
-	}
-	if len(runs) > 0 {
-		for i := range samplesPerChunk {
-			if samplesPerChunk[i] == 0 {
-				samplesPerChunk[i] = runs[len(runs)-1].samplesPerChunk
-			}
-		}
-	}
+	sizes := readSampleSizes(data, stsz)
+	chunkOff := readChunkOffsets(data, stco, is64)
+	samplesPerChunk := buildSamplesPerChunk(data, stsc, len(chunkOff))
 
 	locs := make([]packetLoc, 0, len(sizes))
 	sampleIdx := 0
@@ -559,6 +590,90 @@ func readPacketLocations(data []byte, stbl atom) ([]packetLoc, error) {
 	return locs, nil
 }
 
+// parseTrakEntry parses one trak atom. Returns (td, true, nil) for an ALAC
+// audio track, (zero, false, nil) to skip a non-ALAC or non-audio track, or
+// (zero, false, err) on a hard error.
+// parseTkhdTrackID extracts the track_ID field from the tkhd box.
+func parseTkhdTrackID(data []byte, trak atom) uint32 {
+	tkhd, ok := findChild(data, trak.bodyOff, trak.endOff, "tkhd")
+	if !ok {
+		return 0
+	}
+	b := tkhd.bodyOff
+	if data[b] == 0 && tkhd.endOff-b >= 20 {
+		return binary.BigEndian.Uint32(data[b+12 : b+16])
+	}
+	if data[b] == 1 && tkhd.endOff-b >= 32 {
+		return binary.BigEndian.Uint32(data[b+20 : b+24])
+	}
+	return 0
+}
+
+// findAlacStsdEntry navigates stsd → first sample entry and returns it only if
+// the entry format is "alac". Returns a non-nil error on malformed data,
+// (zero, nil) when the entry is absent or not alac.
+func findAlacStsdEntry(data []byte, stbl atom) (atom, error) {
+	stsd, ok := findChild(data, stbl.bodyOff, stbl.endOff, "stsd")
+	if !ok {
+		return atom{}, nil
+	}
+	b := stsd.bodyOff
+	if stsd.endOff-b < 8 || binary.BigEndian.Uint32(data[b+4:b+8]) == 0 {
+		return atom{}, nil
+	}
+	entryStart := b + 8
+	if entryStart+8 > stsd.endOff {
+		return atom{}, nil
+	}
+	entrySize := int(binary.BigEndian.Uint32(data[entryStart : entryStart+4]))
+	entryType := string(data[entryStart+4 : entryStart+8])
+	if entrySize < 8 || entryStart+entrySize > stsd.endOff || entryType != "alac" {
+		return atom{}, nil
+	}
+	return atom{typ: entryType, hdrOff: entryStart, bodyOff: entryStart + 8, endOff: entryStart + entrySize}, nil
+}
+
+func parseTrakEntry(data []byte, trak atom) (trackData, bool, error) {
+	trackID := parseTkhdTrackID(data, trak)
+
+	mdia, ok := findChild(data, trak.bodyOff, trak.endOff, "mdia")
+	if !ok {
+		return trackData{}, false, nil
+	}
+	hdlr, ok := findChild(data, mdia.bodyOff, mdia.endOff, "hdlr")
+	if !ok {
+		return trackData{}, false, nil
+	}
+	hb := hdlr.bodyOff
+	if hdlr.endOff-hb < 12 || string(data[hb+8:hb+12]) != "soun" {
+		return trackData{}, false, nil
+	}
+	minf, ok := findChild(data, mdia.bodyOff, mdia.endOff, "minf")
+	if !ok {
+		return trackData{}, false, nil
+	}
+	stbl, ok := findChild(data, minf.bodyOff, minf.endOff, "stbl")
+	if !ok {
+		return trackData{}, false, nil
+	}
+	sampleEntry, err := findAlacStsdEntry(data, stbl)
+	if err != nil {
+		return trackData{}, false, fmt.Errorf("track %d stsd: %w", trackID, err)
+	}
+	if sampleEntry.typ == "" {
+		return trackData{}, false, nil
+	}
+	params, err := extractAlacConfig(data, sampleEntry)
+	if err != nil {
+		return trackData{}, false, fmt.Errorf("track %d: %w", trackID, err)
+	}
+	locs, err := readPacketLocations(data, stbl)
+	if err != nil {
+		return trackData{}, false, fmt.Errorf("track %d: %w", trackID, err)
+	}
+	return trackData{trackID: trackID, params: params, locs: locs}, true, nil
+}
+
 // findAlacTracks returns one entry per audio track whose first sample entry
 // in stsd has format == 'alac'. All other tracks (video, AAC audio, etc.)
 // are silently skipped.
@@ -570,81 +685,15 @@ func findAlacTracks(data []byte) ([]trackData, error) {
 	if !ok {
 		return nil, errors.New("no moov atom (not an MP4/M4A?)")
 	}
-
 	var tracks []trackData
 	for _, trak := range findAllChildren(data, moov.bodyOff, moov.endOff, "trak") {
-		var trackID uint32
-		if tkhd, ok := findChild(data, trak.bodyOff, trak.endOff, "tkhd"); ok {
-			b := tkhd.bodyOff
-			version := data[b]
-			if version == 0 && tkhd.endOff-b >= 20 {
-				trackID = binary.BigEndian.Uint32(data[b+12 : b+16])
-			} else if version == 1 && tkhd.endOff-b >= 32 {
-				trackID = binary.BigEndian.Uint32(data[b+20 : b+24])
-			}
-		}
-
-		mdia, ok := findChild(data, trak.bodyOff, trak.endOff, "mdia")
-		if !ok {
-			continue
-		}
-		// Require handler_type == 'soun'.
-		hdlr, ok := findChild(data, mdia.bodyOff, mdia.endOff, "hdlr")
-		if !ok {
-			continue
-		}
-		hb := hdlr.bodyOff
-		if hdlr.endOff-hb < 12 || string(data[hb+8:hb+12]) != "soun" {
-			continue
-		}
-		minf, ok := findChild(data, mdia.bodyOff, mdia.endOff, "minf")
-		if !ok {
-			continue
-		}
-		stbl, ok := findChild(data, minf.bodyOff, minf.endOff, "stbl")
-		if !ok {
-			continue
-		}
-		stsd, ok := findChild(data, stbl.bodyOff, stbl.endOff, "stsd")
-		if !ok {
-			continue
-		}
-		// stsd body: version+flags(4) | entry_count(4) | sample_entries...
-		b := stsd.bodyOff
-		if stsd.endOff-b < 8 {
-			continue
-		}
-		entryCount := binary.BigEndian.Uint32(data[b+4 : b+8])
-		if entryCount == 0 {
-			continue
-		}
-		entryStart := b + 8
-		if entryStart+8 > stsd.endOff {
-			continue
-		}
-		entrySize := int(binary.BigEndian.Uint32(data[entryStart : entryStart+4]))
-		entryType := string(data[entryStart+4 : entryStart+8])
-		if entrySize < 8 || entryStart+entrySize > stsd.endOff {
-			continue
-		}
-		if entryType != "alac" {
-			continue
-		}
-		sampleEntry := atom{
-			typ:     entryType,
-			hdrOff:  entryStart,
-			bodyOff: entryStart + 8,
-			endOff:  entryStart + entrySize,
-		}
-		params, err := extractAlacConfig(data, sampleEntry)
+		td, ok, err := parseTrakEntry(data, trak)
 		if err != nil {
-			return nil, fmt.Errorf("track %d: %w", trackID, err)
+			return nil, err
 		}
-		locs, err := readPacketLocations(data, stbl)
-		if err != nil {
-			return nil, fmt.Errorf("track %d: %w", trackID, err)
+		if ok {
+			tracks = append(tracks, td)
 		}
-		tracks = append(tracks, trackData{trackID: trackID, params: params, locs: locs})
 	}
 	return tracks, nil
 }

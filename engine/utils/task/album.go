@@ -82,6 +82,50 @@ func (a *Album) GetArtwork() string {
 	return a.Resp.Data[0].Attributes.Artwork.URL
 }
 
+// parseTrackSelection parses a comma/range selection string (e.g. "1,3-5,7")
+// against arr (1-based indices) and returns the selected indices.
+// Returns arr unchanged when input is "all".
+func parseTrackSelection(input string, arr []int) []int {
+	if input == "all" {
+		return arr
+	}
+	selected := []int{}
+	for _, part := range strings.Split(input, ",") {
+		if strings.Contains(part, "-") {
+			rangeParts := strings.Split(part, "-")
+			if len(rangeParts) != 2 {
+				fmt.Println("Invalid range:", part)
+				continue
+			}
+			start, err1 := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
+			end, err2 := strconv.Atoi(strings.TrimSpace(rangeParts[1]))
+			if err1 != nil || err2 != nil {
+				fmt.Println("Invalid range:", part)
+				continue
+			}
+			if start < 1 || end > len(arr) || start > end {
+				fmt.Println("Range out of range:", part)
+				continue
+			}
+			for i := start; i <= end; i++ {
+				selected = append(selected, i)
+			}
+		} else {
+			num, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil {
+				fmt.Println("Invalid option:", part)
+				continue
+			}
+			if num > 0 && num <= len(arr) {
+				selected = append(selected, num)
+			} else {
+				fmt.Println("Option out of range:", part)
+			}
+		}
+	}
+	return selected
+}
+
 func (a *Album) ShowSelect() []int {
 	meta := a.Resp
 	trackTotal := len(meta.Data[0].Relationships.Tracks.Data)
@@ -143,51 +187,7 @@ func (a *Album) ShowSelect() []int {
 	input = strings.TrimSpace(input)
 	if input == "all" {
 		fmt.Println("You have selected all options:")
-		selected = arr
-	} else {
-		selectedOptions := [][]string{}
-		parts := strings.Split(input, ",")
-		for _, part := range parts {
-			if strings.Contains(part, "-") { // Range setting
-				rangeParts := strings.Split(part, "-")
-				selectedOptions = append(selectedOptions, rangeParts)
-			} else { // Single option
-				selectedOptions = append(selectedOptions, []string{part})
-			}
-		}
-		//
-		for _, opt := range selectedOptions {
-			if len(opt) == 1 { // Single option
-				num, err := strconv.Atoi(opt[0])
-				if err != nil {
-					fmt.Println("Invalid option:", opt[0])
-					continue
-				}
-				if num > 0 && num <= len(arr) {
-					selected = append(selected, num)
-					//args = append(args, urls[num-1])
-				} else {
-					fmt.Println("Option out of range:", opt[0])
-				}
-			} else if len(opt) == 2 { // Range
-				start, err1 := strconv.Atoi(opt[0])
-				end, err2 := strconv.Atoi(opt[1])
-				if err1 != nil || err2 != nil {
-					fmt.Println("Invalid range:", opt)
-					continue
-				}
-				if start < 1 || end > len(arr) || start > end {
-					fmt.Println("Range out of range:", opt)
-					continue
-				}
-				for i := start; i <= end; i++ {
-					//fmt.Println(options[i-1])
-					selected = append(selected, i)
-				}
-			} else {
-				fmt.Println("Invalid option:", opt)
-			}
-		}
 	}
+	selected = parseTrackSelection(input, arr)
 	return selected
 }
