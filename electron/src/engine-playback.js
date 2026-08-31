@@ -4331,16 +4331,33 @@ async function setup() {
                     // (user clicked track 7 while at track 2 in the same playlist).
                     const intraIdx = cur ? cur.items.indexOf(songId) : -1;
                     if (intraIdx >= 0) {
+                        // Intra-container non-linear jump (user clicked track 7 while at track 2).
                         _sessionItemIdx = intraIdx;
                     } else {
-                        // Genuinely new play context: seed a fresh container from the MK queue.
-                        const mkItems2 = mk.queue?.items ?? [];
-                        const mkPos2   = mk.queue?.position ?? 0;
-                        const newIds   = mkItems2.map(_extractItemId).filter(Boolean);
-                        if (newIds.length) {
-                            _sessionContainers.push({ items: newIds });
-                            _sessionContainerIdx = _sessionContainers.length - 1;
-                            _sessionItemIdx      = mkPos2;
+                        // Search previously visited containers (most-recent first) before creating
+                        // a new one — inter-playlist returns (A→B→A) should reactivate the original
+                        // container rather than accumulating duplicates.
+                        let interIdx = -1;
+                        let interCI  = -1;
+                        for (let ci = _sessionContainers.length - 1; ci >= 0; ci--) {
+                            if (ci === _sessionContainerIdx) continue;
+                            const idx = _sessionContainers[ci].items.indexOf(songId);
+                            if (idx >= 0) { interCI = ci; interIdx = idx; break; }
+                        }
+                        if (interCI >= 0) {
+                            // Return to a previously visited container.
+                            _sessionContainerIdx = interCI;
+                            _sessionItemIdx      = interIdx;
+                        } else {
+                            // Genuinely new play context: seed a fresh container from the MK queue.
+                            const mkItems2 = mk.queue?.items ?? [];
+                            const mkPos2   = mk.queue?.position ?? 0;
+                            const newIds   = mkItems2.map(_extractItemId).filter(Boolean);
+                            if (newIds.length) {
+                                _sessionContainers.push({ items: newIds });
+                                _sessionContainerIdx = _sessionContainers.length - 1;
+                                _sessionItemIdx      = mkPos2;
+                            }
                         }
                     }
                 }
