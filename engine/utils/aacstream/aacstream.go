@@ -763,7 +763,7 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 			}
 			return nil, fmt.Errorf("read body: %w", err)
 		}
-		go PutCachedSegment(cacheKey, data) // async: don't block the download goroutine
+		PutCachedSegment(cacheKey, data)
 		return data, nil
 	}
 	return nil, fmt.Errorf("all retries exhausted")
@@ -822,7 +822,7 @@ func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 			continue
 		}
 		if MVCacheEnabled() {
-			go PutCachedMVSegment(diskKey, data)
+			PutCachedMVSegment(diskKey, data)
 		}
 		return data, nil
 	}

@@ -254,7 +254,9 @@ func (p *Player) SetTime(posMs int64) {
 		p.mu.Unlock()
 		return
 	}
+	p.mu.Lock()
 	myGen := p.loadGen
+	p.mu.Unlock()
 	go func() {
 		// 10s deadline — throttled CPUs take longer to open the HLS stream
 		deadline := time.Now().Add(10 * time.Second)

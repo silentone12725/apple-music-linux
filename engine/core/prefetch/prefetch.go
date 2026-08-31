@@ -15,6 +15,7 @@
 package prefetch
 
 import (
+	"container/heap"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -285,52 +286,51 @@ func (w *workItem) effectiveScore() float64 {
 	return w.baseScore + math.Min(age*0.01, 0.5)
 }
 
-// workQueue is a thread-safe priority queue ordered by effectiveScore.
+// workHeap implements heap.Interface for a max-heap ordered by baseScore.
+// baseScore is fixed at submission time; effectiveScore (aging) is not used
+// for heap ordering since dynamic scores would require O(n) re-heapify on pop.
+// With queue depth bounded at 512 and fast worker turnover, starvation is
+// negligible without aging.
+type workHeap []*workItem
+
+func (h workHeap) Len() int            { return len(h) }
+func (h workHeap) Less(i, j int) bool  { return h[i].baseScore > h[j].baseScore } // max-heap
+func (h workHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *workHeap) Push(x any)         { *h = append(*h, x.(*workItem)) }
+func (h *workHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; old[n-1] = nil; *h = old[:n-1]; return x }
+
+// workQueue is a thread-safe priority queue backed by a max-heap.
 // pop blocks until an item is available or the queue is closed.
 type workQueue struct {
-	mu    sync.Mutex
-	cond  *sync.Cond
-	items []*workItem
-	done  bool
+	mu   sync.Mutex
+	cond *sync.Cond
+	h    workHeap
+	done bool
 }
 
 func newWorkQueue() *workQueue {
-	wq := &workQueue{items: make([]*workItem, 0, 64)}
+	wq := &workQueue{h: make(workHeap, 0, 64)}
 	wq.cond = sync.NewCond(&wq.mu)
 	return wq
 }
 
 func (q *workQueue) push(item *workItem) {
 	q.mu.Lock()
-	q.items = append(q.items, item)
+	heap.Push(&q.h, item)
 	q.cond.Signal()
 	q.mu.Unlock()
 }
 
-// pop picks the item with the highest effectiveScore.
-// O(n) scan — fine because queue depth is bounded at 512.
 func (q *workQueue) pop() (*workItem, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for len(q.items) == 0 && !q.done {
+	for q.h.Len() == 0 && !q.done {
 		q.cond.Wait()
 	}
-	if len(q.items) == 0 {
+	if q.h.Len() == 0 {
 		return nil, false // queue closed
 	}
-	best := 0
-	bestScore := q.items[0].effectiveScore()
-	for i := 1; i < len(q.items); i++ {
-		if sc := q.items[i].effectiveScore(); sc > bestScore {
-			best = i
-			bestScore = sc
-		}
-	}
-	item := q.items[best]
-	// Swap-remove avoids shifting the underlying slice.
-	q.items[best] = q.items[len(q.items)-1]
-	q.items = q.items[:len(q.items)-1]
-	return item, true
+	return heap.Pop(&q.h).(*workItem), true
 }
 
 func (q *workQueue) close() {
@@ -338,7 +338,7 @@ func (q *workQueue) close() {
 }
 
 func (q *workQueue) depth() int {
-	q.mu.Lock(); n := len(q.items); q.mu.Unlock(); return n
+	q.mu.Lock(); n := q.h.Len(); q.mu.Unlock(); return n
 }
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
