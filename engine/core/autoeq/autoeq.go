@@ -125,13 +125,19 @@ func (s *Settings) FFmpegChain() string {
 	if s.Preamp != 0 {
 		parts = append(parts, fmt.Sprintf("volume=%.2fdB", s.Preamp))
 	}
-	typeMap := map[string]string{"PK": "equalizer", "LSC": "lowshelf", "HSC": "highshelf"}
 	for _, b := range s.Bands {
 		if !b.Enabled {
 			continue
 		}
-		filter, ok := typeMap[strings.ToUpper(b.Type)]
-		if !ok {
+		var filter string
+		switch strings.ToUpper(b.Type) {
+		case "PK":
+			filter = "equalizer"
+		case "LSC":
+			filter = "lowshelf"
+		case "HSC":
+			filter = "highshelf"
+		default:
 			continue
 		}
 		parts = append(parts, fmt.Sprintf("%s=f=%.0f:t=q:w=%.4f:g=%.2f",

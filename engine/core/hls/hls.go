@@ -83,23 +83,26 @@ func (m *Master) SelectAudioVariant(priorities []string) (string, error) {
 	found := false
 	var fallback string
 
+	prioRank := make(map[string]int, len(priorities))
+	for i, p := range priorities {
+		prioRank[p] = i
+	}
 	for _, alt := range m.Alternatives {
 		if fallback == "" {
 			fallback = alt.URI
 		}
-		for i, p := range priorities {
-			if alt.GroupID != p {
-				continue
-			}
-			matches := re.FindStringSubmatch(alt.URI)
-			rank := 0
-			if len(matches) == 2 {
-				fmt.Sscanf(matches[1], "%d", &rank)
-			}
-			if !found || i < best.prio || (i == best.prio && rank > best.rank) {
-				best = candidate{uri: alt.URI, rank: rank, prio: i}
-				found = true
-			}
+		i, ok := prioRank[alt.GroupID]
+		if !ok {
+			continue
+		}
+		matches := re.FindStringSubmatch(alt.URI)
+		rank := 0
+		if len(matches) == 2 {
+			fmt.Sscanf(matches[1], "%d", &rank)
+		}
+		if !found || i < best.prio || (i == best.prio && rank > best.rank) {
+			best = candidate{uri: alt.URI, rank: rank, prio: i}
+			found = true
 		}
 	}
 	if found {
@@ -116,51 +119,8 @@ func (m *Master) SelectAudioVariant(priorities []string) (string, error) {
 // Resolution is read from the RESOLUTION= m3u8 attribute first; the URL-path
 // pattern _WxH_ is used as a fallback for older playlist formats.
 func (m *Master) SelectVideoVariant(maxHeight int) (string, error) {
-	re := dimRe
-	sorted := make([]Variant, len(m.Variants))
-	copy(sorted, m.Variants)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].AverageBandwidth > sorted[j].AverageBandwidth
-	})
-
-	heightOf := func(v Variant) int {
-		// Prefer RESOLUTION= attribute (e.g. "1920x1080").
-		if v.Resolution != "" {
-			var w, h int
-			if n, _ := fmt.Sscanf(v.Resolution, "%dx%d", &w, &h); n == 2 && h > 0 {
-				return h
-			}
-		}
-		// Fall back to _WxH_ pattern in URL path.
-		u, err := url.Parse(v.URL)
-		if err != nil {
-			return 0
-		}
-		matches := re.FindStringSubmatch(u.Path)
-		if len(matches) != 3 {
-			return 0
-		}
-		var h int
-		fmt.Sscanf(matches[2], "%d", &h)
-		return h
-	}
-
-	anyParseable := false
-	for _, v := range sorted {
-		h := heightOf(v)
-		if h > 0 {
-			anyParseable = true
-			if h <= maxHeight {
-				return v.URL, nil
-			}
-		}
-	}
-	// If no variant has parseable resolution, return the highest-bandwidth one
-	// so playlists without resolution metadata still work.
-	if !anyParseable && len(sorted) > 0 {
-		return sorted[0].URL, nil
-	}
-	return "", fmt.Errorf("no video variant at or below %dp", maxHeight)
+	variantURL, _, _, err := m.SelectVideoVariantWithCodec(maxHeight)
+	return variantURL, err
 }
 
 // SelectVideoVariantWithCodec is like SelectVideoVariant but also returns the
