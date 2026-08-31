@@ -48,6 +48,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -100,6 +101,11 @@ type ProcessBackend struct {
 	cmd     *exec.Cmd
 	cancel  context.CancelFunc
 	watcher *fsnotify.Watcher
+
+	// credHandling / tfaHandling prevent duplicate handler goroutines when both
+	// watchStateFile and forwardStderr observe the same auth-state transition.
+	credHandling atomic.Bool
+	tfaHandling  atomic.Bool
 
 	// stopCh is closed when Stop() is called. It is recreated on each launch()
 	// so monitor goroutines from a previous run cannot outlive their process.
@@ -563,9 +569,13 @@ func (b *ProcessBackend) applyStateFile(content string) {
 
 	switch r.Auth {
 	case AuthLoggingIn:
-		go b.handleCredentialRequest()
+		if b.credHandling.CompareAndSwap(false, true) {
+			go func() { defer b.credHandling.Store(false); b.handleCredentialRequest() }()
+		}
 	case AuthChallenging:
-		go b.handle2FARequest()
+		if b.tfaHandling.CompareAndSwap(false, true) {
+			go func() { defer b.tfaHandling.Store(false); b.handle2FARequest() }()
+		}
 	}
 }
 
@@ -703,9 +713,13 @@ func (b *ProcessBackend) forwardStderr(r io.Reader) {
 
 		if changed && b.auth != nil {
 			if snapshot.State.Authentication == AuthLoggingIn {
-				go b.handleCredentialRequest()
+				if b.credHandling.CompareAndSwap(false, true) {
+					go func() { defer b.credHandling.Store(false); b.handleCredentialRequest() }()
+				}
 			} else if snapshot.State.Authentication == AuthChallenging {
-				go b.handle2FARequest()
+				if b.tfaHandling.CompareAndSwap(false, true) {
+					go func() { defer b.tfaHandling.Store(false); b.handle2FARequest() }()
+				}
 			}
 		}
 	}

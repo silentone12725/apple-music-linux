@@ -330,10 +330,10 @@ func (m *DRMManager) handleCrash() {
 		return
 	}
 
-	m.mu.Lock()
+	// crashCount is safe to access here without m.mu: restartMu serialises all
+	// handleCrash goroutines, so only one can reach this point at a time.
 	count := m.crashCount
 	m.crashCount++
-	m.mu.Unlock()
 
 	if m.policy.MaxCrashRestarts > 0 && count >= m.policy.MaxCrashRestarts {
 		m.setManagerState(ManagerFailed)

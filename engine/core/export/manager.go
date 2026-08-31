@@ -485,6 +485,8 @@ func (m *Manager) execute(item *workItem) {
 		return
 	}
 
+	// ppCtx detaches from the request context so post-processing (tag writing,
+	// artwork embedding) completes even if the client disconnects mid-export.
 	ppCtx := context.WithoutCancel(ctx)
 	go m.runPostProcess(ppCtx, req, job, meta, tmpPath, finalPath)
 }
