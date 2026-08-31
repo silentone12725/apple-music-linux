@@ -4349,14 +4349,29 @@ async function setup() {
                             _sessionContainerIdx = interCI;
                             _sessionItemIdx      = interIdx;
                         } else {
-                            // Genuinely new play context: seed a fresh container from the MK queue.
                             const mkItems2 = mk.queue?.items ?? [];
                             const mkPos2   = mk.queue?.position ?? 0;
                             const newIds   = mkItems2.map(_extractItemId).filter(Boolean);
                             if (newIds.length) {
-                                _sessionContainers.push({ items: newIds });
-                                _sessionContainerIdx = _sessionContainers.length - 1;
-                                _sessionItemIdx      = mkPos2;
+                                // If every item we already know about appears in the new MK queue,
+                                // this is the same playlist with lazy-loaded tracks now visible —
+                                // extend the current container in place rather than creating a duplicate.
+                                const curItems  = cur?.items ?? [];
+                                const newIdsSet = new Set(newIds);
+                                const sameCtx   = curItems.length >= 2 &&
+                                    curItems.every(id => newIdsSet.has(id));
+                                if (sameCtx) {
+                                    const curSet = new Set(curItems);
+                                    for (const id of newIds) {
+                                        if (!curSet.has(id)) { cur.items.push(id); curSet.add(id); }
+                                    }
+                                    _sessionItemIdx = cur.items.indexOf(songId);
+                                } else {
+                                    // Genuinely new play context.
+                                    _sessionContainers.push({ items: newIds });
+                                    _sessionContainerIdx = _sessionContainers.length - 1;
+                                    _sessionItemIdx      = mkPos2;
+                                }
                             }
                         }
                     }
