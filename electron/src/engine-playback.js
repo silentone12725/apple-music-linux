@@ -4081,22 +4081,27 @@ async function setup() {
                     el = el.parentElement;
                 }
             } catch (_) {}
-            console.log('[AML click] external play while VLC active — opening CDN gate playbackState=' + mk.playbackState + ' amlGotoTarget=' + _amlGotoTarget + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null') + ' catalogId=' + (_pendingExternalClickCatalogId || 'not-found'));
             // Pre-fetch playlist tracks from the local engine cache so the setQueue
             // wrapper can build a full {songs:[...all]} descriptor without touching
             // Apple's API — same as Android's LibraryItemListPlaybackQueueItemProvider
             // building from a local SQLite snapshot at tap time.
             _pendingPlaylistFetch = null;
+            let _pendingPlaylistId = null;
             try {
                 const m = location.href.match(/\/library\/playlist\/(p\.[A-Za-z0-9]+)/);
                 if (m) {
-                    const playlistId = m[1];
-                    _pendingPlaylistFetch = fetch(ENGINE + '/api/v1/library/playlists/' + encodeURIComponent(playlistId) + '/tracks')
+                    _pendingPlaylistId = m[1];
+                    _pendingPlaylistFetch = fetch(ENGINE + '/api/v1/library/playlists/' + encodeURIComponent(_pendingPlaylistId) + '/tracks')
                         .then(r => r.ok ? r.json() : null)
                         .catch(() => null);
-                    console.log('[AML click] pre-fetching playlist tracks from local cache: ' + playlistId);
                 }
             } catch (_) {}
+            console.log('[AML click] external play while VLC active — opening CDN gate'
+                + ' playbackState=' + mk.playbackState
+                + ' amlGotoTarget=' + _amlGotoTarget
+                + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null')
+                + ' catalogId=' + (_pendingExternalClickCatalogId || 'not-found')
+                + (_pendingPlaylistId ? ' playlist=' + _pendingPlaylistId + ' (pre-fetching)' : ''));
             _allowCDNTransition = true;
             _ourBlobUrl = null;
 
