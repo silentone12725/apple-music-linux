@@ -4066,9 +4066,13 @@ async function setup() {
             try {
                 let el = e.target;
                 for (let depth = 0; depth < 12 && el; depth++) {
-                    // data-id or data-content-id attributes
+                    // data-id or data-content-id attributes. Library song IDs carry an "a." prefix
+                    // (e.g. "a.264849919") — strip it before testing so they aren't silently missed.
                     const did = el.dataset?.id || el.dataset?.contentId || el.dataset?.songId;
-                    if (did && /^\d{7,12}$/.test(did)) { _pendingExternalClickCatalogId = did; break; }
+                    if (did) {
+                        const numId = did.startsWith('a.') ? did.slice(2) : did;
+                        if (/^\d{7,12}$/.test(numId)) { _pendingExternalClickCatalogId = numId; break; }
+                    }
                     // href on anchor containing a numeric song ID
                     if (el.tagName === 'A' && el.href) {
                         const m = el.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
@@ -4113,8 +4117,10 @@ async function setup() {
                 const desc = a[0];
                 if (desc?.playlists && desc?.startWith?.id) {
                     const targetId = desc.startWith.id;
+                    // Library song IDs carry an "a." prefix — strip for numeric comparison.
+                    const targetNumId = targetId.startsWith('a.') ? targetId.slice(2) : targetId;
                     const qItems = mk.queue?.items || [];
-                    const idx = qItems.findIndex(item => item.id === targetId);
+                    const idx = qItems.findIndex(item => item.id === targetId || item.id === targetNumId);
                     if (idx >= 0) {
                         console.log('[MK-DBG] setQueue → ctmi redirect: found id=' + targetId + ' at idx=' + idx);
                         const p = _mkApiSaved.changeToMediaAtIndex.call(mk, idx);
@@ -4124,8 +4130,12 @@ async function setup() {
                     console.log('[MK-DBG] setQueue: id=' + targetId + ' not in queue (len=' + qItems.length + '), falling through');
                     // Cross-playlist: build a full {songs:[...all catalog IDs]} from the local engine
                     // cache (Android-style local snapshot) so we never stall on Apple's playlist API.
-                    if (_pendingExternalClickCatalogId) {
-                        const catalogId = _pendingExternalClickCatalogId;
+                    // Fall back to the numeric part of startWith.id when DOM extraction missed it
+                    // (library songs with "a." prefix).
+                    const effectiveCatalogId = _pendingExternalClickCatalogId ||
+                        (/^\d{6,}$/.test(targetNumId) ? targetNumId : null);
+                    if (effectiveCatalogId) {
+                        const catalogId = effectiveCatalogId;
                         const fetchPromise = _pendingPlaylistFetch
                             ? Promise.race([_pendingPlaylistFetch, new Promise(res => setTimeout(() => res(null), 3000))])
                             : Promise.resolve(null);
