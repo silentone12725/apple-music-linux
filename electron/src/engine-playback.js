@@ -4015,6 +4015,17 @@ async function setup() {
         item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
 
     // ── Track-row play button interceptor ────────────────────────────────────────
+    // Fetch playlist tracks from the engine cache (DB → live Apple API fallback).
+    // Returns Promise<{tracks:[{lid,cid}]}|null>. Used by the CDN gate setQueue
+    // interceptor to build {songs:[catalogIds]} without touching Apple's slow
+    // setQueue({playlists:[...]}) path. The engine handles DB miss via a live fetch
+    // using the DRM token; returns empty tracks if neither is available.
+    function _prewarmLibraryPlaylist(playlistId) {
+        return fetch(ENGINE + '/api/v1/library/playlists/' + encodeURIComponent(playlistId) + '/tracks')
+            .then(r => r.ok ? r.json() : null)
+            .catch(() => null);
+    }
+
     // When a user clicks a track in a playlist, Apple Music inserts it at
     // queue.position+1 ("Play Next") but does NOT fire nowPlayingItemDidChange.
     // We detect the queue mutation via queueItemsDidChange (MK v3) or queueDidChange
@@ -4099,9 +4110,7 @@ async function setup() {
                 const m = location.href.match(/\/library\/playlist\/(p\.[A-Za-z0-9]+)/);
                 if (m) {
                     _pendingPlaylistId = m[1];
-                    _pendingPlaylistFetch = fetch(ENGINE + '/api/v1/library/playlists/' + encodeURIComponent(_pendingPlaylistId) + '/tracks')
-                        .then(r => r.ok ? r.json() : null)
-                        .catch(() => null);
+                    _pendingPlaylistFetch = _prewarmLibraryPlaylist(_pendingPlaylistId);
                 }
             } catch (_) {}
             console.log('[AML click] external play while VLC active — opening CDN gate'
@@ -4132,21 +4141,19 @@ async function setup() {
                     const targetId = desc.startWith.id;
                     // Library song IDs carry an "a." prefix — strip for numeric comparison.
                     const targetNumId = targetId.startsWith('a.') ? targetId.slice(2) : targetId;
-                    // NOTE: changeToMediaAtIndex fast-path is intentionally skipped here.
-                    // When the CDN gate is open during VLC playback the audio element is in
-                    // a synthetic state (native paused=true, no real src). MK's ctmi call
-                    // internally tries to stop→load the element sequence and hangs indefinitely
-                    // — NPIDF never fires and the 20s gate timeout kills the transition.
-                    // The setQueue({songs:[...]}) local-cache path tolerates the synthetic
-                    // element (it goes through a full queue teardown/rebuild) and is reliable.
-                    console.log('[MK-DBG] setQueue: id=' + targetId + ' (skipping ctmi — VLC gate active)');
-                    // Cross-playlist: build a full {songs:[...all catalog IDs]} from the local engine
-                    // cache (Android-style local snapshot) so we never stall on Apple's playlist API.
+                    // Library tracks only (a. prefix): try local cache first. The engine's
+                    // /library/playlists/{id}/tracks endpoint hits the DB when synced, or
+                    // falls back to a live Apple API fetch when the DB is cold. Either way
+                    // it returns [{lid,cid}] — we build {songs:[catalogIds]} without stalling
+                    // on Apple's network-hungry setQueue({playlists:[...]}) path.
+                    // Non-library catalog tracks skip straight to passthrough — they are never
+                    // in the library DB and the engine won't fetch them from /me/library.
+                    const isLibraryTrack = targetId.startsWith('a.');
                     // Fall back to the numeric part of startWith.id when DOM extraction missed it
                     // (library songs with "a." prefix).
                     const effectiveCatalogId = _pendingExternalClickCatalogId ||
                         (/^\d{6,}$/.test(targetNumId) ? targetNumId : null);
-                    if (effectiveCatalogId) {
+                    if (isLibraryTrack && effectiveCatalogId) {
                         const catalogId = effectiveCatalogId;
                         const fetchPromise = _pendingPlaylistFetch
                             ? Promise.race([_pendingPlaylistFetch, new Promise(res => setTimeout(() => res(null), 3000))])
@@ -4158,19 +4165,22 @@ async function setup() {
                                 .map(t => t.cid)
                                 .filter(id => id && /^\d{6,}$/.test(id));
                             if (catalogIds.length > 1) {
-                                console.log('[MK-DBG] setQueue → local cache redirect: ' + catalogIds.length + ' tracks, startWith=' + catalogId);
+                                // Local cache hit — build songs descriptor without touching Apple's CDN setQueue.
+                                console.log('[MK-DBG] setQueue → local cache: ' + catalogIds.length + ' tracks, startWith=' + catalogId);
                                 const pDesc = {songs: catalogIds};
                                 if (catalogIds.includes(catalogId)) pDesc.startWith = {id: catalogId};
                                 const p = _mkApiSaved.setQueue.call(mk, pDesc);
-                                if (p?.then) p.then(r => console.log('[MK-DBG] local cache redirect resolved'), e2 => console.log('[MK-DBG] local cache redirect rejected:', e2?.message || String(e2)));
+                                if (p?.then) p.then(() => console.log('[MK-DBG] local cache resolved'), e2 => console.log('[MK-DBG] local cache rejected:', e2?.message || String(e2)));
                                 return p;
                             }
-                            // Library DB had no tracks (sync not yet complete or playlist not synced).
-                            // Fall through to MK's original setQueue({playlists:[...]}) so it fetches
-                            // the playlist from Apple's API — same as if we never intercepted.
-                            console.log('[MK-DBG] setQueue → passthrough (no local tracks) catalogId=' + catalogId);
+                            // Cache cold (DB empty + engine live-fetch failed/DRM not available).
+                            // Fall through to Apple's setQueue({playlists:[...]}) — slow but reliable.
+                            // ctmi is NOT used here: the CDN gate is open only during VLC mode where
+                            // the audio element is synthetic (paused=true, no src). ctmi's stop→load
+                            // sequence hangs waiting for element events that never fire → 20s timeout.
+                            console.log('[MK-DBG] setQueue → passthrough (cache cold) catalogId=' + catalogId);
                             const p = _mkApiSaved.setQueue.apply(mk, a);
-                            if (p?.then) p.then(r => console.log('[MK-DBG] passthrough resolved'), e2 => console.log('[MK-DBG] passthrough rejected:', e2?.message || String(e2)));
+                            if (p?.then) p.then(() => console.log('[MK-DBG] passthrough resolved'), e2 => console.log('[MK-DBG] passthrough rejected:', e2?.message || String(e2)));
                             return p;
                         });
                     }
