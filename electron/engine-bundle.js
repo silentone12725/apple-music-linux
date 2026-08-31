@@ -4255,11 +4255,13 @@ async function setup() {
         const activeCur = _sessionContainers[_sessionContainerIdx];
         if (!activeCur) return;
         const mkLive = mk.queue?.items ?? [];
+        const activeCurSet = new Set(activeCur.items);
         let added = 0;
         for (const mkItem of mkLive) {
             const id = _extractItemId(mkItem);
-            if (id && !activeCur.items.includes(id)) {
+            if (id && !activeCurSet.has(id)) {
                 activeCur.items.push(id);
+                activeCurSet.add(id);
                 added++;
             }
         }
@@ -4325,15 +4327,21 @@ async function setup() {
                     // Auto-advance within the current container (MK-driven for AAC).
                     _sessionItemIdx++;
                 } else {
-                    // New play context: seed a fresh container from the current MK queue.
-                    // mk.queue.items holds the full new queue; mk.queue.position is where we are.
-                    const mkItems2 = mk.queue?.items ?? [];
-                    const mkPos2   = mk.queue?.position ?? 0;
-                    const newIds   = mkItems2.map(_extractItemId).filter(Boolean);
-                    if (newIds.length) {
-                        _sessionContainers.push({ items: newIds });
-                        _sessionContainerIdx = _sessionContainers.length - 1;
-                        _sessionItemIdx      = mkPos2;
+                    // Check if the new track is elsewhere in the current container
+                    // (user clicked track 7 while at track 2 in the same playlist).
+                    const intraIdx = cur ? cur.items.indexOf(songId) : -1;
+                    if (intraIdx >= 0) {
+                        _sessionItemIdx = intraIdx;
+                    } else {
+                        // Genuinely new play context: seed a fresh container from the MK queue.
+                        const mkItems2 = mk.queue?.items ?? [];
+                        const mkPos2   = mk.queue?.position ?? 0;
+                        const newIds   = mkItems2.map(_extractItemId).filter(Boolean);
+                        if (newIds.length) {
+                            _sessionContainers.push({ items: newIds });
+                            _sessionContainerIdx = _sessionContainers.length - 1;
+                            _sessionItemIdx      = mkPos2;
+                        }
                     }
                 }
             }
@@ -4344,9 +4352,13 @@ async function setup() {
             const activeCur = _sessionContainers[_sessionContainerIdx];
             if (activeCur) {
                 const mkLive = mk.queue?.items ?? [];
+                const activeCurSet = new Set(activeCur.items);
                 for (const mkItem of mkLive) {
                     const id = _extractItemId(mkItem);
-                    if (id && !activeCur.items.includes(id)) activeCur.items.push(id);
+                    if (id && !activeCurSet.has(id)) {
+                        activeCur.items.push(id);
+                        activeCurSet.add(id);
+                    }
                 }
             }
         }
