@@ -356,12 +356,6 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 // PassthroughStreaming reads an fMP4 stream, strips the PSSH box from the init
 // segment, and copies all fragments to w unchanged. Use for AAC content that

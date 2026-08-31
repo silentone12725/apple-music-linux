@@ -482,10 +482,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 				}
 			}()
 		}
-	}
 
-	// Library metadata cache — songs + playlist membership for instant queue ops.
-	if cacheBase, err := os.UserCacheDir(); err == nil {
+		// Library metadata cache — songs + playlist membership for instant queue ops.
 		libCacheDir := filepath.Join(cacheBase, "apple-music-linux")
 		if err := os.MkdirAll(libCacheDir, 0o755); err == nil {
 			s.libStore = library.New(libCacheDir)
