@@ -271,7 +271,6 @@ func (s *Store) save() {
 // querySongs / queryPlaylists / queryAllPlaylistTracks / querySyncedAt all have
 // *InTx variants used by save() so the full dump is one consistent snapshot.
 
-func (s *Store) querySongs() []SongInfo { return s.querySongsInTx(nil) }
 func (s *Store) querySongsInTx(tx *sql.Tx) []SongInfo {
 	q := "SELECT lid,cid,name,artist,album,ms FROM songs"
 	var rows *sql.Rows
@@ -315,9 +314,6 @@ func (s *Store) queryPlaylistsInTx(tx *sql.Tx) []PlaylistInfo {
 	return out
 }
 
-func (s *Store) queryAllPlaylistTracks() map[string][]PlaylistTrack {
-	return s.queryAllPlaylistTracksInTx(nil)
-}
 func (s *Store) queryAllPlaylistTracksInTx(tx *sql.Tx) map[string][]PlaylistTrack {
 	q := "SELECT playlist_id,lid,cid FROM playlist_tracks ORDER BY playlist_id,position"
 	var rows *sql.Rows

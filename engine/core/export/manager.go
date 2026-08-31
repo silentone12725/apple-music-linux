@@ -474,12 +474,6 @@ func (m *Manager) execute(item *workItem) {
 	// ── Phase 3: Download + decrypt via engine ────────────────────────────
 	m.advance(job, PhaseDownloading, 0)
 
-	if ra.durationMs > 0 {
-		m.mu.Lock()
-		job.BytesTotal = int64(ra.durationMs) * bitrateForCapabilities(req.Capabilities)
-		m.mu.Unlock()
-	}
-
 	tmpPath, ok := m.downloadToTemp(ctx, req, job, sf, lang, finalPath, ra.durationMs)
 	if !ok {
 		return
@@ -495,19 +489,8 @@ func (m *Manager) execute(item *workItem) {
 // the temp file path. Returns ("", false) on any error (already called m.fail).
 func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *ExportJob, sf, lang, finalPath string, durationMs int) (string, bool) {
 	if durationMs > 0 {
-		var bitsPerSec int64
-		switch {
-		case req.Capabilities.Video:
-			bitsPerSec = 8_000_000
-		case req.Capabilities.Atmos:
-			bitsPerSec = 768_000
-		case req.Capabilities.Lossless:
-			bitsPerSec = 1_500_000
-		default:
-			bitsPerSec = 256_000
-		}
 		m.mu.Lock()
-		job.BytesTotal = int64(durationMs) * bitsPerSec / 8_000
+		job.BytesTotal = int64(durationMs) * bitrateForCapabilities(req.Capabilities)
 		m.mu.Unlock()
 	}
 

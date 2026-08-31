@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -341,77 +342,6 @@ func makeSeekableTrackOpenerWithAuth(
 	}
 }
 
-// makeTrackOpener returns the Track.Open func for a single encrypted HLS track.
-// On call it parses the media playlist, acquires a licence, and returns a
-// pipeline.Stream ready to run.  All Apple Music and FairPlay specifics are
-// captured in the closure; nothing leaks to the caller.
-func makeTrackOpener(
-	lp fairplay.LicenseProvider,
-	assetID, token, mut string,
-	playlistURL string,
-	kind pipeline.StreamKind,
-	codec pipeline.Codec,
-) func(context.Context) (*pipeline.Stream, error) {
-	return makeTrackOpenerWithAuth(lp, assetID, token, mut, playlistURL, kind, codec, false)
-}
-
-// makeAuthTrackOpener is like makeTrackOpener but fetches the media playlist
-// with Apple Music auth headers.  Use for MV tracks whose playlists live at
-// play.itunes.apple.com and require Bearer + x-apple-music-user-token.
-func makeAuthTrackOpener(
-	lp fairplay.LicenseProvider,
-	assetID, token, mut string,
-	playlistURL string,
-	kind pipeline.StreamKind,
-	codec pipeline.Codec,
-) func(context.Context) (*pipeline.Stream, error) {
-	return makeTrackOpenerWithAuth(lp, assetID, token, mut, playlistURL, kind, codec, true)
-}
-
-func makeTrackOpenerWithAuth(
-	lp fairplay.LicenseProvider,
-	assetID, token, mut string,
-	playlistURL string,
-	kind pipeline.StreamKind,
-	codec pipeline.Codec,
-	auth bool,
-) func(context.Context) (*pipeline.Stream, error) {
-	return func(ctx context.Context) (*pipeline.Stream, error) {
-		var med *hls.Media
-		var err error
-		if auth {
-			med, err = hls.OpenMediaAuth(ctx, playlistURL, token, mut)
-		} else {
-			med, err = hls.OpenMedia(ctx, playlistURL)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("open media playlist: %w", err)
-		}
-
-		var dec pipeline.Decryptor
-		if med.Encryption == nil {
-			dec = fairplay.PassthroughDecryptor()
-		} else {
-			dec, err = lp.Open(ctx, fairplay.LicenseRequest{
-				AssetID:        assetID,
-				KIDBase64:      med.Encryption.KIDBase64,
-				URIPrefix:      med.Encryption.URIPrefix,
-				Token:          token,
-				MediaUserToken: mut,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("acquire licence: %w", err)
-			}
-		}
-		return &pipeline.Stream{
-			Source: fairplay.HLSSource(med.AllURLs()),
-			Stages: []pipeline.Stage{pipeline.DecryptStage(dec)},
-			Kind:   kind,
-			Codec:  codec,
-		}, nil
-	}
-}
-
 // makeCBCSTrackOpener returns the Track.Open func for a FairPlay CBCS track
 // (ALAC or Atmos).  On call it parses the media playlist, builds a CBCSSource
 // that dials the wrapper's TCP socket, and returns a pipeline.Stream with no
@@ -541,6 +471,6 @@ func extractALACQuality(traits []string) (sampleRate, bitDepth int) {
 }
 
 func fmtArtwork(template string, size int) string {
-	s := fmt.Sprintf("%d", size)
+	s := strconv.Itoa(size)
 	return strings.ReplaceAll(strings.ReplaceAll(template, "{w}", s), "{h}", s)
 }
