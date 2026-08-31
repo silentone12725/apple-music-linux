@@ -1,7 +1,7 @@
 // Package bench is a no-op timing stub. The real implementation lives in the
 // apple-music-engine-dev repo; this stub satisfies the import so the binary
 // can be built from this repo without the full instrumentation layer.
-package bench
+package tracer
 
 import "context"
 

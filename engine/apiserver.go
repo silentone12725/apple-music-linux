@@ -65,12 +65,19 @@ import (
 	"engine/core/vlc"
 	"engine/utils/ampapi"
 	"engine/utils/lyrics"
-	"engine/utils/runv3"
+	"engine/utils/aacstream"
 )
 
 // artworkClient is used for proxying artwork and catalog API responses.
 // http.DefaultClient has no timeout and can hang indefinitely on slow CDN responses.
-var artworkClient = &http.Client{Timeout: 10 * time.Second}
+var artworkClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        20,
+		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConnsPerHost: 10,
+	},
+}
 
 // ── Request / response types ──────────────────────────────────────────────────
 
@@ -1203,13 +1210,13 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
 		seekSec = v
 	}
-	log.Printf("[video] GET id=%s assetID=%q seekSec=%.2f decExists=%v", id, assetID, seekSec, runv3.MVDecExists(assetID))
+	log.Printf("[video] GET id=%s assetID=%q seekSec=%.2f decExists=%v", id, assetID, seekSec, aacstream.MVDecExists(assetID))
 
 	// Serve from decrypted-track cache for full plays (seekSec==0).
 	// Seeks fall through to the normal pipeline so the segment cache handles them.
-	if seekSec == 0 && runv3.MVDecExists(assetID) {
+	if seekSec == 0 && aacstream.MVDecExists(assetID) {
 		streamMedia(w, r, func(dst io.Writer) error {
-			return runv3.ServeMVDec(assetID, dst)
+			return aacstream.ServeMVDec(assetID, dst)
 		}, "video/mp4")
 		return
 	}
@@ -1226,7 +1233,7 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 		if seekSec > 0 {
 			return transcodeVideoForMSE(r.Context(), srcFn, dst)
 		}
-		cw := runv3.MVDecCacheWriter(assetID, dst)
+		cw := aacstream.MVDecCacheWriter(assetID, dst)
 		err := transcodeVideoForMSE(r.Context(), srcFn, cw)
 		if err == nil {
 			log.Printf("[video] transcode OK — committing dec cache assetID=%s", assetID)

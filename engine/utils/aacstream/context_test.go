@@ -1,4 +1,4 @@
-package runv3_test
+package aacstream_test
 
 // context_test.go — verifies that context cancellation propagates correctly
 // through the segment download pipeline (C2 fix, commit 7710044).
@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"engine/utils/runv3"
+	"engine/utils/aacstream"
 )
 
 // slowServer returns a test server that pauses 200 ms before sending each
@@ -64,7 +64,7 @@ func TestDownloadSegments_ContextCancellation(t *testing.T) {
 	}()
 
 	var dst bytes.Buffer
-	err := runv3.DownloadSegments(ctx, urls, &dst)
+	err := aacstream.DownloadSegments(ctx, urls, &dst)
 
 	// DownloadSegments should return a context error.
 	if err == nil {
@@ -104,7 +104,7 @@ func TestDownloadSegments_ImmediateCancel(t *testing.T) {
 
 	var dst bytes.Buffer
 	start := time.Now()
-	_ = runv3.DownloadSegments(ctx, urls, &dst)
+	_ = aacstream.DownloadSegments(ctx, urls, &dst)
 	elapsed := time.Since(start)
 
 	t.Logf("started=%d elapsed=%v", atomic.LoadInt64(started), elapsed)
@@ -130,7 +130,7 @@ func TestDownloadSegments_CompletesNormally(t *testing.T) {
 
 	urls := []string{srv.URL + "/s0", srv.URL + "/s1", srv.URL + "/s2"}
 	var dst bytes.Buffer
-	err := runv3.DownloadSegments(context.Background(), urls, &dst)
+	err := aacstream.DownloadSegments(context.Background(), urls, &dst)
 	if err != nil {
 		t.Fatalf("DownloadSegments: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestDownloadSegments_Timeout(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := runv3.DownloadSegments(ctx, urls, &bytes.Buffer{})
+	err := aacstream.DownloadSegments(ctx, urls, &bytes.Buffer{})
 	elapsed := time.Since(start)
 
 	if err == nil {

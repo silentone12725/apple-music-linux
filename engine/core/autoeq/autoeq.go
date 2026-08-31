@@ -549,17 +549,7 @@ func FetchFR(ctx context.Context, source, form, name, rig, target string) (*FRDa
 	if target == "" {
 		target = DefaultTarget(form)
 	}
-	tryCache := func(t string) *FRData {
-		slug := slugify(source+"_"+name+"_"+t) + "_fr.json"
-		if raw, err := os.ReadFile(filepath.Join(dir, slug)); err == nil {
-			var d FRData
-			if json.Unmarshal(raw, &d) == nil && len(d.Original) > 0 {
-				return &d
-			}
-		}
-		return nil
-	}
-	if d := tryCache(target); d != nil {
+	if d := fetchFRFromCache(dir, source, name, target); d != nil {
 		return d, nil
 	}
 
@@ -580,7 +570,7 @@ func FetchFR(ctx context.Context, source, form, name, rig, target string) (*FRDa
 	}
 
 	if usedTarget != target {
-		if d := tryCache(usedTarget); d != nil {
+		if d := fetchFRFromCache(dir, source, name, usedTarget); d != nil {
 			return d, nil
 		}
 	}
@@ -596,22 +586,6 @@ func FetchFR(ctx context.Context, source, form, name, rig, target string) (*FRDa
 		return nil, fmt.Errorf("autoeq: response missing frequency/smoothed for %s", name)
 	}
 
-	decodeCurve := func(freqBytes, gainBytes []byte) ([]FRPoint, error) {
-		n := len(freqBytes) / 2
-		if n == 0 || len(gainBytes)/2 != n {
-			return nil, fmt.Errorf("mismatched lengths freq=%d gain=%d", len(freqBytes), len(gainBytes))
-		}
-		pts := make([]FRPoint, 0, n)
-		for i := 0; i < n; i++ {
-			f := float64(f16ToF32(uint16(freqBytes[i*2]) | uint16(freqBytes[i*2+1])<<8))
-			g := float64(f16ToF32(uint16(gainBytes[i*2]) | uint16(gainBytes[i*2+1])<<8))
-			if f >= 20 && f <= 20000 {
-				pts = append(pts, FRPoint{Freq: f, Gain: g})
-			}
-		}
-		return pts, nil
-	}
-
 	freqBytes, err := decodeBase64(freqB64)
 	if err != nil {
 		return nil, fmt.Errorf("autoeq: decode frequency: %w", err)
@@ -620,7 +594,7 @@ func FetchFR(ctx context.Context, source, form, name, rig, target string) (*FRDa
 	if err != nil {
 		return nil, fmt.Errorf("autoeq: decode smoothed: %w", err)
 	}
-	original, err := decodeCurve(freqBytes, smoothBytes)
+	original, err := decodeFRCurve(freqBytes, smoothBytes)
 	if err != nil {
 		return nil, fmt.Errorf("autoeq: original: %w", err)
 	}
@@ -632,7 +606,7 @@ func FetchFR(ctx context.Context, source, form, name, rig, target string) (*FRDa
 	if eqB64 != "" {
 		eqBytes, err := decodeBase64(eqB64)
 		if err == nil {
-			corrected, _ = decodeCurve(freqBytes, eqBytes)
+			corrected, _ = decodeFRCurve(freqBytes, eqBytes)
 		}
 	}
 
@@ -642,6 +616,37 @@ func FetchFR(ctx context.Context, source, form, name, rig, target string) (*FRDa
 		os.WriteFile(filepath.Join(dir, slug), out, 0o644) //nolint:errcheck
 	}
 	return d, nil
+}
+
+// fetchFRFromCache loads a cached FRData for the given model+target, or returns nil.
+func fetchFRFromCache(dir, source, name, target string) *FRData {
+	slug := slugify(source+"_"+name+"_"+target) + "_fr.json"
+	raw, err := os.ReadFile(filepath.Join(dir, slug))
+	if err != nil {
+		return nil
+	}
+	var d FRData
+	if json.Unmarshal(raw, &d) == nil && len(d.Original) > 0 {
+		return &d
+	}
+	return nil
+}
+
+// decodeFRCurve builds FRPoints from paired float16 frequency and gain byte slices.
+func decodeFRCurve(freqBytes, gainBytes []byte) ([]FRPoint, error) {
+	n := len(freqBytes) / 2
+	if n == 0 || len(gainBytes)/2 != n {
+		return nil, fmt.Errorf("mismatched lengths freq=%d gain=%d", len(freqBytes), len(gainBytes))
+	}
+	pts := make([]FRPoint, 0, n)
+	for i := 0; i < n; i++ {
+		f := float64(f16ToF32(uint16(freqBytes[i*2]) | uint16(freqBytes[i*2+1])<<8))
+		g := float64(f16ToF32(uint16(gainBytes[i*2]) | uint16(gainBytes[i*2+1])<<8))
+		if f >= 20 && f <= 20000 {
+			pts = append(pts, FRPoint{Freq: f, Gain: g})
+		}
+	}
+	return pts, nil
 }
 
 // f16ToF32 converts an IEEE 754 half-precision float16 (little-endian uint16) to float32.

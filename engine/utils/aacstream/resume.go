@@ -1,4 +1,4 @@
-package runv3
+package aacstream
 
 // resume.go — crash-safe, per-segment resumable download.
 //

@@ -1,4 +1,4 @@
-package runv3
+package aacstream
 
 // compare.go — structural comparison of DecryptMP4 vs DecryptMP4Streaming.
 //

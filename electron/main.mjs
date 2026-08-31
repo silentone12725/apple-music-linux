@@ -662,6 +662,25 @@ async function refreshBlurBg() {
     _injectBlurLayer(win, sources[0].thumbnail.toDataURL());
 }
 
+function setupDebugLogging(win) {
+    const { debug: debugPref = false } = loadPrefs();
+    if (!process.env.AML_DEVTOOLS && !debugPref) return;
+    const logsDir = path.join(CONFIG_DIR, 'logs');
+    mkdirSync(logsDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const logStream = createWriteStream(path.join(logsDir, `debug-${stamp}.log`));
+    const _write = (tag, args) => logStream.write(`[${new Date().toISOString()}] ${tag} ${args.join(' ')}\n`);
+    const origLog = console.log, origError = console.error, origWarn = console.warn;
+    console.log   = (...a) => { origLog(...a);   _write('LOG  ', a); };
+    console.error = (...a) => { origError(...a); _write('ERROR', a); };
+    console.warn  = (...a) => { origWarn(...a);  _write('WARN ', a); };
+    win.webContents.openDevTools({ mode: 'detach' });
+    win.webContents.on('console-message', (event) => {
+        const msg = event.message ?? event;
+        if (typeof msg === 'string') console.log('[renderer]', msg);
+    });
+}
+
 function createWindow() {
     win = new BrowserWindow({
         width: 1200,
@@ -742,25 +761,7 @@ function createWindow() {
     });
     // DevTools: open when AML_DEVTOOLS env var is set OR when debug pref is true.
     // Toggle via AML Settings → Developer → Enable debug mode (persists across restarts).
-    const { debug: debugPref = false } = loadPrefs();
-    if (process.env.AML_DEVTOOLS || debugPref) {
-        // Log file: new file per run, in ~/.config/apple-music-linux/logs/
-        const logsDir = path.join(CONFIG_DIR, 'logs');
-        mkdirSync(logsDir, { recursive: true });
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const logStream = createWriteStream(path.join(logsDir, `debug-${stamp}.log`));
-        const _write = (tag, args) => logStream.write(`[${new Date().toISOString()}] ${tag} ${args.join(' ')}\n`);
-        const origLog = console.log, origError = console.error, origWarn = console.warn;
-        console.log   = (...a) => { origLog(...a);   _write('LOG  ', a); };
-        console.error = (...a) => { origError(...a); _write('ERROR', a); };
-        console.warn  = (...a) => { origWarn(...a);  _write('WARN ', a); };
-
-        win.webContents.openDevTools({ mode: 'detach' });
-        win.webContents.on('console-message', (event) => {
-            const msg = event.message ?? event;
-            if (typeof msg === 'string') console.log('[renderer]', msg);
-        });
-    }
+    setupDebugLogging(win);
 
     // Prefer bundles from resourcesPath (outside ASAR) so they can be updated
     // without repacking. Falls back to __dirname (inside ASAR) if not present.

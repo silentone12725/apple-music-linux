@@ -7,7 +7,7 @@ import (
 
 	"github.com/grafov/m3u8"
 
-	"engine/utils/structs"
+	"engine/utils/config"
 )
 
 // masterFixture is a synthetic EnhancedHls master with one variant per format,
@@ -34,7 +34,7 @@ func parseMaster(t *testing.T) (*m3u8.MasterPlaylist, *url.URL) {
 
 func TestSelectVariant_ALAC(t *testing.T) {
 	master, base := parseMaster(t)
-	cfg := structs.ConfigSet{AlacMax: 192000}
+	cfg := config.ConfigSet{AlacMax: 192000}
 	sel, err := SelectVariant(master, base, FormatALAC, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func TestSelectVariant_ALAC(t *testing.T) {
 
 func TestSelectVariant_Atmos(t *testing.T) {
 	master, base := parseMaster(t)
-	cfg := structs.ConfigSet{AtmosMax: 2768}
+	cfg := config.ConfigSet{AtmosMax: 2768}
 	sel, err := SelectVariant(master, base, FormatAtmos, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestSelectVariant_Atmos(t *testing.T) {
 
 func TestSelectVariant_AAC(t *testing.T) {
 	master, base := parseMaster(t)
-	cfg := structs.ConfigSet{AacType: "aac"} // audio-stereo-256 → "aac" after regex
+	cfg := config.ConfigSet{AacType: "aac"} // audio-stereo-256 → "aac" after regex
 	sel, err := SelectVariant(master, base, FormatAAC, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestSelectVariant_AAC(t *testing.T) {
 // Atmos variant exceeds the cap, selection falls through to "no codec found".
 func TestSelectVariant_AtmosMaxExcludes(t *testing.T) {
 	master, base := parseMaster(t)
-	cfg := structs.ConfigSet{AtmosMax: 100} // 2768 > 100 → excluded
+	cfg := config.ConfigSet{AtmosMax: 100} // 2768 > 100 → excluded
 	_, err := SelectVariant(master, base, FormatAtmos, cfg)
 	if err == nil {
 		t.Fatal("expected no-codec error when Atmos variant exceeds AtmosMax")
@@ -87,7 +87,7 @@ func TestSelectVariant_AtmosMaxExcludes(t *testing.T) {
 
 func TestSelectVariant_NoMatch(t *testing.T) {
 	master, base := parseMaster(t)
-	cfg := structs.ConfigSet{AacType: "aac-he"} // no HE variant present
+	cfg := config.ConfigSet{AacType: "aac-he"} // no HE variant present
 	if _, err := SelectVariant(master, base, FormatAAC, cfg); err == nil {
 		t.Fatal("expected error when no AAC variant matches AacType")
 	}

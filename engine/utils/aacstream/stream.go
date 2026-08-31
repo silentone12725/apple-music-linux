@@ -1,4 +1,4 @@
-package runv3
+package aacstream
 
 // stream.go — fragment-by-fragment streaming decryption pipeline.
 //

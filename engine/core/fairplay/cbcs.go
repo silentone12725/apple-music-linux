@@ -12,10 +12,10 @@ import (
 
 	"github.com/itouakirai/mp4ff/mp4"
 
-	"engine/core/bench"
+	"engine/core/tracer"
 	"engine/core/hls"
 	"engine/core/pipeline"
-	"engine/utils/runv2"
+	"engine/utils/alacstream"
 )
 
 // DialerFromAddr returns a CBCSDialer that dials the given TCP address directly.
@@ -37,7 +37,7 @@ func (a addrDialer) DialCBCS(ctx context.Context) (net.Conn, error) {
 // caller must send "0" as the adamID instead of the real track ID.
 const cbcsPrefetchKey = "skd://itunes.apple.com/P000000000/s1/e1"
 
-// cbcsHTTPClient is modeled after runv2.alacClient: fields copied by code
+// cbcsHTTPClient is modeled after alacstream.alacClient: fields copied by code
 // inspection (DisableCompression, MaxIdleConns=8, MaxIdleConnsPerHost=4,
 // IdleConnTimeout=90s, 30s dial/keepalive).  Not runtime-compared against
 // legacy.  Using http.DefaultClient here risks hanging on a stalled CDN.
@@ -56,7 +56,7 @@ var cbcsHTTPClient = &http.Client{
 
 // cbcsStallTimeout is how long a Read from the fMP4 response body may stall
 // (i.e. return 0 bytes) before the download is considered hung and aborted.
-// Mirrors the 30s stall timeout in runv2.runAttempt.
+// Mirrors the 30s stall timeout in alacstream.runAttempt.
 const cbcsStallTimeout = 30 * time.Second
 
 // stallDetector wraps an io.Reader and cancels ctx if no progress (≥ threshold
@@ -85,7 +85,7 @@ func newStallDetector(body io.Reader, timeout time.Duration, cancel context.Canc
 		cancel:    cancel,
 	}
 	sd.timer = time.AfterFunc(timeout, func() {
-		cancel(runv2.ErrTimeout)
+		cancel(alacstream.ErrTimeout)
 	})
 	return sd
 }
@@ -146,14 +146,14 @@ type cbcsSource struct {
 }
 
 // Stream implements pipeline.Source.  It wraps streamAttempt in a retry loop
-// derived from runv2.Run by code inspection: up to 3 attempts, exponential
+// derived from alacstream.Run by code inspection: up to 3 attempts, exponential
 // backoff (1s, 2s), retrying the full download+decrypt cycle on any error.
 //
 // Behavioral difference from legacy: the backoff sleep here uses a select on
-// ctx.Done() so cancellation interrupts the wait.  runv2.Run uses time.Sleep,
+// ctx.Done() so cancellation interrupts the wait.  alacstream.Run uses time.Sleep,
 // which cannot be cancelled.  Neither path has been runtime-compared; this
 // difference is a design choice, not a verified improvement.
-// Stream implements pipeline.Source.  Retry logic derived from runv2.Run:
+// Stream implements pipeline.Source.  Retry logic derived from alacstream.Run:
 // up to 3 attempts, exponential backoff (1s, 2s).
 //
 // Retry safety: retries are only allowed before any bytes have been written to
@@ -162,7 +162,7 @@ type cbcsSource struct {
 // already-open HTTP response, producing invalid fMP4.  In that case the error
 // is returned immediately without retry so the caller can log and close.
 //
-// Behavioral note: runv2.Run uses time.Sleep for the retry backoff, which
+// Behavioral note: alacstream.Run uses time.Sleep for the retry backoff, which
 // cannot be cancelled.  This implementation uses a select on ctx.Done() so
 // cancellation interrupts the wait.  This is a deliberate adaptation — not
 // proven to be equivalent in all scenarios.
@@ -172,7 +172,7 @@ func (s *cbcsSource) Stream(ctx context.Context, w io.Writer) error {
 	// would corrupt the output stream (D7 in behavioral-parity-audit.md).
 	tw := &writeTracker{w: w}
 	var err error
-	tr := bench.FromContext(ctx)
+	tr := tracer.FromContext(ctx)
 	for attempt := range maxRetries {
 		err = s.streamAttempt(ctx, tw)
 		if err == nil {
@@ -291,7 +291,7 @@ type cbcsSkipSource struct {
 
 func (s *cbcsSkipSource) Stream(ctx context.Context, w io.Writer) error {
 	tw := &writeTracker{w: w}
-	tr := bench.FromContext(ctx)
+	tr := tracer.FromContext(ctx)
 	var err error
 	for attempt := range 3 {
 		err = s.streamAttemptSkip(ctx, tw)
@@ -440,10 +440,10 @@ func (s *cbcsSkipSource) sendInitialKey(rw *bufio.ReadWriter) error {
 	if s.startKey == "" {
 		return nil
 	}
-	if err := runv2.SendString(rw, s.adamID); err != nil {
+	if err := alacstream.SendString(rw, s.adamID); err != nil {
 		return fmt.Errorf("cbcs seek: send adamID: %w", err)
 	}
-	if err := runv2.SendString(rw, s.startKey); err != nil {
+	if err := alacstream.SendString(rw, s.startKey); err != nil {
 		return fmt.Errorf("cbcs seek: send startKey: %w", err)
 	}
 	return nil
@@ -456,13 +456,13 @@ func (s *cbcsSkipSource) sendSeekFragKey(i int, rw *bufio.ReadWriter) error {
 	if i <= s.startFrag || i >= len(s.keyURIs) || s.keyURIs[i] == "" {
 		return nil
 	}
-	if err := runv2.SwitchKeys(rw); err != nil {
+	if err := alacstream.SwitchKeys(rw); err != nil {
 		return fmt.Errorf("cbcs seek: switch keys at %d: %w", i, err)
 	}
-	if err := runv2.SendString(rw, s.adamID); err != nil {
+	if err := alacstream.SendString(rw, s.adamID); err != nil {
 		return fmt.Errorf("cbcs seek: send adamID %d: %w", i, err)
 	}
-	if err := runv2.SendString(rw, s.keyURIs[i]); err != nil {
+	if err := alacstream.SendString(rw, s.keyURIs[i]); err != nil {
 		return fmt.Errorf("cbcs seek: send key %d: %w", i, err)
 	}
 	return nil
@@ -476,14 +476,14 @@ func (s *cbcsSource) sendFragKey(i int, rw *bufio.ReadWriter) {
 		return
 	}
 	if i != 0 {
-		runv2.SwitchKeys(rw)
+		alacstream.SwitchKeys(rw)
 	}
 	if s.keyURIs[i] == cbcsPrefetchKey {
-		runv2.SendString(rw, "0")
+		alacstream.SendString(rw, "0")
 	} else {
-		runv2.SendString(rw, s.adamID)
+		alacstream.SendString(rw, s.adamID)
 	}
-	runv2.SendString(rw, s.keyURIs[i])
+	alacstream.SendString(rw, s.keyURIs[i])
 }
 
 // skipStartFragments reads and discards startFrag fragments, accumulating
@@ -491,7 +491,7 @@ func (s *cbcsSource) sendFragKey(i int, rw *bufio.ReadWriter) {
 func skipStartFragments(inBuf *bufio.Reader, startOffset uint64, startFrag int) (accTfdt, finalOffset uint64, err error) {
 	finalOffset = startOffset
 	for i := range startFrag {
-		frag, newOffset, ferr := runv2.ReadNextFragment(inBuf, finalOffset)
+		frag, newOffset, ferr := alacstream.ReadNextFragment(inBuf, finalOffset)
 		if ferr != nil {
 			return 0, 0, fmt.Errorf("cbcs seek: skip fragment %d: %w", i, ferr)
 		}
@@ -507,13 +507,13 @@ func skipStartFragments(inBuf *bufio.Reader, startOffset uint64, startFrag int) 
 // streamKeptFragment patches, decrypts, and writes one kept fragment; returns
 // the updated accumulated TFDT.
 func (s *cbcsSkipSource) streamKeptFragment(ctx context.Context, i int, frag *mp4.Fragment, accTfdt uint64,
-	rw *bufio.ReadWriter, outBuf *bufio.Writer, tracks map[uint32]mp4.DecryptTrackInfo, tr *bench.Tracer,
+	rw *bufio.ReadWriter, outBuf *bufio.Writer, tracks map[uint32]mp4.DecryptTrackInfo, tr *tracer.Tracer,
 ) (uint64, error) {
 	accTfdt = patchAlacFragment(frag, accTfdt)
 	if err := s.sendSeekFragKey(i, rw); err != nil {
 		return accTfdt, err
 	}
-	if err := runv2.DecryptFragment(frag, tracks, rw); err != nil {
+	if err := alacstream.DecryptFragment(frag, tracks, rw); err != nil {
 		return accTfdt, fmt.Errorf("cbcs seek: decrypt fragment %d: %w", i, err)
 	}
 	if err := frag.Encode(outBuf); err != nil {
@@ -532,7 +532,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 	dlCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
-	tr := bench.FromContext(ctx)
+	tr := tracer.FromContext(ctx)
 
 	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, s.fileURL, nil)
 	if err != nil {
@@ -556,24 +556,24 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 		return fmt.Errorf("cbcs seek: dial: %w", err)
 	}
 	tr.RecordCBCSDialConnected()
-	defer runv2.Close(conn)
+	defer alacstream.Close(conn)
 
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	inBuf := bufio.NewReader(stalled)
 	outBuf := bufio.NewWriter(w)
 
-	init, offset, err := runv2.ReadInitSegment(inBuf)
+	init, offset, err := alacstream.ReadInitSegment(inBuf)
 	if err != nil {
 		return fmt.Errorf("cbcs seek: read init: %w", err)
 	}
 	if init == nil {
 		return fmt.Errorf("cbcs seek: no init segment")
 	}
-	tracks, err := runv2.TransformInit(init)
+	tracks, err := alacstream.TransformInit(init)
 	if err != nil {
 		return fmt.Errorf("cbcs seek: transform init: %w", err)
 	}
-	if err := runv2.SanitizeInit(init); err != nil {
+	if err := alacstream.SanitizeInit(init); err != nil {
 		fmt.Printf("cbcs seek: warning: sanitize init: %v\n", err)
 	}
 	patchMoovDuration(init, s.durationMs)
@@ -595,7 +595,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 	}
 
 	for i := s.startFrag; ; i++ {
-		frag, newOffset, err := runv2.ReadNextFragment(inBuf, offset)
+		frag, newOffset, err := alacstream.ReadNextFragment(inBuf, offset)
 		if err != nil {
 			return fmt.Errorf("cbcs seek: read fragment %d: %w", i, err)
 		}
@@ -615,7 +615,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 	dlCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
-	tr := bench.FromContext(ctx)
+	tr := tracer.FromContext(ctx)
 
 	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, s.fileURL, nil)
 	if err != nil {
@@ -642,24 +642,24 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("cbcs: dial: %w", err)
 	}
 	tr.RecordCBCSDialConnected()
-	defer runv2.Close(conn)
+	defer alacstream.Close(conn)
 
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	inBuf := bufio.NewReader(stalled)
 	outBuf := bufio.NewWriter(w)
 
-	init, offset, err := runv2.ReadInitSegment(inBuf)
+	init, offset, err := alacstream.ReadInitSegment(inBuf)
 	if err != nil {
 		return fmt.Errorf("cbcs: read init: %w", err)
 	}
 	if init == nil {
 		return fmt.Errorf("cbcs: no init segment in file")
 	}
-	tracks, err := runv2.TransformInit(init)
+	tracks, err := alacstream.TransformInit(init)
 	if err != nil {
 		return fmt.Errorf("cbcs: transform init: %w", err)
 	}
-	if err := runv2.SanitizeInit(init); err != nil {
+	if err := alacstream.SanitizeInit(init); err != nil {
 		fmt.Printf("cbcs: warning: sanitize init: %v\n", err)
 	}
 	patchMoovDuration(init, s.durationMs)
@@ -672,7 +672,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 
 	var accumulatedTfdt uint64
 	for i := 0; ; i++ {
-		frag, newOffset, err := runv2.ReadNextFragment(inBuf, offset)
+		frag, newOffset, err := alacstream.ReadNextFragment(inBuf, offset)
 		if err != nil {
 			return fmt.Errorf("cbcs: read fragment %d: %w", i, err)
 		}
@@ -684,7 +684,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		accumulatedTfdt = patchAlacFragmentSeq(frag, i, accumulatedTfdt)
 		s.sendFragKey(i, rw)
 
-		if err := runv2.DecryptFragment(frag, tracks, rw); err != nil {
+		if err := alacstream.DecryptFragment(frag, tracks, rw); err != nil {
 			return fmt.Errorf("cbcs: decrypt fragment %d: %w", i, err)
 		}
 		if err := frag.Encode(outBuf); err != nil {

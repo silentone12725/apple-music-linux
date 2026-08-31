@@ -50,14 +50,15 @@ type OpenRequest struct {
 // to know about the apple, fairplay, hls, or pipeline packages.
 type Manager struct {
 	provider media.Provider
-	sessions sync.Map // sessionID → *Session
-	contexts sync.Map // sessionID → *playContext
+	mu       sync.RWMutex
+	sessions map[string]*Session
+	contexts map[string]*playContext
 }
 
 // New returns a Manager backed by the Apple Music provider.
 // Swap apple.NewProvider() for any media.Provider to change the source.
 func New() *Manager {
-	m := &Manager{provider: apple.NewProvider()}
+	m := &Manager{provider: apple.NewProvider(), sessions: make(map[string]*Session), contexts: make(map[string]*playContext)}
 	go m.reap()
 	return m
 }
@@ -66,7 +67,7 @@ func New() *Manager {
 // Use this when the caller needs to configure the provider before wiring it
 // (e.g. passing a CBCS socket address to apple.NewProviderWithCBCS).
 func NewWithProvider(p media.Provider) *Manager {
-	m := &Manager{provider: p}
+	m := &Manager{provider: p, sessions: make(map[string]*Session), contexts: make(map[string]*playContext)}
 	go m.reap()
 	return m
 }
@@ -212,32 +213,39 @@ func (m *Manager) GetSeekStart(id string, kind pipeline.StreamKind, startSec flo
 
 // Release deletes a session and its private context.
 func (m *Manager) Release(id string) {
-	m.sessions.Delete(id)
-	m.contexts.Delete(id)
+	m.mu.Lock()
+	delete(m.sessions, id)
+	delete(m.contexts, id)
+	m.mu.Unlock()
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
 
 func (m *Manager) store(sess *Session, pctx *playContext) {
-	m.contexts.Store(sess.ID, pctx) // context first — lookup won't see the session without its context
-	m.sessions.Store(sess.ID, sess)
+	m.mu.Lock()
+	if m.sessions == nil {
+		m.sessions = make(map[string]*Session)
+		m.contexts = make(map[string]*playContext)
+	}
+	m.contexts[sess.ID] = pctx // context first — lookup won't see the session without its context
+	m.sessions[sess.ID] = sess
+	m.mu.Unlock()
 }
 
 func (m *Manager) lookup(id string) (*Session, *playContext, bool) {
-	sv, ok := m.sessions.Load(id)
+	m.mu.RLock()
+	pctx, ok := m.contexts[id]
 	if !ok {
+		m.mu.RUnlock()
 		return nil, nil, false
 	}
-	cv, ok := m.contexts.Load(id)
-	if !ok {
-		return nil, nil, false
-	}
-	pctx := cv.(*playContext)
+	sess := m.sessions[id]
+	m.mu.RUnlock()
 	if time.Now().After(pctx.expiry) {
 		m.Release(id)
 		return nil, nil, false
 	}
-	return sv.(*Session), pctx, true
+	return sess, pctx, true
 }
 
 func (m *Manager) reap() {
@@ -245,12 +253,14 @@ func (m *Manager) reap() {
 	defer t.Stop()
 	for range t.C {
 		now := time.Now()
-		m.contexts.Range(func(k, v any) bool {
-			if now.After(v.(*playContext).expiry) {
-				m.Release(k.(string))
+		m.mu.Lock()
+		for id, pctx := range m.contexts {
+			if now.After(pctx.expiry) {
+				delete(m.sessions, id)
+				delete(m.contexts, id)
 			}
-			return true
-		})
+		}
+		m.mu.Unlock()
 	}
 }
 

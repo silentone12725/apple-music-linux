@@ -1,4 +1,4 @@
-package runv2
+package alacstream
 
 import (
 	"bufio"
@@ -14,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"engine/utils/structs"
+	"engine/utils/config"
 
 	"github.com/grafov/m3u8"
 	"github.com/itouakirai/mp4ff/mp4"
@@ -57,7 +57,7 @@ func (b *TimedResponseBody) Read(p []byte) (int, error) {
 }
 
 
-func Run(adamId string, playlistUrl string, outfile string, Config structs.ConfigSet) error {
+func Run(adamId string, playlistUrl string, outfile string, Config config.ConfigSet) error {
 	const maxRetries = 3
 	var err error
 	for attempt := range maxRetries {
@@ -73,7 +73,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config structs.Confi
 	return err
 }
 
-func runAttempt(adamId string, playlistUrl string, outfile string, Config structs.ConfigSet) error {
+func runAttempt(adamId string, playlistUrl string, outfile string, Config config.ConfigSet) error {
 	header := make(http.Header)
 
 	// request media playlist
@@ -213,7 +213,7 @@ func flushDecryptedOutput(outBuf *bufio.Writer, outfile string, buf *bytes.Buffe
 }
 
 func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
-	adamId string, playlistSegments []*m3u8.MediaSegment, totalLen int64, Config structs.ConfigSet) error {
+	adamId string, playlistSegments []*m3u8.MediaSegment, totalLen int64, Config config.ConfigSet) error {
 	var buffer bytes.Buffer
 	var outBuf *bufio.Writer
 	MaxMemorySize := int64(Config.MaxMemoryLimit * 1024 * 1024)

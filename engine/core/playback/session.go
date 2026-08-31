@@ -48,9 +48,10 @@ type Session struct {
 // Streams are keyed by StreamKind so the API can request any track type
 // without requiring separate methods for audio vs. video vs. future kinds.
 //
-// The context is stored in a separate sync.Map from the Session, so that a
-// lease refresh can replace the context (rebuilding Source + Decryptor) while
-// leaving the Session (and the client's sessionId) completely unchanged.
+// The context is stored in a separate map from the Session (both guarded by
+// Manager.mu), so that a lease refresh can replace the context (rebuilding
+// Source + Decryptor) while leaving the Session (and the client's sessionId)
+// completely unchanged.
 type playContext struct {
 	streams map[pipeline.StreamKind]*pipeline.Stream
 	expiry  time.Time

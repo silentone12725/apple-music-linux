@@ -1,4 +1,4 @@
-package runv3_test
+package aacstream_test
 
 // compare_test.go — regression tests for the decryptor comparison framework.
 //
@@ -26,14 +26,14 @@ import (
 	"os"
 	"testing"
 
-	"engine/utils/runv3"
+	"engine/utils/aacstream"
 )
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
 func TestFirstDiff_Equal(t *testing.T) {
 	a := []byte{1, 2, 3, 4}
-	if d := runv3.FirstDiff(a, append([]byte(nil), a...)); d != -1 {
+	if d := aacstream.FirstDiff(a, append([]byte(nil), a...)); d != -1 {
 		t.Errorf("expected -1 for equal slices, got %d", d)
 	}
 }
@@ -41,7 +41,7 @@ func TestFirstDiff_Equal(t *testing.T) {
 func TestFirstDiff_Length(t *testing.T) {
 	a := []byte{1, 2, 3}
 	b := []byte{1, 2, 3, 4}
-	if d := runv3.FirstDiff(a, b); d != 3 {
+	if d := aacstream.FirstDiff(a, b); d != 3 {
 		t.Errorf("expected 3 (length mismatch), got %d", d)
 	}
 }
@@ -49,20 +49,20 @@ func TestFirstDiff_Length(t *testing.T) {
 func TestFirstDiff_Content(t *testing.T) {
 	a := []byte{0, 1, 2, 0xFF}
 	b := []byte{0, 1, 0, 0xFF}
-	if d := runv3.FirstDiff(a, b); d != 2 {
+	if d := aacstream.FirstDiff(a, b); d != 2 {
 		t.Errorf("expected 2, got %d", d)
 	}
 }
 
 func TestCompareReport_JSON(t *testing.T) {
-	rpt := &runv3.CompareReport{
+	rpt := &aacstream.CompareReport{
 		EncryptedSHA256: "abc123",
 		InitEqual:       true,
 		FirstDiffStage:  "identical",
-		Fragments: []runv3.FragmentReport{
+		Fragments: []aacstream.FragmentReport{
 			{
 				Index: 0,
-				Download: runv3.FragmentStats{
+				Download: aacstream.FragmentStats{
 					SeqNumber:      1,
 					TrackID:        1,
 					SampleCount:    10,
@@ -84,7 +84,7 @@ func TestCompareReport_JSON(t *testing.T) {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 
-	var rt runv3.CompareReport
+	var rt aacstream.CompareReport
 	if err := json.Unmarshal(data, &rt); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
@@ -103,8 +103,8 @@ func TestCompareReport_JSON(t *testing.T) {
 func TestDumpMode_Values(t *testing.T) {
 	// Verify the exported DumpMode constants are distinct so callers can rely
 	// on switch statements being exhaustive.
-	modes := []runv3.DumpMode{runv3.DumpNone, runv3.DumpFirstDiff, runv3.DumpAll}
-	seen := map[runv3.DumpMode]bool{}
+	modes := []aacstream.DumpMode{aacstream.DumpNone, aacstream.DumpFirstDiff, aacstream.DumpAll}
+	seen := map[aacstream.DumpMode]bool{}
 	for _, m := range modes {
 		if seen[m] {
 			t.Errorf("duplicate DumpMode value: %d", m)
@@ -136,7 +136,7 @@ func TestCompareDecryptors_Integration(t *testing.T) {
 		t.Fatalf("decode key: %v", err)
 	}
 
-	result, err := runv3.CompareDecryptors(raw, key, runv3.DumpFirstDiff)
+	result, err := aacstream.CompareDecryptors(raw, key, aacstream.DumpFirstDiff)
 	if err != nil {
 		t.Fatalf("CompareDecryptors: %v", err)
 	}

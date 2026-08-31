@@ -12,7 +12,7 @@
 //     permitted to import it.
 //
 // Trust boundary: key bytes enter the unexported fairplayDecryptor struct via
-// LicenseProvider.Open and are passed directly to runv3.DecryptMP4Streaming.
+// LicenseProvider.Open and are passed directly to aacstream.DecryptMP4Streaming.
 // They are never stored, logged, or returned to any caller above this package.
 package fairplay
 
@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"io"
 
-	"engine/core/bench"
+	"engine/core/tracer"
 	"engine/core/hls"
 	"engine/core/pipeline"
-	"engine/utils/runv3"
+	"engine/utils/aacstream"
 )
 
 // ── Licence acquisition ───────────────────────────────────────────────────────
@@ -51,9 +51,9 @@ func New() LicenseProvider { return &fpLicenseProvider{} }
 type fpLicenseProvider struct{}
 
 func (p *fpLicenseProvider) Open(ctx context.Context, req LicenseRequest) (pipeline.Decryptor, error) {
-	tr := bench.FromContext(ctx)
+	tr := tracer.FromContext(ctx)
 	tr.RecordLicenseStart()
-	keyBytes, err := runv3.AcquireKey(ctx,
+	keyBytes, err := aacstream.AcquireKey(ctx,
 		req.AssetID, req.KIDBase64, req.URIPrefix, req.Token, req.MediaUserToken)
 	tr.RecordLicenseEnd()
 	if err != nil {
@@ -69,7 +69,7 @@ type fairplayDecryptor struct {
 }
 
 func (d *fairplayDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Writer) error {
-	return runv3.DecryptMP4Streaming(ctx, r, d.key, w)
+	return aacstream.DecryptMP4Streaming(ctx, r, d.key, w)
 }
 
 // ── HLS segment source ────────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ type hlsSource struct {
 }
 
 func (s *hlsSource) Stream(ctx context.Context, w io.Writer) error {
-	return runv3.DownloadSegmentsParallel(ctx, s.urls, w, 3)
+	return aacstream.DownloadSegmentsParallel(ctx, s.urls, w, 3)
 }
 
 // HLSSeekableSource returns a pipeline.SeekableSource backed by a full HLS
@@ -106,7 +106,7 @@ type hlsSeekableSource struct {
 }
 
 func (s *hlsSeekableSource) Stream(ctx context.Context, w io.Writer) error {
-	return runv3.DownloadSegmentsParallel(ctx, s.media.AllURLs(), w, 3)
+	return aacstream.DownloadSegmentsParallel(ctx, s.media.AllURLs(), w, 3)
 }
 
 func (s *hlsSeekableSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
@@ -123,7 +123,7 @@ func HLSMVVideoSource(med *hls.Media) pipeline.SeekableSource {
 type hlsMVVideoSource struct{ media *hls.Media }
 
 func (s *hlsMVVideoSource) Stream(ctx context.Context, w io.Writer) error {
-	return runv3.DownloadMVSegmentsParallel(ctx, s.media.AllURLs(), w, 3)
+	return aacstream.DownloadMVSegmentsParallel(ctx, s.media.AllURLs(), w, 3)
 }
 
 func (s *hlsMVVideoSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
@@ -134,7 +134,7 @@ func (s *hlsMVVideoSource) SourceFrom(startSec float64) (pipeline.Source, float6
 type hlsMVVideoRaw struct{ urls []string }
 
 func (s *hlsMVVideoRaw) Stream(ctx context.Context, w io.Writer) error {
-	return runv3.DownloadMVSegmentsParallel(ctx, s.urls, w, 3)
+	return aacstream.DownloadMVSegmentsParallel(ctx, s.urls, w, 3)
 }
 
 // ── Passthrough (AAC clear content) ──────────────────────────────────────────
@@ -147,5 +147,5 @@ func PassthroughDecryptor() pipeline.Decryptor { return &passthroughDecryptor{} 
 type passthroughDecryptor struct{}
 
 func (p *passthroughDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Writer) error {
-	return runv3.PassthroughStreaming(ctx, r, w)
+	return aacstream.PassthroughStreaming(ctx, r, w)
 }
