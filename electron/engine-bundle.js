@@ -3614,23 +3614,28 @@ async function setup() {
     window._syncLibraryViaJS = _syncLibraryViaJS;
 
     // ── Auto-sync on startup if cache is empty or stale ──────────────────────
-    // Fires once, 8s after MK is ready (auth needs time to settle).
+    // Uses MusicKit JS web auth only — DRM session not required.
     // The engine's NeedsSync() is time-gated: if the last sync was within 24h
     // (even if it returned 0 songs), this does nothing — prevents loops on
     // genuinely empty libraries.
-    setTimeout(async () => {
+    const _maybeAutoSync = async () => {
         try {
-            // Abort if MK hasn't finished authenticating — api.music() calls would return
-            // empty data silently, we'd ingest 0 songs, stamp synced_at, and the 24h gate
-            // would block retry. authorizationStatus 3 = authorized.
             const mkForAuth = window.MusicKit?.getInstance?.();
-            if (!mkForAuth || mkForAuth.authorizationStatus !== 3) {
-                console.log('[AML Library] auto-sync: skipping — MK not yet authorized (status=' + mkForAuth?.authorizationStatus + ')');
+            if (!mkForAuth) return;
+            if (mkForAuth.authorizationStatus !== 3) {
+                // Not yet authorized — arm a one-shot listener for when the user
+                // logs into the web UI. Runs without waiting for DRM login.
+                console.log('[AML Library] auto-sync: waiting for web UI login (MK status=' + mkForAuth.authorizationStatus + ')');
+                const _onAuth = async () => {
+                    mk.removeEventListener('authorizationStatusDidChange', _onAuth);
+                    await _maybeAutoSync();
+                };
+                mk.addEventListener('authorizationStatusDidChange', _onAuth);
                 return;
             }
             const status = await fetch(ENGINE + '/api/v1/library/status').then(r => r.json()).catch(() => null);
             if (!status?.needsSync) return;
-            console.log('[AML Library] auto-sync: cache needs refresh');
+            console.log('[AML Library] auto-sync: cache needs refresh (web auth)');
             const result = await _syncLibraryViaJS();
             if (result.songs === 0) {
                 console.log('[AML Library] auto-sync: library is empty — will not retry for 24h');
@@ -3640,7 +3645,10 @@ async function setup() {
         } catch (e) {
             console.log('[AML Library] auto-sync failed:', e.message || e);
         }
-    }, 8000);
+    };
+    // 2s delay: auth usually settles quickly; the authorizationStatusDidChange
+    // listener catches the case where the user logs in after the initial check.
+    setTimeout(_maybeAutoSync, 2000);
 
     // Override mk.play() and mk.pause() so VLC handles audio while MK's own
     // state machine and UI stay in sync.  This is the most reliable interception
