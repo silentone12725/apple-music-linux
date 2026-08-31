@@ -5609,12 +5609,16 @@ window.amlGetQueueInfo = function () {
         return wrap;
     }
 
-    function _buildAudioSection(prefs) {
+    function _buildAudioSection(prefs, drmSignedIn) {
         const { wrap, body: aqBody } = makeSection('Audio Quality');
-        const qualityOpts = [
+        // Lossless options require an active DRM session (CBCS decryption).
+        // When DRM is not signed in, only AAC is available.
+        const qualityOpts = drmSignedIn ? [
             { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
             { value: 'lossless',        label: 'Lossless (ALAC up to 24-bit / 48 kHz)' },
             { value: 'hi-res-lossless', label: 'Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)' },
+        ] : [
+            { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
         ];
         if (!document.getElementById('aml-quality-dropdown-style')) {
             const ds = document.createElement('style');
@@ -5663,9 +5667,11 @@ window.amlGetQueueInfo = function () {
             `;
             document.head.appendChild(ds);
         }
-        const losslessOn = prefs['lossless-enabled'] !== false;
+        // Lossless toggle is only meaningful when DRM is signed in.
+        const losslessOn = drmSignedIn && prefs['lossless-enabled'] !== false;
         const { wrap: sqWrap, setValue: setSQ } = _amlMakeQualityDropdown('streaming-quality', prefs, qualityOpts);
         const sqResetBtn = _amlMiniBtn(() => {
+            if (!drmSignedIn) return;
             setSQ('lossless');
             window.amlBridge?.setTweak('streaming-quality', 'lossless');
             _streamingQuality = 'lossless';
@@ -5674,27 +5680,34 @@ window.amlGetQueueInfo = function () {
         sqCtrl.style.cssText = 'display:flex;align-items:center;gap:8px;';
         sqCtrl.append(sqWrap, sqResetBtn);
         const sqRow = makeRow('Streaming', sqCtrl, null, true);
-        // Grey out streaming quality row when lossless is disabled.
+        // Grey out streaming quality row when lossless toggle is off or DRM unavailable.
         function _applyLosslessRowState(on) {
             sqRow.style.opacity = on ? '1' : '0.38';
             sqRow.style.pointerEvents = on ? '' : 'none';
         }
         _applyLosslessRowState(losslessOn);
-        aqBody.appendChild(makeRow('Lossless Audio',
-            _amlIOSToggle(losslessOn, v => {
-                window.amlBridge?.setTweak('lossless-enabled', v);
-                _applyLosslessRowState(v);
-                if (!v) {
-                    // Disabled → force AAC immediately (no DRM-dependent path).
-                    _streamingQuality = 'high-quality';
-                } else {
-                    // Re-enabled → restore saved streaming quality pref.
-                    const savedSQ = prefs['streaming-quality'] || 'lossless';
-                    _streamingQuality = savedSQ;
-                    setSQ(savedSQ);
-                }
-            }),
-            'Stream lossless audio (ALAC) when available', false));
+
+        const losslessToggle = _amlIOSToggle(losslessOn, v => {
+            window.amlBridge?.setTweak('lossless-enabled', v);
+            _applyLosslessRowState(v);
+            if (!v) {
+                _streamingQuality = 'high-quality';
+            } else {
+                const savedSQ = prefs['streaming-quality'] || 'lossless';
+                _streamingQuality = savedSQ;
+                setSQ(savedSQ);
+            }
+        });
+        if (!drmSignedIn) {
+            // DRM not active — lossless is unavailable regardless of pref.
+            losslessToggle.style.opacity = '0.38';
+            losslessToggle.style.pointerEvents = 'none';
+            losslessToggle.title = 'Sign in to Engine Account to enable lossless';
+        }
+        aqBody.appendChild(makeRow('Lossless Audio', losslessToggle,
+            drmSignedIn ? 'Stream lossless audio (ALAC) when available'
+                        : 'Sign in to Engine Account to enable lossless',
+            false));
         aqBody.appendChild(sqRow);
         return wrap;
     }
@@ -5912,16 +5925,19 @@ window.amlGetQueueInfo = function () {
         return wrap;
     }
 
-    function _buildDownloadsSection(prefs, tools) {
+    function _buildDownloadsSection(prefs, tools, drmSignedIn) {
         const { wrap, body: dlBody } = makeSection('Downloads');
         function makeIOSToggle(on, onChange) { return _amlIOSToggle(on, onChange); }
         function makeMiniBtn(_, onClick) { return _amlMiniBtn(onClick); }
         function dlSubhead(text) { return _dlSubhead(text); }
         function dlDropdown(opts, val, onSave) { return _dlDropdown(opts, val, onSave); }
-        const qualityOpts = [
+        // Lossless and hi-res options require DRM. Without it, only AAC is available.
+        const qualityOpts = drmSignedIn ? [
             { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
             { value: 'lossless',        label: 'Lossless (ALAC up to 24-bit / 48 kHz)' },
             { value: 'hi-res-lossless', label: 'Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)' },
+        ] : [
+            { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
         ];
         function makeQualityDropdown(prefKey) { return _amlMakeQualityDropdown(prefKey, prefs, qualityOpts); }
         let previewEl = null;
@@ -5962,10 +5978,16 @@ window.amlGetQueueInfo = function () {
         // ── Format ──
         dlBody.appendChild(_dlSubhead('Format'));
         const { wrap: dlQWrap } = makeQualityDropdown('dl-quality');
-        const dlQReset = makeMiniBtn('', () => { window.amlBridge?.setTweak('dl-quality', 'lossless'); });
+        const dlQReset = makeMiniBtn('', () => {
+            if (!drmSignedIn) return;
+            window.amlBridge?.setTweak('dl-quality', 'lossless');
+        });
+        if (!drmSignedIn) dlQReset.style.opacity = '0.38';
         const dlQRow = document.createElement('div'); dlQRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
         dlQRow.append(dlQWrap, dlQReset);
-        dlBody.appendChild(makeRow('Quality', dlQRow, null, false));
+        dlBody.appendChild(makeRow('Quality', dlQRow,
+            drmSignedIn ? null : 'Sign in to Engine Account to unlock lossless downloads',
+            false));
 
         const ffmpegAvail = !!(tools?.ffmpeg);
         const ffmpegToggle = makeIOSToggle(!!(prefs['dl-ffmpeg-enabled']) && ffmpegAvail, v => window.amlBridge?.setTweak('dl-ffmpeg-enabled', v));
@@ -5983,8 +6005,14 @@ window.amlGetQueueInfo = function () {
             { value: '720p',  label: '720p' },
             { value: '480p',  label: '480p' },
         ];
-        const { wrap: mvResDd } = _dlDropdown(MV_RES_OPTS, prefs['dl-mv-quality'] || '1080p', v => window.amlBridge?.setTweak('dl-mv-quality', v));
-        dlBody.appendChild(makeRow('Resolution', mvResDd, null, false));
+        const { wrap: mvResDd } = _dlDropdown(MV_RES_OPTS, prefs['dl-mv-quality'] || '1080p', v => {
+            if (!drmSignedIn) return;
+            window.amlBridge?.setTweak('dl-mv-quality', v);
+        });
+        if (!drmSignedIn) { mvResDd.style.opacity = '0.38'; mvResDd.style.pointerEvents = 'none'; }
+        dlBody.appendChild(makeRow('Resolution', mvResDd,
+            drmSignedIn ? null : 'Sign in to Engine Account to enable MV downloads',
+            false));
 
         const ART_OPTS = [
             { value: '600',  label: '600 × 600' },
@@ -6200,13 +6228,20 @@ window.amlGetQueueInfo = function () {
         const prefs = await window.amlBridge.getPrefs().catch(() => ({}));
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
 
+        // DRM signed in = CBCS decryption is live (required for lossless/hi-res).
+        const drmState = drm?.state ?? drm ?? {};
+        const drmSignedIn = (drmState?.process === 'running' && drmState?.session === 'valid')
+            || drmState?.authentication === 'logged_in'
+            || drmState?.fairplay === 'ready'
+            || drm?.capabilities?.cbcs === true;
+
         dlg.appendChild(buildAccountSection(drm, openSettings));
         dlg.appendChild(_buildEngineStatusSection(drm));
         dlg.appendChild(_buildDisplaySection(prefs));
         dlg.appendChild(await _buildThemeSection(prefs));
-        dlg.appendChild(_buildAudioSection(prefs));
+        dlg.appendChild(_buildAudioSection(prefs, drmSignedIn));
         dlg.appendChild(await _buildCacheSection(prefs));
-        dlg.appendChild(_buildDownloadsSection(prefs, tools));
+        dlg.appendChild(_buildDownloadsSection(prefs, tools, drmSignedIn));
         dlg.appendChild(await _buildHistorySection());
         dlg.appendChild(await _buildLibrarySection());
         dlg.appendChild(_buildDevSection(prefs));
