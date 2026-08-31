@@ -803,18 +803,36 @@ func selectTracks(payload ContextPayload) []TrackItem {
 			t TrackItem
 			s float64
 		}
+		if len(tracks) > 25 {
+			// O(n) top-5 selection: maintain a sorted window of 5 best via
+			// insertion into a 5-element slice (inner sort is O(5) = O(1)).
+			top := make([]scored, 0, 5)
+			for _, t := range tracks {
+				sc := scoreTrack(t)
+				if len(top) < 5 || sc > top[len(top)-1].s {
+					top = append(top, scored{t, sc})
+					for i := len(top) - 1; i > 0 && top[i].s > top[i-1].s; i-- {
+						top[i], top[i-1] = top[i-1], top[i]
+					}
+					if len(top) > 5 {
+						top = top[:5]
+					}
+				}
+			}
+			out := make([]TrackItem, len(top))
+			for i, s := range top {
+				out[i] = s.t
+			}
+			return out
+		}
 		ss := make([]scored, len(tracks))
 		for i, t := range tracks {
 			ss[i] = scored{t, scoreTrack(t)}
 		}
 		sort.Slice(ss, func(a, b int) bool { return ss[a].s > ss[b].s })
-		limit := len(tracks)
-		if len(tracks) > 25 {
-			limit = 5
-		}
-		out := make([]TrackItem, 0, limit)
-		for _, s := range ss[:limit] {
-			out = append(out, s.t)
+		out := make([]TrackItem, len(ss))
+		for i, s := range ss {
+			out[i] = s.t
 		}
 		return out
 
