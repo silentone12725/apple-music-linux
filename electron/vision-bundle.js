@@ -423,6 +423,32 @@ const barObserver = new MutationObserver(() => {
 });
 barObserver.observe(document.documentElement, { childList: true, subtree: true });
 
+function _findNavHeader() {
+    return (
+        document.querySelector('nav.navigation [class*="navigation-header"]') ||
+        document.querySelector('nav.navigation [class*="sidebar-header"]') ||
+        document.querySelector('nav.navigation [class*="NavigationHeader"]') ||
+        document.querySelector('nav.navigation header') ||
+        (() => {
+            const nav = document.querySelector('nav.navigation');
+            if (!nav) return null;
+            for (const child of nav.children) {
+                if (child.querySelector('img[src*="apple"], [aria-label*="Music"], [class*="logo"], [class*="brand"]'))
+                    return child;
+            }
+            return nav.firstElementChild || null;
+        })()
+    );
+}
+
+function _findInNavStack(stack, cursor, href) {
+    for (let i = cursor - 1; i >= 0; i--)
+        if (stack[i] === href) return i;
+    for (let i = cursor + 1; i < stack.length; i++)
+        if (stack[i] === href) return i;
+    return -1;
+}
+
 // ── iOS/iPadOS-style back + forward buttons ───────────────────────────────────
 (function mountNavButtons() {
     if (document.getElementById('aml-nav-buttons')) return;
@@ -457,16 +483,9 @@ barObserver.observe(document.documentElement, { childList: true, subtree: true }
     };
 
     window.addEventListener('popstate', () => {
-        // The browser has already moved — find where we landed in our stack.
         const href = location.href;
-        // Search backward first (most common: user pressed Back)
-        for (let i = cursor - 1; i >= 0; i--) {
-            if (stack[i] === href) { cursor = i; syncButtons(); return; }
-        }
-        // Search forward (user pressed Forward)
-        for (let i = cursor + 1; i < stack.length; i++) {
-            if (stack[i] === href) { cursor = i; syncButtons(); return; }
-        }
+        const idx = _findInNavStack(stack, cursor, href);
+        if (idx !== -1) { cursor = idx; syncButtons(); return; }
         // Unknown location (external navigation / reload) — treat as new entry
         stack = stack.slice(0, cursor + 1);
         stack.push(href);
@@ -507,31 +526,10 @@ barObserver.observe(document.documentElement, { childList: true, subtree: true }
     wrap.appendChild(back);
     wrap.appendChild(fwd);
 
-    function findHeader() {
-        // Try progressively broader selectors until one matches the logo row
-        return (
-            document.querySelector('nav.navigation [class*="navigation-header"]') ||
-            document.querySelector('nav.navigation [class*="sidebar-header"]') ||
-            document.querySelector('nav.navigation [class*="NavigationHeader"]') ||
-            document.querySelector('nav.navigation header') ||
-            // Fallback: first direct child div that contains the Apple logo img
-            (() => {
-                const nav = document.querySelector('nav.navigation');
-                if (!nav) return null;
-                for (const child of nav.children) {
-                    if (child.querySelector('img[src*="apple"], [aria-label*="Music"], [class*="logo"], [class*="brand"]'))
-                        return child;
-                }
-                // Last resort: first direct child that has display:flex or is a div
-                return nav.firstElementChild || null;
-            })()
-        );
-    }
-
     const attach = () => {
         if (document.getElementById('aml-nav-buttons')) return;
         const nav = document.querySelector('nav.navigation');
-        const header = findHeader();
+        const header = _findNavHeader();
         if (!nav || !header) return;
 
         // Append to nav (position:relative), then align to header row via JS measurement
@@ -556,13 +554,13 @@ barObserver.observe(document.documentElement, { childList: true, subtree: true }
 
     // Initial attach (or watch for nav to appear on SPA first paint)
     const navWatcher = new MutationObserver(() => {
-        if (findHeader()) { attach(); navWatcher.disconnect(); }
+        if (_findNavHeader()) { attach(); navWatcher.disconnect(); }
     });
-    if (findHeader()) attach();
+    if (_findNavHeader()) attach();
     else navWatcher.observe(document.documentElement, { childList: true, subtree: true });
 
     // Re-attach if SPA navigation removes and recreates the nav element
     new MutationObserver(() => {
-        if (!document.getElementById('aml-nav-buttons') && findHeader()) attach();
+        if (!document.getElementById('aml-nav-buttons') && _findNavHeader()) attach();
     }).observe(document.documentElement, { childList: true, subtree: true });
 })();

@@ -93,6 +93,49 @@ if (window._amlDebug) (function installAudioCapture() {
         enabled: true,
     };
 
+    function extractMp4MetaFields(type, boxData, box) {
+        if (type === 'ftyp' && boxData.length >= 12)
+            box.majorBrand = String.fromCharCode(boxData[8],boxData[9],boxData[10],boxData[11]);
+        if (type === 'hdlr' && boxData.length >= 20)
+            box.handler = String.fromCharCode(boxData[16],boxData[17],boxData[18],boxData[19]);
+        if ((type === 'mp4a' || type === 'enca') && boxData.length >= 28) {
+            box.sampleRate = (boxData[24]<<8|boxData[25]);
+            box.channels   = (boxData[16]<<8|boxData[17]);
+            box.isEncrypted = (type === 'enca');
+        }
+        if (type === 'schm' && boxData.length >= 16)
+            box.schemeType = String.fromCharCode(boxData[8],boxData[9],boxData[10],boxData[11]);
+        if (type === 'mdat')
+            box.hex32 = Array.from(boxData.slice(8, Math.min(40, boxData.length)))
+                .map(b => b.toString(16).padStart(2,'0')).join(' ');
+    }
+
+    function extractMp4TimingFields(type, boxData, box) {
+        if (type === 'mdhd' && boxData.length >= 24) {
+            const ver = boxData[8];
+            box.timescale = ver === 1
+                ? (boxData[20]<<24|boxData[21]<<16|boxData[22]<<8|boxData[23])>>>0
+                : (boxData[16]<<24|boxData[17]<<16|boxData[18]<<8|boxData[19])>>>0;
+        }
+        if (type === 'tfhd' && boxData.length >= 16) {
+            box.trackID = (boxData[8]<<24|boxData[9]<<16|boxData[10]<<8|boxData[11])>>>0;
+            box.flags   = (boxData[9]<<16|boxData[10]<<8|boxData[11]);
+        }
+        if (type === 'trun' && boxData.length >= 16)
+            box.sampleCount = (boxData[8]<<24|boxData[9]<<16|boxData[10]<<8|boxData[11])>>>0;
+        if (type === 'tfdt' && boxData.length >= 12) {
+            const ver = boxData[8];
+            box.baseMediaDecodeTime = ver === 1
+                ? ((boxData[12]*2**24+boxData[13]*2**16+boxData[14]*256+boxData[15])*2**32
+                   + (boxData[16]*2**24+boxData[17]*2**16+boxData[18]*256+boxData[19]))
+                : (boxData[12]<<24|boxData[13]<<16|boxData[14]<<8|boxData[15])>>>0;
+        }
+        if (type === 'senc' && boxData.length >= 12) {
+            box.sampleCount = (boxData[12]<<24|boxData[13]<<16|boxData[14]<<8|boxData[15])>>>0;
+            box.ENCRYPTED   = true;
+        }
+    }
+
     // Deep MP4 box walker — returns array of box descriptors.
     window.__amlParseMp4 = function parseMp4(data, maxDepth) {
         if (maxDepth === undefined) maxDepth = 4;
@@ -112,49 +155,8 @@ if (window._amlDebug) (function installAudioCapture() {
                 const headerSize = (type === 'stsd') ? 16 : (type === 'meta') ? 12 : 8;
                 box.children = parseMp4(data.slice(off + headerSize, off + boxData.length), maxDepth - 1);
             }
-            // Extract key fields.
-            if (type === 'ftyp' && boxData.length >= 12) {
-                box.majorBrand = String.fromCharCode(boxData[8],boxData[9],boxData[10],boxData[11]);
-            }
-            if (type === 'mdhd' && boxData.length >= 24) {
-                const ver = boxData[8];
-                box.timescale = ver === 1
-                    ? (boxData[20]<<24|boxData[21]<<16|boxData[22]<<8|boxData[23])>>>0
-                    : (boxData[16]<<24|boxData[17]<<16|boxData[18]<<8|boxData[19])>>>0;
-            }
-            if (type === 'hdlr' && boxData.length >= 20) {
-                box.handler = String.fromCharCode(boxData[16],boxData[17],boxData[18],boxData[19]);
-            }
-            if ((type === 'mp4a' || type === 'enca') && boxData.length >= 28) {
-                box.sampleRate = (boxData[24]<<8|boxData[25]);
-                box.channels   = (boxData[16]<<8|boxData[17]);
-                box.isEncrypted = (type === 'enca');
-            }
-            if (type === 'schm' && boxData.length >= 16) {
-                box.schemeType = String.fromCharCode(boxData[8],boxData[9],boxData[10],boxData[11]);
-            }
-            if (type === 'tfhd' && boxData.length >= 16) {
-                box.trackID = (boxData[8]<<24|boxData[9]<<16|boxData[10]<<8|boxData[11])>>>0;
-                box.flags   = (boxData[9]<<16|boxData[10]<<8|boxData[11]);
-            }
-            if (type === 'trun' && boxData.length >= 16) {
-                box.sampleCount = (boxData[8]<<24|boxData[9]<<16|boxData[10]<<8|boxData[11])>>>0;
-            }
-            if (type === 'tfdt' && boxData.length >= 12) {
-                const ver = boxData[8];
-                box.baseMediaDecodeTime = ver === 1
-                    ? ((boxData[12]*2**24+boxData[13]*2**16+boxData[14]*256+boxData[15])*2**32
-                       + (boxData[16]*2**24+boxData[17]*2**16+boxData[18]*256+boxData[19]))
-                    : (boxData[12]<<24|boxData[13]<<16|boxData[14]<<8|boxData[15])>>>0;
-            }
-            if (type === 'senc' && boxData.length >= 12) {
-                box.sampleCount = (boxData[12]<<24|boxData[13]<<16|boxData[14]<<8|boxData[15])>>>0;
-                box.ENCRYPTED   = true;
-            }
-            if (type === 'mdat') {
-                box.hex32 = Array.from(boxData.slice(8, Math.min(40, boxData.length)))
-                    .map(b => b.toString(16).padStart(2,'0')).join(' ');
-            }
+            extractMp4MetaFields(type, boxData, box);
+            extractMp4TimingFields(type, boxData, box);
 
             result.push(box);
             off += size;
@@ -298,6 +300,10 @@ let _seekBurstLog     = 0;    // ticks remaining in post-seek burst logging wind
 let _vlcPostSeek      = false; // true after seek fires, clears on next 'playing' tick
 let _vlcWasPlaying    = false; // playback state captured at seek initiation
 let _vlcSeekTargetMs  = 0;    // requested seek position; used in burst logs to show Δ from actual
+let _vlcErrCount      = 0;    // consecutive poll fetch errors (reset on track change)
+let _vlcTickCount     = 0;    // poll ticks since session start (for MPRIS every 4 ticks)
+let _vlcLengthSet     = false; // true once VLC has reported a valid lengthMs for this track
+let _vlcFetching      = false; // prevents overlapping poll fetches
 
 // ── Gapless ALAC pre-warm ─────────────────────────────────────────────────────
 let _nextAlacSession = null; // { adamId, sess } — pre-warmed session for the next ALAC track
@@ -340,6 +346,36 @@ let _snapshotEventId  = -1;     // SSE meta.id of the last engine.snapshot — d
 // MSE pipeline takes over. Since MSE pipes raw AAC (no encryption), no actual
 // DRM license is ever requested.
 
+// Guards SourceBuffer methods against InvalidStateError when buffers are detached.
+// VLC mode installs a silent MediaSource; MK's AudioPlayer reads .buffered on
+// every timeupdate and throws InvalidStateError on the stale SourceBuffer references.
+function _guardSourceBufferMethods() {
+    const sbDesc = Object.getOwnPropertyDescriptor(SourceBuffer.prototype, 'buffered');
+    if (!sbDesc) return;
+    const emptyEl = document.createElement('audio');
+    Object.defineProperty(SourceBuffer.prototype, 'buffered', {
+        configurable: true,
+        get() {
+            try { return sbDesc.get.call(this); }
+            catch (e) {
+                if (e instanceof DOMException && e.name === 'InvalidStateError')
+                    return emptyEl.buffered;
+                throw e;
+            }
+        }
+    });
+    for (const method of ['remove', 'abort', 'appendBuffer']) {
+        const orig = SourceBuffer.prototype[method];
+        if (orig) SourceBuffer.prototype[method] = function(...args) {
+            try { return orig.apply(this, args); }
+            catch (e) {
+                if (e instanceof DOMException && e.name === 'InvalidStateError') return;
+                throw e;
+            }
+        };
+    }
+}
+
 // ── CDN blocker (prototype-level, runs at parse time) ─────────────────────────
 
 function blockAppleCDN() {
@@ -375,36 +411,7 @@ function blockAppleCDN() {
 
     console.log('[AML Engine] Apple CDN audio blocked');
 
-    // Guard MK's MSE buffer management from crashing when SourceBuffers are detached.
-    // In VLC mode we install a silent MediaSource; MK's AudioPlayer keeps stale
-    // references to the old session's SourceBuffers and reads .buffered on every
-    // timeupdate, throwing InvalidStateError. Return an empty TimeRanges instead.
-    const _sbDesc = Object.getOwnPropertyDescriptor(SourceBuffer.prototype, 'buffered');
-    if (_sbDesc) {
-        const _sbEmptyEl = document.createElement('audio'); // buffered is always empty
-        Object.defineProperty(SourceBuffer.prototype, 'buffered', {
-            configurable: true,
-            get() {
-                try { return _sbDesc.get.call(this); }
-                catch (e) {
-                    if (e instanceof DOMException && e.name === 'InvalidStateError')
-                        return _sbEmptyEl.buffered;
-                    throw e;
-                }
-            }
-        });
-        // Also guard .remove() and .abort() which throw the same error on detached buffers
-        for (const method of ['remove', 'abort', 'appendBuffer']) {
-            const orig = SourceBuffer.prototype[method];
-            if (orig) SourceBuffer.prototype[method] = function(...args) {
-                try { return orig.apply(this, args); }
-                catch (e) {
-                    if (e instanceof DOMException && e.name === 'InvalidStateError') return;
-                    throw e;
-                }
-            };
-        }
-    }
+    _guardSourceBufferMethods();
 }
 
 // ── Play proxy (instance-level, installed lazily on first track change) ────────
@@ -932,8 +939,77 @@ function deleteSession(id) {
 
 // ── MSE pipe + seek (AAC path) ────────────────────────────────────────────────
 
+function _sbWaitUpdate(sb, chunks) {
+    return new Promise((res, rej) => {
+        if (!sb.updating) return res();
+        const done = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); res(); };
+        const fail = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); rej(new Error(`SB error chunk ${chunks}`)); };
+        sb.addEventListener('updateend', done, { once: true });
+        sb.addEventListener('error',     fail, { once: true });
+    });
+}
+
+async function _sbRemove(ms, sb, start, end) {
+    if (ms.readyState !== 'open' || end <= start) return;
+    await _sbWaitUpdate(sb, 0);
+    if (ms.readyState !== 'open') return;
+    await new Promise((res, rej) => {
+        sb.addEventListener('updateend', res, { once: true });
+        sb.addEventListener('error',     rej, { once: true });
+        sb.remove(start, end);
+    });
+}
+
+async function _sbEvictPlayed(ms, sb, audio, aggressiveSecs) {
+    if (ms.readyState !== 'open' || sb.buffered.length === 0) return;
+    const evictEnd = Math.max(0, audio.currentTime - aggressiveSecs);
+    if (evictEnd > sb.buffered.start(0) + 1) await _sbRemove(ms, sb, sb.buffered.start(0), evictEnd);
+}
+
+async function _throttleForward(ms, sb, audio, signal, FORWARD_SECS) {
+    while (ms.readyState === 'open' && sb.buffered.length > 0 &&
+           (sb.buffered.end(sb.buffered.length - 1) - audio.currentTime) > FORWARD_SECS) {
+        if (signal.aborted) throw new Error('aborted');
+        await new Promise(r => setTimeout(r, 500));
+    }
+}
+
+function _cacheAudioChunk(localSessionId, value) {
+    if (!_chunkCache || _chunkCache.sessionId !== localSessionId || _chunkCache.byteSize >= 80 * 1024 * 1024) return;
+    const copy = new Uint8Array(value.byteLength);
+    copy.set(value);
+    _chunkCache.chunks.push(copy);
+    _chunkCache.byteSize += value.byteLength;
+}
+
+async function _appendWithRetry(sb, value, ms, audio, signal, BACKWARD_SECS, chunks) {
+    try {
+        sb.appendBuffer(value);
+    } catch (e) {
+        if (e.name === 'InvalidStateError') {
+            // Browser triggered an internal buffer op between our waitUpdate() check and
+            // appendBuffer() — typically happens when video playback starts mid-pipe.
+            await _sbWaitUpdate(sb, chunks);
+            if (signal.aborted) throw new Error('aborted');
+            sb.appendBuffer(value);
+        } else if (e.name === 'QuotaExceededError') {
+            let appended = false;
+            for (let attempt = 0; !appended; attempt++) {
+                await new Promise(r => setTimeout(r, 300));
+                if (signal.aborted) throw new Error('aborted');
+                await _sbEvictPlayed(ms, sb, audio, attempt >= 2 ? 30 : BACKWARD_SECS);
+                await _sbWaitUpdate(sb, chunks);
+                try { sb.appendBuffer(value); appended = true; }
+                catch (e2) { if (e2.name !== 'QuotaExceededError') throw e2; }
+            }
+        } else { throw e; }
+    }
+}
+
 async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durationSec, t0) {
     const localSessionId = _sessionId;
+    const FORWARD_SECS  = 900;
+    const BACKWARD_SECS = 900;
     let resp;
     if (typeof streamUrlOrResp === 'string') {
         resp = await fetch(streamUrlOrResp, { signal });
@@ -948,34 +1024,6 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
     let chunks = 0;
     try {
 
-    const waitUpdate = () => new Promise((res, rej) => {
-        if (!sb.updating) return res();
-        const done = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); res(); };
-        const fail = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); rej(new Error(`SB error chunk ${chunks}`)); };
-        sb.addEventListener('updateend', done, { once: true });
-        sb.addEventListener('error',     fail, { once: true });
-    });
-
-    const sbRemove = async (start, end) => {
-        if (ms.readyState !== 'open' || end <= start) return;
-        await waitUpdate();
-        if (ms.readyState !== 'open') return;
-        await new Promise((res, rej) => {
-            sb.addEventListener('updateend', res, { once: true });
-            sb.addEventListener('error',     rej, { once: true });
-            sb.remove(start, end);
-        });
-    };
-
-    const FORWARD_SECS  = 900;
-    const BACKWARD_SECS = 900;
-
-    const evictPlayed = async (aggressiveSecs = BACKWARD_SECS) => {
-        if (ms.readyState !== 'open' || sb.buffered.length === 0) return;
-        const evictEnd = Math.max(0, audio.currentTime - aggressiveSecs);
-        if (evictEnd > sb.buffered.start(0) + 1) await sbRemove(sb.buffered.start(0), evictEnd);
-    };
-
     while (true) {
         if (signal.aborted) throw new Error('aborted');
         const { done, value } = await reader.read();
@@ -987,51 +1035,21 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
 
         if (ms.readyState !== 'open' || audio.error) throw new Error(`MediaSource closed or audio error: ms=${ms.readyState} err=${audio.error?.code}`);
 
-        if (_chunkCache && _chunkCache.sessionId === localSessionId &&
-                _chunkCache.byteSize < 80 * 1024 * 1024) {
-            const copy = new Uint8Array(value.byteLength);
-            copy.set(value);
-            _chunkCache.chunks.push(copy);
-            _chunkCache.byteSize += value.byteLength;
-        }
+        _cacheAudioChunk(localSessionId, value);
 
         if (sb.buffered.length > 0 && audio.currentTime > sb.buffered.start(0) + BACKWARD_SECS + 1) {
-            await evictPlayed();
+            await _sbEvictPlayed(ms, sb, audio, BACKWARD_SECS);
         }
 
-        while (ms.readyState === 'open' && sb.buffered.length > 0 &&
-               (sb.buffered.end(sb.buffered.length - 1) - audio.currentTime) > FORWARD_SECS) {
-            if (signal.aborted) throw new Error('aborted');
-            await new Promise(r => setTimeout(r, 500));
-        }
+        await _throttleForward(ms, sb, audio, signal, FORWARD_SECS);
 
-        await waitUpdate();
+        await _sbWaitUpdate(sb, chunks);
         if (signal.aborted) throw new Error('aborted');
         if (ms.readyState !== 'open' || audio.error) throw new Error(`MediaSource closed or audio error [post-wait]: ms=${ms.readyState} err=${audio.error?.code}`);
-        try {
-            sb.appendBuffer(value);
-        } catch (e) {
-            if (e.name === 'InvalidStateError') {
-                // Browser triggered an internal buffer op between our waitUpdate() check and
-                // appendBuffer() — typically happens when video playback starts mid-pipe.
-                await waitUpdate();
-                if (signal.aborted) throw new Error('aborted');
-                sb.appendBuffer(value);
-            } else if (e.name === 'QuotaExceededError') {
-                let appended = false;
-                for (let attempt = 0; !appended; attempt++) {
-                    await new Promise(r => setTimeout(r, 300));
-                    if (signal.aborted) throw new Error('aborted');
-                    await evictPlayed(attempt >= 2 ? 30 : BACKWARD_SECS);
-                    await waitUpdate();
-                    try { sb.appendBuffer(value); appended = true; }
-                    catch (e2) { if (e2.name !== 'QuotaExceededError') throw e2; }
-                }
-            } else { throw e; }
-        }
+        await _appendWithRetry(sb, value, ms, audio, signal, BACKWARD_SECS, chunks);
     }
 
-    await waitUpdate();
+    await _sbWaitUpdate(sb, chunks);
     if (!signal.aborted && ms.readyState === 'open') {
         if (durationSec > 0) { try { ms.duration = durationSec; } catch (_) {} }
         ms.endOfStream();
@@ -1048,107 +1066,89 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
     }
 }
 
-async function mseSeekToTime(seekSec, audio, sb, ms) {
-    if (ms.readyState === 'closed') return;
-    const bufferedRanges = Array.from({length: sb.buffered.length}, (_, i) =>
-        `[${sb.buffered.start(i).toFixed(1)},${sb.buffered.end(i).toFixed(1)}]`).join(' ');
-    console.log(`[AML MSE] seekToTime(${seekSec.toFixed(2)}) ct=${audio.currentTime.toFixed(2)} buffered=${bufferedRanges||'(empty)'} seekable=${_seekable}`);
-
-    // Already buffered — let the browser handle it natively.
-    for (let i = 0; i < sb.buffered.length; i++) {
-        if (seekSec >= sb.buffered.start(i) - 1.0 && seekSec < sb.buffered.end(i) + 1.0) {
-            console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → native (buffered)`);
-            _seekTarget = -Infinity;
-            const wasPlaying = !audio.paused;
-            audio.addEventListener('seeked', () => {
-                if (wasPlaying && audio.paused) _nativePlay().catch(() => {});
-            }, { once: true });
-            return;
+async function _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl, mySC, wasStreamComplete, seekSec) {
+    if (pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) return;
+    await _sbWaitUpdate(sb, 0);
+    if (wasStreamComplete) {
+        if (ms.readyState === 'open') {
+            if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
+            ms.endOfStream(); _streamComplete = true;
         }
+    } else if (_seekable && _activeStreamBase) {
+        const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : seekSec;
+        let resumeResp;
+        try { resumeResp = await fetch(`${_activeStreamBase}&t=${bufEnd.toFixed(3)}`, { signal: pipeCtrl.signal }); }
+        catch (_) { return; }
+        if (!resumeResp.ok || pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) { resumeResp?.body?.cancel(); return; }
+        await pipeToSourceBuffer(sb, audio, resumeResp, pipeCtrl.signal, ms, _durationSec, performance.now());
     }
+}
 
-    // Cache re-inject path (backward seeks outside buffer).
-    if (_chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
-        if (Math.abs(_seekTarget - seekSec) < 0.5) {
-            console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → cache guard`);
-            return;
-        }
-        _seekTarget = seekSec;
-        const wasPlaying = !audio.paused;
-        const cacheSnap = _chunkCache;
-        const wasStreamComplete = _streamComplete;
-        _streamComplete = false;
-
-        if (_seekFetchCtrl) { _seekFetchCtrl.abort(); }
-        _seekFetchCtrl = new AbortController();
-        const mySC = _seekFetchCtrl;
-
-        if (_pipeCtrl) { _pipeCtrl.abort(); _pipeCtrl = null; }
-        _pipeCtrl = new AbortController();
-        const pipeCtrl = _pipeCtrl;
-
-        console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB)`);
-
-        const waitIdle = () => new Promise((res, rej) => {
-            if (!sb.updating) return res();
-            const done = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); res(); };
-            const fail = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); rej(new Error('SB error during cache re-inject')); };
-            sb.addEventListener('updateend', done, { once: true });
-            sb.addEventListener('error',     fail, { once: true });
-        });
-
-        (async () => {
-            try {
-                await waitIdle();
-                if (pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
-                if (sb.buffered.length > 0) sb.remove(0, Infinity);
-                await waitIdle();
-                // Discard decoded frames before seekSec so playback starts sample-
-                // accurately at the target without MDCT warmup artifacts.
-                // Reset to 0 in the canplay handler after the seek resolves.
-                try { sb.appendWindowStart = seekSec; } catch (_) {}
-                for (const chunk of cacheSnap.chunks) {
-                    if (pipeCtrl.signal.aborted) return;
-                    await waitIdle();
-                    if (pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
-                    try { sb.appendBuffer(chunk); }
-                    catch (e) { if (e.name === 'QuotaExceededError') console.warn('[AML MSE] cache re-inject quota exceeded'); return; }
-                }
-                if (pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) return;
-                await waitIdle();
-                if (wasStreamComplete) {
-                    if (ms.readyState === 'open') {
-                        if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
-                        ms.endOfStream(); _streamComplete = true;
-                    }
-                } else if (_seekable && _activeStreamBase) {
-                    const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : seekSec;
-                    let resumeResp;
-                    try { resumeResp = await fetch(`${_activeStreamBase}&t=${bufEnd.toFixed(3)}`, { signal: pipeCtrl.signal }); }
-                    catch (_) { return; }
-                    if (!resumeResp.ok || pipeCtrl.signal.aborted || _seekFetchCtrl !== mySC) { resumeResp?.body?.cancel(); return; }
-                    await pipeToSourceBuffer(sb, audio, resumeResp, pipeCtrl.signal, ms, _durationSec, performance.now());
-                }
-            } catch (e) {
-                if (!pipeCtrl.signal.aborted) console.error('[AML MSE] cache re-inject error:', e.message);
-            }
-        })();
-
-        // Set currentTime before re-inject so the browser positions itself once
-        // the buffer covers seekSec (appendWindowStart filters earlier frames).
-        try { _nativeCTSet.call(audio, seekSec); } catch (_) {}
-
-        audio.addEventListener('canplay', () => {
+async function _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, wasStreamComplete, seekSec) {
+    const waitIdle = () => new Promise((res, rej) => {
+        if (!sb.updating) return res();
+        const done = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); res(); };
+        const fail = () => { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); rej(new Error('SB error during cache re-inject')); };
+        sb.addEventListener('updateend', done, { once: true });
+        sb.addEventListener('error',     fail, { once: true });
+    });
+    try {
+        await waitIdle();
+        if (pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
+        if (sb.buffered.length > 0) sb.remove(0, Infinity);
+        await waitIdle();
+        // Discard decoded frames before seekSec so playback starts sample-
+        // accurately at the target without MDCT warmup artifacts.
+        // Reset to 0 in the canplay handler after the seek resolves.
+        try { sb.appendWindowStart = seekSec; } catch (_) {}
+        for (const chunk of cacheSnap.chunks) {
             if (pipeCtrl.signal.aborted) return;
-            try { sb.appendWindowStart = 0; } catch (_) {}
-            _seekTarget = -Infinity;
-            if (wasPlaying) _nativePlay().catch(() => {});
-        }, { once: true });
+            await waitIdle();
+            if (pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
+            try { sb.appendBuffer(chunk); }
+            catch (e) { if (e.name === 'QuotaExceededError') console.warn('[AML MSE] cache re-inject quota exceeded'); return; }
+        }
+        await _mseFinalizeCacheInject(ms, sb, audio, pipeCtrl, mySC, wasStreamComplete, seekSec);
+    } catch (e) {
+        if (!pipeCtrl.signal.aborted) console.error('[AML MSE] cache re-inject error:', e.message);
+    }
+}
+
+function _mseCacheSeek(sb, audio, ms, seekSec) {
+    if (Math.abs(_seekTarget - seekSec) < 0.5) {
+        console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → cache guard`);
         return;
     }
+    _seekTarget = seekSec;
+    const wasPlaying = !audio.paused;
+    const cacheSnap = _chunkCache;
+    const wasStreamComplete = _streamComplete;
+    _streamComplete = false;
 
-    if (!_seekable) { console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → not seekable`); return; }
+    if (_seekFetchCtrl) { _seekFetchCtrl.abort(); }
+    _seekFetchCtrl = new AbortController();
+    const mySC = _seekFetchCtrl;
 
+    if (_pipeCtrl) { _pipeCtrl.abort(); _pipeCtrl = null; }
+    _pipeCtrl = new AbortController();
+    const pipeCtrl = _pipeCtrl;
+
+    console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → cache re-inject (${(cacheSnap.byteSize / 1e6).toFixed(1)} MB)`);
+    _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, wasStreamComplete, seekSec).catch(() => {});
+
+    // Set currentTime before re-inject so the browser positions itself once
+    // the buffer covers seekSec (appendWindowStart filters earlier frames).
+    try { _nativeCTSet.call(audio, seekSec); } catch (_) {}
+
+    audio.addEventListener('canplay', () => {
+        if (pipeCtrl.signal.aborted) return;
+        try { sb.appendWindowStart = 0; } catch (_) {}
+        _seekTarget = -Infinity;
+        if (wasPlaying) _nativePlay().catch(() => {});
+    }, { once: true });
+}
+
+async function _mseNetworkSeek(sb, audio, ms, seekSec) {
     if (_streamComplete) { _seekTarget = -Infinity; _streamComplete = false; }
 
     if (Math.abs(_seekTarget - seekSec) < 0.5) { console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → guard`); return; }
@@ -1211,6 +1211,36 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
         console.log(`[AML MSE] Seek ready — req=${seekSec.toFixed(2)}s actual=${actualStart.toFixed(2)}s ct=${audio.currentTime.toFixed(2)}s`);
         if (wasPlaying) _nativePlay().catch(e => console.warn('[AML MSE] seek play():', e));
     }, { once: true });
+}
+
+async function mseSeekToTime(seekSec, audio, sb, ms) {
+    if (ms.readyState === 'closed') return;
+    const bufferedRanges = Array.from({length: sb.buffered.length}, (_, i) =>
+        `[${sb.buffered.start(i).toFixed(1)},${sb.buffered.end(i).toFixed(1)}]`).join(' ');
+    console.log(`[AML MSE] seekToTime(${seekSec.toFixed(2)}) ct=${audio.currentTime.toFixed(2)} buffered=${bufferedRanges||'(empty)'} seekable=${_seekable}`);
+
+    // Already buffered — let the browser handle it natively.
+    for (let i = 0; i < sb.buffered.length; i++) {
+        if (seekSec >= sb.buffered.start(i) - 1.0 && seekSec < sb.buffered.end(i) + 1.0) {
+            console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → native (buffered)`);
+            _seekTarget = -Infinity;
+            const wasPlaying = !audio.paused;
+            audio.addEventListener('seeked', () => {
+                if (wasPlaying && audio.paused) _nativePlay().catch(() => {});
+            }, { once: true });
+            return;
+        }
+    }
+
+    // Cache re-inject path (backward seeks outside buffer).
+    if (_chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
+        _mseCacheSeek(sb, audio, ms, seekSec);
+        return;
+    }
+
+    if (!_seekable) { console.log(`[AML MSE] Seek ${seekSec.toFixed(2)}s → not seekable`); return; }
+
+    await _mseNetworkSeek(sb, audio, ms, seekSec);
 }
 
 // ── VLC poll ──────────────────────────────────────────────────────────────────
@@ -2147,6 +2177,45 @@ async function startMVPipeline() {
             ranges.push(`${audioSb.buffered.start(i).toFixed(2)}-${audioSb.buffered.end(i).toFixed(2)}`);
         return ranges.join(' ');
     };
+    async function appendAudioChunk(value, chunkIn, elapsed, bufBefore) {
+        try {
+            audioSb.appendBuffer(value);
+            await _waitAudIdle();
+            const chunk = chunkIn + 1;
+            const bufAfter = _mvaBufStr();
+            const grew = bufBefore !== bufAfter;
+            window.__amlCaptureChunk?.('mv-audio', chunk, value, bufBefore, bufAfter, grew);
+            console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${bufAfter} +${elapsed}s bufGrew=${grew}`);
+            if (!grew && chunk > 1)
+                console.warn(`[INTERCEPT] chunk#${chunk} DID NOT grow buffer! Encrypted fragment rejected by browser MSE.`);
+            return { chunk, shouldBreak: false };
+        } catch (e) {
+            console.error(`[INTERCEPT APPEND-ERR] chunk#${chunkIn+1} threw ${e.name}: ${e.message}`);
+            if (e.name === 'InvalidStateError') {
+                console.warn(`[AML MV-A] InvalidStateError chunk#${chunkIn} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} — retrying`);
+                await _waitAudIdle();
+                if (signal.aborted || audioMs.readyState !== 'open') return { chunk: chunkIn, shouldBreak: true };
+                audioSb.appendBuffer(value);
+                await _waitAudIdle();
+                const chunk = chunkIn + 1;
+                console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} +${elapsed}s (retry)`);
+                return { chunk, shouldBreak: false };
+            } else if (e.name === 'QuotaExceededError') {
+                console.warn(`[AML MV-A] QuotaExceeded chunk#${chunkIn} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} — evicting`);
+                await evictAudio();
+                await _waitAudIdle();
+                if (signal.aborted || audioMs.readyState !== 'open') return { chunk: chunkIn, shouldBreak: true };
+                try {
+                    audioSb.appendBuffer(value);
+                    await _waitAudIdle();
+                    const chunk = chunkIn + 1;
+                    console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} +${elapsed}s (post-evict)`);
+                    return { chunk, shouldBreak: false };
+                } catch (_) { return { chunk: chunkIn, shouldBreak: false }; }
+            } else { throw e; }
+        }
+    }
+
     const runAudioPipe = async (signal) => {
         console.log(`[AML MV-A] fetch start t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} url=${audioUrl}`);
         const t0 = performance.now();
@@ -2186,41 +2255,9 @@ async function startMVPipeline() {
                 const bufBefore = _mvaBufStr();
                 console.log(`[INTERCEPT PRE-APPEND] chunk#${chunk+1} size=${value.byteLength} bufBefore=${bufBefore} ${_parseBoxHeader(value)}`);
 
-                try {
-                    audioSb.appendBuffer(value);
-                    await _waitAudIdle();
-                    chunk++;
-                    const bufAfter = _mvaBufStr();
-                    const grew = bufBefore !== bufAfter;
-                    window.__amlCaptureChunk?.('mv-audio', chunk, value, bufBefore, bufAfter, grew);
-                    console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${bufAfter} +${elapsed}s bufGrew=${grew}`);
-                    if (!grew && chunk > 1) {
-                        console.warn(`[INTERCEPT] chunk#${chunk} DID NOT grow buffer! Encrypted fragment rejected by browser MSE.`);
-                    }
-                }
-                catch (e) {
-                    console.error(`[INTERCEPT APPEND-ERR] chunk#${chunk+1} threw ${e.name}: ${e.message}`);
-                    if (e.name === 'InvalidStateError') {
-                        console.warn(`[AML MV-A] InvalidStateError chunk#${chunk} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} — retrying`);
-                        await _waitAudIdle();
-                        if (signal.aborted || audioMs.readyState !== 'open') break;
-                        audioSb.appendBuffer(value);
-                        await _waitAudIdle();
-                        chunk++;
-                        console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} +${elapsed}s (retry)`);
-                    } else if (e.name === 'QuotaExceededError') {
-                        console.warn(`[AML MV-A] QuotaExceeded chunk#${chunk} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} — evicting`);
-                        await evictAudio();
-                        await _waitAudIdle();
-                        if (signal.aborted || audioMs.readyState !== 'open') break;
-                        try {
-                            audioSb.appendBuffer(value);
-                            await _waitAudIdle();
-                            chunk++;
-                            console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} +${elapsed}s (post-evict)`);
-                        } catch (_) {}
-                    } else { throw e; }
-                }
+                const r = await appendAudioChunk(value, chunk, elapsed, bufBefore);
+                if (r.shouldBreak) break;
+                chunk = r.chunk;
             }
         } finally {
             audioSb.removeEventListener('error', _sbErrListener);
@@ -2444,6 +2481,21 @@ async function startMVPipeline() {
         checkBuf();
     }, { once: true });
 
+    const cleanupScrimStyles = () => {
+        if (scrimEl)       { ['opacity','visibility','transition','cursor'].forEach(p => scrimEl.style.removeProperty(p)); }
+        if (scrimClickable){ ['pointer-events','cursor'].forEach(p => scrimClickable.style.removeProperty(p)); }
+        if (scrimFooter)   { ['opacity','visibility','pointer-events'].forEach(p => scrimFooter.style.removeProperty(p)); }
+        if (scrimHeader)   { scrimHeader.style.removeProperty('display'); }
+        if (scrimInfo)     { ['opacity','visibility'].forEach(p => scrimInfo.style.removeProperty(p)); }
+    };
+
+    const cleanupVideoContainerStyles = () => {
+        if (avpi) { for (const p of _avpiProps) avpi.style.removeProperty(p); }
+        if (avpEl) { avpEl.style.removeProperty('width'); avpEl.style.removeProperty('height'); avpEl.style.removeProperty('background'); }
+        if (vcDiv) { vcDiv.style.removeProperty('width'); vcDiv.style.removeProperty('height'); vcDiv.style.removeProperty('background'); }
+        if (gradientDiv) { ['display','opacity','visibility','pointer-events','transition'].forEach(p => gradientDiv.style.removeProperty(p)); }
+    };
+
     const cleanup = () => {
         console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation}`);
         // Always clear the load() shadow so the next handleTrackChange or MK queue
@@ -2482,11 +2534,7 @@ async function startMVPipeline() {
         _scrimResizeObs?.disconnect();
         myVid.removeEventListener('loadedmetadata', _resizeScrim);
         myVid.removeEventListener('resize', _resizeScrim);
-        if (scrimEl)       { ['opacity','visibility','transition','cursor'].forEach(p => scrimEl.style.removeProperty(p)); }
-        if (scrimClickable){ ['pointer-events','cursor'].forEach(p => scrimClickable.style.removeProperty(p)); }
-        if (scrimFooter)   { ['opacity','visibility','pointer-events'].forEach(p => scrimFooter.style.removeProperty(p)); }
-        if (scrimHeader)   { scrimHeader.style.removeProperty('display'); }
-        if (scrimInfo)     { ['opacity','visibility'].forEach(p => scrimInfo.style.removeProperty(p)); }
+        cleanupScrimStyles();
         if (exitBtn)  { exitBtn.removeEventListener('click', onExitClick); exitBtn.style.opacity = ''; exitBtn.style.transition = ''; ['cursor','z-index'].forEach(p => exitBtn.style.removeProperty(p)); }
         if (_qualityBtn.parentNode) _qualityBtn.parentNode.removeChild(_qualityBtn);
         if (_qualityMenu.parentNode) _qualityMenu.parentNode.removeChild(_qualityMenu);
@@ -2494,10 +2542,7 @@ async function startMVPipeline() {
         clearTimeout(_hideTimer);
         clearInterval(_seekSyncInterval);
         // Restore avpi / avpEl / vcDiv expansions.
-        if (avpi) { for (const p of _avpiProps) avpi.style.removeProperty(p); }
-        if (avpEl) { avpEl.style.removeProperty('width'); avpEl.style.removeProperty('height'); avpEl.style.removeProperty('background'); }
-        if (vcDiv) { vcDiv.style.removeProperty('width'); vcDiv.style.removeProperty('height'); vcDiv.style.removeProperty('background'); }
-        if (gradientDiv) { ['display','opacity','visibility','pointer-events','transition'].forEach(p => gradientDiv.style.removeProperty(p)); }
+        cleanupVideoContainerStyles();
         mvContainer.style.removeProperty('cursor');
         if (nativeVidInVc) nativeVidInVc.style.removeProperty('display');
         if (nativeVidEl) {
@@ -2522,153 +2567,171 @@ async function startMVPipeline() {
     console.log(`[AML MV] pipeline started session=${_sessionId}`);
 }
 
+function _vlcHandleLength(lengthMs, mkAudio) {
+    if (!_vlcLengthSet && lengthMs > 0) {
+        _vlcLengthSet = true;
+        _durationSec = lengthMs / 1000;
+        // _mkInstance is set by bridgeDuration in handleTrackChange when the
+        // session opens. Use it here since mk is not in scope in startVLCPoll.
+        if (_mkInstance) bridgeDuration(_mkInstance, _durationSec);
+    }
+    // Gapless: pre-warm next ALAC session as soon as VLC reports the duration
+    // (first poll after track starts). Maximises time for the background
+    // disk-cache download to complete before the track ends.
+    if (!_nextAlacTried && !_nextAlacSession && _durationSec > 0) {
+        _nextAlacTried = true;
+        console.log(`[AML Gapless] trigger at track start (dur=${_durationSec.toFixed(1)}s) — starting ALAC pre-warm`);
+        _prewarmNextAlac().catch(() => {});
+    }
+}
+
+function _vlcUpdatePosition(posMs, state, mkAudio) {
+    const prevPos = _vlcPosMs;
+    // VLC reports absolute fMP4 tfdt timestamps, so posMs is already the
+    // correct song-timeline position. Guard posMs > 0: VLC returns -1/0
+    // briefly before first decode; keep the snapped seek position during that window.
+    if (!_vlcSeekFrozen && posMs > 0) _vlcPosMs = posMs;
+    if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event('timeupdate'));
+    // Update MPRIS position every ~1s (every 4 ticks × 250ms).
+    if (++_vlcTickCount % 4 === 0) {
+        window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000 }); // ms → µs
+    }
+    // Burst-log every tick for 20 ticks (5s) after a seek.
+    if (_seekBurstLog > 0) {
+        _seekBurstLog--;
+        const delta = posMs > 0 ? posMs - _vlcSeekTargetMs : null;
+        const deltaStr = delta !== null ? ` Δ=${delta >= 0 ? '+' : ''}${delta}ms` : '';
+        console.log(`[AML VLC seek] poll  vlc.posMs=${posMs}ms  ui.pos=${_vlcPosMs}ms  target=${_vlcSeekTargetMs}ms${deltaStr}  state=${state}  frozen=${_vlcSeekFrozen}`);
+    } else if (_vlcTickCount % 20 === 0) {
+        // Log position every ~5 seconds during normal playback.
+        console.log(`[AML VLC] pos=${posMs}ms state=${state}`);
+    }
+}
+
+function _vlcHandleEnded(posMs, mkAudio) {
+    stopVLCPoll();
+    // Snap seek bar to 100% before advancing: VLC may end slightly
+    // before the API-reported duration (CMAF duration padding adds
+    // metadata-only silence), leaving the bar showing "10s left".
+    if (posMs > 2000) {
+        _vlcPosMs = Math.round(_durationSec * 1000);
+        mkAudio.dispatchEvent(new Event('timeupdate'));
+    }
+    // Premature end at posMs≈0: cbcs stream failed before delivering data.
+    if (posMs < 2000 && _durationSec > 5 && _vlcRetryCount < 2) {
+        _vlcRetryCount++;
+        _vlcSeekOffsetMs = 0;
+        console.log(`[AML VLC] premature end at posMs=${posMs} — reload attempt ${_vlcRetryCount}`);
+        setTimeout(() => {
+            if (!_sessionId) return;
+            fetch(`${ENGINE}/api/v1/vlc/load`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: 0 }),
+            }).then(() => startVLCPoll(mkAudio)).catch(() => {});
+        }, 1500);
+        return;
+    }
+    // False end: VLC hit EOF well before the expected track duration.
+    // Use vlc/seek (SetTime) to resume — avoids CDN re-download.
+    // The server will reload from disk cache if available, then SetTime.
+    const trackEndMs = Math.round(_durationSec * 1000);
+    if (posMs > 2000 && trackEndMs > 5000 && posMs < trackEndMs - 3000 && _vlcRetryCount < 2) {
+        _vlcRetryCount++;
+        const resumeMs = posMs;
+        console.warn(`[AML VLC] false end at ${posMs}ms (track=${trackEndMs}ms) — seeking to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
+        setTimeout(() => {
+            if (!_sessionId) return;
+            fetch(`${ENGINE}/api/v1/vlc/seek`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ posMs: resumeMs, sessionId: _sessionId }),
+            }).then(() => {
+                _vlcPosMs = resumeMs;
+                startVLCPoll(mkAudio);
+            }).catch(() => {});
+        }, 500);
+        return;
+    }
+    if (_allowCDNTransition) {
+        // CDN gate is open: user already clicked an external play button.
+        // The NPIDF triggered by that click will handle the track change;
+        // calling _amlNext here would advance to the wrong track.
+        console.log('[AML VLC] ended — _amlNext suppressed (CDN gate open)');
+    } else {
+        console.log('[AML VLC] ended → _amlNext');
+        _amlNext().catch(() => {});
+    }
+}
+
+function _vlcHandleStateChange(state, prev, posMs, mkAudio) {
+    if (state === 'playing') {
+        _vlcPaused = false;
+        _stopLyricsFreeze();
+        _vlcLoading = false; // VLC is actually playing; clear pre-warmup guard
+        // Dispatch 'playing' for initial start OR post-seek resume.
+        // Normal pause→play resume is handled by _origMKPlay() to avoid
+        // calling PlayActivity.play() twice (which throws).
+        const fromSeek = _vlcPostSeek;
+        _vlcPostSeek = false;
+        if (prev !== 'paused' || fromSeek) mkAudio.dispatchEvent(new Event('playing'));
+    }
+    if (state === 'paused') {
+        // Suppress spurious pause events while waiting for VLC to resume
+        // after a seek — the poll may see a transient paused state between
+        // SetTime completing and VLC re-entering playing.
+        if (!_vlcPostSeek) {
+            _vlcPaused = true;
+            mkAudio.dispatchEvent(new Event('pause'));
+            _startLyricsFreeze(mkAudio);
+        }
+    }
+    // VLC goes playing → ended → stopped in quick succession.
+    // If the 250ms poll fires after the ended state has already passed,
+    // we see playing → stopped and must treat it as a track end too.
+    if (state === 'ended' || (state === 'stopped' && (prev === 'playing' || prev === 'ended'))) {
+        _vlcHandleEnded(posMs, mkAudio);
+    }
+}
+
+async function _vlcPollTick(mkAudio, mySession) {
+    if (_vlcFetching) return;
+    _vlcFetching = true;
+    try {
+        const r = await fetch(`${ENGINE}/api/v1/vlc/time`);
+        // Stale check: if track changed while fetch was in-flight, discard silently
+        if (!r.ok || _sessionId !== mySession) return;
+        _vlcErrCount = 0;
+        const { posMs, lengthMs, state } = await r.json();
+        if (_sessionId !== mySession) return; // second check after JSON parse
+        _vlcHandleLength(lengthMs, mkAudio);
+        _vlcUpdatePosition(posMs, state, mkAudio);
+        if (state === _vlcPrevState) return;
+        const prev = _vlcPrevState;
+        _vlcPrevState = state;
+        console.log(`[AML VLC] state: ${prev ?? 'null'} → ${state}  posMs=${posMs}  frozen=${_vlcSeekFrozen}`);
+        // Suppress playing/pause events while a seek is in-flight.
+        // Go's pause→SetMediaTime→resume emits paused/playing transitions that
+        // would trigger MK's PlayActivity crash cascade if dispatched mid-seek.
+        if (_vlcSeekFrozen) return;
+        _vlcHandleStateChange(state, prev, posMs, mkAudio);
+    } catch (_) {
+        // Stop polling after 5 consecutive errors (engine exited or unreachable).
+        if (++_vlcErrCount >= 5) stopVLCPoll();
+    } finally {
+        _vlcFetching = false;
+    }
+}
+
 function startVLCPoll(mkAudio) {
     stopVLCPoll();
     _vlcPrevState = null;
-    let _errCount  = 0;
-    let _tickCount = 0;
-    let _vlcLengthSet = false;
-    let _vlcFetching  = false; // skip tick if previous fetch hasn't completed
+    _vlcErrCount  = 0;
+    _vlcTickCount = 0;
+    _vlcLengthSet = false;
+    _vlcFetching  = false;
     const mySession = _sessionId; // capture — discard responses that arrive after a track skip
-    _vlcPollTimer = setInterval(async () => {
-        if (_vlcFetching) return;
-        _vlcFetching = true;
-        try {
-            const r = await fetch(`${ENGINE}/api/v1/vlc/time`);
-            // Stale check: if track changed while fetch was in-flight, discard silently
-            if (!r.ok || _sessionId !== mySession) return;
-            _errCount = 0;
-            const { posMs, lengthMs, state } = await r.json();
-            if (_sessionId !== mySession) return; // second check after JSON parse
-            if (!_vlcLengthSet && lengthMs > 0) {
-                _vlcLengthSet = true;
-                _durationSec = lengthMs / 1000;
-                // _mkInstance is set by bridgeDuration in handleTrackChange when the
-                // session opens. Use it here since mk is not in scope in startVLCPoll.
-                if (_mkInstance) bridgeDuration(_mkInstance, _durationSec);
-            }
-            // Gapless: pre-warm next ALAC session as soon as VLC reports the duration
-            // (first poll after track starts). Maximises time for the background
-            // disk-cache download to complete before the track ends.
-            if (!_nextAlacTried && !_nextAlacSession && _durationSec > 0) {
-                _nextAlacTried = true;
-                console.log(`[AML Gapless] trigger at track start (dur=${_durationSec.toFixed(1)}s) — starting ALAC pre-warm`);
-                _prewarmNextAlac().catch(() => {});
-            }
-            const prevPos = _vlcPosMs;
-            // VLC reports absolute fMP4 tfdt timestamps, so posMs is already the
-            // correct song-timeline position. Guard posMs > 0: VLC returns -1/0
-            // briefly before first decode; keep the snapped seek position during that window.
-            if (!_vlcSeekFrozen && posMs > 0) _vlcPosMs = posMs;
-            if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event('timeupdate'));
-            // Update MPRIS position every ~1s (every 4 ticks × 250ms).
-            if (++_tickCount % 4 === 0) {
-                window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000 }); // ms → µs
-            }
-            // Burst-log every tick for 20 ticks (5s) after a seek.
-            if (_seekBurstLog > 0) {
-                _seekBurstLog--;
-                const delta = posMs > 0 ? posMs - _vlcSeekTargetMs : null;
-                const deltaStr = delta !== null ? ` Δ=${delta >= 0 ? '+' : ''}${delta}ms` : '';
-                console.log(`[AML VLC seek] poll  vlc.posMs=${posMs}ms  ui.pos=${_vlcPosMs}ms  target=${_vlcSeekTargetMs}ms${deltaStr}  state=${state}  frozen=${_vlcSeekFrozen}`);
-            } else if (_tickCount % 20 === 0) {
-                // Log position every ~5 seconds during normal playback.
-                console.log(`[AML VLC] pos=${posMs}ms state=${state}`);
-            }
-            if (state === _vlcPrevState) return;
-            const prev = _vlcPrevState;
-            _vlcPrevState = state;
-            console.log(`[AML VLC] state: ${prev ?? 'null'} → ${state}  posMs=${posMs}  frozen=${_vlcSeekFrozen}`);
-            // Suppress playing/pause events while a seek is in-flight.
-            // Go's pause→SetMediaTime→resume emits paused/playing transitions that
-            // would trigger MK's PlayActivity crash cascade if dispatched mid-seek.
-            if (_vlcSeekFrozen) return;
-            if (state === 'playing') {
-                _vlcPaused = false;
-                _stopLyricsFreeze();
-                _vlcLoading = false; // VLC is actually playing; clear pre-warmup guard
-                // Dispatch 'playing' for initial start OR post-seek resume.
-                // Normal pause→play resume is handled by _origMKPlay() to avoid
-                // calling PlayActivity.play() twice (which throws).
-                const fromSeek = _vlcPostSeek;
-                _vlcPostSeek = false;
-                if (prev !== 'paused' || fromSeek) mkAudio.dispatchEvent(new Event('playing'));
-            }
-            if (state === 'paused') {
-                // Suppress spurious pause events while waiting for VLC to resume
-                // after a seek — the poll may see a transient paused state between
-                // SetTime completing and VLC re-entering playing.
-                if (!_vlcPostSeek) {
-                    _vlcPaused = true;
-                    mkAudio.dispatchEvent(new Event('pause'));
-                    _startLyricsFreeze(mkAudio);
-                }
-            }
-            // VLC goes playing → ended → stopped in quick succession.
-            // If the 250ms poll fires after the ended state has already passed,
-            // we see playing → stopped and must treat it as a track end too.
-            if (state === 'ended' || (state === 'stopped' && (prev === 'playing' || prev === 'ended'))) {
-                stopVLCPoll();
-                // Snap seek bar to 100% before advancing: VLC may end slightly
-                // before the API-reported duration (CMAF duration padding adds
-                // metadata-only silence), leaving the bar showing "10s left".
-                if (posMs > 2000) {
-                    _vlcPosMs = Math.round(_durationSec * 1000);
-                    mkAudio.dispatchEvent(new Event('timeupdate'));
-                }
-                // Premature end at posMs≈0: cbcs stream failed before delivering data.
-                if (posMs < 2000 && _durationSec > 5 && _vlcRetryCount < 2) {
-                    _vlcRetryCount++;
-                    _vlcSeekOffsetMs = 0;
-                    console.log(`[AML VLC] premature end at posMs=${posMs} — reload attempt ${_vlcRetryCount}`);
-                    setTimeout(() => {
-                        if (!_sessionId) return;
-                        fetch(`${ENGINE}/api/v1/vlc/load`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: 0 }),
-                        }).then(() => startVLCPoll(mkAudio)).catch(() => {});
-                    }, 1500);
-                    return;
-                }
-                // False end: VLC hit EOF well before the expected track duration.
-                // Use vlc/seek (SetTime) to resume — avoids CDN re-download.
-                // The server will reload from disk cache if available, then SetTime.
-                const trackEndMs = Math.round(_durationSec * 1000);
-                if (posMs > 2000 && trackEndMs > 5000 && posMs < trackEndMs - 3000 && _vlcRetryCount < 2) {
-                    _vlcRetryCount++;
-                    const resumeMs = posMs;
-                    console.warn(`[AML VLC] false end at ${posMs}ms (track=${trackEndMs}ms) — seeking to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
-                    setTimeout(() => {
-                        if (!_sessionId) return;
-                        fetch(`${ENGINE}/api/v1/vlc/seek`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ posMs: resumeMs, sessionId: _sessionId }),
-                        }).then(() => {
-                            _vlcPosMs = resumeMs;
-                            startVLCPoll(mkAudio);
-                        }).catch(() => {});
-                    }, 500);
-                    return;
-                }
-                if (_allowCDNTransition) {
-                    // CDN gate is open: user already clicked an external play button.
-                    // The NPIDF triggered by that click will handle the track change;
-                    // calling _amlNext here would advance to the wrong track.
-                    console.log('[AML VLC] ended — _amlNext suppressed (CDN gate open)');
-                } else {
-                    console.log('[AML VLC] ended → _amlNext');
-                    _amlNext().catch(() => {});
-                }
-            }
-        } catch (_) {
-            // Stop polling after 5 consecutive errors (engine exited or unreachable).
-            if (++_errCount >= 5) stopVLCPoll();
-        } finally {
-            _vlcFetching = false;
-        }
-    }, T().poll);
+    _vlcPollTimer = setInterval(() => _vlcPollTick(mkAudio, mySession), T().poll);
 }
 
 // Polls _engineCaps.lossless every 100 ms until true or timeoutMs elapses.
@@ -2696,6 +2759,27 @@ function waitForLossless(timeoutMs) {
 // ── Gapless ALAC pre-warm ─────────────────────────────────────────────────────
 // Creates an ALAC session for the next queue item and kicks off a background
 // disk-cache download on the engine side so VLC can load the track instantly.
+// Schedules a gapless retry in 5s. Only retries transient failures — not
+// permanent ones (auth errors, codec mismatches). Uses module-level globals.
+function _prewarmScheduleRetry(reason) {
+    if (_nextAlacRetries >= 3) {
+        console.warn(`[AML Gapless] ${reason} — max retries reached, giving up`);
+        return;
+    }
+    _nextAlacRetries++;
+    console.log(`[AML Gapless] ${reason} — retry ${_nextAlacRetries}/3 in 5s`);
+    setTimeout(() => {
+        if (_nextAlacSession || !_nextAlacTried) return;
+        _nextAlacTried = false;
+    }, 5000);
+}
+
+function _prewarmHandlePrecache(r) {
+    if (r.status === 204) console.log('[AML Gapless] disk cache already populated — gapless ready ✓');
+    else if (r.status === 202) console.log('[AML Gapless] disk cache download started in engine background');
+    else console.warn(`[AML Gapless] precache returned unexpected ${r.status}`);
+}
+
 async function _prewarmNextAlac() {
     const mk = _mkInstance;
     if (!mk) return;
@@ -2709,33 +2793,13 @@ async function _prewarmNextAlac() {
         ?? nextItem?.playParams?.id
         ?? nextItem?.attributes?.playParams?.id;
     if (!nextAdamId) return;
-    // Skip if next track is a music video — VLC path doesn't apply.
     if (nextItem?.type === 'music-videos' || nextItem?.type === 'musicVideo' ||
         nextItem?.type === 'library-music-videos') return;
-    // Skip if user has forced AAC quality — no ALAC session needed.
     if (!_engineCaps.lossless || _streamingQuality === 'high-quality') return;
 
     const nextName = nextItem?.attributes?.name ?? nextAdamId;
-    const attempt  = _nextAlacRetries + 1;
-    console.log(`[AML Gapless] opening session for "${nextName}" (${nextAdamId}) attempt=${attempt}`);
+    console.log(`[AML Gapless] opening session for "${nextName}" (${nextAdamId}) attempt=${_nextAlacRetries + 1}`);
     const t0 = performance.now();
-
-    // Schedules a retry in 5s if the user is still on the same track.
-    // Only retries transient failures (network errors, 5xx) — not permanent ones
-    // (auth errors, codec mismatches).
-    const _scheduleRetry = (reason) => {
-        if (_nextAlacRetries >= 3) {
-            console.warn(`[AML Gapless] ${reason} — max retries reached, giving up`);
-            return;
-        }
-        _nextAlacRetries++;
-        console.log(`[AML Gapless] ${reason} — retry ${_nextAlacRetries}/3 in 5s`);
-        setTimeout(() => {
-            // Don't retry if the track changed or a session was already populated.
-            if (_nextAlacSession || !_nextAlacTried) return;
-            _nextAlacTried = false; // allow the poll to re-trigger
-        }, 5000);
-    };
 
     try {
         const sf = mk.storefrontId ?? 'us';
@@ -2755,13 +2819,12 @@ async function _prewarmNextAlac() {
             if (permanent) {
                 console.warn(`[AML Gapless] session open failed ${sessResp.status} (permanent) — will not retry`);
             } else {
-                _scheduleRetry(`session open failed ${sessResp.status}`);
+                _prewarmScheduleRetry(`session open failed ${sessResp.status}`);
             }
             return;
         }
         const sess = await sessResp.json();
         const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-        // Only store lossless sessions; AAC fallback can't benefit from this path.
         if (sess.codec !== 'alac') {
             console.log(`[AML Gapless] skipped — engine returned ${sess.codec} (not lossless) in ${elapsed}s — will not retry`);
             deleteSession(sess.sessionId);
@@ -2769,55 +2832,45 @@ async function _prewarmNextAlac() {
         }
         _nextAlacSession = { adamId: nextAdamId, sess };
         console.log(`[AML Gapless] session ready ${sess.sessionId} dur=${(sess.durationMs/1000).toFixed(1)}s in ${elapsed}s — kicking off disk cache download`);
-        // Fire precache; response tells us whether the cache was already warm.
         fetch(`${ENGINE}/api/v1/playback/${sess.sessionId}/precache`, { method: 'POST' })
-            .then(r => {
-                if (r.status === 204) console.log('[AML Gapless] disk cache already populated — gapless ready ✓');
-                else if (r.status === 202) console.log('[AML Gapless] disk cache download started in engine background');
-                else console.warn(`[AML Gapless] precache returned unexpected ${r.status}`);
-            })
+            .then(_prewarmHandlePrecache)
             .catch(() => console.warn('[AML Gapless] precache request failed — VLC will download on first play'));
     } catch (e) {
-        _scheduleRetry(`pre-warm error: ${e?.message}`);
+        _prewarmScheduleRetry(`pre-warm error: ${e?.message}`);
     }
 }
 
 // ── Core playback handler ─────────────────────────────────────────────────────
 
-async function handleTrackChange(mk) {
-    let item = mk.nowPlayingItem;
-    if (!item) {
-        // MK fires a null NPIDF during queue transitions (setQueue resets the element).
-        // Always delete the load() instance override so MK can proceed — whether the gate
-        // came from an external play click or from _amlGoto (delete is a no-op if gone).
-        if (_vlcMode) {
-            const tmpAudio = getMKAudio();
-            if (tmpAudio) { try { delete tmpAudio.load; } catch (_) {} }
-        }
-        if (_allowCDNTransition) {
-            // CDN gate is open: null NPIDF is expected during setQueue; real NPIDF follows.
-            console.log('[NPIDF] null-item with CDN gate open — waiting for real NPIDF');
-            return;
-        }
-        const genSnapshot = _generation;
-        await new Promise(r => setTimeout(r, 200));
-        if (_generation !== genSnapshot) return;  // real NPIDF handler already took over
-        item = mk.nowPlayingItem;
-        if (!item) return;
+async function _handleNullNPIDF(mk) {
+    // MK fires a null NPIDF during queue transitions (setQueue resets the element).
+    // Always delete the load() instance override so MK can proceed.
+    if (_vlcMode) {
+        const tmpAudio = getMKAudio();
+        if (tmpAudio) { try { delete tmpAudio.load; } catch (_) {} }
     }
-
-    // Close CDN gate opened by external play-button click (now we own the transition).
     if (_allowCDNTransition) {
-        _allowCDNTransition = false;
-        if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
-        if (_mkApiSaved) { mk.play = _mkApiSaved.play; mk.setQueue = _mkApiSaved.setQueue; mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex; _mkApiSaved = null; }
-        if (_savedGateTracingCleanup) { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
-        _pendingExternalClickCatalogId = null;
-        _pendingPlaylistFetch = null;
+        // CDN gate is open: null NPIDF is expected during setQueue; real NPIDF follows.
+        console.log('[NPIDF] null-item with CDN gate open — waiting for real NPIDF');
+        return null;
     }
+    const genSnapshot = _generation;
+    await new Promise(r => setTimeout(r, 200));
+    if (_generation !== genSnapshot) return null; // real NPIDF handler already took over
+    return mk.nowPlayingItem; // may still be null → caller should return
+}
 
-    const myGen = ++_generation;
+function _closeCDNGate(mk) {
+    if (!_allowCDNTransition) return;
+    _allowCDNTransition = false;
+    if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
+    if (_mkApiSaved) { mk.play = _mkApiSaved.play; mk.setQueue = _mkApiSaved.setQueue; mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex; _mkApiSaved = null; }
+    if (_savedGateTracingCleanup) { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
+    _pendingExternalClickCatalogId = null;
+    _pendingPlaylistFetch = null;
+}
 
+function _resetPlaybackState() {
     if (_pipeCtrl)  { _pipeCtrl.abort();  _pipeCtrl  = null; }
     if (_abortCtrl) { _abortCtrl.abort(); _abortCtrl = null; }
     _ourBlobUrl = null;
@@ -2839,6 +2892,249 @@ async function handleTrackChange(mk) {
     // Do NOT reset _losslessWaitDone here — it's a one-shot per DRM state change,
     // not per track. Resetting it would re-enable the 2.5 s wait on every skip.
     showQualityBadge(null);
+}
+
+async function _resolveSession(item, adamId, sf, mk) {
+    const isVideo = item.type === 'music-videos' || item.type === 'musicVideo' || item.type === 'library-music-videos';
+    const losslessWanted = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+    if (!isVideo && losslessWanted && _nextAlacSession?.adamId === adamId) {
+        const sess = _nextAlacSession.sess;
+        _nextAlacSession = null;
+        console.log(`[AML Gapless] ✓ HIT — using pre-warmed ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs/1000).toFixed(1)}s (saved ~2–5s webplayback+CDN)`);
+        return sess;
+    }
+    const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            assetId:    adamId,
+            storefront: sf,
+            capabilities: {
+                lossless: losslessWanted,
+                atmos:    false,
+                video:    isVideo,
+            },
+            mvMaxHeight:    _mvMaxHeight,
+            token:          mk.developerToken ?? '',
+            mediaUserToken: getMUT(),
+        }),
+    });
+    if (!sessResp.ok) throw new Error(`Session ${sessResp.status}: ${await sessResp.text()}`);
+    return sessResp.json();
+}
+
+async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
+    _seekable    = sess.capabilities?.seekable ?? false;
+    _chunkCache  = { sessionId: _sessionId, chunks: [], byteSize: 0 };
+    const audioPath  = sess.streams?.audio ?? `/api/v1/playback/${_sessionId}/audio`;
+    const streamBase = `${ENGINE}${audioPath}?raw=1`;
+    _activeStreamBase = streamBase;
+
+    const ms      = new MediaSource();
+    const blobUrl = URL.createObjectURL(ms);
+    _ourBlobUrl   = blobUrl;
+    _nativeSrcSet.call(mkAudio, blobUrl);
+
+    delete mkAudio.load;
+    HTMLMediaElement.prototype.load.call(mkAudio);
+    mkAudio.load = () => {};
+
+    await new Promise((resolve, reject) => {
+        ctrl.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        ms.addEventListener('sourceopen', resolve, { once: true });
+    });
+    URL.revokeObjectURL(blobUrl);
+    if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
+
+    const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+    sb.addEventListener('error', e => console.error('[AML MSE] SourceBuffer error', e));
+    _activeSb = sb; _activeMs = ms;
+
+    // Mirror VLC play/pause pattern — override pause/paused on the element instance
+    const _nativeMSEPause = HTMLMediaElement.prototype.pause.bind(mkAudio);
+    _msePaused = false;
+    Object.defineProperty(mkAudio, 'paused', {
+        get: () => _msePaused,
+        configurable: true,
+    });
+    mkAudio.pause = () => {
+        _msePaused = true;
+        _nativeMSEPause();
+    };
+
+    mkAudio.addEventListener('loadedmetadata', function onMeta() {
+        try {
+            if (sb.buffered.length > 0 && sb.buffered.start(0) > mkAudio.currentTime + 0.1)
+                mkAudio.currentTime = sb.buffered.start(0);
+            else if (sb.buffered.length === 0)
+                sb.addEventListener('updateend', () => { try { if (sb.buffered.length > 0 && sb.buffered.start(0) > mkAudio.currentTime + 0.1) mkAudio.currentTime = sb.buffered.start(0); } catch(_){} }, { once: true });
+        } catch (_) {}
+    }, { once: true });
+
+    _pipeCtrl = new AbortController();
+    const pipeCtrl = _pipeCtrl;
+    pipeToSourceBuffer(sb, mkAudio, streamBase, pipeCtrl.signal, ms, _durationSec, t0).catch(e => {
+        if (!pipeCtrl.signal.aborted) console.error('[AML MSE] pipe error:', e.message);
+    });
+
+    const onSeeking = () => {
+        if (ctrl.signal.aborted) return;
+        if (!_ourSeekPending) return;
+        _ourSeekPending = false;
+        mseSeekToTime(_ourSeekTarget, mkAudio, sb, ms);
+    };
+
+    const tryPlay = () => {
+        if (ctrl.signal.aborted) return;
+        mkAudio.addEventListener('seeking', onSeeking);
+        if (_ourSeekPending) {
+            _ourSeekPending = false;
+            mseSeekToTime(_ourSeekTarget, mkAudio, sb, ms);
+            return;
+        }
+        _nativePlay().catch(e => console.warn('[AML MSE] play():', e));
+    };
+
+    if (mkAudio.readyState >= 3) tryPlay();
+    else mkAudio.addEventListener('canplay', tryPlay, { once: true });
+
+    ctrl.signal.addEventListener('abort', () => {
+        mkAudio.removeEventListener('seeking', onSeeking);
+        mkAudio.removeEventListener('canplay', tryPlay);
+        delete mkAudio.paused;
+        delete mkAudio.pause;
+        _msePaused = false;
+        unbridgeDuration();
+    }, { once: true });
+
+    console.log(`[AML MSE] AAC stream open +${((performance.now()-t0)/1000).toFixed(2)}s`);
+}
+
+async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
+    _vlcMode = true;
+
+    // Keep mkAudio in a perpetual loading state via an open MediaSource.
+    // MK's state machine reads DOM events (playing, pause, timeupdate, ended)
+    // from this element; actual audio comes from libvlc → system sound device.
+    _allowCDNTransition = false;
+    const _silentMs  = new MediaSource();
+    const _silentUrl = URL.createObjectURL(_silentMs);
+    _nativeSrcSet.call(mkAudio, _silentUrl);
+    delete mkAudio.load;
+    HTMLMediaElement.prototype.load.call(mkAudio);
+    mkAudio.load = () => {};
+
+    _vlcPaused = false;
+    Object.defineProperty(mkAudio, 'paused', {
+        get: () => _vlcPaused,
+        configurable: true,
+    });
+
+    _vlcPosMs = 0;
+    Object.defineProperty(mkAudio, 'currentTime', {
+        get: () => _vlcPosMs / 1000,
+        set: () => {},
+        configurable: true,
+    });
+
+    let _vlcVolume = _vlcVolPersist; // restore volume from previous track
+    let _vlcMuted = false;
+    let _vlcPreMuteVol = _vlcVolume;
+    let _vlcVolSetting = false;
+    const _postVlcVol = (vol) => fetch(`${ENGINE}/api/v1/vlc/volume`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ volume: vol }),
+    }).catch(() => {});
+    const _dispatchVolChange = () => {
+        if (_vlcVolSetting) return;
+        _vlcVolSetting = true;
+        try { mkAudio.dispatchEvent(new Event('volumechange')); }
+        finally { _vlcVolSetting = false; }
+    };
+    Object.defineProperty(mkAudio, 'volume', {
+        get: () => _vlcVolume / 100,
+        set: (v) => {
+            if (_vlcVolSetting) return;
+            const newVol = Math.max(0, Math.min(200, Math.round(v * 100)));
+            if (newVol === _vlcVolume) return;
+            _vlcVolume = newVol;
+            _vlcVolPersist = newVol;
+            if (_vlcVolume > 0) _vlcMuted = false;
+            _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
+            _dispatchVolChange();
+        },
+        configurable: true,
+    });
+    Object.defineProperty(mkAudio, 'muted', {
+        get: () => _vlcMuted,
+        set: (v) => {
+            _vlcMuted = !!v;
+            if (_vlcMuted) { _vlcPreMuteVol = _vlcVolume || 100; _postVlcVol(0); }
+            else { _vlcVolume = _vlcPreMuteVol; _vlcVolPersist = _vlcVolume; _postVlcVol(_vlcVolume); }
+            _dispatchVolChange();
+        },
+        configurable: true,
+    });
+
+    mkAudio.pause = () => {
+        console.log(`[AML VLC] pause() → pause`);
+        _vlcPaused = true;
+        mkAudio.dispatchEvent(new Event('pause'));
+        _startLyricsFreeze(mkAudio);
+        fetch(`${ENGINE}/api/v1/vlc/pause`, { method: 'POST' }).catch(() => {});
+    };
+
+    _vlcLoading = true;
+    const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: _sessionId, assetId: adamId, startMs: 0 }),
+        signal: ctrl.signal,
+    });
+    if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
+
+    _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
+
+    if (ctrl.signal.aborted) return;
+
+    mkAudio.addEventListener('canplay', () => {
+        if (!ctrl.signal.aborted) {
+            _vlcPaused = false;
+            mkAudio.dispatchEvent(new Event('playing'));
+            if (_vlcLoading) mkAudio.dispatchEvent(new Event('waiting'));
+        }
+    }, { once: true });
+    mkAudio.dispatchEvent(new Event('canplay'));
+
+    startVLCPoll(mkAudio);
+    console.log(`[AML Engine] VLC playing +${((performance.now()-t0)/1000).toFixed(2)}s`);
+
+    ctrl.signal.addEventListener('abort', () => {
+        unbridgeDuration();
+        stopVLCPoll();
+        _stopLyricsFreeze();
+        _vlcLoading = false;
+        URL.revokeObjectURL(_silentUrl);
+        delete mkAudio.paused;
+        delete mkAudio.currentTime;
+        delete mkAudio.volume;
+        delete mkAudio.muted;
+        delete mkAudio.pause;
+        _vlcPaused = false;
+    }, { once: true });
+}
+
+async function handleTrackChange(mk) {
+    let item = mk.nowPlayingItem;
+    if (!item) {
+        item = await _handleNullNPIDF(mk);
+        if (!item) return;
+    }
+
+    _closeCDNGate(mk);
+
+    const myGen = ++_generation;
+    _resetPlaybackState();
 
     // Library tracks have an `i.` prefixed id; the engine needs the catalog id.
     const adamId = item.playParams?.catalogId
@@ -2880,35 +3176,7 @@ async function handleTrackChange(mk) {
     if (myGen !== _generation) return;
 
     try {
-        // Gapless: reuse the pre-warmed ALAC session if available, skipping the
-        // webplayback API round-trip (~1–2 s) and CDN download (~2–5 s).
-        const isVideo = item.type === 'music-videos' || item.type === 'musicVideo' || item.type === 'library-music-videos';
-        const losslessWanted = _engineCaps.lossless && _streamingQuality !== 'high-quality';
-        let sess;
-        if (!isVideo && losslessWanted && _nextAlacSession?.adamId === adamId) {
-            sess = _nextAlacSession.sess;
-            _nextAlacSession = null;
-            console.log(`[AML Gapless] ✓ HIT — using pre-warmed ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs/1000).toFixed(1)}s (saved ~2–5s webplayback+CDN)`);
-        } else {
-            const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
-                method:  'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    assetId:    adamId,
-                    storefront: sf,
-                    capabilities: {
-                        lossless: losslessWanted,
-                        atmos:    false,
-                        video:    isVideo,
-                    },
-                    mvMaxHeight:    _mvMaxHeight,
-                    token:          mk.developerToken ?? '',
-                    mediaUserToken: getMUT(),
-                }),
-            });
-            if (!sessResp.ok) throw new Error(`Session ${sessResp.status}: ${await sessResp.text()}`);
-            sess = await sessResp.json();
-        }
+        const sess = await _resolveSession(item, adamId, sf, mk);
 
         if (myGen !== _generation) { deleteSession(sess.sessionId); return; }
 
@@ -2935,214 +3203,9 @@ async function handleTrackChange(mk) {
         bridgeDuration(mk, _durationSec);
 
         if (sess.codec === 'aac') {
-            // ── MSE path: native AAC fMP4 piped directly into the browser ──────
-            // Seek works via ?t= (SeekableSource on engine side).
-            // ALAC/Atmos still go through VLC below.
-
-            _seekable    = sess.capabilities?.seekable ?? false;
-            _chunkCache  = { sessionId: _sessionId, chunks: [], byteSize: 0 };
-            const audioPath  = sess.streams?.audio ?? `/api/v1/playback/${_sessionId}/audio`;
-            const streamBase = `${ENGINE}${audioPath}?raw=1`;
-            _activeStreamBase = streamBase;
-
-            const ms      = new MediaSource();
-            const blobUrl = URL.createObjectURL(ms);
-            _ourBlobUrl   = blobUrl;
-            _nativeSrcSet.call(mkAudio, blobUrl);
-
-            delete mkAudio.load;
-            HTMLMediaElement.prototype.load.call(mkAudio);
-            mkAudio.load = () => {};
-
-            await new Promise((resolve, reject) => {
-                ctrl.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-                ms.addEventListener('sourceopen', resolve, { once: true });
-            });
-            URL.revokeObjectURL(blobUrl);
-            if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
-
-            const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
-            sb.addEventListener('error', e => console.error('[AML MSE] SourceBuffer error', e));
-            _activeSb = sb; _activeMs = ms;
-
-            // ── Mirror VLC play/pause pattern ──────────────────────────────────
-            // Override pause/paused on the element instance so ALL pause() calls —
-            // from MK internals, the proxy, or anywhere — go through one handler.
-            // Without this, MK can call audio.pause() directly and bypass our flag.
-            const _nativeMSEPause = HTMLMediaElement.prototype.pause.bind(mkAudio);
-            _msePaused = false;
-            Object.defineProperty(mkAudio, 'paused', {
-                get: () => _msePaused,
-                configurable: true,
-            });
-            mkAudio.pause = () => {
-                _msePaused = true;
-                _nativeMSEPause(); // actually stop audio output
-            };
-
-            mkAudio.addEventListener('loadedmetadata', function onMeta() {
-                try {
-                    if (sb.buffered.length > 0 && sb.buffered.start(0) > mkAudio.currentTime + 0.1)
-                        mkAudio.currentTime = sb.buffered.start(0);
-                    else if (sb.buffered.length === 0)
-                        sb.addEventListener('updateend', () => { try { if (sb.buffered.length > 0 && sb.buffered.start(0) > mkAudio.currentTime + 0.1) mkAudio.currentTime = sb.buffered.start(0); } catch(_){} }, { once: true });
-                } catch (_) {}
-            }, { once: true });
-
-            _pipeCtrl = new AbortController();
-            const pipeCtrl = _pipeCtrl;
-            pipeToSourceBuffer(sb, mkAudio, streamBase, pipeCtrl.signal, ms, _durationSec, t0).catch(e => {
-                if (!pipeCtrl.signal.aborted) console.error('[AML MSE] pipe error:', e.message);
-            });
-
-            const onSeeking = () => {
-                if (ctrl.signal.aborted) return;
-                if (!_ourSeekPending) return;
-                _ourSeekPending = false;
-                mseSeekToTime(_ourSeekTarget, mkAudio, sb, ms);
-            };
-
-            const tryPlay = () => {
-                if (ctrl.signal.aborted) return;
-                mkAudio.addEventListener('seeking', onSeeking);
-                if (_ourSeekPending) {
-                    _ourSeekPending = false;
-                    mseSeekToTime(_ourSeekTarget, mkAudio, sb, ms);
-                    return;
-                }
-                _nativePlay().catch(e => console.warn('[AML MSE] play():', e));
-            };
-
-            if (mkAudio.readyState >= 3) tryPlay();
-            else mkAudio.addEventListener('canplay', tryPlay, { once: true });
-
-            ctrl.signal.addEventListener('abort', () => {
-                mkAudio.removeEventListener('seeking', onSeeking);
-                mkAudio.removeEventListener('canplay', tryPlay);
-                delete mkAudio.paused;
-                delete mkAudio.pause;
-                _msePaused = false;
-                unbridgeDuration();
-            }, { once: true });
-
-            console.log(`[AML MSE] AAC stream open +${((performance.now()-t0)/1000).toFixed(2)}s`);
-
+            await _setupMSEPath(mkAudio, sess, mk, ctrl, t0);
         } else {
-            // ── VLC path: ALAC and Atmos routed through libvlc ──────────────────
-
-            _vlcMode = true;
-
-            // Keep mkAudio in a perpetual loading state via an open MediaSource.
-            // MK's state machine reads DOM events (playing, pause, timeupdate, ended)
-            // from this element; actual audio comes from libvlc → system sound device.
-            // Re-enable CDN block now that VLC has taken over — any CDN URLs set by
-            // MK after this point should be blocked (we own the audio element).
-            _allowCDNTransition = false;
-            const _silentMs  = new MediaSource();
-            const _silentUrl = URL.createObjectURL(_silentMs);
-            _nativeSrcSet.call(mkAudio, _silentUrl);
-            delete mkAudio.load;
-            HTMLMediaElement.prototype.load.call(mkAudio);
-            mkAudio.load = () => {};
-
-            _vlcPaused = false;
-            Object.defineProperty(mkAudio, 'paused', {
-                get: () => _vlcPaused,
-                configurable: true,
-            });
-
-            _vlcPosMs = 0;
-            Object.defineProperty(mkAudio, 'currentTime', {
-                get: () => _vlcPosMs / 1000,
-                set: () => {},
-                configurable: true,
-            });
-
-            let _vlcVolume = _vlcVolPersist; // restore volume from previous track
-            let _vlcMuted = false;
-            let _vlcPreMuteVol = _vlcVolume;
-            let _vlcVolSetting = false; // re-entry guard: prevents setter→volumechange→setter loop
-            const _postVlcVol = (vol) => fetch(`${ENGINE}/api/v1/vlc/volume`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ volume: vol }),
-            }).catch(() => {});
-            const _dispatchVolChange = () => {
-                if (_vlcVolSetting) return;
-                _vlcVolSetting = true;
-                try { mkAudio.dispatchEvent(new Event('volumechange')); }
-                finally { _vlcVolSetting = false; }
-            };
-            Object.defineProperty(mkAudio, 'volume', {
-                get: () => _vlcVolume / 100,
-                set: (v) => {
-                    if (_vlcVolSetting) return;
-                    const newVol = Math.max(0, Math.min(200, Math.round(v * 100)));
-                    if (newVol === _vlcVolume) return; // MK sync no-op — value unchanged
-                    _vlcVolume = newVol;
-                    _vlcVolPersist = newVol; // save for next track
-                    if (_vlcVolume > 0) _vlcMuted = false;
-                    _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
-                    _dispatchVolChange();
-                },
-                configurable: true,
-            });
-            Object.defineProperty(mkAudio, 'muted', {
-                get: () => _vlcMuted,
-                set: (v) => {
-                    _vlcMuted = !!v;
-                    if (_vlcMuted) { _vlcPreMuteVol = _vlcVolume || 100; _postVlcVol(0); }
-                    else { _vlcVolume = _vlcPreMuteVol; _vlcVolPersist = _vlcVolume; _postVlcVol(_vlcVolume); }
-                    _dispatchVolChange();
-                },
-                configurable: true,
-            });
-
-            mkAudio.pause = () => {
-                console.log(`[AML VLC] pause() → pause`);
-                _vlcPaused = true;
-                mkAudio.dispatchEvent(new Event('pause'));
-                _startLyricsFreeze(mkAudio);
-                fetch(`${ENGINE}/api/v1/vlc/pause`, { method: 'POST' }).catch(() => {});
-            };
-
-            _vlcLoading = true;
-            const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sessionId: _sessionId, assetId: adamId, startMs: 0 }),
-                signal: ctrl.signal,
-            });
-            if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
-
-            _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
-
-            if (ctrl.signal.aborted) return;
-
-            mkAudio.addEventListener('canplay', () => {
-                if (!ctrl.signal.aborted) {
-                    _vlcPaused = false;
-                    mkAudio.dispatchEvent(new Event('playing'));
-                    if (_vlcLoading) mkAudio.dispatchEvent(new Event('waiting'));
-                }
-            }, { once: true });
-            mkAudio.dispatchEvent(new Event('canplay'));
-
-            startVLCPoll(mkAudio);
-            console.log(`[AML Engine] VLC playing +${((performance.now()-t0)/1000).toFixed(2)}s`);
-
-            ctrl.signal.addEventListener('abort', () => {
-                unbridgeDuration();
-                stopVLCPoll();
-                _stopLyricsFreeze();
-                _vlcLoading = false;
-                URL.revokeObjectURL(_silentUrl);
-                delete mkAudio.paused;
-                delete mkAudio.currentTime;
-                delete mkAudio.volume;
-                delete mkAudio.muted;
-                delete mkAudio.pause;
-                _vlcPaused = false;
-            }, { once: true });
+            await _setupVLCPath(mkAudio, sess, adamId, ctrl, t0);
         }
 
     } catch (err) {
@@ -3587,9 +3650,13 @@ async function setup() {
     const _origMKPause = mk.pause.bind(mk);
     mk.play = function() {
         if (_vlcMode) {
-            console.log('[AML VLC] mk.play() → resume');
-            _vlcPaused = false;
-            fetch(`${ENGINE}/api/v1/vlc/resume`, { method: 'POST' }).catch(() => {});
+            // Only send VLC resume if actually paused — MK internally retries play()
+            // until audio.play() resolves, causing a storm of calls. Dedup via _vlcPaused.
+            if (_vlcPaused) {
+                console.log('[AML VLC] mk.play() → resume');
+                _vlcPaused = false;
+                fetch(`${ENGINE}/api/v1/vlc/resume`, { method: 'POST' }).catch(() => {});
+            }
         } else {
             // Clear the manual-pause guard so the next audio.play() proxy call
             // is allowed through.
@@ -4076,10 +4143,12 @@ async function setup() {
                                 if (p?.then) p.then(r => console.log('[MK-DBG] local cache redirect resolved'), e2 => console.log('[MK-DBG] local cache redirect rejected:', e2?.message || String(e2)));
                                 return p;
                             }
-                            // Fallback: single-song (works even before first library sync)
-                            console.log('[MK-DBG] setQueue → songs redirect (no cache) catalogId=' + catalogId + ' tracks=' + tracks.length);
-                            const p = _mkApiSaved.setQueue.call(mk, {songs: [catalogId]});
-                            if (p?.then) p.then(r => console.log('[MK-DBG] songs redirect resolved'), e2 => console.log('[MK-DBG] songs redirect rejected:', e2?.message || String(e2)));
+                            // Library DB had no tracks (sync not yet complete or playlist not synced).
+                            // Fall through to MK's original setQueue({playlists:[...]}) so it fetches
+                            // the playlist from Apple's API — same as if we never intercepted.
+                            console.log('[MK-DBG] setQueue → passthrough (no local tracks) catalogId=' + catalogId);
+                            const p = _mkApiSaved.setQueue.apply(mk, a);
+                            if (p?.then) p.then(r => console.log('[MK-DBG] passthrough resolved'), e2 => console.log('[MK-DBG] passthrough rejected:', e2?.message || String(e2)));
                             return p;
                         });
                     }
@@ -4320,9 +4389,12 @@ async function setup() {
         // has its own internal AudioPlayer path), so this listener is more reliable
         // than intercepting audio.play() for user-initiated resumes.
         if (s === PS?.playing) {
-            console.log('[AML VLC] playbackStateDidChange → playing → resume');
-            _vlcPaused = false;
-            fetch(`${ENGINE}/api/v1/vlc/resume`, { method: 'POST' }).catch(() => {});
+            // mk.play() already sent resume and cleared _vlcPaused; skip duplicate fetch.
+            if (_vlcPaused) {
+                console.log('[AML VLC] playbackStateDidChange → playing → resume');
+                _vlcPaused = false;
+                fetch(`${ENGINE}/api/v1/vlc/resume`, { method: 'POST' }).catch(() => {});
+            }
         } else if (s === PS?.paused) {
             console.log('[AML VLC] playbackStateDidChange → paused → pause');
             _vlcPaused = true;
@@ -4639,6 +4711,14 @@ window.amlGetQueueInfo = function () {
         return r.json();
     }
 
+    const checkDRMStatus = (status, msgEl, t, onDone, onChallenge) => {
+        const auth = status.state?.authentication;
+        const session = status.state?.session;
+        if (session === 'valid' || auth === 'logged_in' || status.state?.fairplay === 'ready' || status.capabilities?.cbcs === true) { clearInterval(t); onDone(); return; }
+        if (auth === 'challenging') { clearInterval(t); onChallenge(); return; }
+        if (auth === 'failed') { clearInterval(t); msgEl.textContent = status.message || 'Authentication failed.'; }
+    };
+
     // ── Engine Account section (self-contained, mutates its own body) ─────
     function buildAccountSection(drm, onRefresh) {
         const { wrap, body } = makeSection('Engine Account');
@@ -4722,11 +4802,7 @@ window.amlGetQueueInfo = function () {
                 if (++n > 60) { clearInterval(t); msgEl.textContent = 'Timed out. Refresh to check status.'; return; }
                 const status = await fetchDRM().catch(() => null);
                 if (!status) return;
-                const auth = status.state?.authentication;
-                const session = status.state?.session;
-                if (session === 'valid' || auth === 'logged_in' || status.state?.fairplay === 'ready' || status.capabilities?.cbcs === true) { clearInterval(t); onRefresh(); return; }
-                if (auth === 'challenging') { clearInterval(t); renderChallenge(); return; }
-                if (auth === 'failed') { clearInterval(t); msgEl.textContent = status.message || 'Authentication failed.'; return; }
+                checkDRMStatus(status, msgEl, t, onRefresh, renderChallenge);
             }, 1000);
         }
 
@@ -4815,93 +4891,432 @@ window.amlGetQueueInfo = function () {
         dlg.addEventListener('animationend', () => { dlg.classList.remove('aml-closing'); dlg.close(); }, { once: true });
     }
 
-    // ── Open settings — anchored to the account button ─────────────────────
-    // Generation counter: each openSettings() call gets a unique ID.
-    // After each await, stale callers (whose ID was superseded by a newer call)
-    // bail out — preventing concurrent renders from appending duplicate sections.
-    let _settingsGen = 0;
-    async function openSettings() {
-        const myGen = ++_settingsGen;
-        const dlg = getDialog();
-        dlg.innerHTML = '';
+    // ── Shared helpers lifted to IIFE level (used by section builders) ───────
 
-        // Floating close button — sticky so it stays visible while scrolling
-        const closeBtn = document.createElement('button');
-        closeBtn.id = 'aml-settings-close';
-        closeBtn.textContent = '✕';
-        closeBtn.style.cssText = FF +
-            'background:rgba(30,30,32,0.85);border:0.5px solid rgba(255,255,255,0.13);border-radius:50%;' +
-            'width:26px;height:26px;cursor:pointer;color:rgba(255,255,255,0.6);font-size:12px;' +
-            'display:flex;align-items:center;justify-content:center;margin-top:16px;' +
-            'backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);' +
-            'transition:background 0.15s,color 0.15s;';
-        closeBtn.onmouseenter = () => { closeBtn.style.background = 'rgba(255,255,255,0.14)'; closeBtn.style.color = '#fff'; };
-        closeBtn.onmouseleave = () => { closeBtn.style.background = 'rgba(30,30,32,0.85)'; closeBtn.style.color = 'rgba(255,255,255,0.6)'; };
-        closeBtn.onclick = closeSettings;
-        dlg.appendChild(closeBtn);
+    function _amlMiniBtn(onClick) {
+        const b = document.createElement('button');
+        b.textContent = '↺';
+        b.title = 'Reset to default';
+        b.style.cssText = FF + 'width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;' +
+            'background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.12);border-radius:5px;' +
+            'color:rgba(255,255,255,0.35);font-size:13px;cursor:pointer;transition:all 0.15s;';
+        b.onmouseenter = () => { b.style.background = 'rgba(255,255,255,0.12)'; b.style.color = 'rgba(255,255,255,0.7)'; };
+        b.onmouseleave = () => { b.style.background = 'rgba(255,255,255,0.06)'; b.style.color = 'rgba(255,255,255,0.35)'; };
+        b.onclick = onClick;
+        return b;
+    }
 
-        const titleBar = document.createElement('div');
-        titleBar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:4px 0 4px;margin-top:-26px;';
-        const title = document.createElement('h1');
-        title.textContent = 'AML Settings';
-        title.style.cssText = FF + 'font-size:15px;font-weight:600;margin:0;color:rgba(255,255,255,0.95);';
-        const savedBadge = document.createElement('span');
-        savedBadge.style.cssText = FF + 'font-size:10px;color:#30d158;opacity:0;transition:opacity 0.3s;flex-shrink:0;';
-        savedBadge.textContent = '✓ Saved';
-        let _savedTimer = null;
-        titleBar.append(title, savedBadge);
-        dlg.appendChild(titleBar);
+    function _amlIOSToggle(on, onChange) {
+        const label = document.createElement('label');
+        label.style.cssText = 'position:relative;display:inline-flex;align-items:center;cursor:pointer;flex-shrink:0;width:44px;height:26px;';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.checked = on;
+        cb.style.cssText = 'position:absolute;opacity:0;width:0;height:0;pointer-events:none;';
+        const track = document.createElement('span');
+        track.style.cssText = `position:absolute;inset:0;border-radius:13px;transition:background 0.22s;background:${on ? '#fc3c44' : 'rgba(255,255,255,0.18)'};`;
+        const thumb = document.createElement('span');
+        thumb.style.cssText = `position:absolute;top:3px;left:${on ? '21px' : '3px'};width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);transition:left 0.22s;`;
+        label.append(cb, track, thumb);
+        cb.addEventListener('change', () => {
+            track.style.background = cb.checked ? '#fc3c44' : 'rgba(255,255,255,0.18)';
+            thumb.style.left = cb.checked ? '21px' : '3px';
+            onChange(cb.checked);
+        });
+        return label;
+    }
 
-        // Wrap setTweak so every save flashes the badge.
-        // Restore any prior open's proxy first (handles re-opens while open and bail paths).
-        const _bridge = window.amlBridge;
-        if (_bridge._settingsRestore) _bridge._settingsRestore();
-        const _realSetTweak = _bridge.setTweak.bind(_bridge);
-        const _restoreProxy = () => { _bridge.setTweak = _realSetTweak; _bridge._settingsRestore = null; };
-        _bridge._settingsRestore = _restoreProxy;
-        _bridge.setTweak = (k, v) => {
-            _realSetTweak(k, v);
-            savedBadge.style.opacity = '1';
-            clearTimeout(_savedTimer);
-            _savedTimer = setTimeout(() => { savedBadge.style.opacity = '0'; }, 1400);
+    function _amlMakeQualityDropdown(prefKey, prefs, qualityOpts) {
+        const saved = prefs[prefKey] ?? 'lossless';
+        let current = saved;
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'position:relative;display:inline-block;';
+        const btn = document.createElement('div');
+        btn.className = 'aml-qdrop-btn';
+        const btnLabel = document.createElement('span');
+        btnLabel.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        const chevron = document.createElement('span');
+        chevron.className = 'aml-qdrop-chevron';
+        chevron.innerHTML = '&#9660;';
+        btn.append(btnLabel, chevron);
+        const menu = document.createElement('div');
+        menu.className = 'aml-qdrop-menu';
+        menu.style.cssText += 'display:none;position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:10;';
+        function setOption(value, save) {
+            current = value;
+            const opt = qualityOpts.find(o => o.value === value);
+            btnLabel.textContent = opt ? opt.label : value;
+            const sv = String(value);
+            menu.querySelectorAll('.aml-qdrop-item').forEach(el => {
+                el.classList.toggle('selected', el.dataset.value === sv);
+            });
+            if (save) {
+                window.amlBridge?.setTweak(prefKey, value);
+                if (prefKey === 'streaming-quality') _streamingQuality = value;
+            }
+        }
+        qualityOpts.forEach(({ value, label }) => {
+            const item = document.createElement('div');
+            item.className = 'aml-qdrop-item';
+            item.dataset.value = value;
+            const accent = document.createElement('div');
+            accent.className = 'aml-qdrop-accent';
+            const lbl = document.createElement('div');
+            lbl.className = 'aml-qdrop-item-label';
+            lbl.textContent = label;
+            item.append(accent, lbl);
+            item.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                setOption(value, true);
+                menu.style.display = 'none';
+            });
+            menu.appendChild(item);
+        });
+        setOption(current, false);
+        wrap.append(btn, menu);
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const open = menu.style.display !== 'none';
+            document.querySelectorAll('.aml-qdrop-menu').forEach(m => { m.style.display = 'none'; });
+            if (!open) {
+                menu.style.display = 'block';
+                const sel = menu.querySelector('.selected');
+                if (sel) sel.scrollIntoView({ block: 'nearest' });
+            }
+        });
+        return { wrap, setValue: v => setOption(v, false) };
+    }
+
+    function _amlGenPalette(hex, appearance) {
+        hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#fc3c44';
+        const r=parseInt(hex.slice(1,3),16)/255, g=parseInt(hex.slice(3,5),16)/255, b=parseInt(hex.slice(5,7),16)/255;
+        const mx=Math.max(r,g,b), mn=Math.min(r,g,b), l=(mx+mn)/2;
+        const d=mx-mn, s=d===0?0:d/(1-Math.abs(2*l-1));
+        let h=0; if(d){if(mx===r)h=((g-b)/d+6)%6;else if(mx===g)h=(b-r)/d+2;else h=(r-g)/d+4;h*=60;}
+        const hi=Math.round(h), si=Math.round(s*100);
+        if (appearance === 'light') {
+            return { accent:hex, bgColor:`hsla(${hi},${Math.round(si*.25)}%,96%,1)`, navBg:`hsla(${hi},${Math.round(si*.3)}%,91%,0.95)`, navBorder:`hsla(${hi},${Math.round(si*.6)}%,30%,0.15)`, accentActive:`hsla(${hi},${si}%,45%,0.15)` };
+        }
+        return { accent:hex, bgColor:`hsla(${hi},${Math.round(si*.5)}%,10%,1)`, navBg:`hsla(${hi},${Math.round(si*.8)}%,14%,0.72)`, navBorder:`hsla(${hi},${Math.round(si*.7)}%,50%,0.25)`, accentActive:`hsla(${hi},${Math.round(si*.9)}%,60%,0.28)` };
+    }
+
+    function _amlCssColorToHex(str) {
+        if (/^#[0-9a-fA-F]{6}$/.test(str)) return str;
+        const m = str.match(/hsla?\((\d+),\s*([\d.]+)%,\s*([\d.]+)%/);
+        if (!m) return '#336699';
+        const h=+m[1]/360, s=+m[2]/100, l=+m[3]/100, a=s*Math.min(l,1-l);
+        const f=n=>{const k=(n+h*12)%12;return l-a*Math.max(-1,Math.min(k-3,9-k,1));};
+        return '#'+[f(0),f(8),f(4)].map(x=>Math.round(x*255).toString(16).padStart(2,'0')).join('');
+    }
+
+    function _amlRenderPaletteEditor(container, thInfo, st) {
+        container.innerHTML = '';
+        const pal = st.curPalette || _amlGenPalette(thInfo.systemAccent || '#fc3c44', st.curAppearance);
+        const paletteKeys = [
+            { key: 'bgColor', label: 'Background' },
+            { key: 'accent', label: 'Accent' },
+            { key: 'navBg', label: 'Sidebar' },
+            { key: 'navBorder', label: 'Border' },
+            { key: 'accentActive', label: 'Active' },
+        ];
+        const grid = document.createElement('div');
+        grid.style.cssText = 'display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:12px 0;border-bottom:0.5px solid rgba(255,255,255,0.07);';
+        paletteKeys.forEach(({ key, label }) => {
+            const cell = document.createElement('div');
+            cell.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;gap:4px;';
+            const swatchWrap = document.createElement('div');
+            swatchWrap.style.cssText = `height:30px;border-radius:6px;background:${pal[key]||'#333'};border:1px solid rgba(255,255,255,0.1);position:relative;overflow:hidden;cursor:pointer;`;
+            const picker = document.createElement('input');
+            picker.type = 'color';
+            picker.value = _amlCssColorToHex(pal[key] || '#336699');
+            picker.style.cssText = 'position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;';
+            picker.oninput = () => {
+                pal[key] = picker.value;
+                swatchWrap.style.background = picker.value;
+                st.curPalette = { ...pal };
+                window.amlBridge.setThemePalette(key, picker.value);
+            };
+            swatchWrap.appendChild(picker);
+            const lbl = document.createElement('div');
+            lbl.style.cssText = FF+'font-size:10px;color:rgba(255,255,255,0.4);text-align:center;';
+            lbl.textContent = label;
+            cell.appendChild(swatchWrap);
+            cell.appendChild(lbl);
+            grid.appendChild(cell);
+        });
+        container.appendChild(grid);
+        const resetBtn = makeBtn('Reset to system accent');
+        resetBtn.style.cssText += 'margin:10px 0;display:block;';
+        resetBtn.onclick = async () => {
+            const newPal = await window.amlBridge.resetThemePalette();
+            if (newPal) { st.curPalette = newPal; _amlRenderPaletteEditor(container, thInfo, st); }
         };
-        dlg.addEventListener('close', _restoreProxy, { once: true });
-
-
-        const [drm, tools] = await Promise.all([
-            fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
-            fetch(`${ENGINE}/api/v1/tools`).then(r => r.json()).catch(() => ({})),
-        ]);
-        if (myGen !== _settingsGen) { _restoreProxy(); return; }
-        const prefs = await window.amlBridge.getPrefs().catch(() => ({}));
-        if (myGen !== _settingsGen) { _restoreProxy(); return; }
-        const s     = drm.state ?? {};
-
-        // Shared icon reset button — same style used throughout all sections
-        const makeMiniBtn = (label, onClick) => {
-            const b = document.createElement('button');
-            b.textContent = '↺';
-            b.title = 'Reset to default';
-            b.style.cssText = FF + 'width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;' +
-                'background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.12);border-radius:5px;' +
-                'color:rgba(255,255,255,0.35);font-size:13px;cursor:pointer;transition:all 0.15s;';
-            b.onmouseenter = () => { b.style.background = 'rgba(255,255,255,0.12)'; b.style.color = 'rgba(255,255,255,0.7)'; };
-            b.onmouseleave = () => { b.style.background = 'rgba(255,255,255,0.06)'; b.style.color = 'rgba(255,255,255,0.35)'; };
-            b.onclick = onClick;
-            return b;
+        container.appendChild(resetBtn);
+        const presH = document.createElement('div');
+        presH.style.cssText = FF+'font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.4);margin:12px 0 6px;';
+        presH.textContent = 'Presets';
+        container.appendChild(presH);
+        const presetList = document.createElement('div');
+        presetList.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;min-height:24px;margin-bottom:10px;';
+        function renderPresets() {
+            presetList.innerHTML = '';
+            if (!st.thPresets.length) {
+                const none = document.createElement('span');
+                none.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.25);';
+                none.textContent = 'No saved presets';
+                presetList.appendChild(none);
+                return;
+            }
+            st.thPresets.forEach(({ name, builtin }) => {
+                const chip = document.createElement('div');
+                chip.style.cssText = `display:flex;align-items:center;gap:4px;background:${builtin?'rgba(252,60,68,0.18)':'rgba(255,255,255,0.1)'};border-radius:20px;padding:3px 8px 3px 12px;cursor:default;${builtin?'border:1px solid rgba(252,60,68,0.35);':''}`;
+                const cl = document.createElement('span');
+                cl.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.8);cursor:pointer;';
+                cl.textContent = name;
+                cl.onclick = () => {
+                    const pr = st.thPresets.find(x => x.name === name);
+                    if (pr) { st.curPalette = pr.palette; window.amlBridge.applyThemePreset(name); _amlRenderPaletteEditor(container, thInfo, st); }
+                };
+                chip.appendChild(cl);
+                if (!builtin) {
+                    const del = document.createElement('button');
+                    del.textContent = '×';
+                    del.style.cssText = 'border:none;background:transparent;color:rgba(255,255,255,0.35);cursor:pointer;font-size:14px;padding:0 0 0 4px;line-height:1;';
+                    del.onclick = () => {
+                        st.thPresets = st.thPresets.filter(x => x.name !== name);
+                        window.amlBridge.deleteThemePreset(name);
+                        renderPresets();
+                    };
+                    chip.appendChild(del);
+                }
+                presetList.appendChild(chip);
+            });
+        }
+        renderPresets();
+        container.appendChild(presetList);
+        const actRow = document.createElement('div');
+        actRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;padding-bottom:12px;align-items:center;';
+        const saveNameInput = document.createElement('input');
+        saveNameInput.type = 'text';
+        saveNameInput.placeholder = 'Preset name…';
+        saveNameInput.style.cssText = FF + 'display:none;padding:4px 8px;border-radius:6px;border:none;font-size:12px;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.85);width:110px;';
+        const saveBtn = makeBtn('Save preset');
+        saveBtn.onclick = () => {
+            const showing = saveNameInput.style.display !== 'none';
+            saveNameInput.style.display = showing ? 'none' : 'inline-block';
+            if (!showing) { saveNameInput.value = ''; saveNameInput.focus(); }
         };
+        const saveConfirmBtn = makeBtn('✓');
+        saveConfirmBtn.title = 'Confirm save';
+        saveConfirmBtn.style.cssText += 'display:none;padding:4px 9px;';
+        const doSave = async () => {
+            const name = saveNameInput.value.trim();
+            if (!name) return;
+            const newPresets = await window.amlBridge.saveThemePreset(name);
+            if (newPresets) {
+                const builtins = st.thPresets.filter(x => x.builtin);
+                st.thPresets = [...builtins, ...newPresets];
+                renderPresets();
+            }
+            saveNameInput.style.display = 'none';
+            saveConfirmBtn.style.display = 'none';
+            saveBtn.textContent = 'Save preset';
+        };
+        saveConfirmBtn.onclick = doSave;
+        saveNameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSave(); if (e.key === 'Escape') { saveNameInput.style.display = 'none'; saveConfirmBtn.style.display = 'none'; } });
+        saveNameInput.addEventListener('input', () => {
+            saveConfirmBtn.style.display = saveNameInput.value.trim() ? 'inline-block' : 'none';
+        });
+        const exportBtn = makeBtn('Export');
+        exportBtn.onclick = async () => {
+            const name = prompt('Preset name to export (leave blank for current palette):') || 'current';
+            await window.amlBridge.exportThemePreset(name);
+        };
+        const importBtn = makeBtn('Import');
+        importBtn.onclick = async () => {
+            const preset = await window.amlBridge.importThemePreset();
+            if (preset) {
+                st.thPresets = st.thPresets.filter(x => x.name !== preset.name);
+                st.thPresets.push(preset);
+                renderPresets();
+            }
+        };
+        actRow.appendChild(saveBtn); actRow.appendChild(saveNameInput); actRow.appendChild(saveConfirmBtn); actRow.appendChild(exportBtn); actRow.appendChild(importBtn);
+        container.appendChild(actRow);
+    }
 
-        dlg.appendChild(buildAccountSection(drm, openSettings));
+    const _DL_KNOWN_VARS = new Set([
+        'title','song','artist','album_artist','album','track_number','track',
+        'disc_number','disc','year','genre','codec','ext','quality','tag',
+        'release_date','releasedate','isrc','id','song_id','url_artist','urlartist',
+    ]);
+    const _DL_EX = {
+        album_artist: 'Artist Name', artist: 'Artist Name', album: 'Album Title',
+        year: '2024', codec: 'alac', quality: 'Lossless', url_artist: 'artist-name',
+        'track_number:02d': '01', track_number: '1', disc_number: '1',
+        title: 'Song Title', tag: '[E]', ext: 'm4a',
+        id: '1234567890', isrc: 'USRC12345678', release_date: '2024-01-15',
+    };
 
-        // ── Engine Status ──────────────────────────────────────────────────
-        const { wrap: stWrap, body: stBody } = makeSection('Engine Status');
+    function _dlSubhead(text) {
+        const h = document.createElement('div');
+        h.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;color:rgba(255,255,255,0.35);padding:14px 0 4px;text-transform:uppercase;';
+        h.textContent = text;
+        return h;
+    }
 
+    function _dlDropdown(options, savedValue, onSave) {
+        let current = savedValue;
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'position:relative;display:inline-block;min-width:180px;';
+        const btn = document.createElement('div');
+        btn.className = 'aml-qdrop-btn';
+        btn.style.cssText += 'font-size:12px;';
+        const btnLabel = document.createElement('span');
+        btnLabel.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        const chevron = document.createElement('span');
+        chevron.className = 'aml-qdrop-chevron';
+        chevron.innerHTML = '&#9660;';
+        btn.append(btnLabel, chevron);
+        const menu = document.createElement('div');
+        menu.className = 'aml-qdrop-menu';
+        menu.style.cssText += 'display:none;position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:20;min-width:100%;';
+        function setOpt(v, save) {
+            current = v;
+            const opt = options.find(o => o.value === v);
+            btnLabel.textContent = opt ? opt.label : v;
+            const sv = String(v);
+            menu.querySelectorAll('.aml-qdrop-item').forEach(el =>
+                el.classList.toggle('selected', el.dataset.value === sv));
+            if (save) onSave(v);
+        }
+        options.forEach(({ value, label }) => {
+            const item = document.createElement('div');
+            item.className = 'aml-qdrop-item';
+            item.dataset.value = value;
+            const accent = document.createElement('div'); accent.className = 'aml-qdrop-accent';
+            const lbl = document.createElement('div'); lbl.className = 'aml-qdrop-item-label';
+            lbl.textContent = label;
+            item.append(accent, lbl);
+            item.addEventListener('mousedown', e => { e.preventDefault(); setOpt(value, true); menu.style.display = 'none'; });
+            menu.appendChild(item);
+        });
+        setOpt(current, false);
+        wrap.append(btn, menu);
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            const open = menu.style.display !== 'none';
+            document.querySelectorAll('.aml-qdrop-menu').forEach(m => { m.style.display = 'none'; });
+            if (!open) { menu.style.display = 'block'; menu.querySelector('.selected')?.scrollIntoView({ block: 'nearest' }); }
+        });
+        return { wrap, getValue: () => current, setValue: v => setOpt(v, false) };
+    }
+
+    const _dlValidateTemplate = tmpl => {
+        const matches = tmpl.match(/\{([^}:]+)(?::[^}]+)?\}/g) || [];
+        const unknown = matches
+            .map(m => m.match(/\{([^}:]+)/)[1].toLowerCase())
+            .filter(n => !_DL_KNOWN_VARS.has(n));
+        return unknown.length ? `Unknown variables: ${unknown.map(n => '{'+n+'}').join(', ')}` : '';
+    };
+
+    const _dlRenderTemplate = val =>
+        (val || '').replace(/\{([^}:]+)(?::[^}]+)?\}/g, (_, k) => _DL_EX[k] || _DL_EX[k.toLowerCase()] || `{${k}}`);
+
+    function _amlMakeTemplateRow(label, presets, savedValue, prefKey, suffix, prefs, updatePreview) {
+        const isCustom = !presets.some(p => p.value === savedValue);
+        const rowWrap = document.createElement('div');
+        rowWrap.style.cssText = 'display:flex;flex-direction:column;gap:5px;';
+        const topRow = document.createElement('div');
+        topRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+        const customLbl = document.createElement('label');
+        customLbl.style.cssText = FF + 'display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.4);font-size:11px;cursor:pointer;flex-shrink:0;';
+        const customCb = document.createElement('input');
+        customCb.type = 'checkbox'; customCb.checked = isCustom;
+        customCb.style.cssText = 'accent-color:#fc3c44;cursor:pointer;';
+        customLbl.append(customCb, document.createTextNode('Custom'));
+        const resetBtn = document.createElement('button');
+        resetBtn.textContent = 'Reset';
+        resetBtn.title = 'Restore default';
+        resetBtn.style.cssText = FF + 'padding:2px 8px;background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.12);border-radius:5px;color:rgba(255,255,255,0.38);font-size:10.5px;cursor:pointer;flex-shrink:0;transition:all 0.15s;';
+        resetBtn.onmouseenter = () => { resetBtn.style.background = 'rgba(255,255,255,0.12)'; resetBtn.style.color = 'rgba(255,255,255,0.7)'; };
+        resetBtn.onmouseleave = () => { resetBtn.style.background = 'rgba(255,255,255,0.06)'; resetBtn.style.color = 'rgba(255,255,255,0.38)'; };
+        const { wrap: ddWrap, getValue, setValue } = _dlDropdown(presets, isCustom ? presets[0].value : savedValue, v => {
+            window.amlBridge?.setTweak(prefKey, v);
+            exampleEl.textContent = _dlRenderTemplate(v) + (suffix || '');
+            updatePreview();
+        });
+        const exampleEl = document.createElement('div');
+        exampleEl.style.cssText = FF + 'font-size:10.5px;color:rgba(255,255,255,0.32);font-family:ui-monospace,monospace;padding:1px 0;min-height:14px;';
+        const customWrap = document.createElement('div');
+        customWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+        const customInp = document.createElement('input');
+        customInp.type = 'text';
+        customInp.value = isCustom ? savedValue : (getValue() || '');
+        customInp.placeholder = prefKey.includes('album') ? '{album_artist}/{year} - {album}' : '{track_number:02d} - {title}';
+        customInp.style.cssText = FF + 'width:100%;padding:5px 10px;border-radius:7px;background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);color:rgba(255,255,255,0.88);font-size:12px;box-sizing:border-box;outline:none;transition:border-color 0.15s;';
+        customInp.onfocus = () => { customInp.style.borderColor = 'rgba(252,60,68,0.45)'; };
+        customInp.onblur = () => {
+            const err = _dlValidateTemplate(customInp.value);
+            customInp.style.borderColor = err ? 'rgba(255,69,58,0.5)' : customInp.value ? 'rgba(48,209,88,0.4)' : 'rgba(255,255,255,0.15)';
+        };
+        const validMsg = document.createElement('div');
+        validMsg.style.cssText = FF + 'font-size:10.5px;min-height:14px;';
+        const applyCustom = val => {
+            const err = _dlValidateTemplate(val);
+            if (err) {
+                validMsg.style.color = '#ff453a';
+                validMsg.textContent = '⚠ ' + err;
+                customInp.style.borderColor = 'rgba(255,69,58,0.5)';
+                exampleEl.textContent = '';
+            } else {
+                validMsg.style.color = '#30d158';
+                validMsg.textContent = val ? '✓ Valid' : '';
+                customInp.style.borderColor = val ? 'rgba(48,209,88,0.4)' : 'rgba(255,255,255,0.15)';
+                window.amlBridge?.setTweak(prefKey, val);
+                exampleEl.textContent = val ? (_dlRenderTemplate(val) + (suffix || '')) : '';
+                updatePreview();
+            }
+        };
+        customInp.oninput = () => applyCustom(customInp.value);
+        customWrap.append(customInp, validMsg);
+        const syncMode = () => {
+            const custom = customCb.checked;
+            ddWrap.style.display = custom ? 'none' : 'inline-block';
+            customWrap.style.display = custom ? 'block' : 'none';
+            resetBtn.style.display = (custom || getValue() === presets[0].value) ? 'none' : 'inline-block';
+            if (custom) {
+                customInp.value = getValue();
+                applyCustom(customInp.value);
+            } else {
+                window.amlBridge?.setTweak(prefKey, getValue());
+                exampleEl.textContent = _dlRenderTemplate(getValue()) + (suffix || '');
+                updatePreview();
+            }
+        };
+        resetBtn.onclick = () => {
+            customCb.checked = false;
+            setValue(presets[0].value);
+            window.amlBridge?.setTweak(prefKey, presets[0].value);
+            exampleEl.textContent = _dlRenderTemplate(presets[0].value) + (suffix || '');
+            updatePreview();
+            syncMode();
+        };
+        customCb.onchange = syncMode;
+        syncMode();
+        topRow.append(ddWrap, customLbl, resetBtn);
+        rowWrap.append(topRow, customWrap, exampleEl);
+        return rowWrap;
+    }
+
+    // ── Section builders ────────────────────────────────────────────────────
+
+    function _buildEngineStatusSection(drm) {
+        const { wrap, body: stBody } = makeSection('Engine Status');
         function spinner() {
             const s = document.createElement('span');
             s.className = '_aml-spinner';
             return s;
         }
-
         function renderStatusRows(d) {
             const st = d.state ?? {};
             const proc = st.process ?? 'unknown';
@@ -4922,13 +5337,11 @@ window.amlGetQueueInfo = function () {
                 { label: 'Backend',     text: d.backend?.selected ?? 'embedded', noDot: true },
             ];
         }
-
         function applyStatusRow(v, { ok, loading, text, noDot }) {
             v.innerHTML = '';
             if (!noDot) v.appendChild(loading ? spinner() : dot(ok));
             v.appendChild(document.createTextNode(text));
         }
-
         const valEls = [];
         renderStatusRows(drm).forEach((row, i, arr) => {
             const v = statusVal('', row.noDot ? undefined : row.ok);
@@ -4936,16 +5349,12 @@ window.amlGetQueueInfo = function () {
             valEls.push({ el: v, noDot: !!row.noDot });
             stBody.appendChild(makeRow(row.label, v, row.subtitle, i === arr.length - 1));
         });
-
         const refreshRow = document.createElement('div');
         refreshRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;';
         const refreshBtn = makeBtn('Refresh');
         refreshBtn.onclick = () => openSettings();
         refreshRow.appendChild(refreshBtn);
         stBody.appendChild(refreshRow);
-        dlg.appendChild(stWrap);
-
-        // Poll until all statuses resolve or dialog closes
         const isResolved = d => {
             const st = d.state ?? {};
             return (st.process === 'running') && (st.fairplay === 'ready') &&
@@ -4953,17 +5362,18 @@ window.amlGetQueueInfo = function () {
         };
         if (!isResolved(drm)) {
             const poll = setInterval(async () => {
-                if (!dlg.isConnected) { clearInterval(poll); return; }
+                if (!wrap.isConnected) { clearInterval(poll); return; }
                 const d = await fetchDRM().catch(() => null);
                 if (!d) return;
                 renderStatusRows(d).forEach((row, i) => applyStatusRow(valEls[i].el, row));
                 if (isResolved(d)) clearInterval(poll);
             }, 2000);
         }
+        return wrap;
+    }
 
-        // ── Display ────────────────────────────────────────────────────────
-        const { wrap: dWrap, body: dBody } = makeSection('Display');
-
+    function _buildDisplaySection(prefs) {
+        const { wrap, body: dBody } = makeSection('Display');
         const RST = FF+'border:none;background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.45);border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;margin-left:6px;flex-shrink:0;';
         function makeResetBtn(label, onClick) {
             const b = document.createElement('button'); b.title = `Reset ${label}`; b.textContent = '↺'; b.style.cssText = RST;
@@ -4971,7 +5381,6 @@ window.amlGetQueueInfo = function () {
             b.onmouseleave = () => b.style.color = 'rgba(255,255,255,0.45)';
             b.onclick = onClick; return b;
         }
-
         const blurVal = document.createElement('span');
         blurVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
         blurVal.textContent = `${prefs.glassBlur ?? 20}px`;
@@ -4984,7 +5393,6 @@ window.amlGetQueueInfo = function () {
         blurR.appendChild(blurSl); blurR.appendChild(blurVal);
         blurR.appendChild(makeResetBtn('glass blur', () => { blurSl.value = 20; blurVal.textContent = '20px'; window.amlBridge.setGlassBlur(20); }));
         dBody.appendChild(makeRow('Glass blur', blurR, 'Sidebar and UI element blur intensity', false));
-
         const bgBlurVal = document.createElement('span');
         bgBlurVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
         bgBlurVal.textContent = `${prefs.bgBlur ?? 18}px`;
@@ -4997,7 +5405,6 @@ window.amlGetQueueInfo = function () {
         bgBlurR.appendChild(bgBlurSl); bgBlurR.appendChild(bgBlurVal);
         bgBlurR.appendChild(makeResetBtn('background blur', () => { bgBlurSl.value = 18; bgBlurVal.textContent = '18px'; window.amlBridge.setBgBlur(18); }));
         dBody.appendChild(makeRow('Background blur', bgBlurR, 'Wallpaper blur (requires a wallpaper to be set)', false));
-
         const navOpVal = document.createElement('span');
         navOpVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
         const initNavAlpha = prefs.themeNavBgAlpha ?? 0.72;
@@ -5011,7 +5418,6 @@ window.amlGetQueueInfo = function () {
         navOpR.appendChild(navOpSl); navOpR.appendChild(navOpVal);
         navOpR.appendChild(makeResetBtn('sidebar opacity', () => { navOpSl.value = 0.72; navOpVal.textContent = '72%'; window.amlBridge.setNavOpacity(0.72); }));
         dBody.appendChild(makeRow('Sidebar opacity', navOpR, 'How opaque the sidebar background is', false));
-
         const zoomVal = document.createElement('span');
         zoomVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
         zoomVal.textContent = `${Math.round((prefs.zoomFactor ?? 1) * 100)}%`;
@@ -5024,228 +5430,24 @@ window.amlGetQueueInfo = function () {
         zoomR.appendChild(zoomSl); zoomR.appendChild(zoomVal);
         zoomR.appendChild(makeResetBtn('zoom', () => { zoomSl.value = 100; zoomVal.textContent = '100%'; window.amlBridge.setZoom(1); }));
         dBody.appendChild(makeRow('Zoom', zoomR, null, false));
-
         const toggle = document.createElement('input');
         toggle.type = 'checkbox'; toggle.checked = prefs.hideUpsell !== false;
         toggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
         toggle.onchange = () => window.amlBridge.setTweak('hideUpsell', toggle.checked);
         dBody.appendChild(makeRow('Hide upsell banners', toggle, null, true));
+        return wrap;
+    }
 
-        dlg.appendChild(dWrap);
-
-        // ── Theme ──────────────────────────────────────────────────────────────
-        const { wrap: thWrap, body: thBody } = makeSection('Theme');
+    async function _buildThemeSection(prefs) {
+        const { wrap, body: thBody } = makeSection('Theme');
         const thInfo = await window.amlBridge.getThemeInfo().catch(() => ({ blurAvailable: false, themeMode: 'accent', themePalette: null, themePresets: [], customCssPath: null, systemAccent: '#fc3c44', themeAppearance: 'dark' }));
         const blurAvail = !!thInfo.blurAvailable;
-        let curMode = thInfo.themeMode || (blurAvail ? 'blur' : 'accent');
-        let curPalette = thInfo.themePalette;
-        let thPresets = thInfo.themePresets || [];
-        let curAppearance = thInfo.themeAppearance || 'dark';
-
-        // Palette generation (frontend, no Node) — mirrors main.mjs _generatePalette
-        function genPalette(hex, appearance) {
-            if (!appearance) appearance = curAppearance;
-            hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#fc3c44';
-            const r=parseInt(hex.slice(1,3),16)/255, g=parseInt(hex.slice(3,5),16)/255, b=parseInt(hex.slice(5,7),16)/255;
-            const mx=Math.max(r,g,b), mn=Math.min(r,g,b), l=(mx+mn)/2;
-            const d=mx-mn, s=d===0?0:d/(1-Math.abs(2*l-1));
-            let h=0; if(d){if(mx===r)h=((g-b)/d+6)%6;else if(mx===g)h=(b-r)/d+2;else h=(r-g)/d+4;h*=60;}
-            const hi=Math.round(h), si=Math.round(s*100);
-            if (appearance === 'light') {
-                return { accent:hex, bgColor:`hsla(${hi},${Math.round(si*.25)}%,96%,1)`, navBg:`hsla(${hi},${Math.round(si*.3)}%,91%,0.95)`, navBorder:`hsla(${hi},${Math.round(si*.6)}%,30%,0.15)`, accentActive:`hsla(${hi},${si}%,45%,0.15)` };
-            }
-            return { accent:hex, bgColor:`hsla(${hi},${Math.round(si*.5)}%,10%,1)`, navBg:`hsla(${hi},${Math.round(si*.8)}%,14%,0.72)`, navBorder:`hsla(${hi},${Math.round(si*.7)}%,50%,0.25)`, accentActive:`hsla(${hi},${Math.round(si*.9)}%,60%,0.28)` };
-        }
-
-        // hex→hsl color value from any CSS color string (for <input type=color>)
-        function cssColorToHex(str) {
-            if (/^#[0-9a-fA-F]{6}$/.test(str)) return str;
-            const m = str.match(/hsla?\((\d+),\s*([\d.]+)%,\s*([\d.]+)%/);
-            if (!m) return '#336699';
-            const h=+m[1]/360, s=+m[2]/100, l=+m[3]/100, a=s*Math.min(l,1-l);
-            const f=n=>{const k=(n+h*12)%12;return l-a*Math.max(-1,Math.min(k-3,9-k,1));};
-            return '#'+[f(0),f(8),f(4)].map(x=>Math.round(x*255).toString(16).padStart(2,'0')).join('');
-        }
-
-        // Mode selector
-        const modeRow = document.createElement('div');
-        modeRow.style.cssText = 'padding:12px 0;border-bottom:0.5px solid rgba(255,255,255,0.07);';
-        const modeSeg = document.createElement('div');
-        modeSeg.style.cssText = 'display:flex;background:rgba(255,255,255,0.06);border-radius:8px;padding:2px;gap:2px;';
-        const thModes = [
-            { label: 'Blur', value: 'blur', disabled: !blurAvail, tip: blurAvail ? '' : 'Only on Hyprland / KDE' },
-            { label: 'Accent', value: 'accent', disabled: false, tip: '' },
-            { label: 'Custom CSS', value: 'custom', disabled: false, tip: '' },
-        ];
-        const thContentArea = document.createElement('div');
-
-        function renderThemeContent(mode) {
-            thContentArea.innerHTML = '';
-            if (mode === 'blur') {
-                const info = document.createElement('div');
-                info.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.4);padding:12px 0;';
-                info.textContent = blurAvail
-                    ? 'Wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above.'
-                    : 'Blur is only available on Hyprland and KDE. Your current desktop does not support it.';
-                thContentArea.appendChild(info);
-            } else if (mode === 'accent') {
-                if (!curPalette) curPalette = genPalette(thInfo.systemAccent || '#fc3c44');
-                renderPaletteEditor(thContentArea);
-            } else {
-                renderCustomCss(thContentArea);
-            }
-        }
-
-        function renderPaletteEditor(container) {
-            container.innerHTML = '';
-            const pal = curPalette || genPalette(thInfo.systemAccent || '#fc3c44');
-
-            // Appearance: dark only for now
-
-            const paletteKeys = [
-                { key: 'bgColor', label: 'Background' },
-                { key: 'accent', label: 'Accent' },
-                { key: 'navBg', label: 'Sidebar' },
-                { key: 'navBorder', label: 'Border' },
-                { key: 'accentActive', label: 'Active' },
-            ];
-            const grid = document.createElement('div');
-            grid.style.cssText = 'display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:12px 0;border-bottom:0.5px solid rgba(255,255,255,0.07);';
-            paletteKeys.forEach(({ key, label }) => {
-                const cell = document.createElement('div');
-                cell.style.cssText = 'display:flex;flex-direction:column;align-items:stretch;gap:4px;';
-                const swatchWrap = document.createElement('div');
-                swatchWrap.style.cssText = `height:30px;border-radius:6px;background:${pal[key]||'#333'};border:1px solid rgba(255,255,255,0.1);position:relative;overflow:hidden;cursor:pointer;`;
-                const picker = document.createElement('input');
-                picker.type = 'color';
-                picker.value = cssColorToHex(pal[key] || '#336699');
-                picker.style.cssText = 'position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;';
-                picker.oninput = () => {
-                    pal[key] = picker.value;
-                    swatchWrap.style.background = picker.value;
-                    curPalette = { ...pal };
-                    window.amlBridge.setThemePalette(key, picker.value);
-                };
-                swatchWrap.appendChild(picker);
-                const lbl = document.createElement('div');
-                lbl.style.cssText = FF+'font-size:10px;color:rgba(255,255,255,0.4);text-align:center;';
-                lbl.textContent = label;
-                cell.appendChild(swatchWrap);
-                cell.appendChild(lbl);
-                grid.appendChild(cell);
-            });
-            container.appendChild(grid);
-
-            const resetBtn = makeBtn('Reset to system accent');
-            resetBtn.style.cssText += 'margin:10px 0;display:block;';
-            resetBtn.onclick = async () => {
-                const newPal = await window.amlBridge.resetThemePalette();
-                if (newPal) { curPalette = newPal; renderPaletteEditor(container); }
-            };
-            container.appendChild(resetBtn);
-
-            // Presets
-            const presH = document.createElement('div');
-            presH.style.cssText = FF+'font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.4);margin:12px 0 6px;';
-            presH.textContent = 'Presets';
-            container.appendChild(presH);
-
-            const presetList = document.createElement('div');
-            presetList.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;min-height:24px;margin-bottom:10px;';
-            function renderPresets() {
-                presetList.innerHTML = '';
-                if (!thPresets.length) {
-                    const none = document.createElement('span');
-                    none.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.25);';
-                    none.textContent = 'No saved presets';
-                    presetList.appendChild(none);
-                    return;
-                }
-                thPresets.forEach(({ name, builtin }) => {
-                    const chip = document.createElement('div');
-                    chip.style.cssText = `display:flex;align-items:center;gap:4px;background:${builtin?'rgba(252,60,68,0.18)':'rgba(255,255,255,0.1)'};border-radius:20px;padding:3px 8px 3px 12px;cursor:default;${builtin?'border:1px solid rgba(252,60,68,0.35);':''}`;
-                    const cl = document.createElement('span');
-                    cl.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.8);cursor:pointer;';
-                    cl.textContent = name;
-                    cl.onclick = () => {
-                        const pr = thPresets.find(x => x.name === name);
-                        if (pr) { curPalette = pr.palette; window.amlBridge.applyThemePreset(name); renderPaletteEditor(container); }
-                    };
-                    chip.appendChild(cl);
-                    if (!builtin) {
-                        const del = document.createElement('button');
-                        del.textContent = '×';
-                        del.style.cssText = 'border:none;background:transparent;color:rgba(255,255,255,0.35);cursor:pointer;font-size:14px;padding:0 0 0 4px;line-height:1;';
-                        del.onclick = () => {
-                            thPresets = thPresets.filter(x => x.name !== name);
-                            window.amlBridge.deleteThemePreset(name);
-                            renderPresets();
-                        };
-                        chip.appendChild(del);
-                    }
-                    presetList.appendChild(chip);
-                });
-            }
-            renderPresets();
-            container.appendChild(presetList);
-
-            const actRow = document.createElement('div');
-            actRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;padding-bottom:12px;align-items:center;';
-
-            const saveNameInput = document.createElement('input');
-            saveNameInput.type = 'text';
-            saveNameInput.placeholder = 'Preset name…';
-            saveNameInput.style.cssText = FF + 'display:none;padding:4px 8px;border-radius:6px;border:none;font-size:12px;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.85);width:110px;';
-
-            const saveBtn = makeBtn('Save preset');
-            saveBtn.onclick = () => {
-                const showing = saveNameInput.style.display !== 'none';
-                saveNameInput.style.display = showing ? 'none' : 'inline-block';
-                if (!showing) { saveNameInput.value = ''; saveNameInput.focus(); }
-            };
-
-            const saveConfirmBtn = makeBtn('✓');
-            saveConfirmBtn.title = 'Confirm save';
-            saveConfirmBtn.style.cssText += 'display:none;padding:4px 9px;';
-            const doSave = async () => {
-                const name = saveNameInput.value.trim();
-                if (!name) return;
-                const newPresets = await window.amlBridge.saveThemePreset(name);
-                if (newPresets) {
-                    const builtins = thPresets.filter(x => x.builtin);
-                    thPresets = [...builtins, ...newPresets];
-                    renderPresets();
-                }
-                saveNameInput.style.display = 'none';
-                saveConfirmBtn.style.display = 'none';
-                saveBtn.textContent = 'Save preset';
-            };
-            saveConfirmBtn.onclick = doSave;
-            saveNameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSave(); if (e.key === 'Escape') { saveNameInput.style.display = 'none'; saveConfirmBtn.style.display = 'none'; } });
-            saveNameInput.addEventListener('input', () => {
-                saveConfirmBtn.style.display = saveNameInput.value.trim() ? 'inline-block' : 'none';
-            });
-
-            const exportBtn = makeBtn('Export');
-            exportBtn.onclick = async () => {
-                const name = prompt('Preset name to export (leave blank for current palette):') || 'current';
-                await window.amlBridge.exportThemePreset(name);
-            };
-
-            const importBtn = makeBtn('Import');
-            importBtn.onclick = async () => {
-                const preset = await window.amlBridge.importThemePreset();
-                if (preset) {
-                    thPresets = thPresets.filter(x => x.name !== preset.name);
-                    thPresets.push(preset);
-                    renderPresets();
-                }
-            };
-
-            actRow.appendChild(saveBtn); actRow.appendChild(saveNameInput); actRow.appendChild(saveConfirmBtn); actRow.appendChild(exportBtn); actRow.appendChild(importBtn);
-            container.appendChild(actRow);
-        }
-
+        const st = {
+            curMode: thInfo.themeMode || (blurAvail ? 'blur' : 'accent'),
+            curPalette: thInfo.themePalette,
+            thPresets: thInfo.themePresets || [],
+            curAppearance: thInfo.themeAppearance || 'dark',
+        };
         function renderCustomCss(container) {
             container.innerHTML = '';
             const pathDiv = document.createElement('div');
@@ -5261,8 +5463,6 @@ window.amlGetQueueInfo = function () {
             };
             const clearBtn = makeBtn('Clear');
             clearBtn.onclick = () => {
-                const p = loadPrefs?.() ?? {};
-                p.customCssPath = null;
                 window.amlBridge.setThemeMode('custom');
                 pathDiv.textContent = 'No file selected';
                 thInfo.customCssPath = null;
@@ -5274,22 +5474,47 @@ window.amlGetQueueInfo = function () {
             container.appendChild(btnsRow);
             container.appendChild(hint);
         }
-
+        const thContentArea = document.createElement('div');
+        function renderThemeContent(mode) {
+            thContentArea.innerHTML = '';
+            if (mode === 'blur') {
+                const info = document.createElement('div');
+                info.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.4);padding:12px 0;';
+                info.textContent = blurAvail
+                    ? 'Wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above.'
+                    : 'Blur is only available on Hyprland and KDE. Your current desktop does not support it.';
+                thContentArea.appendChild(info);
+            } else if (mode === 'accent') {
+                if (!st.curPalette) st.curPalette = _amlGenPalette(thInfo.systemAccent || '#fc3c44', st.curAppearance);
+                _amlRenderPaletteEditor(thContentArea, thInfo, st);
+            } else {
+                renderCustomCss(thContentArea);
+            }
+        }
+        const modeRow = document.createElement('div');
+        modeRow.style.cssText = 'padding:12px 0;border-bottom:0.5px solid rgba(255,255,255,0.07);';
+        const modeSeg = document.createElement('div');
+        modeSeg.style.cssText = 'display:flex;background:rgba(255,255,255,0.06);border-radius:8px;padding:2px;gap:2px;';
+        const thModes = [
+            { label: 'Blur', value: 'blur', disabled: !blurAvail, tip: blurAvail ? '' : 'Only on Hyprland / KDE' },
+            { label: 'Accent', value: 'accent', disabled: false, tip: '' },
+            { label: 'Custom CSS', value: 'custom', disabled: false, tip: '' },
+        ];
         thModes.forEach(({ label, value, disabled, tip }) => {
             const btn = document.createElement('button');
             btn.textContent = label;
             btn.disabled = disabled;
             if (tip) btn.title = tip;
-            const isActive = value === curMode;
+            const isActive = value === st.curMode;
             btn.style.cssText = `flex:1;padding:5px 0;border:none;border-radius:6px;${FF}font-size:12px;` +
                 `cursor:${disabled?'not-allowed':'pointer'};transition:background .15s,color .15s;` +
                 (isActive ? 'background:rgba(255,255,255,0.18);color:rgba(255,255,255,0.88);font-weight:500;' : 'background:transparent;color:rgba(255,255,255,0.38);') +
                 (disabled ? 'opacity:0.3;' : '');
             btn.onclick = () => {
                 if (disabled) return;
-                curMode = value;
+                st.curMode = value;
                 modeSeg.querySelectorAll('button').forEach((b, i) => {
-                    const a = thModes[i].value === curMode;
+                    const a = thModes[i].value === st.curMode;
                     b.style.background = a ? 'rgba(255,255,255,0.18)' : 'transparent';
                     b.style.color = a ? 'rgba(255,255,255,0.88)' : 'rgba(255,255,255,0.38)';
                     b.style.fontWeight = a ? '500' : '';
@@ -5299,52 +5524,20 @@ window.amlGetQueueInfo = function () {
             };
             modeSeg.appendChild(btn);
         });
-
         modeRow.appendChild(modeSeg);
         thBody.appendChild(modeRow);
         thBody.appendChild(thContentArea);
-        renderThemeContent(curMode);
-        dlg.appendChild(thWrap);
+        renderThemeContent(st.curMode);
+        return wrap;
+    }
 
-        // ── Audio Quality ──────────────────────────────────────────────────
-        const { wrap: aqWrap, body: aqBody } = makeSection('Audio Quality');
-
-        // iOS-style toggle: label wraps a hidden checkbox + styled track + thumb
-        function makeIOSToggle(on, onChange) {
-            const label = document.createElement('label');
-            label.style.cssText = 'position:relative;display:inline-flex;align-items:center;cursor:pointer;flex-shrink:0;width:44px;height:26px;';
-            const cb = document.createElement('input');
-            cb.type = 'checkbox'; cb.checked = on;
-            cb.style.cssText = 'position:absolute;opacity:0;width:0;height:0;pointer-events:none;';
-            const track = document.createElement('span');
-            track.style.cssText = `position:absolute;inset:0;border-radius:13px;transition:background 0.22s;` +
-                `background:${on ? '#fc3c44' : 'rgba(255,255,255,0.18)'};`;
-            const thumb = document.createElement('span');
-            thumb.style.cssText = `position:absolute;top:3px;left:${on ? '21px' : '3px'};` +
-                `width:20px;height:20px;border-radius:50%;background:#fff;` +
-                `box-shadow:0 1px 4px rgba(0,0,0,0.4);transition:left 0.22s;`;
-            label.append(cb, track, thumb);
-            cb.addEventListener('change', () => {
-                track.style.background = cb.checked ? '#fc3c44' : 'rgba(255,255,255,0.18)';
-                thumb.style.left = cb.checked ? '21px' : '3px';
-                onChange(cb.checked);
-            });
-            return label;
-        }
-
-        const losslessOn = prefs['lossless-enabled'] !== false;
-        aqBody.appendChild(makeRow('Lossless Audio',
-            makeIOSToggle(losslessOn, v => window.amlBridge?.setTweak('lossless-enabled', v)),
-            'Stream lossless audio (ALAC) when available', false));
-
-        // Custom macOS-style dropdown
+    function _buildAudioSection(prefs) {
+        const { wrap, body: aqBody } = makeSection('Audio Quality');
         const qualityOpts = [
             { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
             { value: 'lossless',        label: 'Lossless (ALAC up to 24-bit / 48 kHz)' },
             { value: 'hi-res-lossless', label: 'Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)' },
         ];
-
-        // Inject shared dropdown styles once
         if (!document.getElementById('aml-quality-dropdown-style')) {
             const ds = document.createElement('style');
             ds.id = 'aml-quality-dropdown-style';
@@ -5392,80 +5585,12 @@ window.amlGetQueueInfo = function () {
             `;
             document.head.appendChild(ds);
         }
-
-        function makeQualityDropdown(prefKey) {
-            const saved = prefs[prefKey] ?? 'lossless';
-            let current = saved;
-
-            const wrap = document.createElement('div');
-            wrap.style.cssText = 'position:relative;display:inline-block;';
-
-            const btn = document.createElement('div');
-            btn.className = 'aml-qdrop-btn';
-            const btnLabel = document.createElement('span');
-            btnLabel.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-            const chevron = document.createElement('span');
-            chevron.className = 'aml-qdrop-chevron';
-            chevron.innerHTML = '&#9660;';
-            btn.append(btnLabel, chevron);
-
-            // Menu lives inside the wrap (which is inside the dialog top-layer)
-            const menu = document.createElement('div');
-            menu.className = 'aml-qdrop-menu';
-            menu.style.cssText += 'display:none;position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:10;';
-
-            function setOption(value, save) {
-                current = value;
-                const opt = qualityOpts.find(o => o.value === value);
-                btnLabel.textContent = opt ? opt.label : value;
-                const sv = String(value);
-                menu.querySelectorAll('.aml-qdrop-item').forEach(el => {
-                    el.classList.toggle('selected', el.dataset.value === sv);
-                });
-                if (save) {
-                    window.amlBridge?.setTweak(prefKey, value);
-                    if (prefKey === 'streaming-quality') _streamingQuality = value;
-                }
-            }
-
-            qualityOpts.forEach(({ value, label }) => {
-                const item = document.createElement('div');
-                item.className = 'aml-qdrop-item';
-                item.dataset.value = value;
-                const accent = document.createElement('div');
-                accent.className = 'aml-qdrop-accent';
-                const lbl = document.createElement('div');
-                lbl.className = 'aml-qdrop-item-label';
-                lbl.textContent = label;
-                item.append(accent, lbl);
-                item.addEventListener('mousedown', (e) => {
-                    e.preventDefault();
-                    setOption(value, true);
-                    menu.style.display = 'none';
-                });
-                menu.appendChild(item);
-            });
-
-            setOption(current, false);
-            wrap.append(btn, menu);
-
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const open = menu.style.display !== 'none';
-                // Close any other open dropdowns first
-                document.querySelectorAll('.aml-qdrop-menu').forEach(m => { m.style.display = 'none'; });
-                if (!open) {
-                    menu.style.display = 'block';
-                    const sel = menu.querySelector('.selected');
-                    if (sel) sel.scrollIntoView({ block: 'nearest' });
-                }
-            });
-
-            return { wrap, setValue: v => setOption(v, false) };
-        }
-
-        const { wrap: sqWrap, setValue: setSQ } = makeQualityDropdown('streaming-quality');
-        const sqResetBtn = makeMiniBtn('Reset', () => {
+        const losslessOn = prefs['lossless-enabled'] !== false;
+        aqBody.appendChild(makeRow('Lossless Audio',
+            _amlIOSToggle(losslessOn, v => window.amlBridge?.setTweak('lossless-enabled', v)),
+            'Stream lossless audio (ALAC) when available', false));
+        const { wrap: sqWrap, setValue: setSQ } = _amlMakeQualityDropdown('streaming-quality', prefs, qualityOpts);
+        const sqResetBtn = _amlMiniBtn(() => {
             setSQ('lossless');
             window.amlBridge?.setTweak('streaming-quality', 'lossless');
             _streamingQuality = 'lossless';
@@ -5474,26 +5599,22 @@ window.amlGetQueueInfo = function () {
         sqCtrl.style.cssText = 'display:flex;align-items:center;gap:8px;';
         sqCtrl.append(sqWrap, sqResetBtn);
         aqBody.appendChild(makeRow('Streaming', sqCtrl, null, false));
-        dlg.appendChild(aqWrap);
+        return wrap;
+    }
 
-        // ── Cache ──────────────────────────────────────────────────────────
-        const { wrap: cWrap, body: cBody } = makeSection('Playback Cache');
+    async function _buildCacheSection(prefs) {
+        const { wrap, body: cBody } = makeSection('Playback Cache');
         const cacheStats = await fetch(`${ENGINE}/api/v1/cache/stats`).then(r => r.json()).catch(() => null);
         const mvCacheInfo = await fetch(`${ENGINE}/api/v1/cache/mv`).then(r => r.json()).catch(() => null);
-
-        // Persistent cache section
         const persist = cacheStats?.persistent;
         if (persist?.available !== false) {
             const usedMB   = Math.round((persist?.sizeBytes ?? 0) / (1024 * 1024));
             const limitMB  = Math.round((persist?.limitBytes ?? 500 * 1024 * 1024) / (1024 * 1024));
             const ttlDays  = persist?.ttlDays ?? 5;
-
             const songsSubhead = document.createElement('div');
             songsSubhead.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;color:rgba(255,255,255,0.35);padding:12px 0 4px;text-transform:uppercase;';
             songsSubhead.textContent = 'Songs';
             cBody.appendChild(songsSubhead);
-
-            // Progress bar
             const pct = limitMB > 0 ? Math.min(100, Math.round(usedMB / limitMB * 100)) : 0;
             const barWrap = document.createElement('div');
             barWrap.style.cssText = 'flex:1;';
@@ -5507,8 +5628,6 @@ window.amlGetQueueInfo = function () {
             barLabel.textContent = `${usedMB} MB / ${limitMB} MB`;
             barWrap.appendChild(barBg); barWrap.appendChild(barLabel);
             cBody.appendChild(makeRow('Song cache used', barWrap, 'Frequently played songs cached to disk', false));
-
-            // Size slider
             const szVal = document.createElement('span');
             szVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);min-width:62px;text-align:right;white-space:nowrap;flex-shrink:0;';
             szVal.textContent = `${limitMB} MB`;
@@ -5521,7 +5640,7 @@ window.amlGetQueueInfo = function () {
                 window.amlBridge?.setPref('persistLimitMB', v);
                 fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ persistLimitMB: v }) }).catch(() => {});
             };
-            const szResetBtn = makeMiniBtn('Reset', () => {
+            const szResetBtn = _amlMiniBtn(() => {
                 szSl.value = 500; szVal.textContent = '500 MB';
                 window.amlBridge?.setPref('persistLimitMB', 500);
                 fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ persistLimitMB: 500 }) }).catch(() => {});
@@ -5530,12 +5649,9 @@ window.amlGetQueueInfo = function () {
             szRow.style.cssText = 'display:flex;align-items:center;flex:1;gap:8px;';
             szRow.append(szSl, szVal, szResetBtn);
             cBody.appendChild(makeRow('Cache size limit', szRow, null, false));
-
-            // TTL input
             const ttlInp = document.createElement('input');
             ttlInp.type = 'number'; ttlInp.min = 1; ttlInp.max = 365; ttlInp.value = ttlDays;
-            ttlInp.style.cssText = FF + 'width:60px;padding:4px 8px;border-radius:6px;border:none;font-size:13px;' +
-                'background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.85);text-align:center;';
+            ttlInp.style.cssText = FF + 'width:60px;padding:4px 8px;border-radius:6px;border:none;font-size:13px;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.85);text-align:center;';
             ttlInp.onchange = () => {
                 const v = Math.max(1, +ttlInp.value || 5);
                 ttlInp.value = v;
@@ -5549,14 +5665,13 @@ window.amlGetQueueInfo = function () {
             ttlUnit.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);';
             ttlUnit.textContent = 'days';
             ttlWrap.appendChild(ttlUnit);
-            const ttlResetBtn = makeMiniBtn('Reset', () => {
+            const ttlResetBtn = _amlMiniBtn(() => {
                 ttlInp.value = 5;
                 window.amlBridge?.setPref('persistTTLDays', 5);
                 fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ persistTTLDays: 5 }) }).catch(() => {});
             });
             ttlWrap.appendChild(ttlResetBtn);
             cBody.appendChild(makeRow('Expiry', ttlWrap, 'Songs unused longer than this are removed', false));
-
             const clearRow = document.createElement('div');
             clearRow.style.cssText = 'padding:10px 0;display:flex;gap:6px;';
             const clearSongsBtn = makeBtn('Clear Songs');
@@ -5598,7 +5713,7 @@ window.amlGetQueueInfo = function () {
         mvBarWrap.appendChild(mvBarBg); mvBarWrap.appendChild(mvBarLabel);
         cBody.appendChild(makeRow('Cache used', mvBarWrap, null, false));
 
-        const mvToggle = makeIOSToggle(mvEnabled, v => {
+        const mvToggle = _amlIOSToggle(mvEnabled, v => {
             mvCapSl.disabled = !v;
             fetch(`${ENGINE}/api/v1/cache/mv`, {
                 method: 'PUT',
@@ -5625,7 +5740,7 @@ window.amlGetQueueInfo = function () {
                 body: JSON.stringify({ maxBytes: Math.round(+mvCapSl.value * 1024 * 1024) }),
             }).catch(() => {});
         };
-        const mvCapResetBtn = makeMiniBtn('Reset', () => {
+        const mvCapResetBtn = _amlMiniBtn(() => {
             mvCapSl.value = 2048; mvCapVal.textContent = '2048 MB';
             fetch(`${ENGINE}/api/v1/cache/mv`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxBytes: 2 * 1024 * 1024 * 1024 }) }).catch(() => {});
         });
@@ -5680,7 +5795,7 @@ window.amlGetQueueInfo = function () {
             window.amlBridge?.setPref('prewarmLimitMB', v);
             fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prewarmLimitMB: v }) }).catch(() => {});
         };
-        const pwSzResetBtn = makeMiniBtn('Reset', () => {
+        const pwSzResetBtn = _amlMiniBtn(() => {
             pwSzSl.value = 1024; pwSzVal.textContent = '1024 MB';
             window.amlBridge?.setPref('prewarmLimitMB', 1024);
             fetch(`${ENGINE}/api/v1/cache/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prewarmLimitMB: 1024 }) }).catch(() => {});
@@ -5689,7 +5804,6 @@ window.amlGetQueueInfo = function () {
         pwSzRow.style.cssText = 'display:flex;align-items:center;flex:1;gap:8px;';
         pwSzRow.append(pwSzSl, pwSzVal, pwSzResetBtn);
         cBody.appendChild(makeRow('Pre-warm size limit', pwSzRow, null, true));
-
         const pwClearRow = document.createElement('div');
         pwClearRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);margin-top:2px;';
         const clearPrewarmBtn = makeBtn('Clear Pre-warm');
@@ -5698,604 +5812,169 @@ window.amlGetQueueInfo = function () {
         };
         pwClearRow.appendChild(clearPrewarmBtn);
         cBody.appendChild(pwClearRow);
+        return wrap;
+    }
 
-        dlg.appendChild(cWrap);
-
-        // ── Downloads section ──────────────────────────────────────────────────
-        const { wrap: dlWrap, body: dlBody } = makeSection('Downloads');
-
-        // Known template variables for validation
-        const DL_KNOWN_VARS = new Set([
-            'title','song','artist','album_artist','album','track_number','track',
-            'disc_number','disc','year','genre','codec','ext','quality','tag',
-            'release_date','releasedate','isrc','id','song_id','url_artist','urlartist',
-        ]);
-
-        // Sub-section heading helper
-        function dlSubhead(text) {
-            const h = document.createElement('div');
-            h.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;' +
-                'color:rgba(255,255,255,0.35);padding:14px 0 4px;text-transform:uppercase;';
-            h.textContent = text;
-            return h;
+    function _buildDownloadsSection(prefs, tools) {
+        const { wrap, body: dlBody } = makeSection('Downloads');
+        function makeIOSToggle(on, onChange) { return _amlIOSToggle(on, onChange); }
+        function makeMiniBtn(_, onClick) { return _amlMiniBtn(onClick); }
+        function dlSubhead(text) { return _dlSubhead(text); }
+        function dlDropdown(opts, val, onSave) { return _dlDropdown(opts, val, onSave); }
+        const qualityOpts = [
+            { value: 'high-quality',    label: 'High Quality (AAC 256 kbps)' },
+            { value: 'lossless',        label: 'Lossless (ALAC up to 24-bit / 48 kHz)' },
+            { value: 'hi-res-lossless', label: 'Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)' },
+        ];
+        function makeQualityDropdown(prefKey) { return _amlMakeQualityDropdown(prefKey, prefs, qualityOpts); }
+        let previewEl = null;
+        function updatePreview() {
+            if (!previewEl) return;
+            const trackTmpl = prefs['dl-filename-track'] || '{track_number:02d} - {title}';
+            const albumTmpl = prefs['dl-dirname-album'] || '{album_artist}/{year} - {album}';
+            previewEl.textContent = _dlRenderTemplate(albumTmpl) + '/' + _dlRenderTemplate(trackTmpl) + '.m4a';
+        }
+        function makeTemplateRow(label, presets, savedValue, prefKey, suffix) {
+            return _amlMakeTemplateRow(label, presets, savedValue, prefKey, suffix, prefs, updatePreview);
         }
 
-        // Shared small-dropdown builder (reuses .aml-qdrop-* styles already injected)
-        function dlDropdown(options, savedValue, onSave) {
-            let current = savedValue;
-            const wrap = document.createElement('div');
-            wrap.style.cssText = 'position:relative;display:inline-block;min-width:180px;';
-            const btn = document.createElement('div');
-            btn.className = 'aml-qdrop-btn';
-            btn.style.cssText += 'font-size:12px;';
-            const btnLabel = document.createElement('span');
-            btnLabel.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-            const chevron = document.createElement('span');
-            chevron.className = 'aml-qdrop-chevron';
-            chevron.innerHTML = '&#9660;';
-            btn.append(btnLabel, chevron);
-            const menu = document.createElement('div');
-            menu.className = 'aml-qdrop-menu';
-            menu.style.cssText += 'display:none;position:absolute;top:calc(100% + 4px);right:0;left:auto;z-index:20;min-width:100%;';
-            function setOpt(v, save) {
-                current = v;
-                const opt = options.find(o => o.value === v);
-                btnLabel.textContent = opt ? opt.label : v;
-                const sv = String(v);
-                menu.querySelectorAll('.aml-qdrop-item').forEach(el =>
-                    el.classList.toggle('selected', el.dataset.value === sv));
-                if (save) onSave(v);
-            }
-            options.forEach(({ value, label }) => {
-                const item = document.createElement('div');
-                item.className = 'aml-qdrop-item';
-                item.dataset.value = value;
-                const accent = document.createElement('div'); accent.className = 'aml-qdrop-accent';
-                const lbl = document.createElement('div'); lbl.className = 'aml-qdrop-item-label';
-                lbl.textContent = label;
-                item.append(accent, lbl);
-                item.addEventListener('mousedown', e => { e.preventDefault(); setOpt(value, true); menu.style.display = 'none'; });
-                menu.appendChild(item);
-            });
-            setOpt(current, false);
-            wrap.append(btn, menu);
-            btn.addEventListener('click', e => {
-                e.stopPropagation();
-                const open = menu.style.display !== 'none';
-                document.querySelectorAll('.aml-qdrop-menu').forEach(m => { m.style.display = 'none'; });
-                if (!open) { menu.style.display = 'block'; menu.querySelector('.selected')?.scrollIntoView({ block: 'nearest' }); }
-            });
-            return { wrap, getValue: () => current, setValue: v => setOpt(v, false) };
-        }
-
-        // ── Save Location ────────────────────────────────────────────────────
-        dlBody.appendChild(dlSubhead('Save Location'));
-
-        // Save-to directory
-        const dlDirCurrent = prefs['download-dir'] || '';
-        const dlSaveRow = document.createElement('div');
-        dlSaveRow.style.cssText = 'display:flex;align-items:center;gap:10px;padding:4px 0 8px;';
-        const dlDirDisplay = document.createElement('span');
-        dlDirDisplay.style.cssText = FF + 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
-            'color:rgba(255,255,255,0.45);font-size:12px;min-width:0;';
-        dlDirDisplay.textContent = dlDirCurrent || '~/Music/AML-Downloads (default)';
-        const dlDirBtn = document.createElement('button');
-        dlDirBtn.textContent = 'Choose…';
-        dlDirBtn.style.cssText = FF + 'padding:3px 10px;background:rgba(255,255,255,0.10);' +
-            'border:0.5px solid rgba(255,255,255,0.15);border-radius:5px;color:rgba(255,255,255,0.82);' +
-            'font-size:12px;cursor:pointer;flex-shrink:0;transition:background 0.15s;';
-        dlDirBtn.onmouseenter = () => { dlDirBtn.style.background = 'rgba(255,255,255,0.18)'; };
-        dlDirBtn.onmouseleave = () => { dlDirBtn.style.background = 'rgba(255,255,255,0.10)'; };
-        dlDirBtn.onclick = async () => {
-            const result = await window.amlBridge?.chooseDownloadDir();
-            if (result && !result.canceled && result.filePaths?.[0]) {
-                const dir = result.filePaths[0];
-                dlDirDisplay.textContent = dir;
-                window.amlBridge?.setTweak('download-dir', dir);
-                updatePreview();
-            }
-        };
-        const dlDirResetBtn = makeMiniBtn('Reset', () => {
-            prefs['download-dir'] = '';
-            dlDirDisplay.textContent = '~/Music/AML-Downloads (default)';
-            window.amlBridge?.setTweak('download-dir', null);
-            dlDirResetBtn.style.display = 'none';
-            updatePreview();
-        });
-        dlDirResetBtn.style.display = dlDirCurrent ? '' : 'none';
-        dlSaveRow.append(dlDirDisplay, dlDirBtn, dlDirResetBtn);
-        dlBody.appendChild(makeRow('Save to', dlSaveRow, null, false));
-
-        // Album folder presets
+        // ── Filename ──
+        dlBody.appendChild(_dlSubhead('Filename'));
+        const TRACK_PRESETS = [
+            { value: '{track_number:02d} - {title}', label: 'Track# - Title' },
+            { value: '{title}',                       label: 'Title only' },
+            { value: '{artist} - {title}',            label: 'Artist - Title' },
+        ];
         const ALBUM_PRESETS = [
-            { value: '{album_artist}/{album}',                       label: '{album_artist}/{album}' },
-            { value: '{album_artist}/{year} - {album}',              label: '{album_artist}/{year} - {album}' },
-            { value: '{album_artist}/{album} ({year})',               label: '{album_artist}/{album} ({year})' },
-            { value: '{album_artist}/{album} [{codec}]',             label: '{album_artist}/{album} [{codec}]' },
-            { value: '{album_artist}/{year} - {album} [{quality}]',  label: '{album_artist}/{year} - {album} [{quality}]' },
-            { value: '{year} - {album}',                             label: '{year} - {album}' },
-            { value: '{album}',                                      label: '{album}' },
-            { value: '{url_artist}/{album}',                         label: '{url_artist}/{album}' },
+            { value: '{album_artist}/{year} - {album}', label: 'Artist/Year - Album' },
+            { value: '{album_artist}/{album}',           label: 'Artist/Album' },
+            { value: '{album}',                          label: 'Album only' },
         ];
-        const SONG_PRESETS = [
-            { value: '{track_number:02d} - {title}',                       label: '{track_number:02d} - {title}' },
-            { value: '{track_number:02d}. {title}',                        label: '{track_number:02d}. {title}' },
-            { value: '{track_number:02d} - {title} {tag}',                 label: '{track_number:02d} - {title} {tag}' },
-            { value: '{track_number:02d} - {artist} - {title}',            label: '{track_number:02d} - {artist} - {title}' },
-            { value: '{track_number:02d} - {title} [{quality}]',           label: '{track_number:02d} - {title} [{quality}]' },
-            { value: '{track_number:02d} - {title} [{codec}]',             label: '{track_number:02d} - {title} [{codec}]' },
-            { value: '{disc_number}-{track_number:02d} - {title}',         label: '{disc_number}-{track_number:02d} - {title}' },
-            { value: '{disc_number}-{track_number:02d} - {title} {tag}',   label: '{disc_number}-{track_number:02d} - {title} {tag}' },
-            { value: '{title}',                                            label: '{title}' },
-            { value: '{id} - {title}',                                     label: '{id} - {title}' },
-        ];
-
-        // Read from the same keys that controls write to
-        const savedAlbumFolder = prefs['download-album-folder'] || '{album_artist}/{album}';
-        const savedSongPart    = (prefs['download-song-file']   || '{track_number:02d} - {title}').replace(/\.\{ext\}$/, '');
-
-        // Validate a template string — returns '' (valid) or error message
-        const validateTemplate = tmpl => {
-            const matches = tmpl.match(/\{([^}:]+)(?::[^}]+)?\}/g) || [];
-            const unknown = matches
-                .map(m => m.match(/\{([^}:]+)/)[1].toLowerCase())
-                .filter(n => !DL_KNOWN_VARS.has(n));
-            return unknown.length ? `Unknown variables: ${unknown.map(n => '{'+n+'}').join(', ')}` : '';
-        };
-
-        // Example renderers — substitute placeholder values for display
-        const EX = {
-            album_artist: 'Artist Name', artist: 'Artist Name', album: 'Album Title',
-            year: '2024', codec: 'alac', quality: 'Lossless', url_artist: 'artist-name',
-            'track_number:02d': '01', track_number: '1', disc_number: '1',
-            title: 'Song Title', tag: '[E]', ext: 'm4a',
-            id: '1234567890', isrc: 'USRC12345678', release_date: '2024-01-15',
-        };
-        const renderTemplate = val =>
-            (val || '').replace(/\{([^}:]+)(?::[^}]+)?\}/g, (_, k) => EX[k] || EX[k.toLowerCase()] || `{${k}}`);
-
-        // Live path preview — declared before makeTemplateRow so updatePreview is
-        // accessible when syncMode fires during row construction.
-        const previewEl = document.createElement('div');
-        previewEl.style.cssText = FF + 'font-size:10.5px;color:rgba(255,255,255,0.35);padding:4px 0 2px;' +
-            'word-break:break-all;font-family:ui-monospace,monospace;line-height:1.5;';
-
-        const updatePreview = () => {
-            const baseDir = (prefs['download-dir'] || '~/Music/AML-Downloads').replace(/\/$/, '');
-            const af = renderTemplate(prefs['download-album-folder'] || savedAlbumFolder);
-            const sf = renderTemplate(prefs['download-song-file'] || savedSongPart);
-            previewEl.textContent = `${baseDir}/${af}/${sf}.m4a`;
-        };
-
-        // Template row: dropdown + Custom toggle + per-row example + Reset button
-        const makeTemplateRow = (label, presets, savedValue, prefKey, suffix) => {
-            const isCustom = !presets.some(p => p.value === savedValue);
-            const rowWrap = document.createElement('div');
-            rowWrap.style.cssText = 'display:flex;flex-direction:column;gap:5px;';
-
-            const topRow = document.createElement('div');
-            topRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-
-            const customLbl = document.createElement('label');
-            customLbl.style.cssText = FF + 'display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.4);font-size:11px;cursor:pointer;flex-shrink:0;';
-            const customCb = document.createElement('input');
-            customCb.type = 'checkbox'; customCb.checked = isCustom;
-            customCb.style.cssText = 'accent-color:#fc3c44;cursor:pointer;';
-            customLbl.append(customCb, document.createTextNode('Custom'));
-
-            const resetBtn = document.createElement('button');
-            resetBtn.textContent = 'Reset';
-            resetBtn.title = 'Restore default';
-            resetBtn.style.cssText = FF + 'padding:2px 8px;background:rgba(255,255,255,0.06);' +
-                'border:0.5px solid rgba(255,255,255,0.12);border-radius:5px;' +
-                'color:rgba(255,255,255,0.38);font-size:10.5px;cursor:pointer;flex-shrink:0;' +
-                'transition:all 0.15s;';
-            resetBtn.onmouseenter = () => { resetBtn.style.background = 'rgba(255,255,255,0.12)'; resetBtn.style.color = 'rgba(255,255,255,0.7)'; };
-            resetBtn.onmouseleave = () => { resetBtn.style.background = 'rgba(255,255,255,0.06)'; resetBtn.style.color = 'rgba(255,255,255,0.38)'; };
-
-            const { wrap: ddWrap, getValue, setValue } = dlDropdown(presets, isCustom ? presets[0].value : savedValue, v => {
-                window.amlBridge?.setTweak(prefKey, v);
-                exampleEl.textContent = renderTemplate(v) + (suffix || '');
-                updatePreview();
-            });
-
-            // Per-row example preview
-            const exampleEl = document.createElement('div');
-            exampleEl.style.cssText = FF + 'font-size:10.5px;color:rgba(255,255,255,0.32);' +
-                'font-family:ui-monospace,monospace;padding:1px 0;min-height:14px;';
-
-            // Custom input + validator
-            const customWrap = document.createElement('div');
-            customWrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
-            const customInp = document.createElement('input');
-            customInp.type = 'text';
-            customInp.value = isCustom ? savedValue : (getValue() || '');
-            customInp.placeholder = prefKey.includes('album') ? '{album_artist}/{year} - {album}' : '{track_number:02d} - {title}';
-            customInp.style.cssText = FF + 'width:100%;padding:5px 10px;border-radius:7px;' +
-                'background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);' +
-                'color:rgba(255,255,255,0.88);font-size:12px;box-sizing:border-box;outline:none;transition:border-color 0.15s;';
-            customInp.onfocus = () => { customInp.style.borderColor = 'rgba(252,60,68,0.45)'; };
-            customInp.onblur  = () => {
-                const err = validateTemplate(customInp.value);
-                customInp.style.borderColor = err ? 'rgba(255,69,58,0.5)' : customInp.value ? 'rgba(48,209,88,0.4)' : 'rgba(255,255,255,0.15)';
-            };
-            const validMsg = document.createElement('div');
-            validMsg.style.cssText = FF + 'font-size:10.5px;min-height:14px;';
-
-            const applyCustom = val => {
-                const err = validateTemplate(val);
-                if (err) {
-                    validMsg.style.color = '#ff453a';
-                    validMsg.textContent = '⚠ ' + err;
-                    customInp.style.borderColor = 'rgba(255,69,58,0.5)';
-                    exampleEl.textContent = '';
-                } else {
-                    validMsg.style.color = '#30d158';
-                    validMsg.textContent = val ? '✓ Valid' : '';
-                    customInp.style.borderColor = val ? 'rgba(48,209,88,0.4)' : 'rgba(255,255,255,0.15)';
-                    window.amlBridge?.setTweak(prefKey, val);
-                    exampleEl.textContent = val ? (renderTemplate(val) + (suffix || '')) : '';
-                    updatePreview();
-                }
-            };
-            customInp.oninput = () => applyCustom(customInp.value);
-            customWrap.append(customInp, validMsg);
-
-            const syncMode = () => {
-                const custom = customCb.checked;
-                ddWrap.style.display = custom ? 'none' : 'inline-block';
-                customWrap.style.display = custom ? 'block' : 'none';
-                resetBtn.style.display = (custom || getValue() === presets[0].value) ? 'none' : 'inline-block';
-                if (custom) {
-                    customInp.value = getValue();
-                    applyCustom(customInp.value);
-                } else {
-                    window.amlBridge?.setTweak(prefKey, getValue());
-                    exampleEl.textContent = renderTemplate(getValue()) + (suffix || '');
-                    updatePreview();
-                }
-            };
-
-            resetBtn.onclick = () => {
-                customCb.checked = false;
-                setValue(presets[0].value);
-                window.amlBridge?.setTweak(prefKey, presets[0].value);
-                exampleEl.textContent = renderTemplate(presets[0].value) + (suffix || '');
-                updatePreview();
-                syncMode();
-            };
-
-            customCb.onchange = syncMode;
-            syncMode();
-
-            topRow.append(ddWrap, customLbl, resetBtn);
-            rowWrap.append(topRow, customWrap, exampleEl);
-            return rowWrap;
-        };
-
-        const albumFolderRow = makeTemplateRow('Album folder', ALBUM_PRESETS, savedAlbumFolder, 'download-album-folder', '');
-        const songFileRow    = makeTemplateRow('Song filename', SONG_PRESETS,  savedSongPart,         'download-song-file',    '.m4a');
-        dlBody.appendChild(makeRow('Album folder', albumFolderRow, null, false));
-        dlBody.appendChild(makeRow('Song filename', songFileRow, null, false));
+        dlBody.appendChild(makeRow('Track filename',
+            makeTemplateRow('Track filename', TRACK_PRESETS, prefs['dl-filename-track'] || TRACK_PRESETS[0].value, 'dl-filename-track', '.m4a'),
+            null, false));
+        dlBody.appendChild(makeRow('Album folder',
+            makeTemplateRow('Album folder', ALBUM_PRESETS, prefs['dl-dirname-album'] || ALBUM_PRESETS[0].value, 'dl-dirname-album', '/'),
+            null, false));
+        const previewWrap = document.createElement('div');
+        previewWrap.style.cssText = FF + 'font-size:10.5px;color:rgba(255,255,255,0.3);font-family:ui-monospace,monospace;padding:4px 0 10px;word-break:break-all;';
+        previewEl = previewWrap;
+        dlBody.appendChild(previewWrap);
         updatePreview();
-        dlBody.appendChild(previewEl);
 
-        // ── Quality & Format ─────────────────────────────────────────────────
-        dlBody.appendChild(dlSubhead('Quality & Format'));
+        // ── Format ──
+        dlBody.appendChild(_dlSubhead('Format'));
+        const { wrap: dlQWrap } = makeQualityDropdown('dl-quality');
+        const dlQReset = makeMiniBtn('', () => { window.amlBridge?.setTweak('dl-quality', 'lossless'); });
+        const dlQRow = document.createElement('div'); dlQRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+        dlQRow.append(dlQWrap, dlQReset);
+        dlBody.appendChild(makeRow('Quality', dlQRow, null, false));
 
-        const { wrap: dqWrap, setValue: setDQ } = makeQualityDropdown('downloads-quality');
-        const dqResetBtn = makeMiniBtn('Reset', () => {
-            setDQ('lossless');
-            window.amlBridge?.setTweak('downloads-quality', 'lossless');
-        });
-        const dqCtrl = document.createElement('div');
-        dqCtrl.style.cssText = 'display:flex;align-items:center;gap:8px;';
-        dqCtrl.append(dqWrap, dqResetBtn);
-        dlBody.appendChild(makeRow('Audio quality', dqCtrl, null, false));
+        const ffmpegAvail = !!(tools?.ffmpeg);
+        const ffmpegToggle = makeIOSToggle(!!(prefs['dl-ffmpeg-enabled']) && ffmpegAvail, v => window.amlBridge?.setTweak('dl-ffmpeg-enabled', v));
+        if (!ffmpegAvail) { ffmpegToggle.style.opacity = '0.4'; ffmpegToggle.title = 'FFmpeg not found'; }
+        dlBody.appendChild(makeRow('Convert with FFmpeg', ffmpegToggle, ffmpegAvail ? 'Re-encode after download' : 'FFmpeg not found in PATH', false));
 
-        // ── MV video quality segmented control ───────────────────────────────
-        const MV_QUALITY_OPTS = [
-            { value: 0,    label: 'Best' },
-            { value: 2160, label: '4K'   },
-            { value: 1080, label: '1080p' },
-            { value: 720,  label: '720p'  },
-            { value: 480,  label: '480p'  },
+        const embedArtToggle = makeIOSToggle(prefs['dl-embed-art'] !== false, v => window.amlBridge?.setTweak('dl-embed-art', v));
+        dlBody.appendChild(makeRow('Embed artwork', embedArtToggle, null, false));
+
+        // ── MV format ──
+        dlBody.appendChild(_dlSubhead('Music Video'));
+        const MV_RES_OPTS = [
+            { value: '4k',   label: '4K (2160p)' },
+            { value: '1080p', label: '1080p' },
+            { value: '720p',  label: '720p' },
+            { value: '480p',  label: '480p' },
         ];
-        const savedMVH = parseInt(prefs['mv-max-height'] ?? '0', 10) || 0;
+        const { wrap: mvResDd } = _dlDropdown(MV_RES_OPTS, prefs['dl-mv-quality'] || '1080p', v => window.amlBridge?.setTweak('dl-mv-quality', v));
+        dlBody.appendChild(makeRow('Resolution', mvResDd, null, false));
 
-        const mvSeg = document.createElement('div');
-        mvSeg.style.cssText = 'display:flex;align-items:center;border-radius:8px;overflow:hidden;' +
-            'border:0.5px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.06);flex-shrink:0;';
-
-        MV_QUALITY_OPTS.forEach(({ value, label }) => {
-            const btn = document.createElement('button');
-            btn.textContent = label;
-            btn.dataset.val = value;
-            const active = value === savedMVH;
-            btn.style.cssText = FF + `padding:4px 10px;font-size:12px;border:none;border-radius:0;cursor:pointer;` +
-                `background:${active ? '#fc3c44' : 'transparent'};` +
-                `color:${active ? '#fff' : 'rgba(255,255,255,0.55)'};` +
-                `transition:background 0.15s,color 0.15s;border-right:0.5px solid rgba(255,255,255,0.1);`;
-            btn.onmouseenter = () => { if (btn.dataset.val != mvSeg.dataset.active) btn.style.background = 'rgba(255,255,255,0.1)'; };
-            btn.onmouseleave = () => { if (btn.dataset.val != mvSeg.dataset.active) btn.style.background = 'transparent'; };
-            btn.onclick = () => {
-                mvSeg.dataset.active = value;
-                mvSeg.querySelectorAll('button').forEach(b => {
-                    const sel = b.dataset.val == value;
-                    b.style.background = sel ? '#fc3c44' : 'transparent';
-                    b.style.color = sel ? '#fff' : 'rgba(255,255,255,0.55)';
-                });
-                const v = parseInt(value, 10);
-                window.amlBridge?.setTweak('mv-max-height', v === 0 ? null : v);
-            };
-            if (active) mvSeg.dataset.active = value;
-            mvSeg.appendChild(btn);
-        });
-        // Remove last right border
-        mvSeg.lastChild.style.borderRight = 'none';
-        dlBody.appendChild(makeRow('Video quality', mvSeg, null, false));
-
-        const OVERWRITE_OPTS = [
-            { value: 'skip',      label: 'Skip — keep existing file' },
-            { value: 'overwrite', label: 'Overwrite — replace existing file' },
-            { value: 'rename',    label: 'Rename — append (1), (2)…' },
-        ];
-        const { wrap: owDd } = dlDropdown(OVERWRITE_OPTS, prefs['download-overwrite'] || 'skip',
-            v => window.amlBridge?.setTweak('download-overwrite', v));
-        dlBody.appendChild(makeRow('If file exists', owDd, null, false));
-
-        const ffmpegOk   = !!(tools.ffmpeg?.available);
-        const ffmpegPath = tools.ffmpeg?.path || '';
-
-        const flacToggle = makeIOSToggle(!!(prefs['convert-to-flac']), v => {
-            window.amlBridge?.setTweak('convert-to-flac', v);
-            keepRow.style.display = v ? '' : 'none';
-        });
-        dlBody.appendChild(makeRow('Convert to FLAC', flacToggle, null, false));
-
-        // FFmpeg status row
-        const ffStatusWrap = document.createElement('div');
-        ffStatusWrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-        const ffDot = document.createElement('span');
-        ffDot.style.cssText = `width:7px;height:7px;border-radius:50%;flex-shrink:0;background:${ffmpegOk ? '#30d158' : '#ff453a'};`;
-        const ffLabel = document.createElement('span');
-        ffLabel.style.cssText = FF + `font-size:11.5px;color:${ffmpegOk ? 'rgba(255,255,255,0.6)' : 'rgba(255,69,58,0.85)'};font-family:ui-monospace,monospace;`;
-        ffLabel.textContent = ffmpegOk ? ffmpegPath : 'not found in PATH';
-        ffStatusWrap.append(ffDot, ffLabel);
-
-        // Custom binary path toggle
-        const ffCustomOn = !!(prefs['ffmpeg-path']);
-        const ffCustomLbl = document.createElement('label');
-        ffCustomLbl.style.cssText = FF + 'display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.4);font-size:11px;cursor:pointer;';
-        const ffCustomCb = document.createElement('input');
-        ffCustomCb.type = 'checkbox'; ffCustomCb.checked = ffCustomOn;
-        ffCustomCb.style.cssText = 'accent-color:#fc3c44;cursor:pointer;';
-        ffCustomLbl.append(ffCustomCb, document.createTextNode('Custom path'));
-        ffStatusWrap.appendChild(ffCustomLbl);
-
-        const ffPathInp = document.createElement('input');
-        ffPathInp.type = 'text';
-        ffPathInp.value = prefs['ffmpeg-path'] || '';
-        ffPathInp.placeholder = '/usr/local/bin/ffmpeg';
-        ffPathInp.style.cssText = FF + 'width:100%;padding:5px 10px;border-radius:7px;margin-top:4px;' +
-            'background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);' +
-            'color:rgba(255,255,255,0.88);font-size:12px;font-family:ui-monospace,monospace;' +
-            'box-sizing:border-box;outline:none;transition:border-color 0.15s;' +
-            (ffCustomOn ? '' : 'display:none;');
-        ffPathInp.onfocus = () => { ffPathInp.style.borderColor = 'rgba(252,60,68,0.45)'; };
-        ffPathInp.onblur  = () => { ffPathInp.style.borderColor = 'rgba(255,255,255,0.15)'; };
-        ffPathInp.oninput = () => window.amlBridge?.setTweak('ffmpeg-path', ffPathInp.value || null);
-
-        ffCustomCb.onchange = () => {
-            ffPathInp.style.display = ffCustomCb.checked ? '' : 'none';
-            if (!ffCustomCb.checked) window.amlBridge?.setTweak('ffmpeg-path', null);
-        };
-
-        const ffWrap = document.createElement('div');
-        ffWrap.style.cssText = 'display:flex;flex-direction:column;gap:0;';
-        ffWrap.append(ffStatusWrap, ffPathInp);
-        dlBody.appendChild(makeRow('FFmpeg', ffWrap, null, false));
-
-        const keepToggle = makeIOSToggle(!!(prefs['keep-original']), v => window.amlBridge?.setTweak('keep-original', v));
-        const keepRow = makeRow('Keep original M4A', keepToggle, null, false);
-        keepRow.style.display = prefs['convert-to-flac'] ? '' : 'none';
-        dlBody.appendChild(keepRow);
-
-        // ── Artwork ──────────────────────────────────────────────────────────
-        dlBody.appendChild(dlSubhead('Artwork'));
-
-        const artToggle = makeIOSToggle(prefs['embed-artwork'] !== false, v => window.amlBridge?.setTweak('embed-artwork', v));
-        dlBody.appendChild(makeRow('Embed cover art', artToggle, null, false));
-        const ART_SIZE_OPTS = [
+        const ART_OPTS = [
             { value: '600',  label: '600 × 600' },
             { value: '1200', label: '1200 × 1200' },
-            { value: '3000', label: '3000 × 3000 (default)' },
-            { value: '5000', label: '5000 × 5000' },
+            { value: '3000', label: '3000 × 3000' },
         ];
-        const savedArtSize = String(prefs['artwork-size'] || '3000');
-        const artSzIsCustom = !ART_SIZE_OPTS.some(o => o.value === savedArtSize);
-        const { wrap: artSzDd, getValue: getArtSzVal } = dlDropdown(ART_SIZE_OPTS, artSzIsCustom ? '3000' : savedArtSize,
-            v => window.amlBridge?.setTweak('artwork-size', v));
+        const { wrap: artDd } = _dlDropdown(ART_OPTS, prefs['dl-artwork-size'] || '1200', v => window.amlBridge?.setTweak('dl-artwork-size', v));
+        dlBody.appendChild(makeRow('Artwork size', artDd, null, false));
 
-        const artSzCustomInp = document.createElement('input');
-        artSzCustomInp.type = 'number';
-        artSzCustomInp.min = '100';
-        artSzCustomInp.max = '10000';
-        artSzCustomInp.step = '100';
-        artSzCustomInp.value = artSzIsCustom ? savedArtSize : '3000';
-        artSzCustomInp.placeholder = 'e.g. 4000';
-        artSzCustomInp.style.cssText = FF + 'width:90px;padding:4px 8px;border-radius:7px;' +
-            'background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);' +
-            'color:rgba(255,255,255,0.88);font-size:12px;outline:none;' +
-            'transition:border-color 0.15s;display:none;';
-        artSzCustomInp.onfocus = () => { artSzCustomInp.style.borderColor = 'rgba(252,60,68,0.5)'; };
-        artSzCustomInp.onblur  = () => { artSzCustomInp.style.borderColor = 'rgba(255,255,255,0.15)'; };
-        artSzCustomInp.oninput = () => {
-            const v = parseInt(artSzCustomInp.value, 10);
-            if (v >= 100 && v <= 10000) window.amlBridge?.setTweak('artwork-size', String(v));
-        };
+        // ── Lyrics ──
+        dlBody.appendChild(_dlSubhead('Lyrics'));
+        const lyricsToggle = makeIOSToggle(prefs['dl-lyrics'] !== false, v => window.amlBridge?.setTweak('dl-lyrics', v));
+        dlBody.appendChild(makeRow('Embed lyrics', lyricsToggle, null, false));
+        const timedLyricsToggle = makeIOSToggle(prefs['dl-timed-lyrics'] !== false, v => window.amlBridge?.setTweak('dl-timed-lyrics', v));
+        dlBody.appendChild(makeRow('Timed lyrics (SYLT)', timedLyricsToggle, null, false));
 
-        const artSzCustomLbl = document.createElement('label');
-        artSzCustomLbl.style.cssText = FF + 'display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.45);font-size:11px;cursor:pointer;flex-shrink:0;';
-        const artSzCustomCb = document.createElement('input');
-        artSzCustomCb.type = 'checkbox';
-        artSzCustomCb.checked = artSzIsCustom;
-        artSzCustomCb.style.cssText = 'accent-color:#fc3c44;cursor:pointer;';
-        artSzCustomLbl.append(artSzCustomCb, document.createTextNode('Custom'));
-
-        artSzCustomCb.onchange = () => {
-            const custom = artSzCustomCb.checked;
-            artSzDd.style.display = custom ? 'none' : 'inline-block';
-            artSzCustomInp.style.display = custom ? 'inline-block' : 'none';
-            if (custom) {
-                artSzCustomInp.value = getArtSzVal();
-                window.amlBridge?.setTweak('artwork-size', artSzCustomInp.value);
-            } else {
-                window.amlBridge?.setTweak('artwork-size', getArtSzVal());
-            }
-        };
-        if (artSzIsCustom) { artSzDd.style.display = 'none'; artSzCustomInp.style.display = 'inline-block'; }
-
-        const artSzWrap = document.createElement('div');
-        artSzWrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-        artSzWrap.append(artSzDd, artSzCustomInp, artSzCustomLbl);
-        dlBody.appendChild(makeRow('Artwork size', artSzWrap, null, false));
-
-        // ── Lyrics ───────────────────────────────────────────────────────────
-        dlBody.appendChild(dlSubhead('Lyrics'));
-
-        const lyrToggle = makeIOSToggle(prefs['embed-lyrics'] !== false, v => window.amlBridge?.setTweak('embed-lyrics', v));
-        dlBody.appendChild(makeRow('Embed lyrics', lyrToggle, null, false));
-        const LYR_TYPE_OPTS = [
-            { value: 'lyrics',           label: 'Standard (time-synced)' },
-            { value: 'syllable-lyrics',  label: 'Syllable (word-level)' },
-        ];
-        const { wrap: lyrTypeDd } = dlDropdown(LYR_TYPE_OPTS, prefs['lyrics-type'] || 'lyrics',
-            v => window.amlBridge?.setTweak('lyrics-type', v));
-        dlBody.appendChild(makeRow('Lyrics type', lyrTypeDd, null, false));
-        const LYR_FMT_OPTS = [
-            { value: 'lrc',  label: 'LRC' },
-            { value: 'ttml', label: 'TTML' },
-        ];
-        const { wrap: lyrFmtDd } = dlDropdown(LYR_FMT_OPTS, prefs['lyrics-format'] || 'lrc',
-            v => window.amlBridge?.setTweak('lyrics-format', v));
-        dlBody.appendChild(makeRow('Lyrics format', lyrFmtDd, null, false));
-        const sidecarToggle = makeIOSToggle(!!(prefs['save-lrc-sidecar']), v => window.amlBridge?.setTweak('save-lrc-sidecar', v));
-        dlBody.appendChild(makeRow('Save .lrc sidecar', sidecarToggle, 'Writes a .lrc file alongside the audio', false));
-
-        // ── Content & Tags ───────────────────────────────────────────────────
-        dlBody.appendChild(dlSubhead('Content & Tags'));
-
-        // Helper: small inline marker text input
-        const makeMarkerInput = (prefKey, defaultVal) => {
+        // ── Content markers ──
+        dlBody.appendChild(_dlSubhead('Content Markers'));
+        function makeMarkerInput(prefKey, defaultVal) {
             const inp = document.createElement('input');
-            inp.type = 'text';
-            inp.value = prefs[prefKey] || defaultVal;
-            inp.maxLength = 8;
-            inp.style.cssText = FF + 'width:60px;padding:4px 8px;border-radius:7px;text-align:center;' +
-                'background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);' +
-                'color:rgba(255,255,255,0.88);font-size:12.5px;font-family:ui-monospace,monospace;outline:none;' +
-                'transition:border-color 0.15s;';
+            inp.type = 'text'; inp.value = prefs[prefKey] || defaultVal; inp.maxLength = 8;
+            inp.style.cssText = FF + 'width:60px;padding:4px 8px;border-radius:7px;text-align:center;background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.15);color:rgba(255,255,255,0.88);font-size:12.5px;font-family:ui-monospace,monospace;outline:none;transition:border-color 0.15s;';
             inp.onfocus = () => { inp.style.borderColor = 'rgba(252,60,68,0.5)'; };
             inp.onblur  = () => { inp.style.borderColor = 'rgba(255,255,255,0.15)'; };
             inp.oninput = () => window.amlBridge?.setTweak(prefKey, inp.value);
             return inp;
-        };
-
-        // Helper: marker input + inline reset button
-        const makeMarkerControl = (prefKey, defaultVal) => {
+        }
+        function makeMarkerControl(prefKey, defaultVal) {
             const inp = makeMarkerInput(prefKey, defaultVal);
-            const resetBtn = makeMiniBtn('Reset', () => {
-                inp.value = defaultVal;
-                window.amlBridge?.setTweak(prefKey, defaultVal);
-            });
-            const wrap = document.createElement('div');
-            wrap.style.cssText = 'display:flex;align-items:center;gap:6px;';
-            wrap.append(inp, resetBtn);
-            return wrap;
-        };
-
-        // Helper: indented sub-row (shown/hidden by parent toggle)
-        const makeDependentRow = (label, control) => {
-            const wrap = document.createElement('div');
-            wrap.style.cssText = 'display:flex;align-items:center;padding:9px 0 9px 14px;' +
-                'border-bottom:0.5px solid rgba(255,255,255,0.07);';
-            const lbl = document.createElement('div');
-            lbl.style.cssText = FF + 'flex:1;font-size:13px;color:rgba(255,255,255,0.45);';
-            lbl.textContent = label;
+            const resetBtn = makeMiniBtn('', () => { inp.value = defaultVal; window.amlBridge?.setTweak(prefKey, defaultVal); });
+            const w = document.createElement('div'); w.style.cssText = 'display:flex;align-items:center;gap:6px;';
+            w.append(inp, resetBtn); return w;
+        }
+        function makeDependentRow(label, control) {
+            const w = document.createElement('div');
+            w.style.cssText = 'display:flex;align-items:center;padding:9px 0 9px 14px;border-bottom:0.5px solid rgba(255,255,255,0.07);';
+            const lbl = document.createElement('div'); lbl.style.cssText = FF + 'flex:1;font-size:13px;color:rgba(255,255,255,0.45);'; lbl.textContent = label;
             if (control.style) control.style.marginLeft = 'auto';
-            wrap.append(lbl, control);
-            return wrap;
-        };
-
-        // Explicit content
+            w.append(lbl, control); return w;
+        }
         const explicitOn = prefs['explicit-enabled'] !== false;
         const explicitInpRow = makeDependentRow('Marker text', makeMarkerControl('explicit-marker', '[E]'));
         explicitInpRow.style.display = explicitOn ? '' : 'none';
         dlBody.appendChild(makeRow('Explicit content',
-            makeIOSToggle(explicitOn, v => {
-                window.amlBridge?.setTweak('explicit-enabled', v);
-                explicitInpRow.style.display = v ? '' : 'none';
-            }),
+            makeIOSToggle(explicitOn, v => { window.amlBridge?.setTweak('explicit-enabled', v); explicitInpRow.style.display = v ? '' : 'none'; }),
             'Add [E] to filenames of explicit tracks', false));
         dlBody.appendChild(explicitInpRow);
-
-        // Clean content (off by default — most users don't want [C] in filenames)
         const cleanOn = !!(prefs['clean-enabled']);
         const cleanInpRow = makeDependentRow('Marker text', makeMarkerControl('clean-marker', '[C]'));
         cleanInpRow.style.display = cleanOn ? '' : 'none';
         dlBody.appendChild(makeRow('Clean content',
-            makeIOSToggle(cleanOn, v => {
-                window.amlBridge?.setTweak('clean-enabled', v);
-                cleanInpRow.style.display = v ? '' : 'none';
-            }),
+            makeIOSToggle(cleanOn, v => { window.amlBridge?.setTweak('clean-enabled', v); cleanInpRow.style.display = v ? '' : 'none'; }),
             'Add [C] to filenames of clean/censored tracks', false));
         dlBody.appendChild(cleanInpRow);
-
-        // Apple Digital Masters
         const admOn = prefs['adm-enabled'] !== false;
         const admInpRow = makeDependentRow('Marker text', makeMarkerControl('adm-marker', '[M]'));
         admInpRow.style.display = admOn ? '' : 'none';
         dlBody.appendChild(makeRow('Apple Digital Masters',
-            makeIOSToggle(admOn, v => {
-                window.amlBridge?.setTweak('adm-enabled', v);
-                admInpRow.style.display = v ? '' : 'none';
-            }),
+            makeIOSToggle(admOn, v => { window.amlBridge?.setTweak('adm-enabled', v); admInpRow.style.display = v ? '' : 'none'; }),
             'Add [M] to filenames of tracks mastered for Apple Music', false));
         dlBody.appendChild(admInpRow);
-
-        // Playlist metadata
         dlBody.appendChild(makeRow('Playlist metadata',
-            makeIOSToggle(!!(prefs['use-songinfo-for-playlist']), v =>
-                window.amlBridge?.setTweak('use-songinfo-for-playlist', v)),
-            'Use original album track number and album name instead of playlist position when downloading a playlist',
-            true));
+            makeIOSToggle(!!(prefs['use-songinfo-for-playlist']), v => window.amlBridge?.setTweak('use-songinfo-for-playlist', v)),
+            'Use original album track number and album name instead of playlist position when downloading a playlist', true));
 
-        // ── Queue ────────────────────────────────────────────────────────────
-        dlBody.appendChild(dlSubhead('Queue'));
-
-        // Retry on fail toggle
-        const retryToggle = makeIOSToggle(!!(prefs['retry-on-fail'] !== false), v => window.amlBridge?.setTweak('retry-on-fail', v));
-        dlBody.appendChild(makeRow('Retry on fail', retryToggle, 'Automatically retry a failed download', false));
-
-        // Retry timeout dropdown
+        // ── Queue ──
+        dlBody.appendChild(_dlSubhead('Queue'));
+        dlBody.appendChild(makeRow('Retry on fail',
+            makeIOSToggle(prefs['retry-on-fail'] !== false, v => window.amlBridge?.setTweak('retry-on-fail', v)),
+            'Automatically retry a failed download', false));
         const RETRY_TIMEOUT_OPTS = [
             { value: 15,  label: '15 seconds' },
             { value: 30,  label: '30 seconds' },
             { value: 60,  label: '1 minute' },
             { value: 300, label: '5 minutes' },
         ];
-        const { wrap: retryToDd } = dlDropdown(RETRY_TIMEOUT_OPTS, parseInt(prefs['retry-timeout'] ?? '30', 10),
+        const { wrap: retryToDd } = _dlDropdown(RETRY_TIMEOUT_OPTS, parseInt(prefs['retry-timeout'] ?? '30', 10),
             v => window.amlBridge?.setTweak('retry-timeout', parseInt(v, 10)));
         dlBody.appendChild(makeRow('Retry after', retryToDd, null, false));
+        return wrap;
+    }
 
-        dlg.appendChild(dlWrap);
-
-        // ── History section ────────────────────────────────────────────────────
-        const { wrap: histWrap, body: histBody } = makeSection('History');
+    async function _buildHistorySection() {
+        const { wrap, body: histBody } = makeSection('History');
         const histEnabledRaw = await window.amlBridge?.storeRead('historyEnabled').catch(() => null);
         const histIsEnabled = histEnabledRaw !== 'false' && histEnabledRaw !== false;
-        const histToggle = makeIOSToggle(histIsEnabled, async (v) => {
+        const histToggle = _amlIOSToggle(histIsEnabled, async (v) => {
             _histEnabled = v;
             await window.amlBridge?.storeWrite('historyEnabled', String(v)).catch(() => {});
             _histInject();
@@ -6307,10 +5986,11 @@ window.amlGetQueueInfo = function () {
         histClearBtn.onclick = () => { _histClear(); openSettings(); };
         histClearRow.appendChild(histClearBtn);
         histBody.appendChild(histClearRow);
-        dlg.appendChild(histWrap);
+        return wrap;
+    }
 
-        // ── Library section ────────────────────────────────────────────────────
-        const { wrap: libWrap, body: libBody } = makeSection('Library');
+    async function _buildLibrarySection() {
+        const { wrap, body: libBody } = makeSection('Library');
         const libStatus = await fetch(`${ENGINE}/api/v1/library/status`).then(r => r.json()).catch(() => ({}));
         const libSongs = libStatus.songs ?? 0;
         const libPl    = libStatus.playlists ?? 0;
@@ -6321,15 +6001,12 @@ window.amlGetQueueInfo = function () {
         const libStatEl = document.createElement('span');
         libStatEl.style.cssText = FF + 'color:rgba(255,255,255,0.45);font-size:11px;';
         libStatEl.textContent = libSongs > 0 ? `${libSongs} songs · ${libPl} playlists · synced ${libAtStr}` : 'Not synced';
-        libBody.appendChild(makeRow('Local library cache', libStatEl,
-            'Syncs your songs and playlists for instant queue-building', false));
-
+        libBody.appendChild(makeRow('Local library cache', libStatEl, 'Syncs your songs and playlists for instant queue-building', false));
         const libSyncRow = document.createElement('div');
         libSyncRow.style.cssText = 'padding:10px 0;border-top:0.5px solid rgba(255,255,255,0.07);display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
         const libSyncBtn = makeBtn('Sync Now');
         const libSyncMsg = document.createElement('span');
         libSyncMsg.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.4);flex:1;';
-
         libSyncBtn.onclick = async () => {
             libSyncBtn.disabled = true;
             libSyncBtn.textContent = 'Syncing…';
@@ -6356,19 +6033,86 @@ window.amlGetQueueInfo = function () {
         };
         libSyncRow.append(libSyncBtn, libSyncMsg);
         libBody.appendChild(libSyncRow);
-        dlg.appendChild(libWrap);
+        return wrap;
+    }
 
-        // ── Developer section ──────────────────────────────────────────────────
-        const { wrap: devWrap, body: devBody } = makeSection('Developer');
+    function _buildDevSection(prefs) {
+        const { wrap, body: devBody } = makeSection('Developer');
         const debugToggle = document.createElement('input');
         debugToggle.type = 'checkbox';
         debugToggle.checked = !!(prefs.debug);
         debugToggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
-        debugToggle.onchange = () => {
-            window.amlBridge?.setPref('debug', debugToggle.checked);
-        };
+        debugToggle.onchange = () => { window.amlBridge?.setPref('debug', debugToggle.checked); };
         devBody.appendChild(makeRow('Enable debug mode', debugToggle, 'Opens DevTools and full console on next launch', true));
-        dlg.appendChild(devWrap);
+        return wrap;
+    }
+
+    // ── Open settings — anchored to the account button ─────────────────────
+    // Generation counter: each openSettings() call gets a unique ID.
+    // After each await, stale callers (whose ID was superseded by a newer call)
+    // bail out — preventing concurrent renders from appending duplicate sections.
+    let _settingsGen = 0;
+    async function openSettings() {
+        const myGen = ++_settingsGen;
+        const dlg = getDialog();
+        dlg.innerHTML = '';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.id = 'aml-settings-close';
+        closeBtn.textContent = '✕';
+        closeBtn.style.cssText = FF +
+            'background:rgba(30,30,32,0.85);border:0.5px solid rgba(255,255,255,0.13);border-radius:50%;' +
+            'width:26px;height:26px;cursor:pointer;color:rgba(255,255,255,0.6);font-size:12px;' +
+            'display:flex;align-items:center;justify-content:center;margin-top:16px;' +
+            'backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:background 0.15s,color 0.15s;';
+        closeBtn.onmouseenter = () => { closeBtn.style.background = 'rgba(255,255,255,0.14)'; closeBtn.style.color = '#fff'; };
+        closeBtn.onmouseleave = () => { closeBtn.style.background = 'rgba(30,30,32,0.85)'; closeBtn.style.color = 'rgba(255,255,255,0.6)'; };
+        closeBtn.onclick = closeSettings;
+        dlg.appendChild(closeBtn);
+
+        const titleBar = document.createElement('div');
+        titleBar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:4px 0 4px;margin-top:-26px;';
+        const title = document.createElement('h1');
+        title.textContent = 'AML Settings';
+        title.style.cssText = FF + 'font-size:15px;font-weight:600;margin:0;color:rgba(255,255,255,0.95);';
+        const savedBadge = document.createElement('span');
+        savedBadge.style.cssText = FF + 'font-size:10px;color:#30d158;opacity:0;transition:opacity 0.3s;flex-shrink:0;';
+        savedBadge.textContent = '✓ Saved';
+        let _savedTimer = null;
+        titleBar.append(title, savedBadge);
+        dlg.appendChild(titleBar);
+
+        const _bridge = window.amlBridge;
+        if (_bridge._settingsRestore) _bridge._settingsRestore();
+        const _realSetTweak = _bridge.setTweak.bind(_bridge);
+        const _restoreProxy = () => { _bridge.setTweak = _realSetTweak; _bridge._settingsRestore = null; };
+        _bridge._settingsRestore = _restoreProxy;
+        _bridge.setTweak = (k, v) => {
+            _realSetTweak(k, v);
+            savedBadge.style.opacity = '1';
+            clearTimeout(_savedTimer);
+            _savedTimer = setTimeout(() => { savedBadge.style.opacity = '0'; }, 1400);
+        };
+        dlg.addEventListener('close', _restoreProxy, { once: true });
+
+        const [drm, tools] = await Promise.all([
+            fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
+            fetch(`${ENGINE}/api/v1/tools`).then(r => r.json()).catch(() => ({})),
+        ]);
+        if (myGen !== _settingsGen) { _restoreProxy(); return; }
+        const prefs = await window.amlBridge.getPrefs().catch(() => ({}));
+        if (myGen !== _settingsGen) { _restoreProxy(); return; }
+
+        dlg.appendChild(buildAccountSection(drm, openSettings));
+        dlg.appendChild(_buildEngineStatusSection(drm));
+        dlg.appendChild(_buildDisplaySection(prefs));
+        dlg.appendChild(await _buildThemeSection(prefs));
+        dlg.appendChild(_buildAudioSection(prefs));
+        dlg.appendChild(await _buildCacheSection(prefs));
+        dlg.appendChild(_buildDownloadsSection(prefs, tools));
+        dlg.appendChild(await _buildHistorySection());
+        dlg.appendChild(await _buildLibrarySection());
+        dlg.appendChild(_buildDevSection(prefs));
 
         if (!dlg.open) {
             dlg.classList.remove('aml-closing');
@@ -6691,6 +6435,39 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         return null;
     }
 
+    async function prefetchHintMeta(info) {
+        const mkMeta = _mkMetaForId(info.id);
+        if (mkMeta && mkMeta.title)
+            return { title: mkMeta.title, artist: mkMeta.artist, artwork: mkMeta.artwork };
+        try {
+            const sf = encodeURIComponent(info.storefront || 'us');
+            const meta = await fetch(`${ENGINE}/api/v1/metadata/${info.id}?sf=${sf}`, {
+                signal: AbortSignal.timeout(6000),
+            }).then(r => r.ok ? r.json() : null).catch(() => null);
+            if (meta)
+                return { title: meta.title || '', artist: meta.artistName || '', artwork: meta.artworkUrl || '' };
+        } catch (_) {}
+        return { title: '', artist: '', artwork: '' };
+    }
+
+    function buildDownloadOptions(prefs) {
+        return {
+            EmbedArtwork:   prefs['embed-artwork']   !== false,
+            ArtworkSize:    parseInt(prefs['artwork-size'] || '3000', 10),
+            EmbedLyrics:    prefs['embed-lyrics']    !== false,
+            LrcType:        prefs['lyrics-type']     || 'lyrics',
+            LrcFormat:      prefs['lyrics-format']   || 'lrc',
+            SaveLrcSidecar: !!(prefs['save-lrc-sidecar']),
+            OverwritePolicy: prefs['download-overwrite'] || 'skip',
+            ConvertToFLAC:  !!(prefs['convert-to-flac']),
+            FFmpegPath:     prefs['ffmpeg-path'] || '',
+            KeepOriginal:   !!(prefs['keep-original']),
+            ExplicitChoice: prefs['explicit-enabled'] !== false ? (prefs['explicit-marker'] || '[E]') : '',
+            CleanChoice:    prefs['clean-enabled']              ? (prefs['clean-marker']    || '[C]') : '',
+            MasterChoice:   prefs['adm-enabled']    !== false   ? (prefs['adm-marker']      || '[M]') : '',
+        };
+    }
+
     // ── Post a download job to the engine ─────────────────────────────────
     async function startDownload(info) {
         if (!info) { console.warn('[AML] startDownload: no track info'); return; }
@@ -6698,31 +6475,10 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         const prefs = await window.amlBridge?.getPrefs().catch(() => ({})) || {};
         const qual = prefs['downloads-quality'] || _downloadsQuality || 'lossless';
         const isLossless = qual !== 'high-quality';
+        const hint = await prefetchHintMeta(info);
 
-        // Pre-fetch metadata so the download row shows title/artwork immediately.
-        // Try MusicKit first (synchronous), then engine catalog (async, ~200-400ms).
-        let hintTitle = '', hintArtist = '', hintArtwork = '';
-        const mkMeta = _mkMetaForId(info.id);
-        if (mkMeta && mkMeta.title) {
-            hintTitle = mkMeta.title; hintArtist = mkMeta.artist; hintArtwork = mkMeta.artwork;
-        } else {
-            try {
-                const sf = encodeURIComponent(info.storefront || 'us');
-                const meta = await fetch(`${ENGINE}/api/v1/metadata/${info.id}?sf=${sf}`, {
-                    signal: AbortSignal.timeout(6000),
-                }).then(r => r.ok ? r.json() : null).catch(() => null);
-                if (meta) {
-                    hintTitle   = meta.title      || '';
-                    hintArtist  = meta.artistName || '';
-                    hintArtwork = meta.artworkUrl || '';
-                }
-            } catch (_) {}
-        }
-
-        // Build combined filename template from saved folder + song parts
         const _af = prefs['download-album-folder'] || '{album_artist}/{album}';
         const _sf = prefs['download-song-file']    || '{track_number:02d} - {title}';
-        const filenameTemplate = `${_af}/${_sf}`;
 
         const body = {
             AssetID:          info.id,
@@ -6737,27 +6493,13 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 Playlist:        info.type === 'playlist',
                 LibraryPlaylist: !!(info.isLibrary),
             },
-            MVMaxHeight:  parseInt(prefs['mv-max-height'] ?? '0', 10) || 0,
+            MVMaxHeight:      parseInt(prefs['mv-max-height'] ?? '0', 10) || 0,
             OutputDir:        prefs['download-dir'] || '',
-            FilenameTemplate: filenameTemplate,
-            Options: {
-                EmbedArtwork:  prefs['embed-artwork']   !== false,
-                ArtworkSize:   parseInt(prefs['artwork-size'] || '3000', 10),
-                EmbedLyrics:   prefs['embed-lyrics']    !== false,
-                LrcType:       prefs['lyrics-type']     || 'lyrics',
-                LrcFormat:     prefs['lyrics-format']   || 'lrc',
-                SaveLrcSidecar: !!(prefs['save-lrc-sidecar']),
-                OverwritePolicy: prefs['download-overwrite'] || 'skip',
-                ConvertToFLAC: !!(prefs['convert-to-flac']),
-                FFmpegPath:    prefs['ffmpeg-path'] || '',
-                KeepOriginal:  !!(prefs['keep-original']),
-                ExplicitChoice: prefs['explicit-enabled'] !== false ? (prefs['explicit-marker'] || '[E]') : '',
-                CleanChoice:    prefs['clean-enabled']              ? (prefs['clean-marker']    || '[C]') : '',
-                MasterChoice:   prefs['adm-enabled']    !== false   ? (prefs['adm-marker']      || '[M]') : '',
-            },
-            HintTitle:   hintTitle,
-            HintArtist:  hintArtist,
-            HintArtwork: hintArtwork,
+            FilenameTemplate: `${_af}/${_sf}`,
+            Options:          buildDownloadOptions(prefs),
+            HintTitle:        hint.title,
+            HintArtist:       hint.artist,
+            HintArtwork:      hint.artwork,
         };
 
         try {
@@ -6971,6 +6713,22 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         return panel;
     }
 
+    function syncJobRetry(job, retryEnabled, retryDelay) {
+        if (job.phase === 'failed' && retryEnabled) {
+            if (!_failedAt.has(job.jobId)) {
+                const deadline = Date.now() + retryDelay;
+                const t = setTimeout(() => {
+                    _failedAt.delete(job.jobId);
+                    retryJob(job.jobId);
+                }, retryDelay);
+                _failedAt.set(job.jobId, { timer: t, deadline });
+            }
+        } else {
+            const entry = _failedAt.get(job.jobId);
+            if (entry !== undefined) { clearTimeout(entry.timer); _failedAt.delete(job.jobId); }
+        }
+    }
+
     function renderJobs(jobs) {
         const list = document.getElementById('aml-downloads-list');
         if (!list) return;
@@ -7029,21 +6787,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         // Auto-retry failed jobs after the configured timeout
         const retryEnabled = prefs['retry-on-fail'] !== false;
         const retryDelay   = (parseInt(prefs['retry-timeout'] ?? '30', 10) || 30) * 1000;
-        for (const job of jobs) {
-            if (job.phase === 'failed' && retryEnabled) {
-                if (!_failedAt.has(job.jobId)) {
-                    const deadline = Date.now() + retryDelay;
-                    const t = setTimeout(() => {
-                        _failedAt.delete(job.jobId);
-                        retryJob(job.jobId);
-                    }, retryDelay);
-                    _failedAt.set(job.jobId, { timer: t, deadline });
-                }
-            } else {
-                const entry = _failedAt.get(job.jobId);
-                if (entry !== undefined) { clearTimeout(entry.timer); _failedAt.delete(job.jobId); }
-            }
-        }
+        for (const job of jobs) syncJobRetry(job, retryEnabled, retryDelay);
     }
 
     const PHASE_LABEL = {
@@ -7156,23 +6900,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         return row;
     }
 
-    function updateJobRow(row, job) {
-        const name      = row.querySelector('.aml-dl-name');
-        const artist    = row.querySelector('.aml-dl-artist');
-        const pill      = row.querySelector('.aml-dl-pill');
-        const fill      = row.querySelector('.aml-dl-fill');
-        const size      = row.querySelector('.aml-dl-size');
-        const artEl     = row.querySelector('.aml-dl-art');
-        const artImg    = artEl?.querySelector('img');
-        const artSkel   = artEl?.querySelector('.aml-dl-art-skel');
-        const cancelBtn = row.querySelector('.aml-dl-cancel');
-        const progRow   = row.querySelector('.aml-dl-prog-row');
-        const phase     = job.phase || '';
-        const hasTitle  = !!(job.title || job.output);
-        const isTerminal = phase === 'done' || phase === 'failed' || phase === 'cancelled';
-        const isActive   = phase === 'downloading' || phase === 'tagging' || phase === 'moving' || phase === 'resolving';
-
-        // Title: skeleton lines when unresolved, real text otherwise
+    function _applyJobNameArtist(name, artist, hasTitle, job) {
         if (name) {
             if (hasTitle) {
                 name.textContent = job.title || job.output.split('/').pop();
@@ -7182,8 +6910,6 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 name.style.cssText = 'flex:1;height:11px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.10);animation:aml-dl-skel 1.4s ease-in-out infinite;max-width:70%;';
             }
         }
-
-        // Artist: skeleton when unresolved
         if (artist) {
             if (hasTitle) {
                 artist.textContent = job.artistName || '';
@@ -7193,58 +6919,28 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 artist.style.cssText = 'flex:1;height:9px;margin:1px 0;border-radius:3px;background:rgba(255,255,255,0.07);animation:aml-dl-skel 1.4s ease-in-out infinite;max-width:45%;';
             }
         }
+    }
 
-        // Status pill
-        if (pill) {
-            pill.className = PILL_CLASS[phase] || 'aml-dl-pill aml-dl-pill-q';
-            pill.textContent = PHASE_LABEL[phase] || phase;
+    function _applyJobFill(fill, phase, isActive, isTerminal, job) {
+        if (!fill) return;
+        const BG = { done: '#30d158', failed: '#ff453a', cancelled: 'rgba(255,255,255,0.10)' };
+        const pct = isTerminal ? 100 : (job.percent ?? 0);
+        const bg  = BG[phase] || 'rgba(255,255,255,0.85)';
+        if (phase === 'downloading') {
+            // Real byte-based fill — smooth transition, no animation
+            fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.6s ease;background:${bg};animation:none;`;
+        } else if (isActive) {
+            // Indeterminate pulse for resolving/tagging/moving
+            fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.4s ease;background:${bg};animation:aml-dl-pulse 1.2s ease-in-out infinite;`;
+        } else {
+            fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.4s ease;background:${bg};animation:none;`;
         }
+    }
 
-        // Progress fill — determinate bar for all phases
-        if (fill) {
-            const BG = { done: '#30d158', failed: '#ff453a', cancelled: 'rgba(255,255,255,0.10)' };
-            const pct = isTerminal ? 100 : (job.percent ?? 0);
-            const bg  = BG[phase] || 'rgba(255,255,255,0.85)';
-            if (phase === 'downloading') {
-                // Real byte-based fill — smooth transition, no animation
-                fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.6s ease;background:${bg};animation:none;`;
-            } else if (isActive) {
-                // Indeterminate pulse for resolving/tagging/moving
-                fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.4s ease;background:${bg};animation:aml-dl-pulse 1.2s ease-in-out infinite;`;
-            } else {
-                fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.4s ease;background:${bg};animation:none;`;
-            }
-        }
-
-        // Size label — show "done / total" when total is known
-        if (size) {
-            if (phase === 'downloading' && job.bytesTotal && job.bytesDone) {
-                size.textContent = `${_fmtBytes(job.bytesDone)} / ${_fmtBytes(job.bytesTotal)}`;
-            } else {
-                size.textContent = _fmtBytes(job.bytesDone);
-            }
-        }
-
-        // Progress row visibility: hide for queued/done/cancelled
-        if (progRow) progRow.style.display = (phase === 'queued' || phase === 'cancelled') ? 'none' : 'flex';
-
-        // Artwork: reveal once URL resolves; hide skeleton
-        if (artImg && job.artworkUrl) {
-            if (artImg.style.display === 'none') {
-                artImg.src = _artThumb(job.artworkUrl, 84);
-                artImg.style.display = 'block';
-            }
-            if (artSkel) artSkel.style.display = 'none';
-        }
-
-        // Cancel button: hide for terminal phases
-        if (cancelBtn) cancelBtn.style.display = isTerminal ? 'none' : 'flex';
-
-        // Retry button + auto-retry countdown for failed/cancelled
-        const col        = row.querySelector('.aml-dl-col');
-        let retryBtn     = row.querySelector('.aml-dl-retry');
-        let countdownEl  = row.querySelector('.aml-dl-countdown');
-
+    function _applyJobRetry(row, job, phase) {
+        const col       = row.querySelector('.aml-dl-col');
+        let retryBtn    = row.querySelector('.aml-dl-retry');
+        let countdownEl = row.querySelector('.aml-dl-countdown');
         if (phase === 'failed' || phase === 'cancelled') {
             if (!retryBtn && col) {
                 retryBtn = document.createElement('button');
@@ -7264,7 +6960,6 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 col.appendChild(retryBtn);
             }
             if (retryBtn) retryBtn.textContent = retryBtn.disabled ? 'Retrying…' : 'Retry';
-
             // Countdown label for auto-retry
             const entry = _failedAt.get(job.jobId);
             if (entry && phase === 'failed') {
@@ -7285,6 +6980,53 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             retryBtn?.remove();
             countdownEl?.remove();
         }
+    }
+
+    function _applyJobMedia(artImg, artSkel, size, progRow, cancelBtn, phase, isTerminal, job) {
+        if (size) {
+            if (phase === 'downloading' && job.bytesTotal && job.bytesDone) {
+                size.textContent = `${_fmtBytes(job.bytesDone)} / ${_fmtBytes(job.bytesTotal)}`;
+            } else {
+                size.textContent = _fmtBytes(job.bytesDone);
+            }
+        }
+        if (progRow) progRow.style.display = (phase === 'queued' || phase === 'cancelled') ? 'none' : 'flex';
+        if (artImg && job.artworkUrl) {
+            if (artImg.style.display === 'none') {
+                artImg.src = _artThumb(job.artworkUrl, 84);
+                artImg.style.display = 'block';
+            }
+            if (artSkel) artSkel.style.display = 'none';
+        }
+        if (cancelBtn) cancelBtn.style.display = isTerminal ? 'none' : 'flex';
+    }
+
+    function updateJobRow(row, job) {
+        const name      = row.querySelector('.aml-dl-name');
+        const artist    = row.querySelector('.aml-dl-artist');
+        const pill      = row.querySelector('.aml-dl-pill');
+        const fill      = row.querySelector('.aml-dl-fill');
+        const size      = row.querySelector('.aml-dl-size');
+        const artEl     = row.querySelector('.aml-dl-art');
+        const artImg    = artEl?.querySelector('img');
+        const artSkel   = artEl?.querySelector('.aml-dl-art-skel');
+        const cancelBtn = row.querySelector('.aml-dl-cancel');
+        const progRow   = row.querySelector('.aml-dl-prog-row');
+        const phase      = job.phase || '';
+        const hasTitle   = !!(job.title || job.output);
+        const isTerminal = phase === 'done' || phase === 'failed' || phase === 'cancelled';
+        const isActive   = phase === 'downloading' || phase === 'tagging' || phase === 'moving' || phase === 'resolving';
+
+        _applyJobNameArtist(name, artist, hasTitle, job);
+
+        if (pill) {
+            pill.className = PILL_CLASS[phase] || 'aml-dl-pill aml-dl-pill-q';
+            pill.textContent = PHASE_LABEL[phase] || phase;
+        }
+
+        _applyJobFill(fill, phase, isActive, isTerminal, job);
+        _applyJobMedia(artImg, artSkel, size, progRow, cancelBtn, phase, isTerminal, job);
+        _applyJobRetry(row, job, phase);
     }
 
     async function clearDoneJobs() {

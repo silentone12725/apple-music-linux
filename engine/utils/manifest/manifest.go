@@ -20,7 +20,7 @@ import (
 
 	"github.com/grafov/m3u8"
 
-	"engine/utils/structs"
+	"engine/utils/config"
 )
 
 // Format selects which variant to pick from the master playlist.
@@ -74,7 +74,7 @@ func FetchMaster(masterURL string) (*m3u8.MasterPlaylist, *url.URL, error) {
 // SelectVariant picks the media-playlist URL for f from an already-fetched
 // master. It performs no I/O and reads no globals — the exact variant-selection
 // logic lifted from the legacy extractMedia, parameterized by Format and cfg.
-func SelectVariant(master *m3u8.MasterPlaylist, base *url.URL, f Format, cfg structs.ConfigSet) (Selection, error) {
+func SelectVariant(master *m3u8.MasterPlaylist, base *url.URL, f Format, cfg config.ConfigSet) (Selection, error) {
 	sort.Slice(master.Variants, func(i, j int) bool {
 		return master.Variants[i].AverageBandwidth > master.Variants[j].AverageBandwidth
 	})
@@ -156,7 +156,7 @@ func SelectVariant(master *m3u8.MasterPlaylist, base *url.URL, f Format, cfg str
 
 // ResolveMediaURL fetches the master and selects the media-playlist URL for f.
 // Convenience wrapper for callers that only need the final URL (e.g. cmd/parity).
-func ResolveMediaURL(masterURL string, f Format, cfg structs.ConfigSet) (Selection, error) {
+func ResolveMediaURL(masterURL string, f Format, cfg config.ConfigSet) (Selection, error) {
 	master, base, err := FetchMaster(masterURL)
 	if err != nil {
 		return Selection{}, err

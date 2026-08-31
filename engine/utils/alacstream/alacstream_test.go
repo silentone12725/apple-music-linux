@@ -1,4 +1,4 @@
-package runv2
+package alacstream
 
 // runv2_test.go — unit tests for ReadInitSegment (C1 fix), socket protocol
 // helpers (SwitchKeys, SendString, Close), and DecryptFragment basic behaviour.

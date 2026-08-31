@@ -907,7 +907,7 @@ func newBufRW(conn net.Conn) *bufRW {
 }
 
 // sendString writes a 1-byte length-prefix followed by the string bytes.
-// This mirrors runv2.SendString and is part of the FairPlay TCP wire protocol.
+// This mirrors alacstream.SendString and is part of the FairPlay TCP wire protocol.
 // Inlined here so engine/drm does not import utils/runv2 directly.
 func sendString(w io.Writer, s string) error {
 	if _, err := w.Write([]byte{byte(len(s))}); err != nil {
@@ -918,7 +918,7 @@ func sendString(w io.Writer, s string) error {
 }
 
 // closeConn sends the CLOSE signal (5 zero bytes) to the wrapper socket and
-// closes the connection. Mirrors runv2.Close; inlined to avoid runv2 import.
+// closes the connection. Mirrors alacstream.Close; inlined to avoid runv2 import.
 func closeConn(c interface {
 	Write([]byte) (int, error)
 	Close() error

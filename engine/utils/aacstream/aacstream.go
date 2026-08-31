@@ -1,4 +1,4 @@
-package runv3
+package aacstream
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 	"github.com/go-resty/resty/v2"
 	"google.golang.org/protobuf/proto"
 
-	cdm "engine/utils/runv3/cdm"
-	key "engine/utils/runv3/key"
+	cdm "engine/utils/aacstream/cdm"
+	wvkey "engine/utils/aacstream/wvkey"
 	"os"
 
 	"bytes"
@@ -305,21 +305,21 @@ func Run(adamId string, trackpath string, authtoken string, mutoken string, mvmo
 	}
 	client := resty.New()
 	client.SetHeaders(headers)
-	key := key.Key{
+	licKey := wvkey.Key{
 		ReqCli:        client,
 		BeforeRequest: BeforeRequest,
 		AfterRequest:  AfterRequest,
 	}
-	key.CdmInit()
+	licKey.CdmInit()
 	var keybt []byte
 	if serverUrl != "" {
-		keystr, keybt, err = key.GetKey(ctx, serverUrl, pssh, nil)
+		keystr, keybt, err = licKey.GetKey(ctx, serverUrl, pssh, nil)
 		if err != nil {
 			fmt.Println(err)
 			return "", err
 		}
 	} else {
-		keystr, keybt, err = key.GetKey(ctx, "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense", pssh, nil)
+		keystr, keybt, err = licKey.GetKey(ctx, "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense", pssh, nil)
 		if err != nil {
 			fmt.Println(err)
 			return "", err
@@ -705,7 +705,7 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 	}
 	cl := resty.New()
 	cl.SetHeaders(headers)
-	k := key.Key{
+	k := wvkey.Key{
 		ReqCli:        cl,
 		BeforeRequest: BeforeRequest,
 		AfterRequest:  AfterRequest,

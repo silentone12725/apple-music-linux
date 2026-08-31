@@ -1,4 +1,4 @@
-package structs
+package config
 
 // BackendPolicy selects the DRM backend and an optional automatic fallback used
 // when the preferred backend fails to start.

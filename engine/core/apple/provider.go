@@ -21,13 +21,13 @@ import (
 	"strings"
 	"time"
 
-	"engine/core/bench"
+	"engine/core/tracer"
 	"engine/core/fairplay"
 	"engine/core/hls"
 	"engine/core/media"
 	"engine/core/pipeline"
 	"engine/utils/ampapi"
-	"engine/utils/runv3"
+	"engine/utils/aacstream"
 )
 
 // webplaybackClient is used for all Apple webplayback API calls.
@@ -95,7 +95,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 			return nil, fmt.Errorf("auto-fetch developer token: %w", err)
 		}
 	}
-	tr := bench.FromContext(ctx)
+	tr := tracer.FromContext(ctx)
 	tr.RecordCatalogFetchStart()
 	song, err := ampapi.GetSongRespContext(ctx, req.Storefront, req.AssetID, req.Language, token)
 	tr.RecordCatalogFetchEnd()
@@ -228,7 +228,7 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	if err != nil {
 		return nil, fmt.Errorf("select video variant: %w", err)
 	}
-	runv3.SetMVCacheQualityLabel(videoResolution)
+	aacstream.SetMVCacheQualityLabel(videoResolution)
 	audioURL, err := master.SelectAudioVariant(req.MVAudioPriorities)
 	if err != nil {
 		return nil, fmt.Errorf("select audio variant: %w", err)
@@ -443,8 +443,8 @@ func (p *appleMusicProvider) makeCBCSTrackOpener(
 // response body.  Both webplaybackURL (MV master) and webplaybackAssetURL
 // (song CTR asset) call this to avoid duplicating the HTTP logic.
 func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, token, mut string) ([]byte, error) {
-	bench.FromContext(ctx).RecordWebplaybackStart()
-	defer bench.FromContext(ctx).RecordWebplaybackEnd()
+	tracer.FromContext(ctx).RecordWebplaybackStart()
+	defer tracer.FromContext(ctx).RecordWebplaybackEnd()
 	body, _ := json.Marshal(map[string]string{"salableAdamId": adamID})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback",

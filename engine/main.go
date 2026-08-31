@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"engine/utils/runv3"
-	"engine/utils/structs"
+	"engine/utils/aacstream"
+	"engine/utils/config"
 
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v2"
@@ -16,7 +16,7 @@ import (
 
 var (
 	api_port int
-	Config   structs.ConfigSet
+	Config   config.ConfigSet
 )
 
 func loadConfig() error {
@@ -74,7 +74,7 @@ func main() {
 	}
 	pflag.IntVar(&api_port, "api", 0, "Start local HTTP API server on given port (e.g. --api 20025)")
 	pflag.Parse()
-	runv3.WarmCache()
+	aacstream.WarmCache()
 	if api_port > 0 {
 		srv := NewAPIServer(api_port, ServerConfig{
 			DRMBinaryPath:      Config.DRMBinaryPath,

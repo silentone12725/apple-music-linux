@@ -5,7 +5,7 @@ package fairplay
 // Evidence classification:
 //   - stallDetector timer fire: Runtime verified by these tests.
 //   - stallDetector timer-on-EOF: Behavior documented; test confirms timer is
-//     not stopped on EOF (same as runv2.TimedResponseBody).
+//     not stopped on EOF (same as alacstream.TimedResponseBody).
 //   - CBCSSource retry: Runtime verified by these tests (happy path + retry).
 //   - CBCSSource cancellation: Runtime verified by these tests.
 //
@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"engine/utils/runv2"
+	"engine/utils/alacstream"
 )
 
 // ── stallDetector tests ───────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ func TestStallDetector_TimerFires(t *testing.T) {
 	// Wait for the timer to fire.
 	select {
 	case <-ctx.Done():
-		if !errors.Is(context.Cause(ctx), runv2.ErrTimeout) {
+		if !errors.Is(context.Cause(ctx), alacstream.ErrTimeout) {
 			t.Errorf("cause = %v want ErrTimeout", context.Cause(ctx))
 		}
 	case <-time.After(timeout + 200*time.Millisecond):
@@ -85,7 +85,7 @@ func TestStallDetector_TimerFires(t *testing.T) {
 
 // TestStallDetector_TimerNotStoppedOnEOF verifies the documented behavior:
 // the stall timer is NOT stopped when Read returns EOF.  This matches
-// runv2.TimedResponseBody.Read, which also returns on error without stopping
+// alacstream.TimedResponseBody.Read, which also returns on error without stopping
 // the timer.  The deferred cancel(nil) fires first in practice.
 func TestStallDetector_TimerNotStoppedOnEOF(t *testing.T) {
 	t.Parallel()
@@ -110,7 +110,7 @@ func TestStallDetector_TimerNotStoppedOnEOF(t *testing.T) {
 	// The context should be Done, but the cause should be nil (from cancel(nil)),
 	// NOT ErrTimeout (from the timer).  This confirms the deferred cancel wins.
 	cause := context.Cause(ctx)
-	if errors.Is(cause, runv2.ErrTimeout) {
+	if errors.Is(cause, alacstream.ErrTimeout) {
 		t.Error("cause is ErrTimeout — deferred cancel(nil) should have won; investigate timer ordering")
 	}
 	// cause == nil is correct: cancel(nil) was first.
@@ -164,7 +164,7 @@ func failThenSucceedServer(t *testing.T, failCount int) (*httptest.Server, *int6
 
 // TestCBCSSource_RetryOnHTTPFailure verifies that Stream retries up to 3 times
 // when the HTTP download returns a non-200 status.
-// The retry loop is derived from runv2.Run by code inspection (3 attempts,
+// The retry loop is derived from alacstream.Run by code inspection (3 attempts,
 // exponential backoff).
 func TestCBCSSource_RetryOnHTTPFailure(t *testing.T) {
 	if testing.Short() {
