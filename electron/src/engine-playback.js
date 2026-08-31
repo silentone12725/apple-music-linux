@@ -4132,15 +4132,14 @@ async function setup() {
                     const targetId = desc.startWith.id;
                     // Library song IDs carry an "a." prefix — strip for numeric comparison.
                     const targetNumId = targetId.startsWith('a.') ? targetId.slice(2) : targetId;
-                    const qItems = mk.queue?.items || [];
-                    const idx = qItems.findIndex(item => item.id === targetId || item.id === targetNumId);
-                    if (idx >= 0) {
-                        console.log('[MK-DBG] setQueue → ctmi redirect: found id=' + targetId + ' at idx=' + idx);
-                        const p = _mkApiSaved.changeToMediaAtIndex.call(mk, idx);
-                        if (p?.then) p.then(() => console.log('[MK-DBG] ctmi redirect resolved'), e => console.log('[MK-DBG] ctmi redirect rejected:', e?.message || e));
-                        return p;
-                    }
-                    console.log('[MK-DBG] setQueue: id=' + targetId + ' not in queue (len=' + qItems.length + '), falling through');
+                    // NOTE: changeToMediaAtIndex fast-path is intentionally skipped here.
+                    // When the CDN gate is open during VLC playback the audio element is in
+                    // a synthetic state (native paused=true, no real src). MK's ctmi call
+                    // internally tries to stop→load the element sequence and hangs indefinitely
+                    // — NPIDF never fires and the 20s gate timeout kills the transition.
+                    // The setQueue({songs:[...]}) local-cache path tolerates the synthetic
+                    // element (it goes through a full queue teardown/rebuild) and is reliable.
+                    console.log('[MK-DBG] setQueue: id=' + targetId + ' (skipping ctmi — VLC gate active)');
                     // Cross-playlist: build a full {songs:[...all catalog IDs]} from the local engine
                     // cache (Android-style local snapshot) so we never stall on Apple's playlist API.
                     // Fall back to the numeric part of startWith.id when DOM extraction missed it
