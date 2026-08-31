@@ -3489,6 +3489,8 @@ async function setup() {
     // Push saved cache config to engine now that it's up; also load quality pref.
     window.amlBridge?.getPrefs().then(p => {
         if (p['streaming-quality']) _streamingQuality = p['streaming-quality'];
+        // lossless-enabled=false overrides streaming-quality → force AAC regardless.
+        if (p['lossless-enabled'] === false) _streamingQuality = 'high-quality';
         if (p['downloads-quality']) _downloadsQuality  = p['downloads-quality'];
         const body = {};
         if (p.prewarmLimitMB  != null) body.prewarmLimitMB  = p.prewarmLimitMB;
@@ -5662,9 +5664,6 @@ window.amlGetQueueInfo = function () {
             document.head.appendChild(ds);
         }
         const losslessOn = prefs['lossless-enabled'] !== false;
-        aqBody.appendChild(makeRow('Lossless Audio',
-            _amlIOSToggle(losslessOn, v => window.amlBridge?.setTweak('lossless-enabled', v)),
-            'Stream lossless audio (ALAC) when available', false));
         const { wrap: sqWrap, setValue: setSQ } = _amlMakeQualityDropdown('streaming-quality', prefs, qualityOpts);
         const sqResetBtn = _amlMiniBtn(() => {
             setSQ('lossless');
@@ -5674,7 +5673,29 @@ window.amlGetQueueInfo = function () {
         const sqCtrl = document.createElement('div');
         sqCtrl.style.cssText = 'display:flex;align-items:center;gap:8px;';
         sqCtrl.append(sqWrap, sqResetBtn);
-        aqBody.appendChild(makeRow('Streaming', sqCtrl, null, false));
+        const sqRow = makeRow('Streaming', sqCtrl, null, true);
+        // Grey out streaming quality row when lossless is disabled.
+        function _applyLosslessRowState(on) {
+            sqRow.style.opacity = on ? '1' : '0.38';
+            sqRow.style.pointerEvents = on ? '' : 'none';
+        }
+        _applyLosslessRowState(losslessOn);
+        aqBody.appendChild(makeRow('Lossless Audio',
+            _amlIOSToggle(losslessOn, v => {
+                window.amlBridge?.setTweak('lossless-enabled', v);
+                _applyLosslessRowState(v);
+                if (!v) {
+                    // Disabled → force AAC immediately (no DRM-dependent path).
+                    _streamingQuality = 'high-quality';
+                } else {
+                    // Re-enabled → restore saved streaming quality pref.
+                    const savedSQ = prefs['streaming-quality'] || 'lossless';
+                    _streamingQuality = savedSQ;
+                    setSQ(savedSQ);
+                }
+            }),
+            'Stream lossless audio (ALAC) when available', false));
+        aqBody.appendChild(sqRow);
         return wrap;
     }
 
