@@ -41,7 +41,7 @@ const sessionValidityTTL = 4 * time.Hour
 // This design prevents the engine from claiming a session is valid solely
 // because the files exist from a past, now-expired login.
 type SessionManager struct {
-	BaseDir string
+	baseDir string
 
 	mu          sync.Mutex
 	lastSuccess time.Time
@@ -49,14 +49,14 @@ type SessionManager struct {
 
 // NewSessionManager creates a SessionManager rooted at baseDir.
 func NewSessionManager(baseDir string) *SessionManager {
-	return &SessionManager{BaseDir: baseDir}
+	return &SessionManager{baseDir: baseDir}
 }
 
 // HasSession returns true if mpl_db/accounts.sqlitedb exists and has
 // content. This indicates a prior login occurred but does NOT guarantee
 // the session is currently usable — use IsSessionValid for that.
 func (s *SessionManager) HasSession() bool {
-	path := filepath.Join(s.BaseDir, "mpl_db", "accounts.sqlitedb")
+	path := filepath.Join(s.baseDir, "mpl_db", "accounts.sqlitedb")
 	info, err := os.Stat(path)
 	return err == nil && info.Size() > 0
 }
@@ -129,10 +129,10 @@ type SessionInfo struct {
 // storeservicescore writing the files back during deletion.
 func (s *SessionManager) ClearSession() error {
 	paths := []string{
-		filepath.Join(s.BaseDir, "mpl_db"),
-		filepath.Join(s.BaseDir, "STOREFRONT_ID"),
-		filepath.Join(s.BaseDir, "MUSIC_TOKEN"),
-		filepath.Join(s.BaseDir, "drm-state"),
+		filepath.Join(s.baseDir, "mpl_db"),
+		filepath.Join(s.baseDir, "STOREFRONT_ID"),
+		filepath.Join(s.baseDir, "MUSIC_TOKEN"),
+		filepath.Join(s.baseDir, "drm-state"),
 	}
 	var lastErr error
 	for _, p := range paths {
@@ -148,18 +148,18 @@ func (s *SessionManager) ClearSession() error {
 
 // StateFilePath returns the path of the drm-state file written by main.c.
 func (s *SessionManager) StateFilePath() string {
-	return filepath.Join(s.BaseDir, "drm-state")
+	return filepath.Join(s.baseDir, "drm-state")
 }
 
 // TwoFAFilePath returns the path of the 2fa.txt file used by the
 // --code-from-file mechanism in the wrapper's credentialHandler.
 func (s *SessionManager) TwoFAFilePath() string {
-	return filepath.Join(s.BaseDir, "2fa.txt")
+	return filepath.Join(s.baseDir, "2fa.txt")
 }
 
 // ReadStorefrontID reads {BaseDir}/STOREFRONT_ID.
 func (s *SessionManager) ReadStorefrontID() string {
-	return readFile(filepath.Join(s.BaseDir, "STOREFRONT_ID"))
+	return readFile(filepath.Join(s.baseDir, "STOREFRONT_ID"))
 }
 
 // NormalizeStorefrontID strips the platform/content-class suffix that the
@@ -184,7 +184,7 @@ func NormalizeStorefrontID(sf string) string {
 // refresh the token during the engine's lifetime, so callers must not
 // assume the value is immutable or cache it.
 func (s *SessionManager) ReadMusicToken() string {
-	return readFile(filepath.Join(s.BaseDir, "MUSIC_TOKEN"))
+	return readFile(filepath.Join(s.baseDir, "MUSIC_TOKEN"))
 }
 
 func readFile(path string) string {

@@ -23,8 +23,10 @@ type CDM struct {
 	clientID   []byte
 	sessionID  [32]byte
 
-	widevineCencHeader      WidevineCencHeader
-	signedDeviceCertificate SignedDeviceCertificate
+	// Protobuf messages embed a sync.Mutex via protoimpl.MessageState and must
+	// never be copied by value; hold them as pointers so CDM stays copy-safe.
+	widevineCencHeader      *WidevineCencHeader
+	signedDeviceCertificate *SignedDeviceCertificate
 	privacyMode             bool
 }
 
@@ -35,22 +37,22 @@ type Key struct {
 }
 
 // Creates a new CDM object with the specified device information.
-func NewCDM(privateKey string, clientID []byte, initData []byte) (CDM, error) {
+func NewCDM(privateKey string, clientID []byte, initData []byte) (*CDM, error) {
 	block, _ := pem.Decode([]byte(privateKey))
 	if block == nil || block.Type != "RSA PRIVATE KEY" {
-		return CDM{}, errors.New("failed to decode device private key")
+		return nil, errors.New("failed to decode device private key")
 	}
 	keyParsed, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err != nil {
-		return CDM{}, err
+		return nil, err
 	}
 
-	var widevineCencHeader WidevineCencHeader
+	widevineCencHeader := new(WidevineCencHeader)
 	if len(initData) < 32 {
-		return CDM{}, errors.New("initData not long enough")
+		return nil, errors.New("initData not long enough")
 	}
-	if err := proto.Unmarshal(initData[32:], &widevineCencHeader); err != nil {
-		return CDM{}, err
+	if err := proto.Unmarshal(initData[32:], widevineCencHeader); err != nil {
+		return nil, err
 	}
 
 	sessionID := func() (s [32]byte) {
@@ -66,7 +68,7 @@ func NewCDM(privateKey string, clientID []byte, initData []byte) (CDM, error) {
 		return s
 	}()
 
-	return CDM{
+	return &CDM{
 		privateKey: keyParsed,
 		clientID:   clientID,
 
@@ -77,7 +79,7 @@ func NewCDM(privateKey string, clientID []byte, initData []byte) (CDM, error) {
 }
 
 // Creates a new CDM object using the default device configuration.
-func NewDefaultCDM(initData []byte) (CDM, error) {
+func NewDefaultCDM(initData []byte) (*CDM, error) {
 	return NewCDM(DefaultPrivateKey, DefaultClientID, initData)
 }
 
@@ -89,16 +91,18 @@ func (c *CDM) SetServiceCertificate(certData []byte) error {
 	if err := proto.Unmarshal(certData, &message); err != nil {
 		return err
 	}
-	if err := proto.Unmarshal(message.Msg, &c.signedDeviceCertificate); err != nil {
+	cert := new(SignedDeviceCertificate)
+	if err := proto.Unmarshal(message.Msg, cert); err != nil {
 		return err
 	}
+	c.signedDeviceCertificate = cert
 	c.privacyMode = true
 	return nil
 }
 
 func (c *CDM) GetServiceCertificate() *SignedDeviceCertificate {
 
-	return &c.signedDeviceCertificate
+	return c.signedDeviceCertificate
 }
 
 // Generates the license request data.  This is sent to the license server via
@@ -116,7 +120,7 @@ func (c *CDM) GetLicenseRequest() ([]byte, error) {
 		licenseRequest.Type = &v
 	}
 
-	licenseRequest.Msg.ContentId.CencId.Pssh = &c.widevineCencHeader
+	licenseRequest.Msg.ContentId.CencId.Pssh = c.widevineCencHeader
 
 	{
 		v := LicenseType_DEFAULT

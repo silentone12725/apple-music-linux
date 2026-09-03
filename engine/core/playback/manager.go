@@ -16,8 +16,6 @@ package playback
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"sync"
@@ -26,6 +24,7 @@ import (
 	"engine/core/apple"
 	"engine/core/media"
 	"engine/core/pipeline"
+	"engine/internal/randid"
 )
 
 const sessionTTL = 4 * time.Hour
@@ -45,20 +44,32 @@ type OpenRequest struct {
 	MVAudioPriorities []string
 }
 
+// openFlight deduplicates concurrent Open calls for the same asset.
+// If two callers race for the same (assetID, storefront, codec) combination,
+// the second waits for the first and receives the same Session — preventing
+// duplicate DRM sessions from being opened and orphaned.
+type openFlight struct {
+	done chan struct{}
+	sess *Session
+	err  error
+}
+
 // Manager creates and manages playback sessions.
 // It is the single entry point for all transport adapters; none of them need
 // to know about the apple, fairplay, hls, or pipeline packages.
 type Manager struct {
-	provider media.Provider
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	contexts map[string]*playContext
+	provider   media.Provider
+	mu         sync.RWMutex
+	sessions   map[string]*Session
+	contexts   map[string]*playContext
+	inflightMu sync.Mutex
+	inflight   map[string]*openFlight // key: assetID+storefront+capabilities
 }
 
 // New returns a Manager backed by the Apple Music provider.
 // Swap apple.NewProvider() for any media.Provider to change the source.
 func New() *Manager {
-	m := &Manager{provider: apple.NewProvider(), sessions: make(map[string]*Session), contexts: make(map[string]*playContext)}
+	m := &Manager{provider: apple.NewProvider(), sessions: make(map[string]*Session), contexts: make(map[string]*playContext), inflight: make(map[string]*openFlight)}
 	go m.reap()
 	return m
 }
@@ -67,14 +78,55 @@ func New() *Manager {
 // Use this when the caller needs to configure the provider before wiring it
 // (e.g. passing a CBCS socket address to apple.NewProviderWithCBCS).
 func NewWithProvider(p media.Provider) *Manager {
-	m := &Manager{provider: p, sessions: make(map[string]*Session), contexts: make(map[string]*playContext)}
+	m := &Manager{provider: p, sessions: make(map[string]*Session), contexts: make(map[string]*playContext), inflight: make(map[string]*openFlight)}
 	go m.reap()
 	return m
 }
 
+// openKey builds a deduplication key from the fields that determine whether
+// two Open calls would produce the same session type.
+func openKey(req OpenRequest) string {
+	flags := fmt.Sprintf("%v:%v:%v:%d", req.Lossless, req.Atmos, req.Video, req.MVMaxHeight)
+	return req.AssetID + ":" + req.Storefront + ":" + flags
+}
+
 // Open resolves the asset, opens all tracks, and returns a public Session.
 // The private playContext (with pipeline.Stream state) is stored internally.
+//
+// Concurrent calls for the same (assetID, storefront, capabilities) key are
+// deduplicated: the second caller waits for the first to finish and receives
+// the same Session, preventing orphaned DRM sessions.
 func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
+	key := openKey(req)
+
+	m.inflightMu.Lock()
+	if m.inflight == nil {
+		m.inflight = make(map[string]*openFlight)
+	}
+	if fl, ok := m.inflight[key]; ok {
+		// A concurrent call is already opening this asset — join it.
+		m.inflightMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-fl.done:
+			return fl.sess, fl.err
+		}
+	}
+	fl := &openFlight{done: make(chan struct{})}
+	m.inflight[key] = fl
+	m.inflightMu.Unlock()
+
+	// We are the leader: open the session, then signal all waiters.
+	fl.sess, fl.err = m.openDirect(ctx, req)
+	close(fl.done)
+	m.inflightMu.Lock()
+	delete(m.inflight, key)
+	m.inflightMu.Unlock()
+	return fl.sess, fl.err
+}
+
+func (m *Manager) openDirect(ctx context.Context, req OpenRequest) (*Session, error) {
 	ms, err := m.provider.Open(ctx, media.OpenRequest{
 		AssetID:           req.AssetID,
 		Storefront:        req.Storefront,
@@ -240,9 +292,17 @@ func (m *Manager) lookup(id string) (*Session, *playContext, bool) {
 		return nil, nil, false
 	}
 	sess := m.sessions[id]
+	expired := time.Now().After(pctx.expiry)
 	m.mu.RUnlock()
-	if time.Now().After(pctx.expiry) {
-		m.Release(id)
+	if expired {
+		// Upgrade to write lock and re-check before deleting — the reaper may
+		// have already removed the entry between the RUnlock and here.
+		m.mu.Lock()
+		if _, still := m.contexts[id]; still {
+			delete(m.sessions, id)
+			delete(m.contexts, id)
+		}
+		m.mu.Unlock()
 		return nil, nil, false
 	}
 	return sess, pctx, true
@@ -264,8 +324,4 @@ func (m *Manager) reap() {
 	}
 }
 
-func newID() string {
-	b := make([]byte, 8)
-	rand.Read(b) //nolint:errcheck
-	return hex.EncodeToString(b)
-}
+func newID() string { return randid.New() }
