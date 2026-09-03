@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"engine/utils/aacstream"
 	"engine/utils/config"
 
-	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v2"
 )
 
@@ -72,8 +72,8 @@ func main() {
 		Config.FFmpegPath = "ffmpeg"
 		Config.StreamCacheSize = 500
 	}
-	pflag.IntVar(&api_port, "api", 0, "Start local HTTP API server on given port (e.g. --api 20025)")
-	pflag.Parse()
+	flag.IntVar(&api_port, "api", 0, "Start local HTTP API server on given port (e.g. --api 20025)")
+	flag.Parse()
 	aacstream.WarmCache()
 	if api_port > 0 {
 		srv := NewAPIServer(api_port, ServerConfig{

@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/schollz/progressbar/v3"
+	"log/slog"
 )
 
 // SegmentInfo records enough metadata to verify a cached segment file.
@@ -300,21 +300,13 @@ func resumeDownload(m *ResumeManifest) error {
 	if totalBytes == 0 {
 		totalBytes = -1 // unknown; show spinner
 	}
-	bar := progressbar.NewOptions64(totalBytes,
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionSetElapsedTime(true),
-		progressbar.OptionShowElapsedTimeOnFinish(),
-		progressbar.OptionShowCount(),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionSetDescription("Downloading..."),
-	)
-	// Pre-fill progress for already-done segments.
+	var doneBytes int64
 	for _, s := range m.Segments {
 		if s.Done {
-			bar.Add64(s.Size)
+			doneBytes += s.Size
 		}
 	}
+	slog.Info("resumable download starting", "total_bytes", totalBytes, "already_done_bytes", doneBytes, "missing_segments", len(missing))
 
 	resultCh := make(chan segResult, len(missing))
 	limiter := newAimdLimiter(8, 2, 32)
@@ -362,7 +354,6 @@ func resumeDownload(m *ResumeManifest) error {
 		m.Segments[r.idx].Size = size
 		m.Segments[r.idx].SHA256 = hashHex
 		m.Segments[r.idx].Done = true
-		bar.Add64(size)
 		completedSinceSave++
 		if completedSinceSave >= manifestSaveBatch {
 			SaveManifest(m)
