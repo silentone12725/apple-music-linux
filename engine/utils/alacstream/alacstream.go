@@ -49,7 +49,6 @@ func (b *TimedResponseBody) Read(p []byte) (int, error) {
 	if err != nil {
 		return n, err
 	}
-	// fmt.Printf("Read %d bytes, buffer size %d bytes", n, len(p))
 	if n >= b.threshold {
 		b.timer.Reset(b.timeout)
 	}
@@ -66,7 +65,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config config.Config
 			return nil
 		}
 		if attempt < maxRetries-1 {
-			fmt.Printf("⚠ Download attempt %d failed (%v), retrying in %ds...\n", attempt+1, err, 1<<attempt)
+			slog.Warn("ALAC download attempt failed", "attempt", attempt+1, "err", err)
 			time.Sleep(time.Duration(1<<attempt) * time.Second)
 		}
 	}
@@ -156,7 +155,7 @@ func runAttempt(adamId string, playlistUrl string, outfile string, Config config
 	if err != nil {
 		return err
 	}
-	fmt.Print("Decrypted\n")
+	slog.Info("ALAC decrypt complete")
 	return nil
 }
 
@@ -225,7 +224,7 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	err = SanitizeInit(init)
 	if err != nil {
 		// errors returned by sanitizeInit are non-fatal
-		fmt.Printf("Warning: unable to sanitize init completely: %s\n", err)
+		slog.Warn("unable to sanitize init completely", "err", err)
 	}
 	err = init.Encode(outBuf)
 	if err != nil {
@@ -249,9 +248,6 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		}
 		// print progress
 
-		// if totalLen > 0 {
-		// 	fmt.Printf("%.2f%% of %d bytes\n", 100*float32(offset)/float32(totalLen), totalLen)
-		// }
 		segment := playlistSegments[i]
 		if segment == nil {
 			return errors.New("segment number out of sync")
@@ -400,7 +396,6 @@ func ReadNextFragment(r io.Reader, offset uint64) (*mp4.Fragment, uint64, error)
 			return nil, offset, err
 		}
 		boxType := box.Type()
-		// fmt.Printf("processing %s, box starts @ offset %d\n", boxType, offset)
 		offset += box.Size()
 		if boxType == "moof" || boxType == "emsg" || boxType == "prft" {
 			frag.AddChild(box)
@@ -410,7 +405,7 @@ func ReadNextFragment(r io.Reader, offset uint64) (*mp4.Fragment, uint64, error)
 			frag.AddChild(box)
 			break
 		}
-		fmt.Printf("ignoring a %s box found mid-stream", boxType)
+		slog.Warn("ignoring box mid-stream", "type", boxType)
 	}
 	// only 1 mdat box in fragment, meaning that the box doesn't have a preceding moof box
 	if frag.Moof == nil {

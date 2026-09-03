@@ -39,6 +39,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	httppprof "net/http/pprof"
@@ -507,10 +508,10 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 			if sel, ok := composite.(drm.BackendSelection); ok {
 				s.backendSel = sel
 			}
-			fmt.Printf("DRM backend: preferred=%s, fallback=%s\n", preferred, fallbackName)
+			slog.Info("DRM backend", "preferred", preferred, "fallback", fallbackName)
 		}
 	} else {
-		fmt.Printf("DRM backend: %s (no fallback)\n", preferred)
+		slog.Info("DRM backend", "name", preferred)
 	}
 
 	s.dm = drm.NewDRMManager(
@@ -737,7 +738,7 @@ func (s *APIServer) Start() error {
 				}
 				select {
 				case <-ctx.Done():
-					fmt.Printf("DRM auto-start: backend not ready after 30s: %v\n", lastErr)
+					slog.Warn("DRM auto-start: backend not ready after 30s", "err", lastErr)
 					return
 				case <-time.After(delay):
 					if delay < 5*time.Second {
@@ -748,7 +749,7 @@ func (s *APIServer) Start() error {
 		}()
 	}
 
-	fmt.Printf("🎵 Apple Music API → http://127.0.0.1:%d\n", s.port)
+	slog.Info("Apple Music API ready", "addr", fmt.Sprintf("http://127.0.0.1:%d", s.port))
 	go s.srv.Serve(l) //nolint:errcheck
 	return nil
 }
@@ -828,8 +829,6 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 
 // ── Library metadata cache handlers ──────────────────────────────────────────
 
-// resolveToken returns the bearer JWT, falling back to ampapi.GetToken() if the
-// browser hasn't sent one yet (e.g. sync called before first playback request).
 func cors(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Headers are already set by corsPreflightHandler for OPTIONS.

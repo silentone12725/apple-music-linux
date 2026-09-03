@@ -232,18 +232,17 @@ func ExtMvDataResumable(keyAndUrls string, savePath string) error {
 			}
 		}
 		if done > 0 && done < len(urls) {
-			fmt.Printf("Resuming: %d/%d segments complete (%d%%)\n",
-				done, len(urls), 100*done/len(urls))
+			slog.Info("resuming download", "done", done, "total", len(urls), "pct", 100*done/len(urls))
 		}
 	}
 	if err := SaveManifest(m); err != nil {
-		fmt.Printf("⚠ resume manifest: %v\n", err)
+		slog.Warn("resume manifest save failed", "err", err)
 	}
 
 	if err := resumeDownload(m); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
-	fmt.Println("\nDownloaded.")
+	slog.Info("MV download complete")
 
 	hexKey := strings.SplitN(key, ":", 2)[1]
 	keyBytes, err := hex.DecodeString(hexKey)
@@ -262,7 +261,7 @@ func ExtMvDataResumable(keyAndUrls string, savePath string) error {
 		os.Remove(savePath)
 		return fmt.Errorf("decrypt: %w", err)
 	}
-	fmt.Println("Decrypted.")
+	slog.Info("MV decrypt complete")
 	DeleteManifest(savePath)
 	return nil
 }

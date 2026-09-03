@@ -2,8 +2,8 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -86,16 +86,16 @@ func main() {
 			GetM3u8Port:        Config.GetM3u8Port,
 		})
 		if err := srv.Start(); err != nil {
-			fmt.Println("API server failed to start:", err)
+			slog.Error("API server failed to start", "err", err)
 			os.Exit(1)
 		}
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		fmt.Println("\nShutting down API server…")
+		slog.Info("Shutting down API server")
 		srv.Stop()
 		return
 	}
-	fmt.Fprintln(os.Stderr, "Usage: engine --api <port>")
+	slog.Error("Usage: engine --api <port>")
 	os.Exit(1)
 }

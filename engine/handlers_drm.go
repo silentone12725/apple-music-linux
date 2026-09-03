@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -72,7 +72,7 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 			Email:    req.Email,
 			Password: req.Password,
 		}); err != nil {
-			fmt.Printf("drm login error: %v\n", err)
+			slog.Error("drm login error", "err", err)
 		}
 	}()
 	// Return immediately; authentication completion arrives via SSE.
