@@ -19,6 +19,7 @@ if (window.__amlEngineInjected) throw new Error('[AML] double-injection guard');
 window.__amlEngineInjected = true;
 
 const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
+const _AML_DEBUG = false; // set true in DevTools to enable verbose [MK-DBG]/[AML click] logs
 
 // ── Power Budget ───────────────────────────────────────────────────────────────
 // Classifies runtime into full / reduced / minimal based on battery state and
@@ -4549,11 +4550,11 @@ async function setup() {
             ci = _sessionContainers.length - 1;
         }
         const ii = Math.max(0, _sessionContainers[ci].items.indexOf(target));
-        console.log(`[MK-DBG] ${label} → owned change: ${items.length} track(s) ci=${ci} ii=${ii} target=${target}`);
+        if (_AML_DEBUG) console.log(`[MK-DBG] ${label} → owned change: ${items.length} track(s) ci=${ci} ii=${ii} target=${target}`);
         if (closeGate) closeGate();
         return _amlGoto(ci, ii)
-            .then(()  => console.log(`[MK-DBG] ${label} → owned change dispatched`))
-            .catch(err => console.log(`[MK-DBG] ${label} → owned change failed:`, err?.message || err));
+            .then(()  => _AML_DEBUG && console.log(`[MK-DBG] ${label} → owned change dispatched`))
+            .catch(err => _AML_DEBUG && console.log(`[MK-DBG] ${label} → owned change failed:`, err?.message || err));
     }
 
     // Normalise a descriptor's startWith.id to a catalog song ID.
@@ -4827,7 +4828,7 @@ async function setup() {
             // setQueue — this ensures MSE has claimed mkAudio before MK touches it.
             _directPlayPromise = aacCatalogId ? _triggerDirectPlay(aacCatalogId, mk) : null;
             if (_directPlayPromise) _directPlayPromise.catch(() => {});
-            console.log('[AML click] external play in AAC mode — opening CDN gate'
+            if (_AML_DEBUG) console.log('[AML click] external play in AAC mode — opening CDN gate'
                 + ' playbackState=' + mk.playbackState
                 + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null')
                 + ' catalogId=' + (aacCatalogId || 'not-found')
@@ -4869,7 +4870,7 @@ async function setup() {
             const _aacOwnedGoto = (ids, startId, label) => _ownedGoto(ids, startId, label, _aacCloseGate);
             mk.setQueue = (...a) => {
                 const desc = a[0];
-                console.log('[MK-DBG AAC] mk.setQueue() args=' + JSON.stringify(a).slice(0, 400));
+                if (_AML_DEBUG) console.log('[MK-DBG AAC] mk.setQueue() args=' + JSON.stringify(a).slice(0, 400));
 
                 // Library playlist — borrowed from the VLC path, which was the only branch
                 // consuming _pendingPlaylistFetch. The AAC click handler has always started
@@ -4878,20 +4879,20 @@ async function setup() {
                 // and stalled. Serve it from the engine DB and own the change instead.
                 if (desc?.playlists && desc?.startWith?.id) {
                     const startCid = _normalizeStartId(desc);
-                    console.log('[MK-DBG AAC] playlists → resolving pre-fetched tracks, startWith=' + startCid);
+                    if (_AML_DEBUG) console.log('[MK-DBG AAC] playlists → resolving pre-fetched tracks, startWith=' + startCid);
                     return _resolvePlaylistCatalogIds().then(catalogIds => {
                         if (catalogIds.length > 1) {
                             return _aacOwnedGoto(catalogIds, startCid, 'playlist/local');
                         }
                         // Cache cold and the engine's live fetch came back empty — nothing to
                         // build a container from, so fall back to Apple's slow-but-reliable path.
-                        console.log('[MK-DBG AAC] playlists → cache cold, passthrough');
+                        if (_AML_DEBUG) console.log('[MK-DBG AAC] playlists → cache cold, passthrough');
                         if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
-                        _externalPlayGateTimer = setTimeout(() => { console.log('[AML click] AAC CDN gate reset (safety timeout)'); _aacCloseGate(); }, 45000);
+                        _externalPlayGateTimer = setTimeout(() => { if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout)'); _aacCloseGate(); }, 45000);
                         const p = _aacMkApiSaved.setQueue.apply(mk, a);
                         if (p?.then) p.then(
-                            () => console.log('[MK-DBG AAC] playlists → passthrough resolved'),
-                            err => { console.log('[MK-DBG AAC] playlists → passthrough rejected:', err?.message || err); _aacCloseGate(); }
+                            () => _AML_DEBUG && console.log('[MK-DBG AAC] playlists → passthrough resolved'),
+                            err => { if (_AML_DEBUG) console.log('[MK-DBG AAC] playlists → passthrough rejected:', err?.message || err); _aacCloseGate(); }
                         );
                         return p;
                     });
@@ -4901,14 +4902,14 @@ async function setup() {
                 if (desc?.albums?.length === 1 && typeof desc.albums[0] === 'string' && desc.albums[0].startsWith('l.')) {
                     const albumId = desc.albums[0];
                     const startWithLid = desc.startWith?.id ?? null;
-                    console.log('[MK-DBG AAC] albums → querying local cache for ' + albumId);
+                    if (_AML_DEBUG) console.log('[MK-DBG AAC] albums → querying local cache for ' + albumId);
                     const fetchPromise = fetch(`${ENGINE}/api/v1/library/albums/${encodeURIComponent(albumId)}/tracks`)
                         .then(r => r.ok ? r.json() : null).catch(() => null);
                     return Promise.race([fetchPromise, new Promise(res => setTimeout(() => res(null), 3000))]).then(result => {
                         const tracks = result?.tracks || [];
                         const catalogIds = tracks.map(t => t.cid).filter(id => id && /^\d{6,}$/.test(id));
                         if (catalogIds.length > 0) {
-                            console.log('[MK-DBG AAC] albums → local cache: ' + catalogIds.length + ' tracks');
+                            if (_AML_DEBUG) console.log('[MK-DBG AAC] albums → local cache: ' + catalogIds.length + ' tracks');
                             const startCid = startWithLid
                                 ? (tracks.find(t => t.lid === startWithLid) || {}).cid
                                 : (_pendingExternalClickCatalogId || null);
@@ -4919,9 +4920,9 @@ async function setup() {
                         // Android's queryItemsFromAlbum(albumId) which hits SVMediaLibrary or falls
                         // back to a direct /v1/me/library/albums/{id}/tracks fetch.
                         // Avoids the 30-40s delay of setQueue({albums:[...]}) when playbackState=2.
-                        console.log('[MK-DBG AAC] albums → cache cold, fetching tracks via MK REST');
+                        if (_AML_DEBUG) console.log('[MK-DBG AAC] albums → cache cold, fetching tracks via MK REST');
                         if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
-                        _externalPlayGateTimer = setTimeout(() => { console.log('[AML click] AAC CDN gate reset (safety timeout)'); _aacCloseGate(); }, 20000);
+                        _externalPlayGateTimer = setTimeout(() => { if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout)'); _aacCloseGate(); }, 20000);
 
                         const mkInst = window.MusicKit?.getInstance?.();
                         const directFetch = mkInst
@@ -4936,7 +4937,7 @@ async function setup() {
                             }).filter(id => id && /^\d{6,}$/.test(id));
 
                             if (directIds.length > 0) {
-                                console.log('[MK-DBG AAC] albums → REST fetch: ' + directIds.length + ' tracks (store for next time)');
+                                if (_AML_DEBUG) console.log('[MK-DBG AAC] albums → REST fetch: ' + directIds.length + ' tracks (store for next time)');
                                 // Cache the result in engine DB so next click is instant
                                 const cacheTracks = items.map(item => ({
                                     id: item.id,
@@ -4960,13 +4961,13 @@ async function setup() {
 
                             // REST also empty (no auth yet) — last resort: Apple's slow setQueue path
                             const _coldTimeout = (mk.playbackState === 2) ? 65000 : 45000;
-                            console.log('[MK-DBG AAC] albums → REST empty, last-resort Apple setQueue (timeout=' + _coldTimeout / 1000 + 's)');
+                            if (_AML_DEBUG) console.log('[MK-DBG AAC] albums → REST empty, last-resort Apple setQueue (timeout=' + _coldTimeout / 1000 + 's)');
                             if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
-                            _externalPlayGateTimer = setTimeout(() => { console.log('[AML click] AAC CDN gate reset (safety timeout after setQueue)'); _aacCloseGate(); }, _coldTimeout);
+                            _externalPlayGateTimer = setTimeout(() => { if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout after setQueue)'); _aacCloseGate(); }, _coldTimeout);
                             const p = _aacMkApiSaved.setQueue.apply(mk, a);
                             if (p?.then) p.then(
-                                () => console.log('[MK-DBG AAC] setQueue resolved'),
-                                err => { console.log('[MK-DBG AAC] setQueue rejected:', err?.message || err); _aacCloseGate(); }
+                                () => _AML_DEBUG && console.log('[MK-DBG AAC] setQueue resolved'),
+                                err => { if (_AML_DEBUG) console.log('[MK-DBG AAC] setQueue rejected:', err?.message || err); _aacCloseGate(); }
                             );
                             return p;
                         });
@@ -4999,24 +5000,24 @@ async function setup() {
                 // Non-album descriptor — extend safety timer and pass through.
                 if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
                 _externalPlayGateTimer = setTimeout(() => {
-                    console.log('[AML click] AAC CDN gate reset (safety timeout after setQueue)');
+                    if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout after setQueue)');
                     _aacCloseGate();
                 }, 45000);
                 const p = _aacMkApiSaved.setQueue.apply(mk, a);
                 if (p?.then) p.then(
-                    () => console.log('[MK-DBG AAC] setQueue resolved'),
+                    () => _AML_DEBUG && console.log('[MK-DBG AAC] setQueue resolved'),
                     err => {
-                        console.log('[MK-DBG AAC] setQueue rejected:', err?.message || err);
+                        if (_AML_DEBUG) console.log('[MK-DBG AAC] setQueue rejected:', err?.message || err);
                         _aacCloseGate();
                     }
                 );
                 return p;
             };
             mk.changeToMediaAtIndex = (idx) => {
-                console.log('[MK-DBG AAC] mk.changeToMediaAtIndex(' + idx + ')');
+                if (_AML_DEBUG) console.log('[MK-DBG AAC] mk.changeToMediaAtIndex(' + idx + ')');
                 const p = _aacMkApiSaved.changeToMediaAtIndex.call(mk, idx);
-                if (p?.then) p.then(() => console.log('[MK-DBG AAC] ctmi resolved'),
-                                    err => console.log('[MK-DBG AAC] ctmi rejected:', err?.message || err));
+                if (p?.then) p.then(() => _AML_DEBUG && console.log('[MK-DBG AAC] ctmi resolved'),
+                                    err => _AML_DEBUG && console.log('[MK-DBG AAC] ctmi rejected:', err?.message || err));
                 return p;
             };
 
@@ -5025,10 +5026,10 @@ async function setup() {
             const _aacGateEvts = ['pause','play','playing','waiting','stalled','error','emptied','loadstart','canplay','canplaythrough','ended'];
             const _aacGateEvtHandler = (ev) => {
                 const el = _aacGateAudioEl;
-                console.log('[AUDIO-EVT] ' + ev.type + ' paused=' + el?.paused + ' readyState=' + el?.readyState + ' src=' + (el?.src||'').slice(0,60));
+                if (_AML_DEBUG) console.log('[AUDIO-EVT] ' + ev.type + ' paused=' + el?.paused + ' readyState=' + el?.readyState + ' src=' + (el?.src||'').slice(0,60));
             };
             if (_aacGateAudioEl) _aacGateEvts.forEach(t => _aacGateAudioEl.addEventListener(t, _aacGateEvtHandler));
-            const _aacGateStateListener = () => console.log('[MK-DBG] playbackStateDidChange → ' + mk.playbackState + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null'));
+            const _aacGateStateListener = () => _AML_DEBUG && console.log('[MK-DBG] playbackStateDidChange → ' + mk.playbackState + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null'));
             mk.addEventListener('playbackStateDidChange', _aacGateStateListener);
             const _aacGateTracingCleanup = () => {
                 if (_aacGateAudioEl) _aacGateEvts.forEach(t => _aacGateAudioEl.removeEventListener(t, _aacGateEvtHandler));
@@ -5040,7 +5041,7 @@ async function setup() {
             if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
             // 20s initial timeout; extends to 45s if MK calls setQueue (library auth can be slow).
             _externalPlayGateTimer = setTimeout(() => {
-                console.log('[AML click] AAC CDN gate reset (safety timeout)');
+                if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout)');
                 _aacCloseGate();
             }, 20000);
             const _aacDesc = aacSetQueueDesc ?? (aacCatalogId ? { song: aacCatalogId } : null);
@@ -5118,7 +5119,7 @@ async function setup() {
                     _pendingPlaylistFetch = _prewarmLibraryPlaylist(_pendingPlaylistId);
                 }
             } catch (_) {}
-            console.log('[AML click] external play while VLC active — opening CDN gate'
+            if (_AML_DEBUG) console.log('[AML click] external play while VLC active — opening CDN gate'
                 + ' playbackState=' + mk.playbackState
                 + ' amlGotoTarget=' + _amlGotoTarget
                 + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null')
@@ -5130,13 +5131,13 @@ async function setup() {
             // ── MK API + audio-element instrumentation during CDN gate window ──────
             _mkApiSaved = { play: mk.play, setQueue: mk.setQueue, changeToMediaAtIndex: mk.changeToMediaAtIndex };
             mk.play = (...a) => {
-                console.log('[MK-DBG] mk.play() state=' + mk.playbackState);
+                if (_AML_DEBUG) console.log('[MK-DBG] mk.play() state=' + mk.playbackState);
                 const p = _mkApiSaved.play.apply(mk, a);
-                if (p?.then) p.then(() => console.log('[MK-DBG] mk.play() resolved'), e => console.log('[MK-DBG] mk.play() rejected:', e?.message || e));
+                if (p?.then) p.then(() => _AML_DEBUG && console.log('[MK-DBG] mk.play() resolved'), e => _AML_DEBUG && console.log('[MK-DBG] mk.play() rejected:', e?.message || e));
                 return p;
             };
             mk.setQueue = (...a) => {
-                console.log('[MK-DBG] mk.setQueue() args=' + JSON.stringify(a).slice(0,200));
+                if (_AML_DEBUG) console.log('[MK-DBG] mk.setQueue() args=' + JSON.stringify(a).slice(0,200));
                 // setQueue({playlists:[...]}) fetches tracks from Apple's network — this stalls
                 // when DNS/network is slow, hanging for >20s and preventing NPIDF from firing.
                 // If the target startWith item is already in mk.queue.items, redirect to
@@ -5171,11 +5172,11 @@ async function setup() {
                                 .filter(id => id && /^\d{6,}$/.test(id));
                             if (catalogIds.length > 1) {
                                 // Local cache hit — build songs descriptor without touching Apple's CDN setQueue.
-                                console.log('[MK-DBG] setQueue → local cache: ' + catalogIds.length + ' tracks, startWith=' + catalogId);
+                                if (_AML_DEBUG) console.log('[MK-DBG] setQueue → local cache: ' + catalogIds.length + ' tracks, startWith=' + catalogId);
                                 const pDesc = {songs: catalogIds};
                                 if (catalogIds.includes(catalogId)) pDesc.startWith = {id: catalogId};
                                 const p = _mkApiSaved.setQueue.call(mk, pDesc);
-                                if (p?.then) p.then(() => console.log('[MK-DBG] local cache resolved'), e2 => console.log('[MK-DBG] local cache rejected:', e2?.message || String(e2)));
+                                if (p?.then) p.then(() => _AML_DEBUG && console.log('[MK-DBG] local cache resolved'), e2 => _AML_DEBUG && console.log('[MK-DBG] local cache rejected:', e2?.message || String(e2)));
                                 return p;
                             }
                             // Cache cold (DB empty + engine live-fetch failed/DRM not available).
@@ -5183,22 +5184,22 @@ async function setup() {
                             // ctmi is NOT used here: the CDN gate is open only during VLC mode where
                             // the audio element is synthetic (paused=true, no src). ctmi's stop→load
                             // sequence hangs waiting for element events that never fire → 20s timeout.
-                            console.log('[MK-DBG] setQueue → passthrough (cache cold) catalogId=' + catalogId);
+                            if (_AML_DEBUG) console.log('[MK-DBG] setQueue → passthrough (cache cold) catalogId=' + catalogId);
                             const p = _mkApiSaved.setQueue.apply(mk, a);
-                            if (p?.then) p.then(() => console.log('[MK-DBG] passthrough resolved'), e2 => console.log('[MK-DBG] passthrough rejected:', e2?.message || String(e2)));
+                            if (p?.then) p.then(() => _AML_DEBUG && console.log('[MK-DBG] passthrough resolved'), e2 => _AML_DEBUG && console.log('[MK-DBG] passthrough rejected:', e2?.message || String(e2)));
                             return p;
                         });
                     }
                 }
                 const p = _mkApiSaved.setQueue.apply(mk, a);
-                if (p?.then) p.then(r => console.log('[MK-DBG] mk.setQueue() resolved r=' + JSON.stringify(r).slice(0,80)),
-                                     e => console.log('[MK-DBG] mk.setQueue() rejected:', e?.message || String(e)));
+                if (p?.then) p.then(r => _AML_DEBUG && console.log('[MK-DBG] mk.setQueue() resolved r=' + JSON.stringify(r).slice(0,80)),
+                                     e => _AML_DEBUG && console.log('[MK-DBG] mk.setQueue() rejected:', e?.message || String(e)));
                 return p;
             };
             mk.changeToMediaAtIndex = (idx) => {
-                console.log('[MK-DBG] mk.changeToMediaAtIndex(' + idx + ')');
+                if (_AML_DEBUG) console.log('[MK-DBG] mk.changeToMediaAtIndex(' + idx + ')');
                 const p = _mkApiSaved.changeToMediaAtIndex.call(mk, idx);
-                if (p?.then) p.then(r => console.log('[MK-DBG] ctmi(' + idx + ') resolved'), e => console.log('[MK-DBG] ctmi(' + idx + ') rejected:', e?.message || e));
+                if (p?.then) p.then(r => _AML_DEBUG && console.log('[MK-DBG] ctmi(' + idx + ') resolved'), e => _AML_DEBUG && console.log('[MK-DBG] ctmi(' + idx + ') rejected:', e?.message || e));
                 return p;
             };
             // Trace audio element events in the gate window so we can see MK's internal flow.
@@ -5206,10 +5207,10 @@ async function setup() {
             const _gateEvts = ['pause','play','playing','waiting','stalled','error','emptied','loadstart','canplay','canplaythrough','ended'];
             const _gateEvtHandler = (ev) => {
                 const el = _gateAudioEl;
-                console.log('[AUDIO-EVT] ' + ev.type + ' paused=' + el?.paused + ' readyState=' + el?.readyState + ' src=' + (el?.src||'').slice(0,60));
+                if (_AML_DEBUG) console.log('[AUDIO-EVT] ' + ev.type + ' paused=' + el?.paused + ' readyState=' + el?.readyState + ' src=' + (el?.src||'').slice(0,60));
             };
             if (_gateAudioEl) _gateEvts.forEach(t => _gateAudioEl.addEventListener(t, _gateEvtHandler));
-            const _gateStateListener = () => console.log('[MK-DBG] playbackStateDidChange → ' + mk.playbackState + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null'));
+            const _gateStateListener = () => _AML_DEBUG && console.log('[MK-DBG] playbackStateDidChange → ' + mk.playbackState + ' nowPlaying=' + (mk.nowPlayingItem?.attributes?.name || 'null'));
             mk.addEventListener('playbackStateDidChange', _gateStateListener);
             // Cleanup: call this when the gate closes (success or timeout).
             const _gateTracingCleanup = () => {
@@ -5236,7 +5237,7 @@ async function setup() {
                 }
                 _allowCDNTransition = false;
                 _externalPlayGateTimer = null;
-                console.log('[AML click] CDN gate reset (safety timeout)');
+                if (_AML_DEBUG) console.log('[AML click] CDN gate reset (safety timeout)');
             }, 20000);
         }
 

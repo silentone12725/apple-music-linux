@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -388,7 +389,7 @@ func streamMedia(w http.ResponseWriter, r *http.Request, fn func(io.Writer) erro
 			return
 		}
 		// Headers already committed; log and let the client handle the truncated stream.
-		fmt.Printf("stream error (partial): %v\n", err)
+		slog.Error("stream error (partial)", "err", err)
 	}
 }
 
