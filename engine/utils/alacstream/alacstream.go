@@ -18,7 +18,7 @@ import (
 
 	"github.com/grafov/m3u8"
 	"github.com/itouakirai/mp4ff/mp4"
-	"github.com/schollz/progressbar/v3"
+	"log/slog"
 )
 const prefetchKey = "skd://itunes.apple.com/P000000000/s1/e1"
 
@@ -137,28 +137,10 @@ func runAttempt(adamId string, playlistUrl string, outfile string, Config config
 
 	if do.ContentLength >= 0 && do.ContentLength < int64(Config.MaxMemoryLimit*1024*1024) {
 		var buf bytes.Buffer
-		bar := progressbar.NewOptions64(
-			do.ContentLength,
-			progressbar.OptionClearOnFinish(),
-			progressbar.OptionSetElapsedTime(false),
-			progressbar.OptionSetPredictTime(false),
-			progressbar.OptionShowElapsedTimeOnFinish(),
-			progressbar.OptionShowCount(),
-			progressbar.OptionEnableColorCodes(true),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetDescription("Downloading..."),
-			progressbar.OptionSetTheme(progressbar.Theme{
-				Saucer:        "",
-				SaucerHead:    "",
-				SaucerPadding: "",
-				BarStart:      "",
-				BarEnd:        "",
-			}),
-		)
-		if _, err = io.Copy(io.MultiWriter(&buf, bar), body); err != nil {
+		if _, err = io.Copy(&buf, body); err != nil {
 			return fmt.Errorf("download stalled or failed: %w", err)
 		}
-		fmt.Print("Downloaded\n")
+		slog.Info("alac download complete", "bytes", buf.Len())
 		body = &buf
 	}
 
@@ -251,25 +233,7 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	}
 
 	// 'segment' in m3u8 == 'fragment' in mp4ff
-	//fmt.Println("Starting decryption...")
-	bar := progressbar.NewOptions64(totalLen,
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionSetElapsedTime(false),
-		progressbar.OptionSetPredictTime(false),
-		progressbar.OptionShowElapsedTimeOnFinish(),
-		progressbar.OptionShowCount(),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionSetDescription("Decrypting..."),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer:        "",
-			SaucerHead:    "",
-			SaucerPadding: "",
-			BarStart:      "",
-			BarEnd:        "",
-		}),
-	)
-	bar.Add64(int64(offset))
+	slog.Info("alac decrypt starting", "total_bytes", totalLen)
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	for i := 0; ; i++ {
 		var frag *mp4.Fragment
@@ -302,7 +266,6 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		if err != nil {
 			return err
 		}
-		bar.Add64(int64(rawoffset))
 	}
 	return flushDecryptedOutput(outBuf, outfile, &buffer, totalLen, MaxMemorySize)
 }

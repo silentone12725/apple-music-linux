@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/grafov/m3u8"
-	"github.com/schollz/progressbar/v3"
 )
 
 type PlaybackLicense struct {
@@ -240,25 +239,7 @@ func extsong(b string) bytes.Buffer {
 			fmt.Printf("下载文件失败: %v\n", err)
 			return buffer
 		}
-		bar := progressbar.NewOptions64(
-			resp.ContentLength,
-			progressbar.OptionClearOnFinish(),
-			progressbar.OptionSetElapsedTime(false),
-			progressbar.OptionSetPredictTime(false),
-			progressbar.OptionShowElapsedTimeOnFinish(),
-			progressbar.OptionShowCount(),
-			progressbar.OptionEnableColorCodes(true),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetDescription("Downloading..."),
-			progressbar.OptionSetTheme(progressbar.Theme{
-				Saucer:        "",
-				SaucerHead:    "",
-				SaucerPadding: "",
-				BarStart:      "",
-				BarEnd:        "",
-			}),
-		)
-		_, copyErr := io.Copy(io.MultiWriter(&buffer, bar), resp.Body)
+		_, copyErr := io.Copy(&buffer, resp.Body)
 		resp.Body.Close()
 		if copyErr == nil {
 			return buffer
@@ -604,47 +585,7 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 	defer tempFile.Close()
 
 	limiter := newAimdLimiter(8, 2, 32)
-	bar := progressbar.NewOptions64(-1,
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionSetElapsedTime(true),
-		progressbar.OptionSetPredictTime(false),
-		progressbar.OptionShowElapsedTimeOnFinish(),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionShowCount(),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionSetDescription("Downloading..."),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer: "", SaucerHead: "", SaucerPadding: "", BarStart: "", BarEnd: "",
-		}),
-	)
-	barWriter := io.MultiWriter(tempFile, bar)
-
-	// Background goroutine refreshes the bar description with live stats.
-	done := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				hits, misses := CacheStats()
-				total := hits + misses
-				hitPct := 0
-				if total > 0 {
-					hitPct = int(100 * hits / total)
-				}
-				bar.Describe(fmt.Sprintf(
-					"[workers:%d cache:%d%%]",
-					limiter.Workers(), hitPct,
-				))
-			}
-		}
-	}()
-
-	downloadAndAssemble(context.Background(), urls, barWriter, limiter)
-	close(done)
+	downloadAndAssemble(context.Background(), urls, tempFile, limiter)
 
 	if err := tempFile.Close(); err != nil {
 		fmt.Printf("close temp: %v\n", err)

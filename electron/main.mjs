@@ -1286,6 +1286,15 @@ function applyPersistedViewSettings() {
 // ── IPC: prefs + view controls (used by settings panel) ─────────────────────
 ipcMain.handle('prefs:get', () => loadPrefs());
 
+// Returns the user-configured system power profile (performance/balanced/cool/quiet/…)
+// from the ACPI platform_profile sysfs node, or null if unavailable.
+ipcMain.handle('system:powerProfile', async () => {
+    try {
+        const raw = await readFileAsync('/sys/firmware/acpi/platform_profile', 'utf8');
+        return raw.trim() || null;
+    } catch { return null; }
+});
+
 // Encrypted per-key store (history, play-counts, etc.)
 // Keys are restricted to a safe character set to prevent injection or path
 // traversal by XSS code running in the Apple Music webview.

@@ -144,9 +144,6 @@ function injectLosslessIcon() {
 }
 
 // ── Renderer bundle injection ─────────────────────────────────────────────────
-// Read the pre-built IIFE bundle (xterm.js + terminal overlay) and execute it
-// directly in world 0 — the page's own JS context — following pear-desktop's
-// approach. This sidesteps all isolated-world event-proxy issues.
 
 function setupAppleMusicPage() {
     if (!location.hostname.includes('apple.com')) return;
