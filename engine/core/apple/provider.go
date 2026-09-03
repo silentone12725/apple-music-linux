@@ -28,7 +28,7 @@ import (
 	"engine/core/media"
 	"engine/core/pipeline"
 	"engine/utils/ampapi"
-	"engine/utils/aacstream"
+	"engine/utils/mvlabel"
 )
 
 // webplaybackClient is used for all Apple webplayback API calls.
@@ -229,7 +229,7 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	if err != nil {
 		return nil, fmt.Errorf("select video variant: %w", err)
 	}
-	aacstream.SetMVCacheQualityLabel(videoResolution)
+	mvlabel.Set(videoResolution)
 	audioURL, err := master.SelectAudioVariant(req.MVAudioPriorities)
 	if err != nil {
 		return nil, fmt.Errorf("select audio variant: %w", err)

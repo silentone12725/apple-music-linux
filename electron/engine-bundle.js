@@ -110,7 +110,7 @@ navigator.getBattery?.().then(bat => {
 // Poll system power profile via Electron IPC; refresh every 30 s in case user
 // switches profiles (e.g. power-profiles-daemon responds to a GUI toggle).
 ;(function _pollSysPowerProfile() {
-    const fetch = () => window.amlBridge?.invoke('system:powerProfile')
+    const fetch = () => window.amlBridge?.getPowerProfile()
         .then(_applySysPowerProfile).catch(() => {});
     fetch();
     setInterval(fetch, 30_000);
@@ -7348,77 +7348,108 @@ window.amlGetQueueInfo = function () {
     const DOWNLOAD_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:19%"><path d="M11.9952,21.1159C12.3277,21.1159 12.6697,20.9829 12.8977,20.7359L19.12,14.5136C19.3765,14.2571 19.5,13.9531 19.5,13.6396C19.5,12.9462 19.006,12.4522 18.341,12.4522C17.9801,12.4522 17.6856,12.6042 17.4671,12.8322L15.3011,14.9791L13.1352,17.4395L13.2112,15.3781L13.2112,4.254C13.2112,3.5035 12.7172,3 11.9952,3C11.2733,3 10.7793,3.5035 10.7793,4.254L10.7793,15.3781L10.8648,17.4395L8.6894,14.9791L6.5329,12.8322C6.3049,12.6042 6.0199,12.4522 5.659,12.4522C4.994,12.4522 4.5,12.9462 4.5,13.6396C4.5,13.9531 4.6235,14.2571 4.88,14.5136L11.0928,20.7359C11.3303,20.9829 11.6628,21.1159 11.9952,21.1159Z"/></svg>`;
 
     function findAccountRow() {
+        // account-menu is confirmed via vision-glass.js selectors.
+        const nav = document.querySelector('nav.navigation') || document.querySelector('nav');
+        if (!nav) return null;
         return (
-            document.querySelector('nav.navigation [class*="account"]') ||
-            document.querySelector('nav.navigation [class*="Account"]') ||
-            document.querySelector('[class*="navigation-account"]') ||
-            document.querySelector('[class*="NavigationAccount"]') ||
-            document.querySelector('nav.navigation [aria-haspopup="true"]') ||
-            document.querySelector('nav.navigation [aria-haspopup="menu"]')
+            nav.querySelector('[class*="account-menu"]') ||
+            nav.querySelector('[class*="account"]') ||
+            nav.querySelector('[class*="Account"]') ||
+            nav.querySelector('[aria-haspopup="true"]') ||
+            nav.querySelector('[aria-haspopup="menu"]') ||
+            nav.querySelector('[aria-label*="ccount"]') ||
+            // Last-resort: bottom-most li containing an img (profile photo)
+            [...nav.querySelectorAll('li')].reverse().find(li => li.querySelector('img')) ||
+            null
         );
     }
 
+    // Buttons live in nav.navigation directly (same as vision-glass #aml-nav-buttons)
+    // so they're never clipped by account-menu's own overflow/stacking context.
+    const _szN = 28;
+    let _cogResizeObs = null;
+
     function mountSettingsCog() {
-        if (document.getElementById('aml-settings-cog')) return;
         const accountRow = findAccountRow();
-        if (!accountRow) return;
+        const nav = document.querySelector('nav.navigation') || document.querySelector('nav');
+        if (!accountRow || !nav) return;
 
-        // Match the avatar circle size
-        const avatarEl = accountRow.querySelector('img, [class*="avatar"], [class*="Avatar"], [class*="profile"], [class*="Profile"]');
-        const avatarSize = avatarEl ? Math.round(avatarEl.getBoundingClientRect().width) || 28 : 28;
-        const szN = Math.max(avatarSize, 28);
-        const sz = szN + 'px';
+        let cog = document.getElementById('aml-settings-cog');
+        let dlBtn = document.getElementById('aml-downloads-btn');
 
-        function makeNavBtn(id, title, svg, rightPx) {
-            const btn = document.createElement('button');
-            btn.id = id;
-            btn.title = title;
-            btn.innerHTML = svg;
-            btn.style.cssText = [
-                'position:absolute',
-                `right:${rightPx}px`,
-                'top:50%',
-                'transform:translateY(-50%)',
-                'z-index:100',
-                `width:${sz}`,
-                `height:${sz}`,
-                'border-radius:50%',
-                'border:none',
-                'background:rgba(255,255,255,0.10)',
-                'color:rgba(255,255,255,0.55)',
-                'cursor:pointer',
-                'display:flex',
-                'align-items:center',
-                'justify-content:center',
-                'transition:background 0.15s,color 0.15s',
-                '-webkit-app-region:no-drag',
-                'flex-shrink:0',
-                'box-sizing:border-box',
-            ].join(';');
-            btn.onmouseenter = () => { btn.style.background = 'rgba(255,255,255,0.20)'; btn.style.color = 'rgba(255,255,255,0.9)'; };
-            btn.onmouseleave = () => { btn.style.background = 'rgba(255,255,255,0.10)'; btn.style.color = 'rgba(255,255,255,0.55)'; };
-            return btn;
+        if (!cog) {
+            cog = document.createElement('button');
+            cog.id = 'aml-settings-cog';
+            cog.title = 'AML Settings';
+            cog.innerHTML = COG_SVG;
+            _styleNavBtn(cog);
+            cog.onclick = (e) => { e.stopPropagation(); openSettings(); };
+            nav.appendChild(cog);
+        }
+        if (!dlBtn) {
+            dlBtn = document.createElement('button');
+            dlBtn.id = 'aml-downloads-btn';
+            dlBtn.title = 'Downloads';
+            dlBtn.innerHTML = DOWNLOAD_SVG;
+            _styleNavBtn(dlBtn);
+            dlBtn.onclick = (e) => { e.stopPropagation(); window.__amlToggleDownloads?.(); };
+            nav.appendChild(dlBtn);
         }
 
-        // Make parent relative so absolute positioning works
-        const parent = accountRow.closest('li, [class*="account"], [class*="Account"]') || accountRow;
-        if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+        _positionCogButtons(nav, accountRow, cog, dlBtn);
 
+        if (!_cogResizeObs) {
+            _cogResizeObs = new ResizeObserver(() => {
+                const row = findAccountRow();
+                const n   = document.querySelector('nav.navigation') || document.querySelector('nav');
+                const c   = document.getElementById('aml-settings-cog');
+                const d   = document.getElementById('aml-downloads-btn');
+                if (row && n && c && d) _positionCogButtons(n, row, c, d);
+            });
+            _cogResizeObs.observe(nav);
+        }
+    }
+
+    function _styleNavBtn(btn) {
+        const sz = _szN + 'px';
+        btn.style.cssText = [
+            'position:absolute',
+            `width:${sz}`,
+            `height:${sz}`,
+            'border-radius:50%',
+            'border:none',
+            'background:rgba(255,255,255,0.10)',
+            'color:rgba(255,255,255,0.55)',
+            'cursor:pointer',
+            'display:flex',
+            'align-items:center',
+            'justify-content:center',
+            'transition:background 0.15s,color 0.15s',
+            '-webkit-app-region:no-drag',
+            'flex-shrink:0',
+            'box-sizing:border-box',
+            'z-index:200',
+        ].join(';');
+        btn.onmouseenter = () => { btn.style.background = 'rgba(255,255,255,0.20)'; btn.style.color = 'rgba(255,255,255,0.9)'; };
+        btn.onmouseleave = () => { btn.style.background = 'rgba(255,255,255,0.10)'; btn.style.color = 'rgba(255,255,255,0.55)'; };
+    }
+
+    function _positionCogButtons(nav, accountRow, cog, dlBtn) {
+        const navRect = nav.getBoundingClientRect();
+        const rowRect = accountRow.getBoundingClientRect();
+        if (!navRect.height || !rowRect.height) return;
+        const top = rowRect.top - navRect.top + (rowRect.height - _szN) / 2;
         const gap = 8;
-        const cog = makeNavBtn('aml-settings-cog', 'AML Settings', COG_SVG, 10);
-        cog.onclick = (e) => { e.stopPropagation(); openSettings(); };
-
-        const dlBtn = makeNavBtn('aml-downloads-btn', 'Downloads', DOWNLOAD_SVG, 10 + szN + gap);
-        dlBtn.onclick = (e) => { e.stopPropagation(); window.__amlToggleDownloads?.(); };
-
-        parent.appendChild(cog);
-        parent.appendChild(dlBtn);
+        cog.style.top   = `${top}px`;
+        cog.style.right = '10px';
+        dlBtn.style.top   = `${top}px`;
+        dlBtn.style.right = `${10 + _szN + gap}px`;
     }
 
     // Watch the entire document so the cog re-mounts after SPA navigation
     // replaces the sidebar (observing only parent misses parent-level removals).
     watchDomSettled(() => {
-        if (findAccountRow() && (!document.getElementById('aml-settings-cog') || !document.getElementById('aml-downloads-btn'))) mountSettingsCog();
+        if (findAccountRow()) mountSettingsCog();
     });
 
     window.__amlOpenEngineSettings = openSettings;
