@@ -17,8 +17,6 @@ package prefetch
 import (
 	"container/heap"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"math"
 	"sort"
 	"strings"
@@ -27,6 +25,8 @@ import (
 	"time"
 
 	"engine/core/playback"
+	"engine/internal/randid"
+	"engine/internal/ring"
 )
 
 const (
@@ -214,59 +214,6 @@ func isRetryable(reason string) bool {
 	return reason != FailReasonAuth && reason != FailReasonNotFound
 }
 
-// ── Latency tracking ──────────────────────────────────────────────────────────
-
-const latencyCap = 200 // rolling window size
-
-// latencyRing is a fixed-size circular buffer for warm-latency samples (ms).
-type latencyRing struct {
-	mu      sync.Mutex
-	samples [latencyCap]int64
-	pos     int
-	n       int
-}
-
-func (lr *latencyRing) record(ms int64) {
-	lr.mu.Lock()
-	lr.samples[lr.pos%latencyCap] = ms
-	lr.pos++
-	if lr.n < latencyCap {
-		lr.n++
-	}
-	lr.mu.Unlock()
-}
-
-// stats returns the mean and P95 latency over the current window.
-func (lr *latencyRing) stats() (avg, p95 float64) {
-	lr.mu.Lock()
-	if lr.n == 0 {
-		lr.mu.Unlock()
-		return 0, 0
-	}
-	// Stack-allocate the copy to avoid a heap alloc on every stats call.
-	var tmp [latencyCap]int64
-	s := tmp[:lr.n]
-	start := lr.pos - lr.n
-	for i := range s {
-		s[i] = lr.samples[(start+i)%latencyCap]
-	}
-	lr.mu.Unlock()
-
-	var sum int64
-	for _, v := range s {
-		sum += v
-	}
-	avg = float64(sum) / float64(len(s))
-
-	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
-	idx := int(math.Ceil(float64(len(s))*0.95)) - 1
-	if idx >= len(s) {
-		idx = len(s) - 1
-	}
-	p95 = float64(s[idx])
-	return
-}
-
 // ── Priority queue ────────────────────────────────────────────────────────────
 
 type workItem struct {
@@ -348,6 +295,7 @@ func (q *workQueue) depth() int {
 type preWarmedEntry struct {
 	sessionID string
 	expiresAt time.Time
+	req       playback.OpenRequest // stored so we can re-warm on expiry
 }
 
 const preWarmTTL = 15 * time.Minute
@@ -379,8 +327,8 @@ type Scheduler struct {
 	totalFailed    atomic.Int64
 	totalCancelled atomic.Int64
 	totalRetries   atomic.Int64
-	latencies      latencyRing // time from worker-start to opened (not streamed)
-	queueWaits     latencyRing // time from enqueue to worker-start
+	latencies      *ring.Buffer // time from worker-start to opened (not streamed)
+	queueWaits     *ring.Buffer // time from enqueue to worker-start
 }
 
 // NewScheduler wires a Scheduler with the given playback manager.
@@ -391,14 +339,16 @@ func NewScheduler(pm *playback.Manager, token, mut func() string, sink EventSink
 		workers = DefaultWorkers
 	}
 	s := &Scheduler{
-		pm:        pm,
-		token:     token,
-		mut:       mut,
-		sink:      sink,
-		jobs:      make(map[string]*WarmJob),
-		dedup:     make(map[string]bool),
-		preWarmed: make(map[string]preWarmedEntry),
-		wq:        newWorkQueue(),
+		pm:         pm,
+		token:      token,
+		mut:        mut,
+		sink:       sink,
+		jobs:       make(map[string]*WarmJob),
+		dedup:      make(map[string]bool),
+		preWarmed:  make(map[string]preWarmedEntry),
+		wq:         newWorkQueue(),
+		latencies:  ring.New(200),
+		queueWaits: ring.New(200),
 	}
 	for range workers {
 		go s.worker()
@@ -438,8 +388,8 @@ func (s *Scheduler) GetCacheConfig() CacheConfig {
 
 // Stats returns a point-in-time snapshot of internal scheduler metrics.
 func (s *Scheduler) Stats() Stats {
-	avg, p95 := s.latencies.stats()
-	qAvg, qP95 := s.queueWaits.stats()
+	avg, p95 := s.latencies.Stats()
+	qAvg, qP95 := s.queueWaits.Stats()
 	cached := s.totalCached.Load()
 	failed := s.totalFailed.Load()
 	var hitRatio float64
@@ -534,7 +484,8 @@ func (s *Scheduler) Cancel(id string) bool {
 // TakePreWarmed returns and removes the pre-opened session ID for assetID,
 // allowing real playback to reuse it without a new webplayback API call.
 // Returns ("", false) if no pre-warmed session exists or it has expired.
-// Expired sessions are released back to the playback manager.
+// On expiry the old session is released and a background re-warm is kicked off
+// so the next caller benefits from a fresh session.
 func (s *Scheduler) TakePreWarmed(assetID string) (sessionID string, ok bool) {
 	s.mu.Lock()
 	entry, found := s.preWarmed[assetID]
@@ -546,10 +497,42 @@ func (s *Scheduler) TakePreWarmed(assetID string) (sessionID string, ok bool) {
 		return "", false
 	}
 	if time.Now().After(entry.expiresAt) {
-		s.pm.Release(entry.sessionID)
+		if s.pm != nil {
+			s.pm.Release(entry.sessionID)
+		}
+		// Re-warm in the background so subsequent playback can reuse it.
+		// The singleflight in Manager.Open means this races safely with any
+		// concurrent real-playback open for the same asset.
+		if s.pm != nil {
+			go s.rewarm(entry)
+		}
 		return "", false
 	}
 	return entry.sessionID, true
+}
+
+// rewarm opens a fresh session for an expired pre-warmed entry and stores it.
+func (s *Scheduler) rewarm(entry preWarmedEntry) {
+	ctx := context.Background()
+	req := entry.req
+	req.Token = s.token()
+	req.MUT = s.mut()
+	sess, err := s.pm.Open(ctx, req)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	// Only store if nothing else has already populated this slot (race-safe).
+	if _, exists := s.preWarmed[entry.req.AssetID]; !exists {
+		s.preWarmed[entry.req.AssetID] = preWarmedEntry{
+			sessionID: sess.ID,
+			expiresAt: time.Now().Add(preWarmTTL),
+			req:       entry.req,
+		}
+	} else {
+		s.pm.Release(sess.ID)
+	}
+	s.mu.Unlock()
 }
 
 // PruneExpiredPreWarmed releases pre-warmed sessions that were never claimed.
@@ -636,7 +619,7 @@ func (s *Scheduler) warm(item *workItem) {
 		s.mu.Unlock()
 	}()
 
-	s.queueWaits.record(time.Since(item.enqueuedAt).Milliseconds())
+	s.queueWaits.Record(time.Since(item.enqueuedAt).Milliseconds())
 	job.startOne()
 	s.activeWorkers.Add(1)
 	defer s.activeWorkers.Add(-1)
@@ -701,6 +684,10 @@ func (s *Scheduler) warm(item *workItem) {
 		s.preWarmed[item.track.AssetID] = preWarmedEntry{
 			sessionID: sess.ID,
 			expiresAt: time.Now().Add(preWarmTTL),
+			req: playback.OpenRequest{
+				AssetID:    item.track.AssetID,
+				Storefront: sf,
+			},
 		}
 		s.mu.Unlock()
 
@@ -719,7 +706,7 @@ func (s *Scheduler) warm(item *workItem) {
 		default:
 		}
 
-		s.latencies.record(time.Since(startedAt).Milliseconds())
+		s.latencies.Record(time.Since(startedAt).Milliseconds())
 		cached, total := job.finishCached()
 		s.totalCached.Add(1)
 		s.emit(Event{
@@ -750,17 +737,22 @@ func (s *Scheduler) warm(item *workItem) {
 }
 
 func (s *Scheduler) checkJobDone(job *WarmJob) {
-	if job.isDone() {
-		snap := job.snapshot()
-		s.emit(Event{
-			Kind:       EventJobDone,
-			JobID:      job.ID,
-			Generation: job.Generation,
-			Total:      snap.Total,
-			Cached:     snap.Cached,
-			Failed:     snap.Failed,
-		})
+	if !job.isDone() {
+		return
 	}
+	snap := job.snapshot()
+	s.emit(Event{
+		Kind:       EventJobDone,
+		JobID:      job.ID,
+		Generation: job.Generation,
+		Total:      snap.Total,
+		Cached:     snap.Cached,
+		Failed:     snap.Failed,
+	})
+	// Prune completed job so the map stays bounded.
+	s.mu.Lock()
+	delete(s.jobs, job.ID)
+	s.mu.Unlock()
 }
 
 func (s *Scheduler) emit(ev Event) {
@@ -892,8 +884,4 @@ func classifyError(err error) string {
 	}
 }
 
-func newID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
+func newID() string { return randid.New() }

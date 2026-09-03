@@ -102,8 +102,16 @@ func (s *Store) initSchema() {
 			playlist_id TEXT, position INTEGER, lid TEXT, cid TEXT,
 			PRIMARY KEY (playlist_id, position)
 		);
+		CREATE TABLE IF NOT EXISTS albums (
+			lid TEXT PRIMARY KEY, cid TEXT, name TEXT, artist TEXT, track_count INTEGER
+		);
 		CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 	`)
+	// Migrations for existing DBs.
+	s.db.Exec(`ALTER TABLE songs ADD COLUMN album_id TEXT NOT NULL DEFAULT ''`)
+	s.db.Exec(`ALTER TABLE songs ADD COLUMN track_number INTEGER NOT NULL DEFAULT 0`)
+	s.db.Exec(`ALTER TABLE songs ADD COLUMN disc_number INTEGER NOT NULL DEFAULT 0`)
+	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_songs_album_id ON songs(album_id)`)
 }
 
 // ── Encryption helpers ────────────────────────────────────────────────────────
@@ -388,17 +396,39 @@ func (s *Store) PlaylistTracks(playlistID string) []PlaylistTrack {
 	return tracks // nil if no rows (= not cached)
 }
 
+// SongsByAlbum returns ordered tracks for a library album ID (e.g. "l.1OBwMCC").
+// Returns nil when the album is not in the local DB (not yet synced or album_id absent).
+func (s *Store) SongsByAlbum(albumID string) []PlaylistTrack {
+	if s.db == nil || albumID == "" {
+		return nil
+	}
+	rows, err := s.db.Query(
+		"SELECT lid, cid FROM songs WHERE album_id = ? ORDER BY disc_number ASC, track_number ASC, rowid ASC", albumID)
+	if err != nil || rows == nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []PlaylistTrack
+	for rows.Next() {
+		var t PlaylistTrack
+		rows.Scan(&t.LibraryID, &t.CatalogID)
+		out = append(out, t)
+	}
+	return out
+}
+
 // Playlists returns all cached playlists.
 func (s *Store) Playlists() []PlaylistInfo {
 	return s.queryPlaylists()
 }
 
 // Stats returns current cache size info.
-func (s *Store) Stats() (songs, playlists int, syncedAt time.Time) {
+func (s *Store) Stats() (songs, albums, playlists int, syncedAt time.Time) {
 	if s.db == nil {
 		return
 	}
 	s.db.QueryRow("SELECT COUNT(*) FROM songs").Scan(&songs)
+	s.db.QueryRow("SELECT COUNT(*) FROM albums").Scan(&albums)
 	s.db.QueryRow("SELECT COUNT(*) FROM playlists").Scan(&playlists)
 	syncedAt = s.querySyncedAt()
 	return
@@ -430,6 +460,7 @@ func (s *Store) SetPlaylistTracks(playlistID string, tracks []PlaylistTrack) {
 // Items match the Apple Music API response schema.
 type IngestPayload struct {
 	Songs          []amItem            `json:"songs"`
+	Albums         []amItem            `json:"albums"`
 	Playlists      []amItem            `json:"playlists"`
 	PlaylistTracks map[string][]amItem `json:"playlistTracks"` // playlistID → items
 	Revision       string              `json:"revision"`        // opaque revision token for delta sync
@@ -448,49 +479,27 @@ func (s *Store) Ingest(p IngestPayload) {
 	}
 	defer tx.Rollback() //nolint:errcheck
 	tx.Exec("DELETE FROM songs")
+	tx.Exec("DELETE FROM albums")
 	tx.Exec("DELETE FROM playlists")
 	tx.Exec("DELETE FROM playlist_tracks")
 
-	songStmt, err := tx.Prepare("INSERT INTO songs(lid,cid,name,artist,album,ms) VALUES(?,?,?,?,?,?)")
-	if err != nil {
-		log.Printf("[library] ingest prepare songs: %v", err)
+	if err := ingestSongs(tx, p.Songs); err != nil {
+		log.Printf("[library] %v", err)
 		return
 	}
-	defer songStmt.Close()
-	for _, item := range p.Songs {
-		cid := item.Attributes.PlayParams.CatalogID
-		if cid == "" {
-			cid = item.Attributes.PlayParams.ID
-		}
-		songStmt.Exec(item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName,
-			item.Attributes.AlbumName, item.Attributes.DurationInMillis)
+	if err := ingestAlbums(tx, p.Albums); err != nil {
+		log.Printf("[library] %v", err)
+		return
+	}
+	if err := ingestPlaylists(tx, p.Playlists); err != nil {
+		log.Printf("[library] %v", err)
+		return
+	}
+	if err := ingestPlaylistTracks(tx, p.PlaylistTracks); err != nil {
+		log.Printf("[library] %v", err)
+		return
 	}
 
-	plStmt, err := tx.Prepare("INSERT INTO playlists(lid,name,track_count) VALUES(?,?,?)")
-	if err != nil {
-		log.Printf("[library] ingest prepare playlists: %v", err)
-		return
-	}
-	defer plStmt.Close()
-	for _, item := range p.Playlists {
-		plStmt.Exec(item.ID, item.Attributes.Name, item.Attributes.TrackCount)
-	}
-
-	ptStmt, err := tx.Prepare("INSERT INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)")
-	if err != nil {
-		log.Printf("[library] ingest prepare playlist_tracks: %v", err)
-		return
-	}
-	defer ptStmt.Close()
-	for plID, items := range p.PlaylistTracks {
-		for i, item := range items {
-			cid := item.Attributes.PlayParams.CatalogID
-			if cid == "" {
-				cid = item.Attributes.PlayParams.ID
-			}
-			ptStmt.Exec(plID, i, item.ID, cid)
-		}
-	}
 	tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('synced_at',?)",
 		time.Now().Format(time.RFC3339))
 	if p.Revision != "" {
@@ -501,8 +510,82 @@ func (s *Store) Ingest(p IngestPayload) {
 		return
 	}
 
-	log.Printf("[library] ingested: %d songs, %d playlists", len(p.Songs), len(p.Playlists))
-	go s.save() // encrypt and persist in background
+	log.Printf("[library] ingested: %d songs, %d albums, %d playlists", len(p.Songs), len(p.Albums), len(p.Playlists))
+	go s.save()
+}
+
+func ingestSongs(tx *sql.Tx, songs []amItem) error {
+	stmt, err := tx.Prepare("INSERT INTO songs(lid,cid,name,artist,album,album_id,ms,track_number,disc_number) VALUES(?,?,?,?,?,?,?,?,?)")
+	if err != nil {
+		return fmt.Errorf("ingest prepare songs: %w", err)
+	}
+	defer stmt.Close()
+	for _, item := range songs {
+		cid := item.Attributes.PlayParams.CatalogID
+		if cid == "" {
+			cid = item.Attributes.PlayParams.ID
+		}
+		if cid == "" && len(item.Relationships.Catalog.Data) > 0 {
+			cid = item.Relationships.Catalog.Data[0].ID
+		}
+		albumID := ""
+		if len(item.Relationships.Albums.Data) > 0 {
+			albumID = item.Relationships.Albums.Data[0].ID
+		}
+		stmt.Exec(item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName,
+			item.Attributes.AlbumName, albumID, item.Attributes.DurationInMillis,
+			item.Attributes.TrackNumber, item.Attributes.DiscNumber)
+	}
+	return nil
+}
+
+func ingestAlbums(tx *sql.Tx, albums []amItem) error {
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO albums(lid,cid,name,artist,track_count) VALUES(?,?,?,?,?)")
+	if err != nil {
+		return fmt.Errorf("ingest prepare albums: %w", err)
+	}
+	defer stmt.Close()
+	for _, item := range albums {
+		cid := item.Attributes.PlayParams.CatalogID
+		if cid == "" {
+			cid = item.Attributes.PlayParams.ID
+		}
+		if cid == "" && len(item.Relationships.Catalog.Data) > 0 {
+			cid = item.Relationships.Catalog.Data[0].ID
+		}
+		stmt.Exec(item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName, item.Attributes.TrackCount)
+	}
+	return nil
+}
+
+func ingestPlaylists(tx *sql.Tx, playlists []amItem) error {
+	stmt, err := tx.Prepare("INSERT INTO playlists(lid,name,track_count) VALUES(?,?,?)")
+	if err != nil {
+		return fmt.Errorf("ingest prepare playlists: %w", err)
+	}
+	defer stmt.Close()
+	for _, item := range playlists {
+		stmt.Exec(item.ID, item.Attributes.Name, item.Attributes.TrackCount)
+	}
+	return nil
+}
+
+func ingestPlaylistTracks(tx *sql.Tx, tracks map[string][]amItem) error {
+	stmt, err := tx.Prepare("INSERT INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)")
+	if err != nil {
+		return fmt.Errorf("ingest prepare playlist_tracks: %w", err)
+	}
+	defer stmt.Close()
+	for plID, items := range tracks {
+		for i, item := range items {
+			cid := item.Attributes.PlayParams.CatalogID
+			if cid == "" {
+				cid = item.Attributes.PlayParams.ID
+			}
+			stmt.Exec(plID, i, item.ID, cid)
+		}
+	}
+	return nil
 }
 
 // FetchPlaylistTracksOnce fetches one playlist's track list directly from the
@@ -523,18 +606,34 @@ type amResponse struct {
 	Next string   `json:"next"`
 }
 
+type amRelationships struct {
+	Albums struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	} `json:"albums"`
+	Catalog struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	} `json:"catalog"`
+}
+
 type amItem struct {
-	ID         string       `json:"id"`
-	Type       string       `json:"type"`
-	Attributes amAttributes `json:"attributes"`
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	Attributes    amAttributes    `json:"attributes"`
+	Relationships amRelationships `json:"relationships"`
 }
 
 type amAttributes struct {
-	Name             string      `json:"name"`
-	ArtistName       string      `json:"artistName"`
-	AlbumName        string      `json:"albumName"`
-	DurationInMillis int         `json:"durationInMillis"`
-	TrackCount       int         `json:"trackCount"`
+	Name             string       `json:"name"`
+	ArtistName       string       `json:"artistName"`
+	AlbumName        string       `json:"albumName"`
+	DurationInMillis int          `json:"durationInMillis"`
+	TrackCount       int          `json:"trackCount"`
+	TrackNumber      int          `json:"trackNumber"`
+	DiscNumber       int          `json:"discNumber"`
 	PlayParams       amPlayParams `json:"playParams"`
 }
 

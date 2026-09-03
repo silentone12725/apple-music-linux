@@ -462,6 +462,13 @@ func (m *Manager) execute(item *workItem) {
 
 	relPath := renderTemplate(req.FilenameTemplate, vars)
 	outPath := filepath.Join(req.OutputDir, relPath)
+	// Path traversal guard: ensure the final path is inside OutputDir.
+	cleanOut := filepath.Clean(outPath)
+	cleanDir := filepath.Clean(req.OutputDir)
+	if len(cleanOut) <= len(cleanDir) || cleanOut[:len(cleanDir)] != cleanDir || cleanOut[len(cleanDir)] != filepath.Separator {
+		m.fail(job, fmt.Errorf("filename template escapes output directory"))
+		return
+	}
 
 	// ── Phase 2: Overwrite check ──────────────────────────────────────────
 	finalPath, skip := overwritePath(outPath, req.Options.OverwritePolicy)
