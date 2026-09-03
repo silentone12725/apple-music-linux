@@ -576,9 +576,10 @@ func TestManagerCrashTriggersRestart(t *testing.T) {
 			AuthTimeout:      10 * time.Second,
 		})
 
-	// Simulate backend running, then crashing.
+	// Simulate backend running, then crashing: clear running before emitting the
+	// event so handleCrash does not see a still-running backend and return early.
 	backend.mu.Lock()
-	backend.running = true
+	backend.running = false
 	backend.startCalled = 0
 	backend.mu.Unlock()
 
@@ -629,16 +630,37 @@ func TestManagerMaxCrashRestarts(t *testing.T) {
 			AuthTimeout:      10 * time.Second,
 		})
 
-	// Emit more crashes than MaxCrashRestarts.
+	crashEvent := drm.DRMEvent{
+		Snapshot: drm.DRMSnapshot{
+			State:   drm.DRMState{Process: drm.ProcessStopped},
+			Message: "crash",
+		},
+		Intentional: false,
+	}
+
+	// Emit more crashes than MaxCrashRestarts.  Before each event, clear
+	// running so handleCrash does not exit early seeing a "still-running"
+	// backend.  After all but the last crash, wait for handleCrash to call
+	// Start (which sets running=true) before triggering the next crash.
 	for i := 0; i <= maxRestarts; i++ {
-		backend.emitEvent(drm.DRMEvent{
-			Snapshot: drm.DRMSnapshot{
-				State:   drm.DRMState{Process: drm.ProcessStopped},
-				Message: "crash",
-			},
-			Intentional: false,
-		})
-		time.Sleep(30 * time.Millisecond) // wait for backoff
+		backend.mu.Lock()
+		backend.running = false
+		backend.mu.Unlock()
+		backend.emitEvent(crashEvent)
+
+		if i < maxRestarts {
+			// Wait for restart attempt before next crash.
+			dl := time.Now().Add(500 * time.Millisecond)
+			for time.Now().Before(dl) {
+				backend.mu.Lock()
+				r := backend.running
+				backend.mu.Unlock()
+				if r {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
 	}
 
 	// Manager must eventually enter ManagerFailed.

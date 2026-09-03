@@ -64,8 +64,6 @@ type SegmentCache struct {
 	lru          list.List                // front = most recent
 	entries      map[string]*list.Element // key → element
 	totalSz      int64
-	qualityLabel string // MV only: resolution of last cached variant, e.g. "1920x1080"
-
 	Hits   int64
 	Misses int64
 }
@@ -308,21 +306,6 @@ func MVCacheStats() (hits, misses int64) {
 	return mvSegmentCache.Hits, mvSegmentCache.Misses
 }
 
-// SetMVCacheQualityLabel records the resolution string of the most recently
-// selected MV variant (e.g. "1920x1080"). Cleared on ClearMVCache.
-func SetMVCacheQualityLabel(resolution string) {
-	mvSegmentCache.mu.Lock()
-	mvSegmentCache.qualityLabel = resolution
-	mvSegmentCache.mu.Unlock()
-}
-
-// MVCacheQualityLabel returns the cached MV quality label, e.g. "1920x1080".
-func MVCacheQualityLabel() string {
-	mvSegmentCache.mu.Lock()
-	defer mvSegmentCache.mu.Unlock()
-	return mvSegmentCache.qualityLabel
-}
-
 // MVCacheEnabled reports whether the MV cache is active (maxBytes > 0).
 func MVCacheEnabled() bool { return mvSegmentCache.maxBytes.Load() > 0 }
 
@@ -345,7 +328,6 @@ func ClearMVCache() error {
 	mvSegmentCache.lru.Init()
 	mvSegmentCache.entries = make(map[string]*list.Element)
 	mvSegmentCache.totalSz = 0
-	mvSegmentCache.qualityLabel = ""
 	dir := mvSegmentCache.dir
 	mvSegmentCache.mu.Unlock()
 	if err := os.RemoveAll(dir); err != nil {

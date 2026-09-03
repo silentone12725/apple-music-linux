@@ -99,6 +99,7 @@ contextBridge.exposeInMainWorld('amlBridge', {
     storeRead:   (key)        => ipcRenderer.invoke('store:read',   key),
     storeWrite:  (key, value) => ipcRenderer.invoke('store:write',  key, value),
     storeDelete: (key)        => ipcRenderer.invoke('store:delete', key),
+    getPowerProfile: ()       => ipcRenderer.invoke('system:powerProfile'),
 });
 
 // ── Apple Music page setup ────────────────────────────────────────────────────

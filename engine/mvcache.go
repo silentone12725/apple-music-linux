@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 
 	"engine/utils/aacstream"
+	"engine/utils/mvlabel"
 )
 
 // mvCachePrefMaxBytes is the last user-requested MV cache capacity.
@@ -14,7 +15,7 @@ func init() { mvCachePrefMaxBytes.Store(aacstream.DefaultMVCacheMaxBytes) }
 
 // MVCacheGetInfo returns the current MV cache state for the capabilities/stats API.
 func MVCacheGetInfo() (enabled bool, maxBytes, sizeBytes int64, quality string) {
-	return aacstream.MVCacheEnabled(), aacstream.MVCacheMaxBytes(), aacstream.MVCacheTotalBytes(), aacstream.MVCacheQualityLabel()
+	return aacstream.MVCacheEnabled(), aacstream.MVCacheMaxBytes(), aacstream.MVCacheTotalBytes(), mvlabel.Get()
 }
 
 func ClearMVCache() error { return aacstream.ClearMVCache() }
