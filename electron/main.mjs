@@ -13,6 +13,8 @@ import path from 'path';
 import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, readdirSync } from 'fs';
 import { readFile as readFileAsync, writeFile as writeFileAsync } from 'fs/promises';
 import os from 'os';
+import net from 'net';
+import crypto from 'crypto';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1642,6 +1644,7 @@ let _lastMprisStatus   = null;
 let _lastMprisMetadata = null;
 let _lastMprisPosition = 0; // µs
 let _lastMprisShuffle  = false;
+let _lastMprisRepeat   = null; // 0=none, 1=all, 2=one
 
 function applyMprisData(data) {
     // Snapshot player — the error event handler may null mprisPlayer
@@ -1669,6 +1672,10 @@ function applyMprisData(data) {
     }
     if (data.shuffle != null) {
         try { p.shuffle = data.shuffle; } catch (_) {}
+    }
+    if (data.repeat != null) {
+        const loopMap = ['None', 'Playlist', 'Track']; // mk.repeatMode: 0=none, 1=all, 2=one
+        try { p.loopStatus = loopMap[data.repeat] ?? 'None'; } catch (_) {}
     }
 }
 
