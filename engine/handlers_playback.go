@@ -72,12 +72,13 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Use a pre-warmed session if the prefetch scheduler already opened one
-	// for this asset. This skips the webplayback API round-trip (~1–2 s) and
-	// lets playback start immediately. Only applicable for AAC (non-lossless,
-	// non-atmos) since prefetch workers open default-quality sessions.
+	// for this asset at the matching quality tier. This skips the webplayback
+	// API round-trip (~1–3 s) and lets playback start immediately. Lossless
+	// and AAC sessions are tracked separately — the scheduler now pre-warms
+	// at whichever quality the renderer reported via ContextPayload.Lossless.
 	var sess *playback.Session
-	if !req.Capabilities.Lossless && !req.Capabilities.Atmos && !req.Capabilities.Video {
-		if sessionID, ok := s.scheduler.TakePreWarmed(req.AssetID); ok {
+	if !req.Capabilities.Atmos && !req.Capabilities.Video {
+		if sessionID, ok := s.scheduler.TakePreWarmed(req.AssetID, req.Capabilities.Lossless); ok {
 			if preOpened, found := s.pm.GetSession(sessionID); found {
 				sess = preOpened
 			}
@@ -185,14 +186,33 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		// requested offset is available, then streams from there.
 		if sess.Codec == "alac" {
 			// VLC Range seek during an active streaming download: serve the
-			// requested byte range from the in-progress writer. Blocks until the
-			// writer has reached the requested offset so seeking forward works.
+			// requested byte range from the in-progress writer only if the
+			// offset has already been written. Return 416 immediately when the
+			// download hasn't reached the offset yet — VLC then uses SeekReload
+			// (vlc/load with startMs) as a fallback rather than hanging until
+			// its HTTP timeout fires. The 206 status + Content-Range header is
+			// required so VLC updates its byte-position counter correctly.
 			if rangeHdr := r.Header.Get("Range"); rangeHdr != "" {
 				if spw := s.diskCache.GetStreaming(sess.AssetID, qualifier); spw != nil {
 					offset := parseRangeStart(rangeHdr)
-					log.Printf("[audio] ALAC Range seek id=%s offset=%d", id, offset)
+					written := spw.Written()
+					log.Printf("[audio] ALAC Range seek id=%s offset=%d written=%d", id, offset, written)
+					if offset > written {
+						// Not yet downloaded — tell VLC the range is unsatisfiable so
+						// the renderer can fall back to SeekReload immediately.
+						w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", written))
+						w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+						return
+					}
+					// Offset is available: serve as 206 so VLC treats this as a
+					// ranged response and doesn't reset its position counter to 0.
+					// Use a 1 GiB sentinel for the total size (no ALAC file is that
+					// large) since the true size is unknown during streaming.
+					const sentinel = int64(1 << 30)
 					w.Header().Set("Content-Type", "audio/mp4")
 					w.Header().Set("Accept-Ranges", "bytes")
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, sentinel-1, sentinel))
+					w.WriteHeader(http.StatusPartialContent)
 					reader := spw.NewReaderAt(offset)
 					defer reader.Close()
 					io.Copy(w, reader) //nolint:errcheck
@@ -384,9 +404,11 @@ var (
 	ffmpegPath string
 )
 
-// transcodeVideoForMSE remuxes the Apple CDN fMP4 through FFmpeg with -c:v copy:
-// strips the audio track, re-fragments for MSE (frag_keyframe+empty_moov+default_base_moof),
-// and normalises the container without re-encoding. Near-zero CPU overhead.
+// transcodeVideoForMSE remuxes the decrypted fMP4 through FFmpeg with -c:v copy:
+// selects only the first video stream (drops audio and caption tracks), re-fragments
+// for MSE (frag_keyframe+empty_moov+default_base_moof), and normalises the container
+// without re-encoding so the original codec string (e.g. avc1.640028) is preserved
+// and matches the SourceBuffer declaration in the renderer. Near-zero CPU overhead.
 // Falls back to direct pass-through if FFmpeg is not in PATH.
 func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io.Writer) error {
 	ffmpegOnce.Do(func() {
@@ -402,12 +424,8 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-loglevel", "error",
 		"-i", "pipe:0",
-		"-c:v", "libx264",
-		"-profile:v", "main",
-		"-level:v", "4.0",
-		"-x264-params", "bframes=0:keyint=24:min-keyint=24:scenecut=0",
-		"-pix_fmt", "yuv420p",
-		"-an",
+		"-map", "0:v:0", // first video stream only — drops audio and caption tracks
+		"-c:v", "copy",  // preserve original codec (avc1.640028); no re-encode
 		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
 		"-f", "mp4",
 		"pipe:1",

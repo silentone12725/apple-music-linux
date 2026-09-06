@@ -113,6 +113,7 @@ type ContextPayload struct {
 	} `json:"context"`
 	CurrentIndex int         `json:"currentIndex"`
 	Tracks       []TrackItem `json:"tracks"`
+	Lossless     bool        `json:"lossless"` // true when the renderer has lossless DRM + quality pref
 }
 
 // Phase describes the lifecycle state of a warm job.
@@ -221,6 +222,7 @@ type workItem struct {
 	track      TrackItem
 	token      string
 	mut        string
+	lossless   bool
 	ctx        context.Context
 	baseScore  float64   // computed once at Submit time via scoreTrack
 	enqueuedAt time.Time // for aging calculation
@@ -295,6 +297,7 @@ func (q *workQueue) depth() int {
 type preWarmedEntry struct {
 	sessionID string
 	expiresAt time.Time
+	lossless  bool                 // true when the session was opened with Lossless=true
 	req       playback.OpenRequest // stored so we can re-warm on expiry
 }
 
@@ -449,6 +452,7 @@ func (s *Scheduler) Submit(payload ContextPayload) string {
 			track:      t,
 			token:      tok,
 			mut:        mut,
+			lossless:   payload.Lossless,
 			ctx:        ctx,
 			baseScore:  scoreTrack(t),
 			enqueuedAt: now,
@@ -481,12 +485,13 @@ func (s *Scheduler) Cancel(id string) bool {
 	return true
 }
 
-// TakePreWarmed returns and removes the pre-opened session ID for assetID,
-// allowing real playback to reuse it without a new webplayback API call.
-// Returns ("", false) if no pre-warmed session exists or it has expired.
-// On expiry the old session is released and a background re-warm is kicked off
-// so the next caller benefits from a fresh session.
-func (s *Scheduler) TakePreWarmed(assetID string) (sessionID string, ok bool) {
+// TakePreWarmed returns and removes the pre-opened session ID for assetID
+// when its quality tier (lossless vs. AAC) matches the caller's request,
+// allowing real playback to skip the webplayback API round-trip (~1–3 s).
+// Returns ("", false) if no matching session exists or it has expired.
+// A mismatched-quality or expired entry is released and a background re-warm
+// is kicked off so subsequent requests benefit from a fresh session.
+func (s *Scheduler) TakePreWarmed(assetID string, lossless bool) (sessionID string, ok bool) {
 	s.mu.Lock()
 	entry, found := s.preWarmed[assetID]
 	if found {
@@ -499,12 +504,19 @@ func (s *Scheduler) TakePreWarmed(assetID string) (sessionID string, ok bool) {
 	if time.Now().After(entry.expiresAt) {
 		if s.pm != nil {
 			s.pm.Release(entry.sessionID)
-		}
-		// Re-warm in the background so subsequent playback can reuse it.
-		// The singleflight in Manager.Open means this races safely with any
-		// concurrent real-playback open for the same asset.
-		if s.pm != nil {
 			go s.rewarm(entry)
+		}
+		return "", false
+	}
+	if entry.lossless != lossless {
+		// Quality mismatch — release this session; the caller will open fresh.
+		// Re-warm with the correct quality so the next request can benefit.
+		if s.pm != nil {
+			s.pm.Release(entry.sessionID)
+			newEntry := entry
+			newEntry.lossless = lossless
+			newEntry.req.Lossless = lossless
+			go s.rewarm(newEntry)
 		}
 		return "", false
 	}
@@ -659,6 +671,7 @@ func (s *Scheduler) warm(item *workItem) {
 			Storefront: sf,
 			Token:      item.token,
 			MUT:        item.mut,
+			Lossless:   item.lossless,
 		})
 		if err != nil {
 			lastErr = err
@@ -684,9 +697,11 @@ func (s *Scheduler) warm(item *workItem) {
 		s.preWarmed[item.track.AssetID] = preWarmedEntry{
 			sessionID: sess.ID,
 			expiresAt: time.Now().Add(preWarmTTL),
+			lossless:  item.lossless,
 			req: playback.OpenRequest{
 				AssetID:    item.track.AssetID,
 				Storefront: sf,
+				Lossless:   item.lossless,
 			},
 		}
 		s.mu.Unlock()

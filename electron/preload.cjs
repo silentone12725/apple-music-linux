@@ -126,6 +126,8 @@ contextBridge.exposeInMainWorld('amlBridge', {
     openExternal:     (url)   => ipcRenderer.send('app:open-external', url),
     // App lifecycle — renderer registers a callback to flush state before quit
     onFlushAndQuit:   (cb)    => ipcRenderer.on('app:flush-and-quit', () => cb()),
+    // Deep link navigation — fires when the user opens an Apple Music or aml:// URL
+    onOpenUrl:        (cb)    => ipcRenderer.on('aml:open', (_, intent) => cb(intent)),
 });
 
 // ── Apple Music page setup ────────────────────────────────────────────────────

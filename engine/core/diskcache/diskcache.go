@@ -421,6 +421,13 @@ func (sw *StreamingPutWriter) Discard() {
 
 // NewReader returns a StreamingReader that reads from the temp file as it is
 // written. The caller must call Close on the reader when done.
+// Written returns the number of bytes written so far. Safe to call concurrently.
+func (sw *StreamingPutWriter) Written() int64 {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	return sw.written
+}
+
 func (sw *StreamingPutWriter) NewReader() *StreamingReader {
 	sw.refs.Add(1)
 	return &StreamingReader{sw: sw}
