@@ -123,6 +123,55 @@ func TestStreamingPutWriter_MultipleReaders(t *testing.T) {
 	}
 }
 
+func TestStreamingPutWriter_NewReaderAt(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := New(dir)
+
+	spw, _ := c.BeginStreamingPut("asset5", "alac")
+	data := []byte("0123456789abcdef")
+
+	// Reader starts at offset 8 and should only see the second half.
+	var got []byte
+	var wg sync.WaitGroup
+	wg.Add(1)
+	reader := spw.NewReaderAt(8)
+	go func() {
+		defer wg.Done()
+		defer reader.Close()
+		got, _ = io.ReadAll(reader)
+	}()
+
+	// Write in two halves; reader at offset 8 must block until second half arrives.
+	spw.Write(data[:8])
+	time.Sleep(10 * time.Millisecond)
+	spw.Write(data[8:])
+	spw.Commit()
+
+	wg.Wait()
+	if !bytes.Equal(got, data[8:]) {
+		t.Fatalf("NewReaderAt(8): got %q, want %q", got, data[8:])
+	}
+}
+
+func TestStreamingPutWriter_GetStreaming(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := New(dir)
+
+	if got := c.GetStreaming("asset6", "alac"); got != nil {
+		t.Fatal("expected nil before any streaming put")
+	}
+
+	spw, _ := c.BeginStreamingPut("asset6", "alac")
+	if got := c.GetStreaming("asset6", "alac"); got != spw {
+		t.Fatal("GetStreaming did not return the in-progress writer")
+	}
+
+	spw.Discard()
+	if got := c.GetStreaming("asset6", "alac"); got != nil {
+		t.Fatal("expected nil after Discard")
+	}
+}
+
 func TestStreamingPutWriter_InFlightBlocksSecondPut(t *testing.T) {
 	dir := t.TempDir()
 	c, _ := New(dir)
