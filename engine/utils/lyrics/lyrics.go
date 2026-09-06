@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/beevik/etree"
 )
+
+var lyricsClient = &http.Client{Timeout: 15 * time.Second}
 
 type SongLyrics struct {
 	Data []struct {
@@ -68,7 +71,7 @@ func getSongLyricsContext(ctx context.Context, songId string, storefront string,
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	cookie := http.Cookie{Name: "media-user-token", Value: userToken}
 	req.AddCookie(&cookie)
-	do, err := http.DefaultClient.Do(req)
+	do, err := lyricsClient.Do(req)
 	if err != nil {
 		return "", err
 	}

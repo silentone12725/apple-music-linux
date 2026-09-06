@@ -19,7 +19,11 @@ if (window.__amlEngineInjected) throw new Error('[AML] double-injection guard');
 window.__amlEngineInjected = true;
 
 const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
-const _AML_DEBUG = false; // set true in DevTools to enable verbose [MK-DBG]/[AML click] logs
+const _AML_DEBUG = !!(window.amlBridge?.isDev) || localStorage.getItem('_AML_DEBUG') === '1';
+
+// ── Last.fm API credentials (hardcoded — no UI entry needed) ──────────────────
+const LASTFM_API_KEY    = 'de5f164dcf024dc00e0aab05ba464d17'; // paste your API Key here
+const LASTFM_API_SECRET = 'c03db782a5d29db42da06edcbf76d89a'; // paste your Shared Secret here
 
 // ── Power Budget ───────────────────────────────────────────────────────────────
 // Classifies runtime into full / reduced / minimal based on battery state and
@@ -305,6 +309,7 @@ let _mkApiSaved = null; // saved MK API methods during external-play gate window
 let _savedAacApiRestore = null; // restore fn for AAC-path MK API wrappers (setQueue/ctmi)
 let _savedGateTracingCleanup = null; // cleanup fn for audio/MK event tracing added during gate
 let _pendingExternalClickCatalogId = null; // catalog song ID extracted from DOM at click time
+let _pendingExternalClickQueueIdx  = -1;   // mk.queue.items index of clicked track at click time
 let _pendingPlaylistFetch = null;          // Promise<API response> started at click time for cross-playlist queue rebuild
 let _directPlayAdamId   = null;           // adamId currently being played via _triggerDirectPlay (pre-NPIDF fast path)
 let _directPlayGen      = 0;              // _generation value when _triggerDirectPlay started; guards early-return against stale NPIDF
@@ -485,8 +490,8 @@ function _slBuildOverlay() {
     el.id = 'aml-lyrics-overlay';
     el.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:99998;display:none;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.86);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);transition:opacity 0.35s;opacity:0;overflow:hidden;font-family:-apple-system,SF Pro Display,system-ui,sans-serif;box-sizing:border-box;';
     const closeBtn = document.createElement('div');
-    closeBtn.textContent = '✕';
-    closeBtn.style.cssText = 'position:absolute;top:20px;right:24px;font-size:22px;color:rgba(255,255,255,0.45);cursor:pointer;user-select:none;transition:color 0.15s;z-index:1;padding:6px;';
+    closeBtn.innerHTML = _svgCloseLg;
+    closeBtn.style.cssText = 'position:absolute;top:20px;right:24px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.45);cursor:pointer;user-select:none;transition:color 0.15s;z-index:1;border-radius:50%;';
     closeBtn.onmouseenter = () => { closeBtn.style.color = '#fff'; };
     closeBtn.onmouseleave = () => { closeBtn.style.color = 'rgba(255,255,255,0.45)'; };
     closeBtn.onclick = () => _slHide();
@@ -621,6 +626,12 @@ let _nextAlacTried   = false; // prevents re-triggering within the same track
 let _nextAacSession = null;  // { adamId, sess } — pre-warmed session for the next AAC track
 let _nextAacTried   = false; // prevents re-triggering within the same track
 let _nextAlacRetries = 0;    // retry attempts so far for current track (max 3)
+// Gapless AAC stream pre-open: during the current track's tail, open the next
+// track's audio stream fetch so its TTFB is paid before 'ended' fires. The
+// pre-warmed *session* skips the /api/v1/playback POST; this skips the audio
+// GET's connect+TTFB, closing the remaining audible gap on auto-advance.
+let _nextAacStreamResp = null; // { sessionId, resp, ctrl } — pre-opened audio Response
+const GAPLESS_STREAM_LEAD = 8; // seconds before track end to pre-open next stream
 
 // ── MSE state (AAC-only path) ─────────────────────────────────────────────────
 
@@ -958,6 +969,16 @@ let _mvVideoHeights = []; // available variant heights from HLS master, set per-
 
 // Lossless SVG icon (from AMP.UI.Controls, fill switched to white)
 const _losslessSVG = `<svg viewBox="0 0 69 44" xmlns="http://www.w3.org/2000/svg" style="height:12px;width:auto;display:block;flex-shrink:0"><path d="M36.8269026,4 C42.3794214,4 45.7184513,10.5183153 48.20334,17.4261699 L48.4450486,18.1066712 L48.6815356,18.788389 L48.9130884,19.4700271 C49.6770268,21.7405814 50.36352,23.9882073 51.0204784,25.9968947 C52.5296562,19.7123189 51.7381954,18.3629096 53.3551269,18.3629096 C53.9565751,18.3629096 54.5652965,18.7717786 54.5652965,19.5168498 C54.5652965,19.8184059 54.0740356,23.0143253 53.391361,26.2165815 L53.2651959,26.7982368 L53.1352128,27.3761743 C52.9156151,28.3341623 52.6817778,29.2605867 52.4420448,30.075084 C59.3914285,48.2833991 64.5514879,24.299737 65.134561,19.3973484 C65.2196627,18.6903693 65.7520794,18.3629223 66.2903224,18.3629223 C67.0092304,18.3629223 67.5985395,18.9043683 67.4862017,19.7191497 C66.2419581,27.647702 64.3284002,40 56.4607867,40 C52.1189889,40 49.6781873,36.6024859 47.7506208,32.7092263 C46.4116896,30.0790205 45.2734117,26.952661 44.2263394,23.8087368 L43.9767371,23.0541028 C43.8940827,22.8026091 43.811956,22.5512479 43.7303009,22.3002645 L43.4866946,21.5486922 C41.1040436,14.1741911 39.0830717,7.34159293 35.9851696,7.34159293 C34.4711899,7.34159293 33.3487598,8.92234593 33.2709954,8.92234593 C33.128169,8.92234593 33.0160746,8.27828447 31.602332,6.51365955 C32.9478242,4.97723054 34.8023002,4 36.8269026,4 Z M11.0614865,4.01937104 C23.4500006,4.01937104 24.5519172,36.7070003 31.5633281,36.7070003 C32.3865195,36.7070003 33.2738509,36.2079668 34.2437613,35.0776923 C34.7806086,35.9871115 35.3308882,36.7945268 35.9004521,37.5054184 C34.500923,39.1028534 32.7595403,39.9988275 30.578884,39.9988275 C22.7448451,39.9977315 19.3788608,26.8790797 16.4819088,18.0220558 C15.7996486,20.8631751 15.4455023,23.434387 15.3068631,24.5887478 C15.2208267,25.3223111 14.6831215,25.6566526 14.1414468,25.6566526 C13.5407541,25.6566526 12.9351571,25.2454896 12.9351571,24.5116332 C12.9351571,24.4569356 12.9385248,24.4004537 12.9455035,24.3422131 C13.346708,21.4307464 14.1551865,17.0196557 15.0604448,13.9441978 C13.8554484,10.7869356 12.3503425,7.33621492 10.1329104,7.33621492 C5.65625092,7.33621492 3.09261157,18.5867088 2.37169324,24.5887478 C2.28565683,25.3223111 1.74795163,25.6566526 1.20627691,25.6566526 C0.605597004,25.6566526 0,25.2454896 0,24.5116332 C0,24.4569356 0.00336770017,24.4004537 0.0103463944,24.3422131 C0.114233957,23.5883333 0.225608359,22.8207923 0.346678477,22.046953 L0.452878843,21.3822914 C0.470991821,21.2713147 0.48931555,21.1602523 0.50785647,21.0491258 L0.621759807,20.3817689 C2.0405473,12.2570738 4.68538356,4.01937104 11.0614865,4.01937104 Z M23.9155499,4.00146557 C26.1404345,4.00146557 28.5270839,5.15921632 30.5844926,7.87545613 C30.6994554,8.00734485 31.8526558,9.79953527 32.2166235,10.4208612 C33.474197,12.6992201 34.5694223,15.4837436 35.5796467,18.378952 L35.8413062,19.1364745 C38.7427747,27.6177062 40.980016,36.7463669 44.4650259,36.7463669 C45.2911112,36.7463669 46.1873164,36.2334422 47.1790849,35.0773864 C47.7158553,35.9867291 48.2660581,36.794068 48.835558,37.5049086 C47.4394606,39.099438 45.6989231,39.9988275 43.5140667,39.9988275 C31.1995909,39.9969924 29.8609621,7.32900175 23.0764932,7.32900175 C21.5454317,7.32900175 20.4138588,8.92244789 20.3357358,8.92244789 C20.1928455,8.92244789 20.0806102,8.27846289 18.6670468,6.51397816 C20.048649,4.9358122 21.9168263,4.00146557 23.9155499,4.00146557 Z" fill="white" fill-rule="nonzero"/></svg>`;
+
+// Shared micro-icons — paths from Android APK vector drawables
+// Play: actionsheet_play.xml — viewBox 0 0 24 24
+const _svgPlaySm = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-left:1px"><path d="M6.483 21.466c.22 0 .432-.035.635-.107.203-.072.428-.179.674-.322L20.578 13.609c.438-.253.759-.498.963-.735.204-.237.305-.523.305-.859 0-.332-.101-.617-.305-.856-.204-.239-.525-.485-.963-.738L7.792 3c-.246-.142-.471-.25-.674-.324-.203-.073-.415-.11-.635-.11-.424 0-.777.153-1.058.458-.281.305-.422.723-.422 1.252v15.486c0 .53.141.946.422 1.249.281.304.634.455 1.058.455z" fill-rule="nonzero"/></svg>`;
+// Close (chip/small): ic_m3_chip_close.xml — viewBox 0 0 24 24
+const _svgClose  = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>`;
+// Close (large overlay): sf_xmark_monochrome_medium_medium.xml — viewBox 0 0 28 28 (rounded SF Symbol X)
+const _svgCloseLg= `<svg width="20" height="20" viewBox="0 0 28 28" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M7.923 20.075c.132.128.284.214.459.256.174.043.347.043.519 0 .171-.042.319-.125.442-.248L14.002 15.424l4.653 4.656c.127.127.276.211.448.253.171.042.344.041.517-.001.174-.043.325-.129.453-.259.128-.128.213-.279.256-.451.043-.173.044-.345.003-.517-.041-.172-.124-.321-.249-.447L15.429 13.996l4.654-4.653c.125-.127.209-.276.251-.448.043-.171.042-.343-.002-.515-.045-.172-.131-.322-.259-.45-.132-.131-.283-.219-.455-.261-.172-.043-.344-.044-.515-.003-.172.041-.321.126-.448.254L14.002 12.574l-4.659-4.656c-.123-.125-.272-.208-.445-.249-.174-.041-.347-.041-.522 0-.174.041-.325.127-.453.259-.127.128-.21.279-.251.452-.041.174-.041.347 0 .519.041.173.122.32.243.441L12.574 13.996l-4.659 4.667c-.121.121-.204.268-.247.440-.044.171-.045.344-.003.519.042.174.128.325.258.453z" fill-rule="nonzero"/></svg>`;
+// Reset: circular arrow (custom SF-style, no Android equivalent)
+const _svgReset  = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M10.2 5.5A4.2 4.2 0 1 1 8.1 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M7.5 0.5L8.5 2.2L6.5 2.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 // State shared across showQualityBadge calls (populated by handleTrackChange)
 let _qualityBadgeInfo = { codec: null, sampleRate: null, bitDepth: null, spatialAudio: null };
@@ -3020,13 +3041,19 @@ function _vlcHandleStateChange(state, prev, posMs, mkAudio) {
     if (state === 'playing') {
         _vlcPaused = false;
         _stopLyricsFreeze();
-        _vlcLoading = false; // VLC is actually playing; clear pre-warmup guard
-        // Dispatch 'playing' for initial start OR post-seek resume.
-        // Normal pause→play resume is handled by _origMKPlay() to avoid
-        // calling PlayActivity.play() twice (which throws).
+        // Capture before clearing: wasLoading=true means VLC's initial startup sequence
+        // went through a transient 'paused' state (opening→paused→playing). In that case
+        // audio.play() never fired, so MK is still stuck in paused UI — dispatch 'playing'.
+        const wasLoading = _vlcLoading;
+        _vlcLoading = false;
+        // Dispatch 'playing' for:
+        //   a) Initial start or loading transition (prev !== 'paused', or wasLoading)
+        //   b) Post-seek resume (fromSeek)
+        // Skip when user resumed from a manual pause — audio.play() override already
+        // dispatched 'playing' and resolved MK's internal promise to avoid double-play.
         const fromSeek = _vlcPostSeek;
         _vlcPostSeek = false;
-        if (prev !== 'paused' || fromSeek) mkAudio.dispatchEvent(new Event('playing'));
+        if (prev !== 'paused' || fromSeek || wasLoading) mkAudio.dispatchEvent(new Event('playing'));
     }
     if (state === 'paused') {
         // Suppress spurious pause events while waiting for VLC to resume
@@ -3236,20 +3263,46 @@ async function _prewarmNextAac() {
     }
 }
 
+// Aborts and clears any pre-opened next-track audio stream. Safe to call twice.
+function _discardNextAacStream() {
+    if (!_nextAacStreamResp) return;
+    try { _nextAacStreamResp.ctrl.abort(); } catch (_) {}
+    try { _nextAacStreamResp.resp?.body?.cancel(); } catch (_) {}
+    _nextAacStreamResp = null;
+}
+
+// Opens the next track's audio stream fetch during the current track's tail so
+// its connect+TTFB is already paid when _setupMSEPath runs on auto-advance.
+// Only fires once per pre-warmed session; a no-op if none is pending.
+function _prefetchNextAacStream() {
+    if (!_nextAacSession || _nextAacStreamResp) return;
+    const sess = _nextAacSession.sess;
+    if (!sess?.sessionId || sess.codec !== 'aac') return;
+    const audioPath  = sess.streams?.audio ?? `/api/v1/playback/${sess.sessionId}/audio`;
+    const streamBase = `${ENGINE}${audioPath}?raw=1`;
+    const ctrl = new AbortController();
+    fetch(streamBase, { signal: ctrl.signal }).then(resp => {
+        if (!resp.ok) { resp.body?.cancel(); return; }
+        if (ctrl.signal.aborted) { resp.body?.cancel(); return; }
+        _nextAacStreamResp = { sessionId: sess.sessionId, resp, ctrl };
+        console.log(`[AML Gapless AAC] stream pre-opened for ${sess.sessionId} — TTFB paid`);
+    }).catch(() => {}); // aborted or network error → fall back to fresh fetch
+}
+
 // ── Core playback handler ─────────────────────────────────────────────────────
 
 async function _handleNullNPIDF(mk) {
     // MK fires a null NPIDF during queue transitions (setQueue resets the element).
-    // Always delete the load() instance override so MK can proceed.
-    if (_vlcMode) {
-        const tmpAudio = getMKAudio();
-        if (tmpAudio) { try { delete tmpAudio.load; } catch (_) {} }
-    }
+    // Clear the load() shadow so MK can reset its audio element and proceed with
+    // its own CDN URL assignment — the real NPIDF's handleTrackChange re-installs it.
+    const tmpAudio = getMKAudio();
+    if (tmpAudio) { try { delete tmpAudio.load; } catch (_) {} }
     if (_allowCDNTransition) {
         // CDN gate is open: null NPIDF is expected during setQueue; real NPIDF follows.
         console.log('[NPIDF] null-item with CDN gate open — waiting for real NPIDF');
         return null;
     }
+    console.log('[NPIDF] null-item (station/queue transition) — load() shadow cleared, waiting for real NPIDF');
     const genSnapshot = _generation;
     await new Promise(r => setTimeout(r, 200));
     if (_generation !== genSnapshot) return null; // real NPIDF handler already took over
@@ -3263,7 +3316,7 @@ function _closeCDNGate(mk) {
     if (_mkApiSaved) { mk.play = _mkApiSaved.play; mk.setQueue = _mkApiSaved.setQueue; mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex; _mkApiSaved = null; }
     if (_savedAacApiRestore) { _savedAacApiRestore(); _savedAacApiRestore = null; }
     if (_savedGateTracingCleanup) { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
-    _pendingExternalClickCatalogId = null;
+    _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1;
     _pendingPlaylistFetch = null;
 }
 
@@ -3284,9 +3337,15 @@ function _resetPlaybackState() {
     _streamComplete = false; _chunkCache = null; _msePaused = false;
     if (_seekFetchCtrl) { _seekFetchCtrl.abort(); _seekFetchCtrl = null; }
     // VLC state reset
-    _vlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _stopLyricsFreeze(); _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0; _vlcPostSeek = false; _vlcWasPlaying = false; _vlcSeekTargetMs = 0;
+    _vlcMode = false; window._amlVlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _stopLyricsFreeze(); _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0; _vlcPostSeek = false; _vlcWasPlaying = false; _vlcSeekTargetMs = 0;
+    _scVlcReapply = null; // VLC volume closure is per-track; drop the stale reference
     _nextAlacTried = false; _nextAlacRetries = 0;
-    _nextAacTried = false; _nextAacSession = null;
+    // Preserve _nextAacSession + _nextAacStreamResp across reset (mirrors the
+    // ALAC path above): reset runs at the top of handleTrackChange, BEFORE
+    // _resolveSession reads the pre-warm. Nulling it here defeated the gapless
+    // HIT entirely and leaked the pre-warmed engine session. _htcDiscardStalePrewarms
+    // drops it on a track mismatch; _resolveSession consumes it on a hit.
+    _nextAacTried = false;
     if (_vlcSeekTimer) { clearTimeout(_vlcSeekTimer); _vlcSeekTimer = null; }
     stopVLCPoll();
     unbridgeDuration();
@@ -3411,8 +3470,70 @@ async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
     _pipeCtrl = new AbortController();
     const pipeCtrl = _pipeCtrl;
     const myStreamBase = streamBase;
-    pipeToSourceBuffer(sb, mkAudio, streamBase, pipeCtrl.signal, ms, _durationSec, t0)
+    // Gapless: if the next-track stream was pre-opened during the previous
+    // track's tail and matches this session, feed the already-connected Response
+    // to the pipe (skips connect+TTFB). Otherwise open a fresh fetch by URL.
+    // Take ownership without aborting its ctrl — that would kill the body stream.
+    let pipeInput = streamBase;
+    if (_nextAacStreamResp?.sessionId === _sessionId) {
+        pipeInput = _nextAacStreamResp.resp;
+        _nextAacStreamResp = null; // ownership transferred; do NOT abort its ctrl
+        console.log(`[AML Gapless AAC] ✓ stream HIT — using pre-opened response for ${_sessionId}`);
+    } else if (_nextAacStreamResp) {
+        _discardNextAacStream(); // pre-opened for a different session — drop it
+    }
+    pipeToSourceBuffer(sb, mkAudio, pipeInput, pipeCtrl.signal, ms, _durationSec, t0)
         .catch(err => _mseRecoverPipe(err, sb, mkAudio, ms, myStreamBase, pipeCtrl, _durationSec, t0));
+
+    // Crossfade: track the user's volume and fade the incoming track's head in.
+    const onXfVol = () => _xfTrackUserVolume(mkAudio);
+    mkAudio.addEventListener('volumechange', onXfVol);
+    ctrl.signal.addEventListener('abort',
+        () => mkAudio.removeEventListener('volumechange', onXfVol), { once: true });
+    _xfFadeIn(mkAudio);
+
+    // Pre-open the next track's stream near this track's end (once per session);
+    // also fade the outgoing track's tail out when crossfade is enabled.
+    let _gaplessArmed = false, _xfFadedOut = false;
+    const onGaplessTick = () => {
+        if (ctrl.signal.aborted || _durationSec <= 0) return;
+        const remaining = _durationSec - mkAudio.currentTime;
+        if (!_gaplessArmed && remaining <= GAPLESS_STREAM_LEAD) {
+            _gaplessArmed = true;
+            _prefetchNextAacStream();
+            // After gapless caching, precompute the Adaptive fade length offline
+            // (background, non-blocking) so the tail handler needs no live sampling.
+            if (_crossfadeMode === 'adaptive') _xfPlanAdaptive();
+        }
+        if (!_xfFadedOut && _crossfadeSec > 0 && remaining <= _crossfadeSec) {
+            // Dynamic decision (Apple Music Android parity). 'wait' leaves
+            // _xfFadedOut false so we keep polling: if the station appends its
+            // pick before the track ends we still fade over the time that's left,
+            // turning "sometimes" into "every time".
+            const d = _xfDecision();
+            if (d === 'fade') {
+                if (_crossfadeMode === 'adaptive') {
+                    // Prefer the offline plan (computed from the cached ending);
+                    // fall back to live loudness sampling if it isn't ready.
+                    const dur = (_xfPlanSession === _sessionId && _xfPlannedSec != null)
+                        ? _xfPlannedSec : _xfAdaptiveDuration();
+                    if (remaining <= dur) { _xfFadedOut = true; _xfFadeOut(mkAudio, remaining, dur); }
+                    // else keep polling — re-evaluate as the ending approaches.
+                } else {
+                    _xfFadedOut = true; _xfFadeOut(mkAudio, remaining);
+                }
+            }
+            else if (d === 'skip-gapless') { _xfFadedOut = true; _xfSkipNextFadeIn = true; }
+            else if (d === 'skip')         { _xfFadedOut = true; }
+            // 'wait' → do nothing this tick; re-evaluate on the next timeupdate.
+        }
+        if (_gaplessArmed && (_xfFadedOut || _crossfadeSec <= 0)) {
+            mkAudio.removeEventListener('timeupdate', onGaplessTick);
+        }
+    };
+    mkAudio.addEventListener('timeupdate', onGaplessTick);
+    ctrl.signal.addEventListener('abort',
+        () => mkAudio.removeEventListener('timeupdate', onGaplessTick), { once: true });
 
     const onSeeking = () => {
         if (ctrl.signal.aborted) return;
@@ -3461,6 +3582,7 @@ async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
 
 async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
     _vlcMode = true;
+    window._amlVlcMode = true; // expose for CDP diagnostics
 
     // Keep mkAudio in a perpetual loading state via an open MediaSource.
     // MK's state machine reads DOM events (playing, pause, timeupdate, ended)
@@ -3491,10 +3613,14 @@ async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
     let _vlcMuted = false;
     let _vlcPreMuteVol = _vlcVolume;
     let _vlcVolSetting = false;
+    // Sound Check scales the posted volume by _scFactor (1.0 = off/no attenuation).
     const _postVlcVol = (vol) => fetch(`${ENGINE}/api/v1/vlc/volume`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ volume: vol }),
+        body: JSON.stringify({ volume: Math.round(vol * _scFactor) }),
     }).catch(() => {});
+    // Expose a scaled-volume repost so Sound Check can reapply when the factor
+    // changes mid-track. Cleared on the next reset via _resetPlaybackState.
+    _scVlcReapply = () => _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
     const _dispatchVolChange = () => {
         if (_vlcVolSetting) return;
         _vlcVolSetting = true;
@@ -3650,6 +3776,7 @@ async function _triggerDirectPlay(adamId, mk) {
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
         bridgeDuration(mk, _durationSec);
         _slInitForTrack(adamId);
+        _broadcastNowPlaying(); // Discord presence + Last.fm now-playing/scrobble + resume snapshot
 
         // Close CDN gate now — MK has had ~1s to fire NPIDF via its CDN URL.
         // _setupMSEPath will set our blob URL, overriding whatever MK set on audio.src.
@@ -3701,6 +3828,7 @@ function _htcDiscardStalePrewarms(adamId) {
     if (_nextAacSession && _nextAacSession.adamId !== adamId) {
         deleteSession(_nextAacSession.sess.sessionId);
         _nextAacSession = null;
+        _discardNextAacStream(); // stream was pre-opened for the discarded session
     }
 }
 
@@ -3766,7 +3894,14 @@ async function handleTrackChange(mk) {
     try {
         const sess = await _resolveSession(item, adamId, sf, mk);
 
-        if (genStale(myGen)) { deleteSession(sess.sessionId); return; }
+        if (genStale(myGen)) {
+            // Defer deletion: the engine singleflight may have returned this same
+            // session ID to a concurrent live call. Using queueMicrotask ensures all
+            // pending Promise resolutions (including the live call claiming _sessionId)
+            // finish before we check — so we only delete if no other gen claimed it.
+            queueMicrotask(() => { if (_sessionId !== sess.sessionId) deleteSession(sess.sessionId); });
+            return;
+        }
 
         _sessionId      = sess.sessionId;
         _durationSec    = (sess.durationMs ?? 0) / 1000;
@@ -3775,6 +3910,7 @@ async function handleTrackChange(mk) {
         console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now()-t0)/1000).toFixed(2)}s`);
 
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
+        _broadcastNowPlaying(); // Discord presence + Last.fm now-playing/scrobble + resume snapshot
 
         _abortCtrl = new AbortController();
         const ctrl = _abortCtrl;
@@ -3806,7 +3942,13 @@ async function handleTrackChange(mk) {
         }
 
     } catch (err) {
-        if (!_abortCtrl?.signal.aborted) console.error('[AML Engine] Playback error:', err);
+        if (!_abortCtrl?.signal.aborted) {
+            const mk2 = window.MusicKit?.getInstance?.();
+            console.error('[AML Engine] Playback error:', err,
+                '\n  adamId=', _currentAssetId, 'gen=', myGen, 'currentGen=', _generation,
+                '\n  mk.state=', mk2?.playbackState, 'mk.item=', mk2?.nowPlayingItem?.id ?? 'null'
+            );
+        }
         if (mkAudio) delete mkAudio.load;
         setPlayState(PLAY_STATE.IDLE, 'htc:error');
     }
@@ -3879,6 +4021,822 @@ function _histClear() {
     _queueHistory = [];
     window.amlBridge?.storeDelete(_HIST_KEY).catch(() => {});
     _histRender();
+}
+
+// ── Resume playback (full-session persistence) ────────────────────────────────
+// Native music apps continue where you left off. Like pear-desktop (which
+// persists the last URL so YouTube Music rehydrates the queue from it), we
+// persist the ENTIRE session — the full queue (all containers of song ids),
+// the current index, playback modes (shuffle/repeat), and the current track's
+// position — to the encrypted store. Apple Music web won't rebuild a play queue
+// from a URL, so on launch we rebuild it via MusicKit setQueue({songs}) +
+// changeToMediaAtIndex and seek to the saved position. A non-intrusive "Resume"
+// chip lets the user opt in rather than auto-playing on launch.
+const _RESUME_KEY = 'aml_resume_state';
+const _RESUME_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // ignore snapshots older than a week
+let _resumeEnabled     = true;  // pref 'resumeEnabled' (default on)
+let _resumeState       = null;  // in-memory snapshot, flushed on a timer
+let _resumeDirty       = false;
+let _resumeFlushTimer  = null;
+
+function _resumeCurrentPositionSec() {
+    if (_vlcMode) return _vlcPosMs / 1000;
+    const a = getMKAudio();
+    return a && Number.isFinite(a.currentTime) ? a.currentTime : 0;
+}
+
+// Capture the full session into memory (cheap — no IPC). Flushed by the timer.
+function _resumeMark() {
+    if (!_resumeEnabled) return;
+    const item = _mkInstance?.nowPlayingItem;
+    if (!item || !_currentAssetId) return;
+    const a = item.attributes ?? {};
+    _resumeState = {
+        v:            2,
+        // Full queue snapshot: every container's song-id list, plus position.
+        containers:   _sessionContainers.map(c => ({ items: c.items.slice() })),
+        containerIdx: _sessionContainerIdx,
+        itemIdx:      _sessionItemIdx,
+        shuffle:      _mkInstance?.shuffleMode === 1,
+        repeat:       _mkInstance?.repeatMode ?? 0,
+        adamId:       _currentAssetId,
+        name:         a.name || '',
+        artist:       a.artistName || '',
+        artworkUrl:   _histArtUrl(a.artwork, 128),
+        positionSec:  Math.max(0, Math.round(_resumeCurrentPositionSec())),
+        durationSec:  Math.round(_durationSec || (a.durationInMillis || 0) / 1000),
+        savedAt:      Date.now(),
+    };
+    _resumeDirty = true;
+}
+
+async function _resumeFlush() {
+    if (!_resumeDirty || !_resumeState) return;
+    _resumeDirty = false;
+    try { await window.amlBridge?.storeWrite(_RESUME_KEY, JSON.stringify(_resumeState)); } catch (_) {}
+}
+
+function _resumeClear() {
+    _resumeState = null; _resumeDirty = false;
+    window.amlBridge?.storeDelete(_RESUME_KEY).catch(() => {});
+}
+
+function _resumeShowChip(mk, saved) {
+    if (document.getElementById('aml-resume-chip')) return;
+    const FF = 'font-family:-apple-system,SF Pro Text,system-ui,sans-serif;';
+    const chip = document.createElement('div');
+    chip.id = 'aml-resume-chip';
+    chip.style.cssText = 'position:fixed;bottom:110px;right:22px;z-index:99997;display:flex;align-items:center;gap:12px;' +
+        'max-width:360px;padding:12px 14px;border-radius:14px;background:rgba(30,30,32,0.92);' +
+        'border:0.5px solid rgba(255,255,255,0.14);box-shadow:0 10px 40px rgba(0,0,0,0.55);' +
+        'backdrop-filter:blur(28px) saturate(1.8);-webkit-backdrop-filter:blur(28px) saturate(1.8);' +
+        'transform:translateY(20px);opacity:0;transition:transform 0.3s,opacity 0.3s;' + FF;
+    if (saved.artworkUrl) {
+        const art = document.createElement('img');
+        art.src = saved.artworkUrl;
+        art.style.cssText = 'width:44px;height:44px;border-radius:6px;flex-shrink:0;object-fit:cover;';
+        chip.appendChild(art);
+    }
+    const txt = document.createElement('div');
+    txt.style.cssText = 'flex:1;min-width:0;';
+    const pos = `${Math.floor(saved.positionSec / 60)}:${String(saved.positionSec % 60).padStart(2, '0')}`;
+    const queueLen = (saved.containers || []).reduce((n, c) => n + (c.items?.length || 0), 0);
+    const label = queueLen > 1 ? `Resume from ${pos} · ${queueLen} tracks` : `Resume from ${pos}`;
+    txt.innerHTML =
+        `<div style="font-size:11px;color:rgba(255,255,255,0.45);margin-bottom:2px;">${label}</div>` +
+        `<div style="font-size:13px;color:#fff;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_histEscape(saved.name)}</div>` +
+        `<div style="font-size:11px;color:rgba(255,255,255,0.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${_histEscape(saved.artist)}</div>`;
+    chip.appendChild(txt);
+    const playBtn = document.createElement('button');
+    playBtn.innerHTML = _svgPlaySm;
+    playBtn.style.cssText = 'width:36px;height:36px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;' +
+        'background:#fc3c44;color:#fff;display:flex;align-items:center;justify-content:center;';
+    const dismiss = document.createElement('button');
+    dismiss.innerHTML = _svgClose;
+    dismiss.style.cssText = 'width:24px;height:24px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;' +
+        'background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.6);display:flex;align-items:center;justify-content:center;';
+    const close = () => { chip.style.opacity = '0'; chip.style.transform = 'translateY(20px)'; setTimeout(() => chip.remove(), 300); };
+    dismiss.onclick = close;
+    playBtn.onclick = () => { close(); _resumePlay(mk, saved); };
+    chip.append(playBtn, dismiss);
+    document.body.appendChild(chip);
+    requestAnimationFrame(() => { chip.style.opacity = '1'; chip.style.transform = 'translateY(0)'; });
+    // Auto-dismiss after 20s if untouched.
+    setTimeout(() => { if (document.getElementById('aml-resume-chip')) close(); }, 20000);
+}
+
+// Seek to the saved position once the target track is actually playing —
+// existing seek machinery routes to VLC SetTime or MSE network seek by codec.
+function _resumeSeekWhenReady(mk, saved) {
+    if (!saved.positionSec) return;
+    let tries = 0;
+    const iv = setInterval(() => {
+        tries++;
+        if (_currentAssetId === saved.adamId && _durationSec > 0) {
+            clearInterval(iv);
+            try { mk.seekToTime(Math.min(saved.positionSec, _durationSec - 1)); } catch (_) {}
+        } else if (tries > 40) { // ~10s give-up
+            clearInterval(iv);
+        }
+    }, 250);
+}
+
+async function _resumePlay(mk, saved) {
+    try {
+        // Rebuild AML's internal queue model first so next/prev work immediately
+        // and the NPIDF sync recognizes the restored container.
+        const containers = Array.isArray(saved.containers) ? saved.containers : [];
+        const flatIds = containers.flatMap(c => (c.items || []).slice());
+        if (containers.length) {
+            _sessionContainers   = containers.map(c => ({ items: (c.items || []).slice() }));
+            _sessionContainerIdx = Math.max(0, Math.min(saved.containerIdx ?? 0, _sessionContainers.length - 1));
+            _sessionItemIdx      = saved.itemIdx ?? 0;
+        }
+        // Restore playback modes before building the queue.
+        if (typeof saved.shuffle === 'boolean') { try { mk.shuffleMode = saved.shuffle ? 1 : 0; } catch (_) {} }
+        if (Number.isFinite(saved.repeat))      { try { mk.repeatMode  = saved.repeat; } catch (_) {} }
+
+        const targetIdx = flatIds.indexOf(saved.adamId);
+        if (flatIds.length && targetIdx >= 0) {
+            // Full-session restore: rebuild the whole queue and jump to the track.
+            await mk.setQueue({ songs: flatIds });
+            await mk.changeToMediaAtIndex(targetIdx);
+        } else {
+            // Fallback (legacy v1 snapshot or empty queue): just the last track.
+            await mk.setQueue({ song: saved.adamId });
+            await mk.play();
+        }
+        _resumeSeekWhenReady(mk, saved);
+    } catch (e) {
+        console.warn('[AML Resume] restore failed, falling back to single track:', e?.message);
+        try { await mk.setQueue({ song: saved.adamId }); await mk.play(); _resumeSeekWhenReady(mk, saved); }
+        catch (_) {}
+    }
+}
+
+async function _resumeSetup(mk) {
+    try {
+        const raw = await window.amlBridge?.storeRead('resumeEnabled');
+        if (raw === 'false' || raw === false) _resumeEnabled = false;
+    } catch (_) {}
+    // Save hooks are always installed; _resumeMark no-ops when disabled.
+    if (!_resumeFlushTimer) _resumeFlushTimer = setInterval(_resumeFlush, 15000);
+    window.addEventListener('pagehide', _resumeFlush);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) _resumeFlush(); });
+    // Main process sends this just before quitting — flush immediately so the
+    // 300ms window in before-quit is enough for the IPC write to land in _storeCache.
+    window.amlBridge?.onFlushAndQuit?.(() => { _resumeMark(); _resumeFlush(); });
+    const audio = getMKAudio();
+    if (audio) {
+        audio.addEventListener('timeupdate', _resumeMark);       // in-memory only
+        audio.addEventListener('pause', () => { _resumeMark(); _resumeFlush(); });
+    }
+    if (!_resumeEnabled) return;
+    let saved = null;
+    try { const raw = await window.amlBridge?.storeRead(_RESUME_KEY); if (raw) saved = JSON.parse(raw); } catch (_) {}
+    if (!saved?.adamId) return;
+    if (Date.now() - (saved.savedAt || 0) > _RESUME_MAX_AGE_MS) { _resumeClear(); return; }
+    // Offer resume when there's a real queue to restore (>1 track) OR a
+    // meaningful mid-track position. Skip only the trivial case: a single track
+    // barely started, where "resume" adds nothing.
+    const queueLen = (saved.containers || []).reduce((n, c) => n + (c.items?.length || 0), 0);
+    const midTrack = saved.positionSec >= 5 && !(saved.durationSec && saved.positionSec > saved.durationSec - 5);
+    if (queueLen <= 1 && !midTrack) return;
+    _resumeShowChip(mk, saved);
+}
+
+// ── Discord Rich Presence (renderer side) ─────────────────────────────────────
+let _discordEnabled = false;
+
+function _isPausedNow() {
+    return _vlcMode ? _vlcPaused : (getMKAudio()?.paused ?? false);
+}
+
+function _discordUpdateNow() {
+    if (!_discordEnabled || !window.amlBridge?.discordUpdate) return;
+    const item = _mkInstance?.nowPlayingItem;
+    if (!item || !_currentAssetId) return;
+    const a = item.attributes ?? {};
+    const posSec  = _resumeCurrentPositionSec();
+    const durSec  = _durationSec || (a.durationInMillis || 0) / 1000;
+    const playing = !_isPausedNow();
+    const startedAtMs = Date.now() - Math.round(posSec * 1000);
+    window.amlBridge.discordUpdate({
+        name:        a.name || '',
+        artist:      a.artistName || '',
+        album:       a.albumName || '',
+        artworkUrl:  _histArtUrl(a.artwork, 512),
+        playing,
+        startedAtMs: playing ? startedAtMs : 0,
+        endsAtMs:    playing && durSec ? startedAtMs + Math.round(durSec * 1000) : 0,
+    });
+}
+
+async function _discordSetup() {
+    try {
+        const raw = await window.amlBridge?.storeRead('discordEnabled');
+        _discordEnabled = (raw === 'true' || raw === true);
+    } catch (_) {}
+    const audio = getMKAudio();
+    if (audio) {
+        audio.addEventListener('play',  _discordUpdateNow);
+        audio.addEventListener('pause', _discordUpdateNow);
+    }
+    // Discord rate-limits SET_ACTIVITY (~5/15s); a 10s refresh keeps both the
+    // AAC and VLC paths in sync without relying on per-codec event parity.
+    setInterval(() => { if (_discordEnabled) _discordUpdateNow(); }, 10000);
+    if (_discordEnabled) _discordUpdateNow();
+}
+
+// ── Last.fm scrobbling (renderer side) ────────────────────────────────────────
+// The scrobble threshold follows Last.fm's rules: track > 30s, and scrobble
+// after min(4 min, half the track). Signing + session key live in main.
+let _lastfmConnected = false;
+let _lbConnected     = false;
+let _scrobbleTimer   = null; // single per-track timer feeding all connected services
+
+async function _lastfmRefreshStatus() {
+    try { const s = await window.amlBridge?.lastfmStatus(); _lastfmConnected = !!s?.connected; return s; }
+    catch (_) { return null; }
+}
+async function _lbRefreshStatus() {
+    try { const s = await window.amlBridge?.lbStatus(); _lbConnected = !!s?.connected; return s; }
+    catch (_) { return null; }
+}
+
+// Fire now-playing to every connected service and schedule the scrobble once.
+function _scrobbleOnTrackChange() {
+    if (_scrobbleTimer) { clearTimeout(_scrobbleTimer); _scrobbleTimer = null; }
+    if (!_lastfmConnected && !_lbConnected) return;
+    const item = _mkInstance?.nowPlayingItem;
+    if (!item) return;
+    const a = item.attributes ?? {};
+    const artist = a.artistName || '';
+    const track  = a.name || '';
+    if (!artist || !track) return;
+    const durSec = _durationSec || (a.durationInMillis || 0) / 1000;
+    const meta = {
+        artist, track,
+        album:       a.albumName || '',
+        albumArtist: a.albumArtistName || a.artistName || '',
+        duration:    durSec || undefined,
+    };
+    if (_lastfmConnected) window.amlBridge?.lastfmNowPlaying?.(meta);
+    if (_lbConnected)     window.amlBridge?.lbNowPlaying?.(meta);
+    if (durSec && durSec < 30) return; // don't scrobble tracks under 30s
+    const thresholdSec = durSec ? Math.min(240, durSec / 2) : 60;
+    const startedAt = Date.now();
+    const myTimer = setTimeout(() => {
+        if (_scrobbleTimer !== myTimer) return;
+        _scrobbleTimer = null;
+        const scrob = { ...meta, timestamp: Math.floor(startedAt / 1000) };
+        if (_lastfmConnected) window.amlBridge?.lastfmScrobble?.(scrob);
+        if (_lbConnected)     window.amlBridge?.lbScrobble?.(scrob);
+    }, thresholdSec * 1000);
+    _scrobbleTimer = myTimer;
+}
+
+async function _scrobbleSetup() {
+    await Promise.all([_lastfmRefreshStatus(), _lbRefreshStatus()]);
+}
+
+// ── Sound Check (loudness normalization) ──────────────────────────────────────
+// OFF by default (experimental — validate against real tracks before trusting).
+// Reads the fMP4 `ludt` loudness box, computes Apple's attenuate-only gain
+// factor = min(1, 10^((TARGET−LKFS)/20)), and applies it: a WebAudio GainNode
+// for AAC/MSE, libvlc software volume for lossless. Only ever attenuates, so the
+// worst case is a too-quiet track — never clipping. When disabled, factor stays
+// 1.0 and no WebAudio graph is created, so playback is byte-for-byte unaffected.
+let _soundCheckEnabled = false;
+let _scFactor      = 1.0;   // module-global: read by the VLC _postVlcVol closure
+let _scVlcReapply  = null;  // set by _setupVLCPath; reposts current volume × _scFactor
+const SC_TARGET_LKFS = -16; // Apple Sound Check reference level
+// Shared Web Audio graph (source → analyser → gain → destination), created once.
+// Loudness Normalisation drives the gain; Adaptive crossfade reads the analyser.
+let _audioCtx = null, _audioSrc = null, _audioGain = null, _audioAnalyser = null, _audioGraphFailed = false;
+
+function _ensureAudioGraph() {
+    if (_audioGraphFailed) return false;
+    if (_audioGain) return true;
+    try {
+        const audio = getMKAudio();
+        if (!audio) return false;
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        _audioCtx = new Ctx();
+        _audioSrc = _audioCtx.createMediaElementSource(audio);
+        _audioAnalyser = _audioCtx.createAnalyser();
+        _audioAnalyser.fftSize = 1024;
+        _audioGain = _audioCtx.createGain();
+        _audioSrc.connect(_audioAnalyser);
+        _audioAnalyser.connect(_audioGain);
+        _audioGain.connect(_audioCtx.destination);
+        return true;
+    } catch (e) {
+        console.warn('[AML Audio] WebAudio graph unavailable:', e?.message);
+        _audioGraphFailed = true; _audioCtx = _audioSrc = _audioGain = _audioAnalyser = null;
+        return false;
+    }
+}
+
+function _scFindBox(dv, start, end, type) {
+    let p = start;
+    while (p + 8 <= end) {
+        let size = dv.getUint32(p);
+        const t = String.fromCharCode(dv.getUint8(p + 4), dv.getUint8(p + 5), dv.getUint8(p + 6), dv.getUint8(p + 7));
+        let hdr = 8;
+        if (size === 1) {
+            if (p + 16 > end) break; // 64-bit largesize would over-read the buffer
+            size = dv.getUint32(p + 8) * 4294967296 + dv.getUint32(p + 12); hdr = 16;
+        }
+        if (size < hdr || p + size > end) break;
+        if (t === type) return { start: p + hdr, end: p + size };
+        p += size;
+    }
+    return null;
+}
+
+function _scFindPath(dv, start, end, path) {
+    let s = start, e = end;
+    for (const type of path) {
+        const box = _scFindBox(dv, s, e, type);
+        if (!box) return null;
+        s = box.start; e = box.end;
+    }
+    return { start: s, end: e };
+}
+
+// Parse a tlou/alou LoudnessBaseBox → program/anchor loudness in LKFS, or NaN.
+function _scParseLoudnessBase(dv, start, end) {
+    let p = start;
+    if (p + 4 > end) return NaN;
+    const version = dv.getUint8(p); p += 4; // version + 3 flag bytes
+    let count = 1;
+    if (version >= 2) { count = dv.getUint8(p) & 0x3f; p += 1; }
+    for (let i = 0; i < count && p < end; i++) {
+        if (version >= 1) p += 1;   // EQ_set_ID / downmix id
+        p += 3;                     // sample_peak(12) + true_peak(12)
+        if (p >= end) break;
+        const measCount = dv.getUint8(p); p += 1;
+        for (let m = 0; m < measCount && p + 3 <= end; m++) {
+            const methodDef = dv.getUint8(p), methodVal = dv.getUint8(p + 1);
+            p += 3; // method_definition + method_value + reliability
+            if (methodDef === 1 || methodDef === 2) return methodVal / 4.0 - 57.75;
+        }
+    }
+    return NaN;
+}
+
+async function _scFetchLoudness() {
+    if (!_sessionId) return NaN;
+    try {
+        const resp = await fetch(`${ENGINE}/api/v1/playback/${_sessionId}/audio?raw=1`,
+            { headers: { Range: 'bytes=0-262143' } });
+        if (!resp.ok) return NaN;
+        const dv = new DataView(await resp.arrayBuffer());
+        const box = _scFindPath(dv, 0, dv.byteLength, ['moov', 'udta', 'ludt'])
+                 || _scFindPath(dv, 0, dv.byteLength, ['moov', 'trak', 'udta', 'ludt']);
+        if (!box) return NaN;
+        const leaf = _scFindBox(dv, box.start, box.end, 'tlou') || _scFindBox(dv, box.start, box.end, 'alou');
+        if (!leaf) return NaN;
+        return _scParseLoudnessBase(dv, leaf.start, leaf.end);
+    } catch (_) { return NaN; }
+}
+
+
+async function _scApplyForTrack() {
+    _scFactor = 1.0;
+    if (_audioGain) _audioGain.gain.value = 1.0;
+    if (!_soundCheckEnabled || !_sessionId) return;
+    const lkfs = await _scFetchLoudness();
+    if (!Number.isFinite(lkfs)) { console.log('[AML SoundCheck] no ludt loudness in stream'); return; }
+    const factor = Math.max(0, Math.min(1, Math.pow(10, (SC_TARGET_LKFS - lkfs) / 20)));
+    _scFactor = factor;
+    console.log(`[AML SoundCheck] loudness=${lkfs.toFixed(2)} LKFS → factor=${factor.toFixed(3)} (${(20 * Math.log10(factor || 1)).toFixed(2)} dB)`);
+    if (factor >= 0.999) return; // no meaningful attenuation — leave playback untouched
+    if (_vlcMode) {
+        _scVlcReapply?.();
+    } else if (_ensureAudioGraph()) {
+        try { if (_audioCtx.state === 'suspended') await _audioCtx.resume(); } catch (_) {}
+        _audioGain.gain.value = factor;
+    }
+}
+
+function _scSetEnabled(on) {
+    _soundCheckEnabled = on;
+    if (on) { _scApplyForTrack(); return; }
+    _scFactor = 1.0;
+    if (_audioGain) _audioGain.gain.value = 1.0;
+    _scVlcReapply?.(); // restore unscaled VLC volume
+}
+
+async function _scSetup() {
+    try {
+        const raw = await window.amlBridge?.storeRead('soundCheckEnabled');
+        _soundCheckEnabled = (raw === 'true' || raw === true);
+    } catch (_) {}
+}
+
+// ── Crossfade (AAC/MSE only) ──────────────────────────────────────────────────
+// OFF by default. True overlapping crossfade would require a second audio element
+// running the next track while MusicKit reloads it on the primary element —
+// desyncing the queue state machine. Instead this does a reversible fade
+// transition on the single element: ramp the tail of the outgoing track down and
+// the head of the incoming track up (element volume only, restored when off).
+// Combined with gapless auto-advance, the two ramps meet at the boundary for a
+// smooth handoff. Never touches the VLC/lossless path.
+// Mode: 'off' | 'auto' (smart default) | 'adaptive' (analysis) | 'manual'.
+// _crossfadeSec is the EFFECTIVE arming window the fade engine reads;
+// _xfRecompute() derives it from the mode + manual seconds.
+let _crossfadeMode   = 'off';
+let _crossfadeManual = 6;   // manual slider seconds (pref 'crossfade-sec')
+const XF_AUTO_SEC    = 6;   // Smart Automatic: Apple's default length + dynamic skip
+const XF_ADAPT_MAX   = 10;  // Adaptive: longest fade (abrupt endings) / arming window
+const XF_ADAPT_MIN   = 2;   // Adaptive: shortest fade (song already fading out)
+let _crossfadeSec    = 0;   // effective seconds (0 = off) — read throughout the fade engine
+let _xfBaseVol    = null; // user's chosen volume (0..1), tracked outside our ramps
+let _xfRamping    = false;
+let _xfTimer      = null;
+let _xfSkipNextFadeIn = false; // set when a gapless album pair skips the fade-out
+let _xfPreserveGapless = true; // pref 'xf-preserve-gapless': skip crossfade for sequential album tracks
+let _xfStationEnabled  = true; // pref 'xf-station': wait for async station/autoplay picks so they crossfade consistently
+let _xfRmsHist = [];           // recent {t, rms} samples — Adaptive live-sampling fallback
+let _xfRmsBuf  = null;         // reused analyser buffer (avoids per-sample allocation)
+// Adaptive precompute: analyse the outgoing track's ending offline (from the
+// already-cached bytes) after gapless caching, so the fade length is known
+// before we reach the tail — no live sampling on the hot path.
+let _xfPlannedSec  = null;     // precomputed fade length for the current track
+let _xfPlanSession = null;     // session id the plan belongs to
+let _xfDecodeCtx   = null;     // throwaway AudioContext for offline decode
+
+// Derive the effective crossfade arming window from the current mode.
+function _xfRecompute() {
+    _crossfadeSec = _crossfadeMode === 'auto'     ? XF_AUTO_SEC
+                  : _crossfadeMode === 'adaptive' ? XF_ADAPT_MAX
+                  : _crossfadeMode === 'manual'   ? _crossfadeManual
+                  : 0;
+    if (_crossfadeSec <= 0) {
+        _xfCancel();
+        const a = getMKAudio();
+        if (a && _xfBaseVol != null) { try { a.volume = _xfBaseVol; } catch (_) {} }
+    }
+}
+
+function _xfCancel() { if (_xfTimer) { clearInterval(_xfTimer); _xfTimer = null; } _xfRamping = false; }
+
+function _xfTrackUserVolume(audio) { if (!_xfRamping) _xfBaseVol = audio.volume; }
+
+// Fade-in length for the incoming track: match the manual seconds, else the
+// smart default (Adaptive fades in over the default; the outgoing tail is what
+// varies per song).
+function _xfFadeInSec() {
+    return _crossfadeMode === 'manual' ? _crossfadeManual : XF_AUTO_SEC;
+}
+
+// Root-mean-square level of the currently-playing audio (0..~1) via the shared
+// analyser. Reuses one buffer to avoid per-sample allocation. Returns null if
+// the Web Audio graph isn't available.
+function _xfSampleRms() {
+    if (!_ensureAudioGraph() || !_audioAnalyser) return null;
+    try { if (_audioCtx.state === 'suspended') _audioCtx.resume(); } catch (_) {}
+    const n = _audioAnalyser.fftSize;
+    if (!_xfRmsBuf || _xfRmsBuf.length !== n) _xfRmsBuf = new Float32Array(n);
+    _audioAnalyser.getFloatTimeDomainData(_xfRmsBuf);
+    let s = 0;
+    for (let i = 0; i < n; i++) s += _xfRmsBuf[i] * _xfRmsBuf[i];
+    return Math.sqrt(s / n);
+}
+
+// Analyse a decoded AudioBuffer's final seconds → a fade length. A song that
+// already fades out gets a short crossfade; one that ends abruptly gets a long
+// one. Runs off the hot path (offline decode).
+function _xfAnalyzeEnding(audioBuf) {
+    const sr = audioBuf.sampleRate;
+    const ch = audioBuf.getChannelData(0);
+    const tail = Math.min(12, audioBuf.duration);
+    const start = Math.max(0, ch.length - Math.floor(tail * sr));
+    const win = Math.max(1, Math.floor(sr * 0.5)); // 0.5s windows
+    let peak = 0, final = 0;
+    for (let i = start; i < ch.length; i += win) {
+        let s = 0, n = 0;
+        for (let j = i; j < Math.min(i + win, ch.length); j++) { s += ch[j] * ch[j]; n++; }
+        const rms = Math.sqrt(s / Math.max(1, n));
+        final = rms; if (rms > peak) peak = rms;
+    }
+    if (peak < 1e-4) return XF_ADAPT_MIN;             // silent tail → minimal fade
+    const ratio = final / peak;                        // ~1 abrupt, ~0 fully faded
+    if (ratio >= 0.7) return XF_ADAPT_MAX;
+    if (ratio <= 0.3) return XF_ADAPT_MIN;
+    return XF_ADAPT_MIN + (XF_ADAPT_MAX - XF_ADAPT_MIN) * ((ratio - 0.3) / 0.4);
+}
+
+// Precompute the Adaptive fade length by decoding the current track's cached
+// bytes and analysing its ending. Runs in the background after gapless caching;
+// non-blocking, best-effort (falls back to live sampling if decode fails).
+async function _xfPlanAdaptive() {
+    if (_crossfadeMode !== 'adaptive') return;
+    const cache = _chunkCache;
+    if (!cache || !cache.chunks || !cache.chunks.length) return;
+    if (_xfPlanSession === cache.sessionId && _xfPlannedSec != null) return; // already planned
+    try {
+        let total = 0;
+        for (const c of cache.chunks) total += c.byteLength;
+        const bytes = new Uint8Array(total);
+        let o = 0;
+        for (const c of cache.chunks) { bytes.set(c, o); o += c.byteLength; }
+        if (!_xfDecodeCtx) _xfDecodeCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const audioBuf = await _xfDecodeCtx.decodeAudioData(bytes.buffer);
+        _xfPlannedSec  = _xfAnalyzeEnding(audioBuf);
+        _xfPlanSession = cache.sessionId;
+        console.log(`[AML Crossfade] adaptive plan: ${_xfPlannedSec.toFixed(1)}s fade (session ${cache.sessionId})`);
+    } catch (e) {
+        // Decode unsupported/incomplete → tail handler falls back to live sampling.
+        console.log('[AML Crossfade] adaptive offline analysis unavailable, using live sampling:', e?.message);
+    }
+}
+
+// Adaptive fade-out length: watch the outgoing track's loudness trend and pick a
+// shorter fade when the song is already fading out (or near-silent), a longer
+// one when it ends abruptly at full level. Called each tick inside the window.
+function _xfAdaptiveDuration() {
+    const rms = _xfSampleRms();
+    if (rms == null) return XF_AUTO_SEC; // no analyser → smart default
+    const now = performance.now();
+    _xfRmsHist.push({ t: now, rms });
+    while (_xfRmsHist.length && now - _xfRmsHist[0].t > 3000) _xfRmsHist.shift();
+    if (rms < 0.015) return XF_ADAPT_MIN;             // already ~silent → minimal fade
+    const past = _xfRmsHist[0]?.rms ?? rms;
+    const ratio = past > 0 ? rms / past : 1;          // <1 means declining (fading out)
+    if (ratio >= 0.7) return XF_ADAPT_MAX;            // steady/rising → full crossfade
+    // Declining: map ratio 0.3..0.7 → MIN..MAX (steeper drop ⇒ shorter fade).
+    const f = Math.max(0, Math.min(1, (ratio - 0.3) / 0.4));
+    return XF_ADAPT_MIN + (XF_ADAPT_MAX - XF_ADAPT_MIN) * f;
+}
+
+// Ports Apple Music Android's PlayerAudioFadeControl.areSequentialItems: two
+// items are sequential when they're consecutive tracks of the same album
+// (same album, same disc, next track number). Such pairs are meant to play
+// gapless, so crossfade is skipped for them.
+function _xfAreSequential(a, b) {
+    if (!a || !b) return false;
+    const al = (a.albumName || '').trim().toLowerCase();
+    const bl = (b.albumName || '').trim().toLowerCase();
+    if (!al || !bl || al !== bl) return false;
+    if ((a.artistName || '') !== (b.artistName || '')) return false;
+    const ad = a.discNumber ?? 1, bd = b.discNumber ?? 1;
+    const at = a.trackNumber, bt = b.trackNumber;
+    if (!Number.isFinite(at) || !Number.isFinite(bt)) return false;
+    return ad === bd && bt === at + 1;
+}
+
+// Ports shouldCrossFadeToNextItem into a tri-state so the tail handler can tell
+// "genuinely skip" apart from "the station hasn't appended its pick yet":
+//   'fade'         — crossfade this transition
+//   'skip-gapless' — sequential same-album track; keep it seamless (no fades)
+//   'skip'         — repeat-one, a music video, or a real end of queue
+//   'wait'         — no next item yet but autoplay/station will append one; the
+//                    caller keeps polling so recommendations crossfade every time
+function _xfDecision() {
+    if (_crossfadeSec <= 0) return 'skip';
+    const mk = _mkInstance;
+    if (!mk) return 'skip';
+    if ((mk.repeatMode ?? 0) === 1) return 'skip'; // repeat-one: never crossfade
+    const items = mk.queue?.items;
+    const pos = mk.queue?.position ?? -1;
+    if (!items || pos < 0) return 'skip';
+    if (pos + 1 >= items.length) {
+        // Next pick not queued yet. Stations/autoplay append it asynchronously —
+        // wait for it (when the toggle is on) instead of skipping "sometimes".
+        return (_xfStationEnabled && (mk.autoplayEnabled ?? true)) ? 'wait' : 'skip';
+    }
+    const nextItem = items[pos + 1];
+    const nextType = nextItem?.type ?? nextItem?.attributes?.playParams?.kind;
+    if (nextType && String(nextType).includes('video')) return 'skip'; // songs only
+    if (_xfPreserveGapless && _xfAreSequential(mk.nowPlayingItem?.attributes, nextItem?.attributes)) {
+        return 'skip-gapless';
+    }
+    return 'fade';
+}
+
+function _xfRamp(audio, to, durSec, onDone) {
+    _xfCancel();
+    const from = audio.volume;
+    const steps = Math.max(1, Math.round(durSec * 20)); // ~50ms steps
+    let i = 0; _xfRamping = true;
+    _xfTimer = setInterval(() => {
+        i++;
+        try { audio.volume = Math.max(0, Math.min(1, from + (to - from) * (i / steps))); } catch (_) {}
+        if (i >= steps) { _xfCancel(); onDone?.(); }
+    }, 50);
+}
+
+function _xfFadeIn(audio) {
+    if (_crossfadeSec <= 0 || !audio) return;
+    _xfRmsHist = []; _xfPlannedSec = null; _xfPlanSession = null; // fresh track — reset Adaptive state
+    // Gapless album pair: the previous track skipped its fade-out, so this track
+    // must start at full volume (no dip) to preserve the seamless transition.
+    if (_xfSkipNextFadeIn) { _xfSkipNextFadeIn = false; return; }
+    if (_xfBaseVol == null) _xfBaseVol = audio.volume || 1;
+    _xfRamping = true;
+    try { audio.volume = 0; } catch (_) {}
+    _xfRamp(audio, _xfBaseVol, _xfFadeInSec());
+}
+
+// forceDur (Adaptive) overrides the effective seconds when given.
+function _xfFadeOut(audio, remainingSec, forceDur) {
+    if (_crossfadeSec <= 0 || !audio) return;
+    const len = forceDur != null ? forceDur : _crossfadeSec;
+    _xfRamp(audio, 0, Math.max(0.2, Math.min(len, remainingSec)));
+}
+
+function _xfSetMode(mode) {
+    _crossfadeMode = mode;
+    window.amlBridge?.setTweak('crossfade-mode', mode);
+    _xfRecompute();
+}
+
+function _xfSetManualSec(sec) {
+    _crossfadeManual = Math.max(0, Math.min(12, sec));
+    window.amlBridge?.setTweak('crossfade-sec', _crossfadeManual);
+    if (_crossfadeMode === 'manual') _xfRecompute();
+}
+
+async function _xfSetup() {
+    try {
+        const prefs = await window.amlBridge?.getPrefs();
+        const v = Number(prefs?.['crossfade-sec']);
+        if (Number.isFinite(v) && v >= 0) _crossfadeManual = Math.min(12, v);
+        // Mode: explicit pref wins; else infer from a legacy manual-seconds value.
+        const m = prefs?.['crossfade-mode'];
+        _crossfadeMode = (m === 'off' || m === 'auto' || m === 'adaptive' || m === 'manual') ? m
+                       : (_crossfadeManual > 0 ? 'manual' : 'off');
+        _xfRecompute();
+        if (prefs?.['xf-preserve-gapless'] === false) _xfPreserveGapless = false;
+        if (prefs?.['xf-station'] === false) _xfStationEnabled = false;
+    } catch (_) {}
+}
+
+// ── Toast (transient bottom-centre pill) ──────────────────────────────────────
+let _amlToastTimer = null;
+function _amlToast(text) {
+    let el = document.getElementById('aml-toast');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'aml-toast';
+        el.style.cssText = 'position:fixed;left:50%;bottom:96px;transform:translateX(-50%) translateY(10px);' +
+            'z-index:99999;padding:9px 18px;border-radius:20px;background:rgba(30,30,32,0.92);' +
+            'border:0.5px solid rgba(255,255,255,0.14);color:#fff;font-size:13px;font-weight:500;' +
+            'font-family:-apple-system,SF Pro Text,system-ui,sans-serif;pointer-events:none;opacity:0;' +
+            'box-shadow:0 8px 30px rgba(0,0,0,0.5);backdrop-filter:blur(24px) saturate(1.8);' +
+            '-webkit-backdrop-filter:blur(24px) saturate(1.8);transition:opacity 0.2s,transform 0.2s;';
+        document.body.appendChild(el);
+    }
+    el.textContent = text;
+    requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'translateX(-50%) translateY(0)'; });
+    clearTimeout(_amlToastTimer);
+    _amlToastTimer = setTimeout(() => {
+        el.style.opacity = '0'; el.style.transform = 'translateX(-50%) translateY(10px)';
+    }, 1600);
+}
+
+// ── Love / Favorite (bidirectional with MPRIS rating) ─────────────────────────
+let _lovedState     = {};   // assetId → boolean (our optimistic love state)
+let _reemitMpris    = null; // set by sendMprisMetadata; refreshes MPRIS rating
+let _pushMiniStateRef = null; // set in setup; pushes volume/repeat/shuffle/loved to the mini
+
+async function _toggleLove() {
+    const mk = _mkInstance, id = _currentAssetId;
+    if (!mk || !id) return;
+    try {
+        let loved = _lovedState[id];
+        if (loved === undefined) {
+            // Fetch current rating from Apple (value === 1 means loved).
+            try {
+                const r = await mk.api.music(`/v1/me/ratings/songs/${id}`);
+                loved = (r?.data?.data?.[0]?.attributes?.value === 1);
+            } catch (_) { loved = false; }
+        }
+        if (loved) {
+            await mk.api.music(`/v1/me/ratings/songs/${id}`, {}, { fetchOptions: { method: 'DELETE' } });
+            _lovedState[id] = false;
+            _amlToast('Removed from Favourites');
+        } else {
+            await mk.api.music(`/v1/me/ratings/songs/${id}`, {},
+                { fetchOptions: { method: 'PUT', body: JSON.stringify({ type: 'rating', attributes: { value: 1 } }) } });
+            _lovedState[id] = true;
+            _amlToast('♥  Loved');
+        }
+        _reemitMpris?.(); // push the new rating to the desktop applet
+    } catch (e) {
+        console.warn('[AML Love] toggle failed:', e?.message);
+        _amlToast('Could not update Favourite');
+    }
+}
+
+// ── In-app media keyboard shortcuts (reassignable) ────────────────────────────
+let _hotkeysEnabled = true; // pref 'hotkeysEnabled' (default on)
+
+// Action list drives both the handler and the settings submenu. `e.key` values
+// are stored per action; letters are matched case-insensitively.
+const _HOTKEY_ACTIONS = [
+    { id: 'playPause',   label: 'Play / Pause',   def: ' ' },
+    { id: 'seekForward', label: 'Seek forward 10s', def: 'ArrowRight' },
+    { id: 'seekBack',    label: 'Seek back 10s',  def: 'ArrowLeft' },
+    { id: 'volUp',       label: 'Volume up',      def: 'ArrowUp' },
+    { id: 'volDown',     label: 'Volume down',    def: 'ArrowDown' },
+    { id: 'love',        label: 'Love / Favourite', def: 'l' },
+];
+let _hotkeyBindings = Object.fromEntries(_HOTKEY_ACTIONS.map(a => [a.id, a.def]));
+
+// Human-readable label for a stored key value.
+function _hotkeyKeyLabel(k) {
+    if (k === ' ') return 'Space';
+    const map = { ArrowRight: '→', ArrowLeft: '←', ArrowUp: '↑', ArrowDown: '↓', Escape: 'Esc' };
+    if (map[k]) return map[k];
+    return k.length === 1 ? k.toUpperCase() : k;
+}
+
+function _hotkeyNormalize(k) { return k.length === 1 ? k.toLowerCase() : k; }
+
+function _hotkeyActionFor(key) {
+    const norm = _hotkeyNormalize(key);
+    for (const [id, k] of Object.entries(_hotkeyBindings)) {
+        if (_hotkeyNormalize(k) === norm) return id;
+    }
+    return null;
+}
+
+function _hotkeyTypingTarget(t) {
+    if (!t) return false;
+    const tag = t.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
+}
+
+function _hotkeyAdjustVolume(delta) {
+    const a = getMKAudio();
+    if (!a) return;
+    const v = Math.max(0, Math.min(1, (a.volume ?? 1) + delta));
+    try { a.volume = v; } catch (_) {}
+    _amlToast(`Volume ${Math.round(v * 100)}%`);
+}
+
+function _hotkeyRun(action) {
+    const mk = _mkInstance;
+    if (!mk) return;
+    const pos = _resumeCurrentPositionSec();
+    switch (action) {
+        case 'playPause':   _isPausedNow() ? mk.play?.() : mk.pause?.(); break;
+        case 'seekForward': try { mk.seekToTime(pos + 10); } catch (_) {} break;
+        case 'seekBack':    try { mk.seekToTime(Math.max(0, pos - 10)); } catch (_) {} break;
+        case 'volUp':       _hotkeyAdjustVolume(+0.05); break;
+        case 'volDown':     _hotkeyAdjustVolume(-0.05); break;
+        case 'love':        _toggleLove(); break;
+    }
+}
+
+// When a capture is active (settings reassignment), the next keydown is routed
+// here instead of triggering an action.
+let _hotkeyCapture = null; // (key) => void
+
+function _installMediaHotkeys() {
+    document.addEventListener('keydown', (e) => {
+        if (_hotkeyCapture) { // reassignment in progress
+            e.preventDefault(); e.stopImmediatePropagation();
+            const cb = _hotkeyCapture; _hotkeyCapture = null;
+            cb(e.key === 'Escape' ? null : e.key);
+            return;
+        }
+        if (!_hotkeysEnabled) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (_hotkeyTypingTarget(e.target)) return;
+        const action = _hotkeyActionFor(e.key);
+        if (!action) return;
+        e.preventDefault(); e.stopImmediatePropagation();
+        _hotkeyRun(action);
+    }, true); // capture phase so we win over the page's own handlers
+}
+
+async function _hotkeySaveBindings() {
+    try { await window.amlBridge?.storeWrite('hotkeyBindings', JSON.stringify(_hotkeyBindings)); } catch (_) {}
+}
+
+async function _hotkeysSetup() {
+    try {
+        const raw = await window.amlBridge?.storeRead('hotkeysEnabled');
+        if (raw === 'false' || raw === false) _hotkeysEnabled = false;
+        const b = await window.amlBridge?.storeRead('hotkeyBindings');
+        if (b) { const parsed = JSON.parse(b); for (const a of _HOTKEY_ACTIONS) if (parsed[a.id]) _hotkeyBindings[a.id] = parsed[a.id]; }
+    } catch (_) {}
+    _installMediaHotkeys();
+}
+
+// Unified "track is playing with metadata + duration known" broadcast.
+// Called from handleTrackChange once the session is resolved.
+function _broadcastNowPlaying() {
+    try { _discordUpdateNow(); } catch (_) {}
+    try { _scrobbleOnTrackChange(); } catch (_) {}
+    try { _resumeMark(); _resumeFlush(); } catch (_) {}
+    try { _scApplyForTrack(); } catch (_) {}
+    try { _pushMiniStateRef?.(); } catch (_) {}
 }
 
 function _histRender() {
@@ -4043,7 +5001,12 @@ async function setup() {
     //   2. React defers rendering, so the dialog can open AFTER _amlTransitioning is
     //      already cleared by NPIDF — use a 1s timestamp window instead.
     let _amlLastGotoMs = 0; // updated each time _amlGoto starts
-    const _inGotoWindow = () => performance.now() - _amlLastGotoMs < 1000;
+    // Suppress errors while: (a) within 1s of a goto call, OR (b) while a session is
+    // actively opening/streaming — VLC can take 2-5s to start, well past the 1s window.
+    const _inGotoWindow = () =>
+        performance.now() - _amlLastGotoMs < 1000 ||
+        _playState === PLAY_STATE.OPENING ||
+        _playState === PLAY_STATE.STREAMING;
     const _isSpuriousDialog = (el) =>
         el?.tagName === 'DIALOG' &&
         el?.dataset?.testid === 'dialog' &&
@@ -4051,9 +5014,26 @@ async function setup() {
 
     const _origShowModal = HTMLDialogElement.prototype.showModal;
     HTMLDialogElement.prototype.showModal = function() {
-        if (_isSpuriousDialog(this) && _inGotoWindow()) {
-            console.log('[AML] Suppressed error dialog showModal (goto window)');
-            return;
+        if (_isSpuriousDialog(this)) {
+            const mkAudio = getMKAudio();
+            const mk2 = window.MusicKit?.getInstance?.();
+            console.error('[AML] Error dialog showModal triggered — dumping state:',
+                '\n  playState   =', _playState,
+                '\n  generation  =', _generation,
+                '\n  sessionId   =', _sessionId,
+                '\n  adamId      =', _currentAssetId,
+                '\n  allowCDN    =', _allowCDNTransition,
+                '\n  mk.state    =', mk2?.playbackState,
+                '\n  mk.item     =', mk2?.nowPlayingItem?.id ?? 'null',
+                '\n  mk.queuePos =', mk2?.queue?.position,
+                '\n  audio.src   =', mkAudio?.src?.slice(0,80) ?? 'null',
+                '\n  audio.loadShadowed =', mkAudio?.load?.toString?.()?.includes('{}') ?? 'no',
+                '\n  dialogText  =', this.innerText?.slice(0, 200)
+            );
+            if (_inGotoWindow()) {
+                console.log('[AML] Suppressed error dialog showModal (goto window)');
+                return;
+            }
         }
         return _origShowModal.call(this);
     };
@@ -4323,7 +5303,8 @@ async function setup() {
 
     let _amlAdvancing = false;
     let _amlAdvancingTimer = null;
-    let _amlGotoTarget = null; // queue index we're transitioning TO (set by _amlGoto)
+    let _amlGotoTarget = null;   // queue index we're transitioning TO (set by _amlGoto)
+    let _amlGotoTargetId = null; // catalog ID of the target track — fallback for stale queue.items
 
     function _clearAdvancing() {
         _amlAdvancing = false;
@@ -4395,6 +5376,7 @@ async function setup() {
         // the remaining NPIDF-tracking flags (_amlGotoTarget, _amlNavInternal, pending coords).
         _amlAdvancingTimer = setTimeout(() => {
             _amlGotoTarget = null;
+            _amlGotoTargetId = null;
             _allowCDNTransition = false;
             _amlTransitioning = false;
             _amlNavInternal = false;
@@ -4416,6 +5398,7 @@ async function setup() {
 
         if (mkDirectIdx >= 0) {
             _amlGotoTarget = mkDirectIdx;
+            _amlGotoTargetId = targetSongId ?? null;
             await mk.changeToMediaAtIndex(mkDirectIdx).catch(() => {});
         } else {
             const allIds = _sessionFlatIds();
@@ -4423,6 +5406,7 @@ async function setup() {
                 clearTimeout(_amlAdvancingTimer);
                 _clearAdvancing();
                 _amlGotoTarget = null;
+                _amlGotoTargetId = null;
                 _allowCDNTransition = false;
                 _amlTransitioning = false;
                 _amlNavInternal = false;
@@ -4442,11 +5426,13 @@ async function setup() {
                     : { song: targetSongId };
                 console.log('[AML] _amlGoto mixed/MV session — targeted setQueue ' + JSON.stringify(desc));
                 _amlGotoTarget = 0;
+                _amlGotoTargetId = targetSongId ?? null;
                 await mk.setQueue(desc).catch(() => {});
                 await mk.changeToMediaAtIndex(0).catch(() => {});
             } else {
                 const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
                 _amlGotoTarget = targetIdx;
+                _amlGotoTargetId = targetSongId ?? null;
                 await mk.setQueue({ songs: allIds }).catch(() => {});
                 await mk.changeToMediaAtIndex(targetIdx).catch(() => {});
             }
@@ -4565,12 +5551,21 @@ async function setup() {
     // every library-track descriptor fall through to MK.
     function _normalizeStartId(desc) {
         const raw = desc?.startWith?.id;
-        // No startWith at all → not a "play this specific track" descriptor. Leave it to
-        // the caller's passthrough; claiming it here would hijack station/autoplay queues.
         if (!raw) return null;
         const stripped = raw.startsWith('a.') ? raw.slice(2) : raw;
         if (/^\d{6,}$/.test(stripped)) return stripped;
-        // Opaque library ID ("i.XXXX") — use the catalog ID the click handler read off the DOM.
+        // Opaque library ID ("i.XXXX") — resolve via queue items first (avoids needing DOM
+        // data-id attribute, handles albums descriptor startWith without extra API calls).
+        const qItems = mk?.queue?.items;
+        if (qItems?.length) {
+            for (const it of qItems) {
+                const lid = it?.id ?? it?.playParams?.id ?? it?.attributes?.playParams?.id;
+                if (lid === raw || lid === stripped) {
+                    const cid = it?.playParams?.catalogId ?? it?.attributes?.playParams?.catalogId;
+                    if (cid && /^\d{6,}$/.test(String(cid))) return String(cid);
+                }
+            }
+        }
         return _pendingExternalClickCatalogId || null;
     }
 
@@ -4647,18 +5642,38 @@ async function setup() {
         const a = item.attributes ?? {};
         const artTemplate = a.artwork?.url ?? '';
         const artUrl = artTemplate.replace('{w}', '1000').replace('{h}', '1000');
+        const meta = {
+            'mpris:trackid': mprisTrackId(item),
+            'mpris:length':  Math.round((a.durationInMillis ?? 0) * 1000),
+            'xesam:title':   a.name ?? '',
+            'xesam:artist':  [a.artistName ?? ''],
+            'xesam:album':   a.albumName ?? '',
+            'mpris:artUrl':  artUrl,
+        };
+        // Richer xesam fields — desktops (KDE, GNOME) surface these in the media
+        // applet and lock screen. Only include when present so unrated/absent
+        // values don't misrepresent the track (e.g. a false 0-star rating).
+        if (a.albumArtistName || a.artistName) meta['xesam:albumArtist'] = [a.albumArtistName ?? a.artistName];
+        if (Array.isArray(a.genreNames) && a.genreNames.length) meta['xesam:genre'] = a.genreNames;
+        if (Number.isFinite(a.trackNumber)) meta['xesam:trackNumber'] = a.trackNumber;
+        if (Number.isFinite(a.discNumber))  meta['xesam:discNumber']  = a.discNumber;
+        if (a.composerName) meta['xesam:composer'] = [a.composerName];
+        if (a.releaseDate)  meta['xesam:contentCreated'] = a.releaseDate;
+        // Ratings: userRating (0–5 → 0.0–1.0) only when the user has rated;
+        // autoRating from catalog popularity (0–100 → 0.0–1.0) when available.
+        if (Number.isFinite(a.userRating)) meta['xesam:userRating'] = Math.max(0, Math.min(1, a.userRating / 5));
+        if (Number.isFinite(a.popularity)) meta['xesam:autoRating'] = Math.max(0, Math.min(1, a.popularity / 100));
+        // Love/Favorite override — reflects our own toggle so the desktop applet
+        // shows the heart immediately (bidirectional with _toggleLove).
+        const iid = _extractItemId(item);
+        if (iid && iid in _lovedState) meta['xesam:userRating'] = _lovedState[iid] ? 1 : 0;
         window.amlBridge.mprisUpdate({
-            metadata: {
-                'mpris:trackid': mprisTrackId(item),
-                'mpris:length':  Math.round((a.durationInMillis ?? 0) * 1000),
-                'xesam:title':   a.name ?? '',
-                'xesam:artist':  [a.artistName ?? ''],
-                'xesam:album':   a.albumName ?? '',
-                'mpris:artUrl':  artUrl,
-            },
+            metadata: meta,
             shuffle: mk.shuffleMode === 1,
         });
     }
+    // Expose a re-emit so _toggleLove (module scope) can refresh MPRIS rating.
+    _reemitMpris = () => { try { sendMprisMetadata(mk.nowPlayingItem); } catch (_) {} };
 
     function sendMprisStatus(status, { isResume = false } = {}) {
         // Emit seeked only on resume-from-pause so clients re-anchor without
@@ -4671,6 +5686,30 @@ async function setup() {
     // Handle MPRIS commands from system media controls / media keys.
     // Commands are either plain strings (play/pause/next/previous) or objects
     // { type: 'seek', deltaMs } / { type: 'setPosition', ms } for seek.
+    // Push mini-player-specific state (volume/repeat/shuffle/loved) — carried on
+    // the mprisUpdate payload; MPRIS ignores the extra keys, main forwards them
+    // to the mini window.
+    function _pushMiniState() {
+        const a = getMKAudio();
+        window.amlBridge?.mprisUpdate?.({
+            volume:  a && Number.isFinite(a.volume) ? Math.round(a.volume * 100) : 100,
+            repeat:  mk.repeatMode ?? 0,
+            shuffle: mk.shuffleMode === 1,
+            loved:   !!_lovedState[_currentAssetId],
+        });
+    }
+    _pushMiniStateRef = _pushMiniState;
+
+    // Main asks for a full refresh when the mini player opens.
+    window.amlBridge?.onMiniSync?.(() => {
+        try {
+            if (mk.nowPlayingItem) sendMprisMetadata(mk.nowPlayingItem);
+            _pushMiniState();
+            const playing = mk.playbackState === window.MusicKit?.PlaybackStates?.playing;
+            window.amlBridge?.mprisUpdate?.({ status: playing ? 'Playing' : 'Paused', position: _vlcPosMs * 1000 });
+        } catch (_) {}
+    });
+
     window.amlBridge?.onMprisCmd?.((cmd) => {
         if (cmd && typeof cmd === 'object') {
             if (cmd.type === 'seek') {
@@ -4679,6 +5718,17 @@ async function setup() {
                 mk.seekToTime(Math.max(0, cmd.ms / 1000));
             } else if (cmd.type === 'shuffle') {
                 mk.shuffleMode = cmd.value ? 1 : 0;
+            } else if (cmd.type === 'setVolume') {
+                const a = getMKAudio();
+                if (a) { try { a.volume = Math.max(0, Math.min(1, cmd.value / 100)); } catch (_) {} }
+                _pushMiniState();
+            } else if (cmd.type === 'repeat') {
+                // Cycle none → all → one → none (MK: 0 none, 1 one, 2 all).
+                const cur = mk.repeatMode ?? 0;
+                mk.repeatMode = cur === 0 ? 2 : cur === 2 ? 1 : 0;
+                _pushMiniState();
+            } else if (cmd.type === 'love') {
+                _toggleLove().then(() => _pushMiniState());
             }
             return;
         }
@@ -4698,6 +5748,9 @@ async function setup() {
 
     mk.addEventListener('shuffleModeDidChange', () => {
         window.amlBridge?.mprisUpdate?.({ shuffle: mk.shuffleMode === 1 });
+    });
+    mk.addEventListener('repeatModeDidChange', () => {
+        window.amlBridge?.mprisUpdate?.({ repeat: mk.repeatMode ?? 0 });
     });
 
     // Stable ID from any MusicKit MediaItem regardless of whether the item came
@@ -4741,6 +5794,7 @@ async function setup() {
             // NOTE: [aria-label*="Play"] removed — matches product-lockup nav links (false positive)
         );
         if (!_vlcMode && _dbgPlaySel) {
+            console.log('[AML AAC-GATE] click caught vlc=' + _vlcMode + ' sel=' + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0,30) || '?'));
             // AAC mode: user clicked a play button on a browse/album/single/library page.
             // Four things block MK from completing its track-change sequence:
             //   1. mkAudio.load = () => {} (no-op) — MK calls load() to reset the element;
@@ -4769,7 +5823,7 @@ async function setup() {
             _proxyInstalled = false; // handleTrackChange will reinstall for the new track
             _msePaused = false;       // clear pause state so reinstalled proxy doesn't block
             _ourBlobUrl = null; // allow MK's internal blob URL through blockAppleCDN line 580
-            _pendingExternalClickCatalogId = null;
+            _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1;
             let aacCatalogId = null;
             let aacSetQueueDesc = null;
             try {
@@ -4856,7 +5910,7 @@ async function setup() {
             const _aacCloseGate = () => {
                 if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
                 _allowCDNTransition = false;
-                _pendingExternalClickCatalogId = null;
+                _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1;
                 _pendingPlaylistFetch = null;
                 if (_savedAacApiRestore) { _savedAacApiRestore(); _savedAacApiRestore = null; }
                 if (_savedGateTracingCleanup) { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
@@ -5058,6 +6112,7 @@ async function setup() {
             // Guard: if the CDN gate is already open from a previous click, a second
             // click would overwrite _mkApiSaved with already-patched methods, permanently
             // corrupting mk.play/setQueue/changeToMediaAtIndex until page reload.
+            console.log('[AML VLC-GATE] click caught vlc=' + _vlcMode + ' saved=' + !!_mkApiSaved + ' sel=' + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0,30) || '?'));
             if (_mkApiSaved) return;
             // MK's setQueue reuses the existing mkAudio element. It calls:
             //   mkAudio.src = ''  → fine
@@ -5087,7 +6142,7 @@ async function setup() {
             // Try to extract the catalog song ID from the clicked DOM element so the
             // setQueue wrapper can substitute {songs:[catalogId]} for cross-playlist clicks
             // (which otherwise stall on a network fetch for the full playlist).
-            _pendingExternalClickCatalogId = null;
+            _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1;
             try {
                 let el = e.target;
                 for (let depth = 0; depth < 12 && el; depth++) {
@@ -5104,6 +6159,31 @@ async function setup() {
                         if (m) { _pendingExternalClickCatalogId = m[1]; break; }
                     }
                     el = el.parentElement;
+                }
+            } catch (_) {}
+            // Capture the queue index of the clicked track at click time — before setQueue
+            // reshuffles mk.queue.items. This is the JS equivalent of CURRENT_CONTAINER_INDEX
+            // from Android's MediaSession metadata and is the only slot-unique key MusicKit JS
+            // exposes. Stored so _vlcGotoById can skip ID resolution entirely when available.
+            try {
+                const qItems = mk.queue?.items;
+                if (qItems?.length && _pendingExternalClickCatalogId) {
+                    _pendingExternalClickQueueIdx = qItems.findIndex(it => _extractItemId(it) === _pendingExternalClickCatalogId);
+                }
+                // One-shot diagnostic: dump all own + hidden properties of a queue item so we
+                // can check whether MusicKit surfaces playlistItemPersistentId internally.
+                if (_AML_DEBUG && qItems?.length && !window._amlQueueItemDumped) {
+                    window._amlQueueItemDumped = true;
+                    const it = qItems[0];
+                    const allKeys = new Set();
+                    let proto = it;
+                    while (proto && proto !== Object.prototype) {
+                        Object.getOwnPropertyNames(proto).forEach(k => allKeys.add(k));
+                        proto = Object.getPrototypeOf(proto);
+                    }
+                    const dump = {};
+                    for (const k of allKeys) { try { dump[k] = it[k]; } catch (_) {} }
+                    console.log('[AML queue-item dump]', JSON.stringify(dump, (_, v) => typeof v === 'function' ? '[fn]' : v, 2).slice(0, 4000));
                 }
             } catch (_) {}
             // Pre-fetch playlist tracks from the local engine cache so the setQueue
@@ -5131,13 +6211,13 @@ async function setup() {
             // ── MK API + audio-element instrumentation during CDN gate window ──────
             _mkApiSaved = { play: mk.play, setQueue: mk.setQueue, changeToMediaAtIndex: mk.changeToMediaAtIndex };
             mk.play = (...a) => {
-                if (_AML_DEBUG) console.log('[MK-DBG] mk.play() state=' + mk.playbackState);
+                console.log('[VLC-MK] mk.play() state=' + mk.playbackState);
                 const p = _mkApiSaved.play.apply(mk, a);
-                if (p?.then) p.then(() => _AML_DEBUG && console.log('[MK-DBG] mk.play() resolved'), e => _AML_DEBUG && console.log('[MK-DBG] mk.play() rejected:', e?.message || e));
+                if (p?.then) p.then(() => console.log('[VLC-MK] mk.play() resolved'), e => console.log('[VLC-MK] mk.play() rejected:', e?.message || e));
                 return p;
             };
             mk.setQueue = (...a) => {
-                if (_AML_DEBUG) console.log('[MK-DBG] mk.setQueue() args=' + JSON.stringify(a).slice(0,200));
+                console.log('[VLC-MK] mk.setQueue() args=' + JSON.stringify(a).slice(0,200));
                 // setQueue({playlists:[...]}) fetches tracks from Apple's network — this stalls
                 // when DNS/network is slow, hanging for >20s and preventing NPIDF from firing.
                 // If the target startWith item is already in mk.queue.items, redirect to
@@ -5191,15 +6271,99 @@ async function setup() {
                         });
                     }
                 }
-                const p = _mkApiSaved.setQueue.apply(mk, a);
-                if (p?.then) p.then(r => _AML_DEBUG && console.log('[MK-DBG] mk.setQueue() resolved r=' + JSON.stringify(r).slice(0,80)),
-                                     e => _AML_DEBUG && console.log('[MK-DBG] mk.setQueue() rejected:', e?.message || String(e)));
-                return p;
+                // Helper: find catalogId in session containers or add from mk.queue, then _amlGoto.
+                // _amlGoto is the ONLY safe path in VLC mode — it stops the poll, tears down
+                // audio element overrides, and clears _vlcMode before calling changeToMediaAtIndex.
+                // Bare ctmi calls skip that teardown and fail silently.
+                const _vlcGotoById = (id) => {
+                    // Fast path: click-time queue index. This is the JS equivalent of
+                    // CURRENT_CONTAINER_INDEX (Android MediaSession) — the only slot-unique
+                    // key MusicKit JS exposes, unambiguous even for duplicate tracks.
+                    if (_pendingExternalClickQueueIdx >= 0 && id) {
+                        const mkQ     = mk.queue?.items;
+                        const slotIt  = mkQ?.[_pendingExternalClickQueueIdx];
+                        if (slotIt && _extractItemId(slotIt) === id) {
+                            const ci  = _sessionContainerIdx;
+                            const cur = _sessionContainers[ci];
+                            if (cur) {
+                                if (!cur.items.includes(id)) cur.items.push(id);
+                                const ii = cur.items.indexOf(id);
+                                console.log('[AML VLC] → _amlGoto(' + ci + ',' + ii + ') id=' + id + ' via click-idx=' + _pendingExternalClickQueueIdx);
+                                _amlGoto(ci, ii).catch(() => {});
+                                return true;
+                            }
+                        }
+                    }
+                    // Fallback: search all session containers by ID
+                    for (let c = 0; c < _sessionContainers.length; c++) {
+                        const ii = (_sessionContainers[c]?.items ?? []).indexOf(id);
+                        if (ii >= 0) {
+                            console.log('[AML VLC] → _amlGoto(' + c + ',' + ii + ') id=' + id);
+                            _amlGoto(c, ii).catch(() => {});
+                            return true;
+                        }
+                    }
+                    // Not in any container — add from mk.queue.items then navigate
+                    const mkQ2 = mk.queue?.items;
+                    const ci   = _sessionContainerIdx;
+                    const cur  = _sessionContainers[ci];
+                    if (cur && mkQ2?.length && mkQ2.findIndex(it => _extractItemId(it) === id) >= 0) {
+                        if (!cur.items.includes(id)) cur.items.push(id);
+                        const ii = cur.items.indexOf(id);
+                        console.log('[AML VLC] → _amlGoto(' + ci + ',' + ii + ') id=' + id + ' (added to container)');
+                        _amlGoto(ci, ii).catch(() => {});
+                        return true;
+                    }
+                    return false;
+                };
+
+                // URL-based descriptor: {url, startWith:{id}} — catalog album/playlist click.
+                if (desc?.url && desc?.startWith?.id) {
+                    const startId = _normalizeStartId(desc);
+                    if (startId) {
+                        if (_vlcGotoById(startId)) return;
+                        console.log('[AML VLC] url-setQueue → passthrough (not in queue, id=' + startId + ')');
+                    }
+                }
+                // Any other descriptor (albums, songs, stationId) — use click-time DOM ID.
+                const clickId = _pendingExternalClickCatalogId;
+                if (clickId) {
+                    if (_vlcGotoById(clickId)) return;
+                    console.log('[AML VLC] setQueue(' + Object.keys(desc ?? {}).join('/') + ') → passthrough (id=' + clickId + ' not in queue)');
+                }
+                // Can't resolve to a specific track. Tear VLC down BEFORE letting MK run
+                // setQueue — otherwise VLC keeps playing while MK rebuilds the queue,
+                // corrupting the container index mapping and causing wrong-track navigation.
+                // After teardown, handleTrackChange re-enters lossless mode on next NPIDF.
+                console.log('[AML VLC] passthrough with teardown — handing off to MK');
+                const _origSQ = _mkApiSaved.setQueue;
+                if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
+                stopVLCPoll();
+                unbridgeDuration();
+                deleteSession(_sessionId);
+                _sessionId = null; _currentAssetId = null; _durationSec = 0;
+                showQualityBadge(null);
+                _vlcMode = false;
+                const _ae = document.getElementById('apple-music-player');
+                if (_ae) {
+                    for (const _p of ['load','paused','currentTime','volume','muted','pause','play']) {
+                        try { delete _ae[_p]; } catch (_) {}
+                    }
+                    // Stop VLC audio from competing with MK's incoming media
+                    try { _ae.pause(); _ae.src = ''; _ae.load(); } catch (_) {}
+                }
+                mk.play                = _mkApiSaved.play;
+                mk.setQueue            = _mkApiSaved.setQueue;
+                mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex;
+                _mkApiSaved            = null;
+                _allowCDNTransition    = false;
+                _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1;
+                return _origSQ.apply(mk, a);
             };
             mk.changeToMediaAtIndex = (idx) => {
-                if (_AML_DEBUG) console.log('[MK-DBG] mk.changeToMediaAtIndex(' + idx + ')');
+                console.log('[VLC-MK] mk.changeToMediaAtIndex(' + idx + ')');
                 const p = _mkApiSaved.changeToMediaAtIndex.call(mk, idx);
-                if (p?.then) p.then(r => _AML_DEBUG && console.log('[MK-DBG] ctmi(' + idx + ') resolved'), e => _AML_DEBUG && console.log('[MK-DBG] ctmi(' + idx + ') rejected:', e?.message || e));
+                if (p?.then) p.then(r => console.log('[VLC-MK] ctmi(' + idx + ') resolved'), e => console.log('[VLC-MK] ctmi(' + idx + ') rejected:', e?.message || e));
                 return p;
             };
             // Trace audio element events in the gate window so we can see MK's internal flow.
@@ -5225,7 +6389,7 @@ async function setup() {
                 // No track change happened — restore VLC state and close gate.
                 if (_mkApiSaved) { mk.play = _mkApiSaved.play; mk.setQueue = _mkApiSaved.setQueue; mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex; _mkApiSaved = null; }
                 if (_savedGateTracingCleanup) { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
-                _pendingExternalClickCatalogId = null;
+                _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1;
                 _pendingPlaylistFetch = null;
                 const el = getMKAudio();
                 if (el && _vlcMode) {
@@ -5270,8 +6434,19 @@ async function setup() {
 
             const newNext = _qId(mk.queue?.items?.[curPos + 1]);
             if (newNext && newNext !== snapNext) {
-                console.log('[aml] track-click: inserted at next, calling _amlNext');
-                _amlNext(true).catch(() => {});
+                // MK inserted the clicked track at the next queue position (common for
+                // same-playlist non-linear clicks). Find it in the session containers so
+                // we can jump directly rather than advancing by one via _amlNext.
+                const ci = _sessionContainerIdx;
+                const cur2 = _sessionContainers[ci];
+                const intraIdx = cur2 ? cur2.items.indexOf(newNext) : -1;
+                if (intraIdx >= 0 && intraIdx !== _sessionItemIdx + 1) {
+                    console.log('[aml] track-click: non-linear same-playlist jump to ci=', ci, 'ii=', intraIdx);
+                    _amlGoto(ci, intraIdx).catch(() => {});
+                } else {
+                    console.log('[aml] track-click: inserted at next, calling _amlNext');
+                    _amlNext(true).catch(() => {});
+                }
             }
         };
 
@@ -5285,6 +6460,12 @@ async function setup() {
     }, true);
 
     setupQueueHistory(mk); // async; fire-and-forget: loads history, then enables listener + inject
+    _resumeSetup(mk);      // async; fire-and-forget: install save hooks + offer resume chip
+    _discordSetup(mk);     // async; fire-and-forget: install Discord Rich Presence hooks
+    _scrobbleSetup();      // async; fire-and-forget: load Last.fm + ListenBrainz status
+    _scSetup();            // async; fire-and-forget: load Sound Check enabled state
+    _xfSetup();            // async; fire-and-forget: load crossfade duration
+    _hotkeysSetup();       // async; fire-and-forget: install in-app media hotkeys
 
     // Persistent listener: whenever MK appends tracks to the queue (station/autoplay
     // fetches the next batch asynchronously), sync them into the active container so
@@ -5320,16 +6501,21 @@ async function setup() {
         if (_amlGotoTarget !== null) {
             const item = mk.nowPlayingItem;
             if (!item) return; // null NPIDF from setQueue — suppress entirely, wait for ctmi NPIDF
-            const itemId = item?.id ?? item?.playParams?.id;
+            // Normalize IDs: _extractItemId strips the "a." library prefix so library
+            // track IDs ("a.1880097631" → "1880097631") compare correctly against
+            // _amlGotoTargetId which is always stored without the prefix.
+            const itemId = _extractItemId(item);
             const targetItem = mk.queue?.items?.[_amlGotoTarget];
-            const targetId = targetItem?.id ?? targetItem?.playParams?.id;
+            // Use the stored target ID as fallback — queue.items[_amlGotoTarget] is stale
+            // immediately after setQueue() because MK hasn't propagated the new queue yet.
+            const targetId = _extractItemId(targetItem) || _amlGotoTargetId;
             if (targetId && itemId !== targetId) {
                 // Spurious NPIDF for the OLD track during transition — drop it.
-                console.log('[AML] NPIDF filtered: spurious event for', item?.attributes?.name, '(advancing to idx', _amlGotoTarget, ')');
+                console.log('[AML] NPIDF filtered: spurious event for', item?.attributes?.name, '(advancing to idx', _amlGotoTarget, 'target id', targetId, ')');
                 return;
             }
             // Target track arrived (or target ID indeterminate) — clear filter and cancel safety timer.
-            _amlGotoTarget = null; _amlTransitioning = false;
+            _amlGotoTarget = null; _amlGotoTargetId = null; _amlTransitioning = false;
             clearTimeout(_amlAdvancingTimer); _amlAdvancingTimer = null;
         }
         // Confirm the track change and release any residual advance lock.
@@ -5345,6 +6531,18 @@ async function setup() {
                 item = mk.nowPlayingItem;
                 if (item) break;
             }
+        }
+        // Close the VLC CDN gate when a real track NPIDF arrives. Doing it here (after
+        // the item poll) rather than in check(true) avoids restoring mk.play to the VLC
+        // override during the null NPIDF window — which would otherwise cause MK to resume
+        // the old track via vlc/resume before the real NPIDF fires.
+        if (_mkApiSaved && item) {
+            clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null;
+            mk.play = _mkApiSaved.play; mk.setQueue = _mkApiSaved.setQueue;
+            mk.changeToMediaAtIndex = _mkApiSaved.changeToMediaAtIndex; _mkApiSaved = null;
+            if (typeof _savedGateTracingCleanup === 'function') { _savedGateTracingCleanup(); _savedGateTracingCleanup = null; }
+            _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1; _pendingPlaylistFetch = null;
+            _allowCDNTransition = false;
         }
         // Maintain session container state so next/prev navigate correctly.
         const wasInternal = _amlNavInternal;
@@ -5649,6 +6847,87 @@ window.addEventListener('unhandledrejection', (e) => {
     }
 });
 
+// ── Album colour extraction (Pear Desktop approach) ───────────────────────
+// Reads a 64×64 canvas of album artwork → returns { color, dark } hex strings
+// and the --theme-album-color / --theme-album-color-dark CSS var values as
+// RGB triples (matching Pear's own CSS-variable contract).
+//
+// Usage (not wired up yet):
+//   const img = new Image(); img.crossOrigin = 'anonymous';
+//   img.onload = () => {
+//     const result = _extractAlbumColor(img);
+//     document.documentElement.style.setProperty('--theme-album-color', result.colorRgb);
+//     document.documentElement.style.setProperty('--theme-album-color-dark', result.darkRgb);
+//   };
+//   img.src = mk.nowPlayingItem?.attributes?.artwork?.url?.replace('{w}','300').replace('{h}','300');
+
+function _extractAlbumColor(imgOrCanvas) {
+    const SIZE = 64;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = SIZE;
+    const c = cv.getContext('2d');
+    c.drawImage(imgOrCanvas, 0, 0, SIZE, SIZE);
+    const d = c.getImageData(0, 0, SIZE, SIZE).data;
+
+    // 1. Average all pixels.
+    let r = 0, g = 0, b = 0;
+    const n = SIZE * SIZE;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i+1]; b += d[i+2]; }
+    r = r/n; g = g/n; b = b/n;
+
+    // 2. Convert to HSL, darken until luminosity ≤ 0.5.
+    function toHsl(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        const max = Math.max(r,g,b), min = Math.min(r,g,b);
+        let h = 0, s = 0, l = (max+min)/2;
+        if (max !== min) {
+            const d = max - min;
+            s = l > 0.5 ? d/(2-max-min) : d/(max+min);
+            switch (max) {
+                case r: h = ((g-b)/d + (g<b?6:0))/6; break;
+                case g: h = ((b-r)/d + 2)/6; break;
+                case b: h = ((r-g)/d + 4)/6; break;
+            }
+        }
+        return [h*360, s, l];
+    }
+    function fromHsl(h, s, l) {
+        h /= 360;
+        const q = l < 0.5 ? l*(1+s) : l+s-l*s, p = 2*l-q;
+        const hue = t => {
+            t = t<0?t+1:t>1?t-1:t;
+            if (t<1/6) return p+(q-p)*6*t;
+            if (t<1/2) return q;
+            if (t<2/3) return p+(q-p)*(2/3-t)*6;
+            return p;
+        };
+        if (s === 0) { const v = Math.round(l*255); return [v,v,v]; }
+        return [Math.round(hue(h+1/3)*255), Math.round(hue(h)*255), Math.round(hue(h-1/3)*255)];
+    }
+    function lum(r, g, b) {
+        const lin = v => { v /= 255; return v <= 0.04045 ? v/12.92 : Math.pow((v+0.055)/1.055, 2.4); };
+        return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b);
+    }
+    function darken([h, s, l], amt) { return fromHsl(h, s, Math.max(0, l-amt)); }
+    function toHex([r, g, b]) {
+        return '#'+[r,g,b].map(v => Math.round(Math.max(0,Math.min(255,v))).toString(16).padStart(2,'0')).join('');
+    }
+
+    let col = [r,g,b], dark = darken(toHsl(r,g,b), 0.3);
+    // Darken primary colour until WCAG-adequate luminosity (≤ 0.5).
+    while (lum(...col) > 0.5) {
+        col  = darken(toHsl(...col), 0.05);
+        dark = darken(toHsl(...dark), 0.05);
+    }
+
+    return {
+        color:    toHex(col),
+        dark:     toHex(dark),
+        colorRgb: col.map(Math.round).join(', '),
+        darkRgb:  dark.map(Math.round).join(', '),
+    };
+}
+
 // ── Debug / console helpers ────────────────────────────────────────────────
 // Exposed on window so they can be called from DevTools or CDP.
 
@@ -5665,7 +6944,7 @@ window.amlClearSession = function () {
     if (_nextAlacSession) { deleteSession(_nextAlacSession.sess.sessionId); _nextAlacSession = null; }
     _nextAlacTried = false; _nextAlacRetries = 0;
     if (_nextAacSession) { deleteSession(_nextAacSession.sess.sessionId); _nextAacSession = null; }
-    _nextAacTried = false;
+    _nextAacTried = false; _discardNextAacStream();
     unbridgeDuration();
     try { _mkInstance?.pause?.(); } catch (_) {}
     console.log('[AML] amlClearSession: all playback stopped and session released');
@@ -5969,6 +7248,7 @@ window.amlGetQueueInfo = function () {
     }
 
     function closeSettings() {
+        _hotkeyCapture = null; // cancel any pending key-reassignment capture
         const dlg = document.getElementById('aml-settings-dialog');
         if (!dlg?.open) return;
         dlg.classList.replace('aml-opening', 'aml-closing') || dlg.classList.add('aml-closing');
@@ -5979,11 +7259,11 @@ window.amlGetQueueInfo = function () {
 
     function _amlMiniBtn(onClick) {
         const b = document.createElement('button');
-        b.textContent = '↺';
+        b.innerHTML = _svgReset;
         b.title = 'Reset to default';
         b.style.cssText = FF + 'width:22px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;' +
             'background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.12);border-radius:5px;' +
-            'color:rgba(255,255,255,0.35);font-size:13px;cursor:pointer;transition:all 0.15s;';
+            'color:rgba(255,255,255,0.35);cursor:pointer;transition:all 0.15s;';
         b.onmouseenter = () => { b.style.background = 'rgba(255,255,255,0.12)'; b.style.color = 'rgba(255,255,255,0.7)'; };
         b.onmouseleave = () => { b.style.background = 'rgba(255,255,255,0.06)'; b.style.color = 'rgba(255,255,255,0.35)'; };
         b.onclick = onClick;
@@ -6009,7 +7289,7 @@ window.amlGetQueueInfo = function () {
         return label;
     }
 
-    function _amlMakeQualityDropdown(prefKey, prefs, qualityOpts) {
+    function _amlMakeQualityDropdown(prefKey, prefs, qualityOpts, onChange) {
         const saved = prefs[prefKey] ?? 'lossless';
         let current = saved;
         const wrap = document.createElement('div');
@@ -6036,6 +7316,7 @@ window.amlGetQueueInfo = function () {
             if (save) {
                 window.amlBridge?.setTweak(prefKey, value);
                 if (prefKey === 'streaming-quality') _streamingQuality = value;
+                onChange?.(value);
             }
         }
         qualityOpts.forEach(({ value, label }) => {
@@ -6163,8 +7444,8 @@ window.amlGetQueueInfo = function () {
                 chip.appendChild(cl);
                 if (!builtin) {
                     const del = document.createElement('button');
-                    del.textContent = '×';
-                    del.style.cssText = 'border:none;background:transparent;color:rgba(255,255,255,0.35);cursor:pointer;font-size:14px;padding:0 0 0 4px;line-height:1;';
+                    del.innerHTML = _svgClose;
+                    del.style.cssText = 'border:none;background:transparent;color:rgba(255,255,255,0.35);cursor:pointer;padding:0 0 0 4px;display:inline-flex;align-items:center;';
                     del.onclick = () => {
                         st.thPresets = st.thPresets.filter(x => x.name !== name);
                         window.amlBridge.deleteThemePreset(name);
@@ -6460,7 +7741,7 @@ window.amlGetQueueInfo = function () {
         const { wrap, body: dBody } = makeSection('Display');
         const RST = FF+'border:none;background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.45);border-radius:4px;padding:2px 6px;font-size:11px;cursor:pointer;margin-left:6px;flex-shrink:0;';
         function makeResetBtn(label, onClick) {
-            const b = document.createElement('button'); b.title = `Reset ${label}`; b.textContent = '↺'; b.style.cssText = RST;
+            const b = document.createElement('button'); b.title = `Reset ${label}`; b.innerHTML = _svgReset; b.style.cssText = RST;
             b.onmouseenter = () => b.style.color = 'rgba(255,255,255,0.8)';
             b.onmouseleave = () => b.style.color = 'rgba(255,255,255,0.45)';
             b.onclick = onClick; return b;
@@ -7178,6 +8459,266 @@ window.amlGetQueueInfo = function () {
         return { wrap, applyLossless: applyDlLossless };
     }
 
+    async function _buildPlaybackSection(prefs, drmSignedIn) {
+        const { wrap, body } = makeSection('Playback');
+
+        // Resume playback on launch
+        const resumeRaw = await window.amlBridge?.storeRead('resumeEnabled').catch(() => null);
+        const resumeOn  = resumeRaw !== 'false' && resumeRaw !== false;
+        const resumeToggle = _amlIOSToggle(resumeOn, async (v) => {
+            _resumeEnabled = v;
+            await window.amlBridge?.storeWrite('resumeEnabled', String(v)).catch(() => {});
+            if (!v) _resumeClear();
+        });
+        body.appendChild(makeRow('Resume on launch', resumeToggle,
+            'Offer to restore your last queue and position on launch', false));
+
+        // Sound Check (loudness normalization) — experimental
+        const scRaw = await window.amlBridge?.storeRead('soundCheckEnabled').catch(() => null);
+        const scOn  = scRaw === 'true' || scRaw === true;
+        const scToggle = _amlIOSToggle(scOn, async (v) => {
+            await window.amlBridge?.storeWrite('soundCheckEnabled', String(v)).catch(() => {});
+            _scSetEnabled(v);
+        });
+        body.appendChild(makeRow('Loudness Normalisation', scToggle,
+            'Normalize track loudness to a consistent level (experimental)', false));
+
+        // ── Crossfade (AAC only) ──────────────────────────────────────────────
+        // Mode selector: Off / Automatic / Manual. Automatic uses Apple's default
+        // length with the dynamic skip logic; Manual exposes a 1–12s slider.
+        const _xfModes = ['off', 'auto', 'adaptive', 'manual'];
+        const xfModeInit = _xfModes.includes(prefs?.['crossfade-mode'])
+            ? prefs['crossfade-mode']
+            : ((Number(prefs?.['crossfade-sec']) || 0) > 0 ? 'manual' : 'off');
+        const xfManualInit = Math.min(12, Math.max(1, Number(prefs?.['crossfade-sec']) || 6));
+
+        // Manual seconds slider (its own row; shown only in Manual mode).
+        const xfVal = document.createElement('span');
+        xfVal.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:38px;text-align:right;';
+        xfVal.textContent = `${xfManualInit}s`;
+        const xfSl = document.createElement('input');
+        xfSl.type = 'range'; xfSl.min = 1; xfSl.max = 12; xfSl.step = 1; xfSl.value = xfManualInit;
+        xfSl.style.cssText = 'flex:1;accent-color:#fc3c44;margin:0 10px;';
+        xfSl.oninput = () => { const v = +xfSl.value; xfVal.textContent = `${v}s`; _xfSetManualSec(v); };
+        const xfSecInner = document.createElement('div');
+        xfSecInner.style.cssText = 'display:flex;align-items:center;flex:1;';
+        xfSecInner.append(xfSl, xfVal);
+        const xfSecRow = makeRow('Duration', xfSecInner, null, false);
+        xfSecRow.style.paddingLeft = '14px';
+
+        // Sub-option rows.
+        const gaplessOn = prefs?.['xf-preserve-gapless'] !== false;
+        const gaplessToggle = _amlIOSToggle(gaplessOn, (v) => {
+            _xfPreserveGapless = v;
+            window.amlBridge?.setTweak('xf-preserve-gapless', v);
+        });
+        const gaplessRow = makeRow('Keep albums gapless', gaplessToggle,
+            'Skip crossfade between consecutive tracks of the same album', false);
+        gaplessRow.style.paddingLeft = '14px';
+
+        const stationOn = prefs?.['xf-station'] !== false;
+        const stationToggle = _amlIOSToggle(stationOn, (v) => {
+            _xfStationEnabled = v;
+            window.amlBridge?.setTweak('xf-station', v);
+        });
+        const stationRow = makeRow('Crossfade autoplay & stations', stationToggle,
+            'Wait for the next recommended track so it fades in consistently', false);
+        stationRow.style.paddingLeft = '14px';
+
+        // Show/hide dependent rows for the current mode.
+        const xfApplyMode = (mode) => {
+            xfSecRow.style.display  = mode === 'manual' ? '' : 'none';
+            const on = mode !== 'off';
+            gaplessRow.style.display = on ? '' : 'none';
+            stationRow.style.display = on ? '' : 'none';
+        };
+        const { wrap: xfModeWrap } = _amlMakeQualityDropdown('crossfade-mode', { 'crossfade-mode': xfModeInit }, [
+            { value: 'off',      label: 'Off' },
+            { value: 'auto',     label: 'Automatic (Smart)' },
+            { value: 'adaptive', label: 'Automatic (Adaptive)' },
+            { value: 'manual',   label: 'Manual' },
+        ], (mode) => { _xfSetMode(mode); xfApplyMode(mode); });
+        body.appendChild(makeRow('Crossfade', xfModeWrap,
+            'Off · Smart (fixed) · Adaptive (per-track) · Manual — AAC only', false));
+        body.appendChild(xfSecRow);
+        body.appendChild(gaplessRow);
+        body.appendChild(stationRow);
+        xfApplyMode(xfModeInit);
+
+        // Discord Rich Presence
+        const discordRaw = await window.amlBridge?.storeRead('discordEnabled').catch(() => null);
+        const discordOn  = discordRaw === 'true' || discordRaw === true;
+        const discordToggle = _amlIOSToggle(discordOn, async (v) => {
+            _discordEnabled = v;
+            await window.amlBridge?.storeWrite('discordEnabled', String(v)).catch(() => {});
+            if (v) _discordUpdateNow();
+            else window.amlBridge?.discordDisable?.();
+        });
+        body.appendChild(makeRow('Discord Rich Presence', discordToggle,
+            'Show the current track on your Discord profile (requires a client ID in main.mjs)', false));
+
+        return { wrap };
+    }
+
+    function _buildShortcutsSection() {
+        const { wrap, body } = makeSection('Keyboard Shortcuts');
+
+        // Master enable toggle.
+        const enToggle = _amlIOSToggle(_hotkeysEnabled, async (v) => {
+            _hotkeysEnabled = v;
+            await window.amlBridge?.storeWrite('hotkeysEnabled', String(v)).catch(() => {});
+        });
+        body.appendChild(makeRow('In-app shortcuts', enToggle,
+            'Control playback with the keyboard when the window is focused', false));
+
+        // One reassignable row per action.
+        const keyBtns = {};
+        for (const act of _HOTKEY_ACTIONS) {
+            const btn = makeBtn(_hotkeyKeyLabel(_hotkeyBindings[act.id]));
+            btn.style.minWidth = '58px';
+            keyBtns[act.id] = btn;
+            btn.onclick = () => {
+                btn.textContent = 'Press a key…';
+                _hotkeyCapture = (key) => {
+                    if (key) { _hotkeyBindings[act.id] = key; _hotkeySaveBindings(); }
+                    btn.textContent = _hotkeyKeyLabel(_hotkeyBindings[act.id]);
+                };
+            };
+            body.appendChild(makeRow(act.label, btn, null, false));
+        }
+
+        // Reset to defaults.
+        const resetRow = document.createElement('div');
+        resetRow.style.cssText = 'padding:10px 0;display:flex;gap:6px;';
+        const resetBtn = makeBtn('Reset to defaults');
+        resetBtn.onclick = () => {
+            for (const act of _HOTKEY_ACTIONS) {
+                _hotkeyBindings[act.id] = act.def;
+                if (keyBtns[act.id]) keyBtns[act.id].textContent = _hotkeyKeyLabel(act.def);
+            }
+            _hotkeySaveBindings();
+        };
+        resetRow.appendChild(resetBtn);
+        body.appendChild(resetRow);
+
+        return { wrap };
+    }
+
+    // Small helper: a labelled note line linking to a setup page (opens externally).
+    function _scrobbleNote(html) {
+        const n = document.createElement('div');
+        n.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.42);line-height:1.5;padding:2px 0 10px;';
+        n.innerHTML = html;
+        n.querySelectorAll('a').forEach(a => {
+            a.style.cssText = 'color:#fc3c44;text-decoration:none;';
+            a.onclick = (e) => { e.preventDefault(); window.amlBridge?.openExternal?.(a.getAttribute('href')) ?? window.open(a.getAttribute('href')); };
+        });
+        return n;
+    }
+
+    async function _buildScrobbleSection() {
+        const { wrap, body } = makeSection('Scrobbling');
+
+        // ── Last.fm ──────────────────────────────────────────────────────────
+        body.appendChild(_scrobbleSubhead('Last.fm'));
+        const lf = await window.amlBridge?.lastfmStatus().catch(() => null) ?? {};
+
+        // Auto-seed hardcoded credentials if not yet stored.
+        if (LASTFM_API_KEY && (!lf.apiKey || !lf.secretSet)) {
+            await window.amlBridge?.lastfmSetCredentials({ apiKey: LASTFM_API_KEY, secret: LASTFM_API_SECRET }).catch(() => {});
+            Object.assign(lf, { apiKey: LASTFM_API_KEY, secretSet: true, configured: true });
+        }
+
+        const lfVal = document.createElement('div');
+        lfVal.style.cssText = 'display:flex;align-items:center;gap:8px;';
+        const lfConnected = () => {
+            lfVal.innerHTML = '';
+            lfVal.appendChild(statusVal(lf.username || 'connected', true));
+            const disc = makeBtn('Disconnect');
+            disc.onclick = async () => { await window.amlBridge?.lastfmDisconnect(); _lastfmConnected = false; openSettings(); };
+            lfVal.appendChild(disc);
+        };
+        const lfDisconnected = () => {
+            lfVal.innerHTML = '';
+            const connect = makeBtn('Connect');
+            connect.onclick = async () => {
+                const r = await window.amlBridge?.lastfmAuth();
+                if (r?.error) { connect.textContent = 'Error — retry'; return; }
+                connect.textContent = 'Finish connecting';
+                connect.onclick = async () => {
+                    const s = await window.amlBridge?.lastfmSession(r.token);
+                    if (s?.username) { _lastfmConnected = true; lf.username = s.username; lfConnected(); }
+                    else { connect.textContent = 'Approve in the window, then retry'; }
+                };
+            };
+            lfVal.appendChild(connect);
+        };
+        (lf.connected ? lfConnected : lfDisconnected)();
+        body.appendChild(makeRow('Account', lfVal, 'Log in and authorize AML in the in-app Last.fm window', false));
+
+        // ── ListenBrainz ─────────────────────────────────────────────────────
+        body.appendChild(_scrobbleSubhead('ListenBrainz'));
+        const lb = await window.amlBridge?.lbStatus().catch(() => null) ?? {};
+        const lbCard = document.createElement('div');
+        lbCard.style.cssText = FF +
+            'display:flex;flex-direction:column;margin:4px 0 8px;' +
+            'border-radius:8px;border:0.5px solid rgba(255,255,255,0.12);overflow:hidden;';
+        const lbInner = document.createElement('div');
+        lbInner.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+            'padding:8px 12px;background:rgba(255,255,255,0.04);';
+        const lbLabel = document.createElement('span');
+        lbLabel.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);flex:0 0 auto;margin-right:10px;';
+        lbLabel.textContent = 'Account';
+        const lbRight = document.createElement('div');
+        lbRight.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;';
+        lbInner.append(lbLabel, lbRight);
+        lbCard.appendChild(lbInner);
+        body.appendChild(lbCard);
+        body.appendChild(_scrobbleNote(
+            'Paste your token from <a href="https://listenbrainz.org/settings/">listenbrainz.org/settings</a> ' +
+            '(the "User token" field). No app registration needed.'));
+
+        const lbRenderConnected = () => {
+            lbRight.innerHTML = '';
+            lbRight.appendChild(statusVal(lb.username || 'connected', true));
+            const disc = makeBtn('Disconnect');
+            disc.onclick = async () => { await window.amlBridge?.lbDisconnect(); _lbConnected = false; openSettings(); };
+            lbRight.appendChild(disc);
+        };
+        const lbRenderInput = () => {
+            lbRight.innerHTML = '';
+            const lbTokenInput = makeInput('password', 'User token');
+            lbTokenInput.style.cssText = FF +
+                'flex:1;background:transparent;border:none;outline:none;padding:4px 0;' +
+                'font-size:13px;color:rgba(255,255,255,0.85);';
+            lbTokenInput.style.removeProperty('width');
+            const lbConnBtn = makeBtn('Connect');
+            lbConnBtn.onclick = async () => {
+                const tok = lbTokenInput.value.trim();
+                if (!tok) return;
+                lbConnBtn.textContent = '…';
+                lbConnBtn.disabled = true;
+                await window.amlBridge?.lbSetToken(tok);
+                const s = await window.amlBridge?.lbStatus();
+                if (s?.connected) { _lbConnected = true; lb.username = s.username; lb.connected = true; lbRenderConnected(); }
+                else { lbConnBtn.textContent = 'Invalid'; lbConnBtn.disabled = false; }
+            };
+            lbRight.append(lbTokenInput, lbConnBtn);
+        };
+        if (lb.connected) lbRenderConnected(); else lbRenderInput();
+
+        return { wrap };
+    }
+
+    // Subheading divider inside a section body.
+    function _scrobbleSubhead(text) {
+        const h = document.createElement('div');
+        h.style.cssText = FF + 'font-size:10px;font-weight:600;letter-spacing:0.06em;color:rgba(255,255,255,0.35);' +
+            'padding:14px 0 4px;text-transform:uppercase;';
+        h.textContent = text;
+        return h;
+    }
+
     async function _buildHistorySection() {
         const { wrap, body: histBody } = makeSection('History');
         const histEnabledRaw = await window.amlBridge?.storeRead('historyEnabled').catch(() => null);
@@ -7329,6 +8870,10 @@ window.amlGetQueueInfo = function () {
         dlg.appendChild(dlWrap);
         // Wire lossless toggle → downloads quality row.
         onLosslessChange(applyDlLossless);
+        const { wrap: playbackWrap } = await _buildPlaybackSection(prefs, drmSignedIn);
+        dlg.appendChild(playbackWrap);
+        dlg.appendChild(_buildShortcutsSection().wrap);
+        dlg.appendChild((await _buildScrobbleSection()).wrap);
         dlg.appendChild(await _buildHistorySection());
         dlg.appendChild(await _buildLibrarySection());
         dlg.appendChild(_buildDevSection(prefs));
@@ -7346,7 +8891,7 @@ window.amlGetQueueInfo = function () {
     const COG_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:17%"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.05-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.03-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>`;
     // Apple Music Android ic_swipe_download — bold solid downward arrow
     const DOWNLOAD_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:19%"><path d="M11.9952,21.1159C12.3277,21.1159 12.6697,20.9829 12.8977,20.7359L19.12,14.5136C19.3765,14.2571 19.5,13.9531 19.5,13.6396C19.5,12.9462 19.006,12.4522 18.341,12.4522C17.9801,12.4522 17.6856,12.6042 17.4671,12.8322L15.3011,14.9791L13.1352,17.4395L13.2112,15.3781L13.2112,4.254C13.2112,3.5035 12.7172,3 11.9952,3C11.2733,3 10.7793,3.5035 10.7793,4.254L10.7793,15.3781L10.8648,17.4395L8.6894,14.9791L6.5329,12.8322C6.3049,12.6042 6.0199,12.4522 5.659,12.4522C4.994,12.4522 4.5,12.9462 4.5,13.6396C4.5,13.9531 4.6235,14.2571 4.88,14.5136L11.0928,20.7359C11.3303,20.9829 11.6628,21.1159 11.9952,21.1159Z"/></svg>`;
-
+    // Mini-player / PiP glyph — window with an inset panel bottom-right.
     function findAccountRow() {
         // account-menu is confirmed via vision-glass.js selectors.
         const nav = document.querySelector('nav.navigation') || document.querySelector('nav');
@@ -7395,7 +8940,6 @@ window.amlGetQueueInfo = function () {
             dlBtn.onclick = (e) => { e.stopPropagation(); window.__amlToggleDownloads?.(); };
             nav.appendChild(dlBtn);
         }
-
         _positionCogButtons(nav, accountRow, cog, dlBtn);
 
         if (!_cogResizeObs) {
@@ -7790,6 +9334,38 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         });
     }
 
+    // Hide playlist submenu by default; show it only while hovering "Add to Playlist".
+    function setupSubmenuHover(menuRoot) {
+        if (!menuRoot || menuRoot._amlSubmenuWired) return;
+        const li = menuRoot.querySelector("li.contextual-menu-item:has(button[title='Add to Playlist'])");
+        if (!li) return;
+        const subs = () => Array.from(menuRoot.querySelectorAll(
+            'div.contextual-menu.contextual-menu--nested, div.contextual-menu.contextual-menu--in-submenu'
+        ));
+        const hide = () => subs().forEach(s => {
+            s.style.setProperty('opacity', '0', 'important');
+            s.style.setProperty('pointer-events', 'none', 'important');
+            s.style.setProperty('visibility', 'hidden', 'important');
+        });
+        const show = () => subs().forEach(s => {
+            s.style.removeProperty('opacity');
+            s.style.removeProperty('pointer-events');
+            s.style.removeProperty('visibility');
+        });
+        hide();
+        menuRoot._amlSubmenuWired = true;
+        li.addEventListener('mouseenter', show);
+        li.addEventListener('mouseleave', e => {
+            // Stay visible if moving into the submenu itself
+            if (subs().some(s => s.contains(e.relatedTarget) || s === e.relatedTarget)) return;
+            hide();
+        });
+        subs().forEach(s => s.addEventListener('mouseleave', e => {
+            if (li.contains(e.relatedTarget) || e.relatedTarget === li) return;
+            hide();
+        }));
+    }
+
     // Watch body (childList only, no subtree) for amp-contextual-menu insertion.
     // Apple creates it fresh per open (both ⋯ click and right-click) as a direct body child.
     const _menuObservers = new Map();
@@ -7829,11 +9405,15 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 const inner = new MutationObserver(() => {
                     injectMenuIcons(node.querySelector('.contextual-menu'));
                     clampSubmenus(node);
+                    setupSubmenuHover(node);
                 });
                 inner.observe(node, { childList: true, subtree: true });
                 _menuObservers.set(node, inner);
                 // Initial injection — buttons may not be in DOM yet; retry once after paint.
-                setTimeout(() => injectMenuIcons(node.querySelector('.contextual-menu')), 80);
+                setTimeout(() => {
+                    injectMenuIcons(node.querySelector('.contextual-menu'));
+                    setupSubmenuHover(node);
+                }, 80);
             }
             for (const node of m.removedNodes) {
                 if (node.nodeType !== 1 || node.tagName !== 'AMP-CONTEXTUAL-MENU') continue;

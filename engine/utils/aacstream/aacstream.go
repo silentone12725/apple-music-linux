@@ -113,7 +113,9 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 		slog.Error("GetWebplayback: encode JSON", "err", err)
 		return "", "", "", err
 	}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(jsonData)))
+	ctx30, cancel30 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel30()
+	req, err := http.NewRequestWithContext(ctx30, "POST", url, bytes.NewBuffer([]byte(jsonData)))
 	if err != nil {
 		slog.Error("GetWebplayback: create request", "err", err)
 		return "", "", "", err
@@ -124,11 +126,7 @@ func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool
 	req.Header.Set("Referer", "https://music.apple.com/")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", authtoken))
 	req.Header.Set("x-apple-music-user-token", mutoken)
-	// 创建 HTTP 客户端
-	//client := &http.Client{}
-	resp, err := http.DefaultClient.Do(req)
-	// 发送请求
-	//resp, err := client.Do(req)
+	resp, err := webplaybackClient.Do(req)
 	if err != nil {
 		slog.Error("GetWebplayback: send request", "err", err)
 		return "", "", "", err
@@ -550,12 +548,29 @@ func fileWriter(wg *sync.WaitGroup, segmentsChan <-chan Segment, outputFile io.W
 	}
 }
 
+// appleIPv4Dial forces IPv4 so Apple CDN AAAA records (unreachable on many
+// Linux machines) don't cause "network is unreachable" failures.
+func appleIPv4Dial(timeout, keepAlive time.Duration) func(context.Context, string, string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout, KeepAlive: keepAlive}
+	return func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return d.DialContext(ctx, "tcp4", addr)
+	}
+}
+
+// webplaybackClient is used for Apple webplayback API calls and master playlist
+// fetches — needs a timeout; http.DefaultClient has none.
+var webplaybackClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext:         appleIPv4Dial(15*time.Second, 30*time.Second),
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     60 * time.Second,
+	},
+	Timeout: 30 * time.Second,
+}
+
 var mvHTTPClient = &http.Client{
 	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           appleIPv4Dial(10*time.Second, 30*time.Second),
 		MaxIdleConns:          64,
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       90 * time.Second,
@@ -579,8 +594,10 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()
 
+	mvCtx, mvCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer mvCancel()
 	limiter := newAimdLimiter(8, 2, 32)
-	downloadAndAssemble(context.Background(), urls, tempFile, limiter)
+	downloadAndAssemble(mvCtx, urls, tempFile, limiter)
 
 	if err := tempFile.Close(); err != nil {
 		slog.Error("ExtMvData: close temp file", "err", err)
@@ -617,6 +634,31 @@ func ExtMvData(keyAndUrls string, savePath string) error {
 	return nil
 }
 
+// licenseTransport is shared across all AcquireKey calls so TCP+TLS connections
+// to play.itunes.apple.com are reused — eliminating per-track handshake latency.
+// Mirrors Android FootHillDecryptionKeyController which holds a persistent CDM
+// session rather than opening a new one per track.
+var licenseTransport = &http.Transport{
+	DialContext:         (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext,
+	MaxIdleConns:        10,
+	IdleConnTimeout:     90 * time.Second,
+	TLSHandshakeTimeout: 10 * time.Second,
+	ForceAttemptHTTP2:   true,
+}
+
+// WarmLicensePool pre-establishes a TLS connection to Apple's FairPlay license
+// server so the first AcquireKey call skips the handshake latency.
+// Mirrors Android FootHillDecryptionKey.DEFAULT_PREFETCH_KEY_URI warm-up via
+// FootHillDecryptionKeyController at BaseMediaPlayerContext.<init> time.
+func WarmLicensePool(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	cl := resty.New().SetTransport(licenseTransport)
+	if resp, err := cl.R().SetContext(ctx).Get("https://play.itunes.apple.com/"); err == nil {
+		log.Printf("[drm] license pool warmed status=%d", resp.StatusCode())
+	}
+}
+
 // AcquireKey acquires the AES decryption key for one Apple Music track via the
 // Widevine licence endpoint and returns the raw key bytes.  This is the only
 // exported key-acquisition function; callers must not store the bytes in any
@@ -639,7 +681,7 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 		"authorization":            "Bearer " + token,
 		"x-apple-music-user-token": mutoken,
 	}
-	cl := resty.New()
+	cl := resty.New().SetTransport(licenseTransport)
 	cl.SetHeaders(headers)
 	k := wvkey.Key{
 		ReqCli:        cl,
@@ -654,10 +696,32 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 	return keyBytes, err
 }
 
+// stableCacheKey strips rotating query parameters (Apple CDN accessKey rotates
+// per webplayback session) while preserving the byte-range fragment.
+// Mirrors Android MediaHlsAssetCache keying by (fileName, byteStart, byteEnd)
+// not by full signed URL — so cache hits survive token rotation between replays.
+func stableCacheKey(url string) string {
+	frag := strings.Index(url, "#bytes=")
+	if frag >= 0 {
+		base := url[:frag]
+		if q := strings.IndexByte(base, '?'); q >= 0 {
+			base = base[:q]
+		}
+		return base + url[frag:]
+	}
+	if q := strings.IndexByte(url, '?'); q >= 0 {
+		return url[:q]
+	}
+	return url
+}
+
 // fetchSegment downloads cacheKey (cache-hit → returns immediately) with up to
 // 3 retries and exponential backoff. Handles "#bytes=<off>-<end>" range fragments.
 func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
-	if cached, ok := GetCachedSegment(cacheKey); ok {
+	// Use a stable key (no rotating query params) for cache lookup and storage.
+	// The fetch URL retains the signed query params needed for CDN auth.
+	stableKey := stableCacheKey(cacheKey)
+	if cached, ok := GetCachedSegment(stableKey); ok {
 		return cached, nil
 	}
 	fetchURL, rangeHdr := cacheKey, ""
@@ -699,7 +763,7 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 			}
 			return nil, fmt.Errorf("read body: %w", err)
 		}
-		PutCachedSegment(cacheKey, data)
+		PutCachedSegment(stableKey, data)
 		return data, nil
 	}
 	return nil, fmt.Errorf("all retries exhausted")
@@ -936,7 +1000,7 @@ func DownloadSegmentsParallel(ctx context.Context, urls []string, w io.Writer, c
 // bandwidth variant is returned as a fallback.
 // Pass codec="" to get the highest-bandwidth variant regardless of codec.
 func SelectVariantForCodec(masterURL, codec string) (string, error) {
-	resp, err := http.Get(masterURL)
+	resp, err := webplaybackClient.Get(masterURL)
 	if err != nil {
 		return "", err
 	}
