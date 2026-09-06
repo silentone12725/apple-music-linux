@@ -128,7 +128,7 @@ func HLSMVVideoSource(med *hls.Media) pipeline.SeekableSource {
 type hlsMVVideoSource struct{ media *hls.Media }
 
 func (s *hlsMVVideoSource) Stream(ctx context.Context, w io.Writer) error {
-	return aacstream.DownloadMVSegmentsParallel(ctx, s.media.AllURLs(), w, 3)
+	return aacstream.DownloadMVSegmentsParallel(ctx, s.media.AllURLs(), w, 5)
 }
 
 func (s *hlsMVVideoSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
@@ -139,7 +139,7 @@ func (s *hlsMVVideoSource) SourceFrom(startSec float64) (pipeline.Source, float6
 type hlsMVVideoRaw struct{ urls []string }
 
 func (s *hlsMVVideoRaw) Stream(ctx context.Context, w io.Writer) error {
-	return aacstream.DownloadMVSegmentsParallel(ctx, s.urls, w, 3)
+	return aacstream.DownloadMVSegmentsParallel(ctx, s.urls, w, 5)
 }
 
 // ── Passthrough (AAC clear content) ──────────────────────────────────────────

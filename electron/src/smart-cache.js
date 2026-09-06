@@ -105,6 +105,7 @@ class SmartCache {
         const payload = {
             context: { type, id: id ?? null, reason },
             currentIndex: currentIndex ?? -1,
+            lossless: window._amlLossless ?? false,
             tracks: tracks.map((t, i) => {
                 const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId
                     ?? t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;

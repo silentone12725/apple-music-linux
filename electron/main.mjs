@@ -106,6 +106,72 @@ let engineProc = null;
 let isQuitting = false;
 let _engineRestartDelay = 1000; // ms; doubles on each crash, resets on clean uptime
 
+// ── Deep link handling ────────────────────────────────────────────────────────
+// Supported URL forms:
+//   https://music.apple.com/{sf}/song/{slug}/{id}
+//   https://music.apple.com/{sf}/album/{slug}/{id}
+//   https://music.apple.com/{sf}/artist/{slug}/{id}
+//   https://music.apple.com/{sf}/playlist/{id}         (id = pl.xxx)
+//   https://music.apple.com/{sf}/music-video/{slug}/{id}
+//   aml://song/{id}
+//   aml://album/{id}  etc.
+const APPLE_MUSIC_TYPES = new Set(['song','album','artist','playlist','music-video']);
+
+function _parseDeepLink(raw) {
+    if (!raw) return null;
+    try {
+        const u = new URL(raw);
+        let parts, sf;
+        if (u.protocol === 'aml:') {
+            // aml://{type}/{id}  — hostname is the type
+            const type = u.hostname;
+            const id   = u.pathname.replace(/^\//, '');
+            if (!APPLE_MUSIC_TYPES.has(type) || !id) return null;
+            return { type, id, sf: null };
+        }
+        if ((u.hostname === 'music.apple.com' || u.hostname === 'itunes.apple.com') && u.protocol === 'https:') {
+            parts = u.pathname.split('/').filter(Boolean);
+            // /{sf}/{type}/{...slugs}/{id}  — last segment is the ID
+            if (parts.length < 3) return null;
+            sf   = parts[0];
+            const type = parts[1];
+            const id   = parts[parts.length - 1];
+            if (!APPLE_MUSIC_TYPES.has(type) || !id) return null;
+            return { type, id, sf };
+        }
+        return null;
+    } catch { return null; }
+}
+
+function _dispatchDeepLink(url) {
+    const intent = _parseDeepLink(url);
+    if (!intent) return;
+    console.log('[AML] deep link:', intent);
+    if (win) {
+        if (win.isMinimized()) win.restore();
+        win.focus();
+        win.webContents.send('aml:open', intent);
+    }
+}
+
+// Register custom aml:// URI scheme so `xdg-open aml://song/123` opens AML.
+app.setAsDefaultProtocolClient('aml');
+
+// Single-instance lock: if a second instance opens (e.g. user clicked a link
+// while AML is already running), forward the URL to the existing instance.
+const _gotLock = app.requestSingleInstanceLock();
+if (!_gotLock) {
+    // This is the second instance — it will exit immediately. The first instance
+    // handles the URL via the second-instance event below.
+    app.quit();
+}
+app.on('second-instance', (_e, argv) => {
+    // argv[argv.length - 1] is the URL on Linux (passed by xdg-open / the OS)
+    const url = argv.find(a => a.startsWith('aml://') || a.startsWith('https://music.apple.com'));
+    if (url) _dispatchDeepLink(url);
+    else if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
+});
+
 // ── Engine API server ─────────────────────────────────────────────────────────
 // The engine binary decrypts Apple Music streams and exposes them as plain
 // AAC/H.264 fMP4 over HTTP so the renderer can pipe them into a MediaSource.
@@ -1831,12 +1897,29 @@ ipcMain.on('discord:update', (_, data) => {
         details: (data.name || '').slice(0, 128) || undefined,
         state:   (data.artist || '').slice(0, 128) || undefined,
     };
+    // Artwork + play/pause badge.
+    // small_image keys ("play" / "pause") must be uploaded as assets in the
+    // Discord Developer Portal under this application (client ID 1545304879441121320).
     if (data.artworkUrl) {
-        activity.assets = { large_image: data.artworkUrl, large_text: (data.album || '').slice(0, 128) || undefined };
+        activity.assets = {
+            large_image: data.artworkUrl,
+            large_text:  (data.album || '').slice(0, 128) || undefined,
+            small_image: data.playing ? 'play' : 'pause',
+            small_text:  data.playing ? 'Playing' : 'Paused',
+        };
     }
     if (data.playing && data.startedAtMs) {
-        activity.timestamps = { start: Math.round(data.startedAtMs) };
-        if (data.endsAtMs) activity.timestamps.end = Math.round(data.endsAtMs);
+        activity.timestamps = { start: Math.round(data.startedAtMs / 1000) };
+        if (data.endsAtMs) activity.timestamps.end = Math.round(data.endsAtMs / 1000);
+    } else {
+        // Explicitly null timestamps so Discord clears the running timer.
+        // Omitting the key leaves the previous timestamps cached in the client.
+        activity.timestamps = null;
+    }
+    // "Open in Apple Music" button — opens the song/MV page in the user's browser.
+    // Buttons are visible to everyone viewing the user's profile except the user themselves.
+    if (data.appleUrl) {
+        activity.buttons = [{ label: data.isVideo ? 'Open Music Video' : 'Open in Apple Music', url: data.appleUrl }];
     }
     _discordPendingActivity = activity;
     if (!_discordSocket && !_discordConnecting) _discordConnect();
@@ -2314,6 +2397,19 @@ app.whenReady().then(() => {
     // reachability at startup and silently falls back to the Apple CDN if the
     // engine isn't running, so a missing binary is not a hard failure.
     startEngine();
+
+    // Cold-start deep link: if AML was launched with a URL argument (e.g. from
+    // xdg-open or a browser "Open in AML" prompt), dispatch it after the window
+    // is ready. The renderer registers its aml:open listener inside waitForMusicKit,
+    // so we defer until ui-ready has fired (listener installed in main.mjs).
+    const coldUrl = process.argv.find(a => a.startsWith('aml://') || a.startsWith('https://music.apple.com'));
+    if (coldUrl) {
+        ipcMain.once('app:ui-ready', () => {
+            // Give MusicKit ~2 s to fully initialise after ui-ready before
+            // dispatching the navigation so mk.setQueue() has a valid instance.
+            setTimeout(() => _dispatchDeepLink(coldUrl), 2000);
+        });
+    }
 });
 
 // Sync-write the encrypted store to disk, cancelling any pending timer.

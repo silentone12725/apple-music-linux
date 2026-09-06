@@ -119,11 +119,12 @@ Icon=apple-music-linux
 Type=Application
 Categories=AudioVideo;Music;Network;
 StartupWMClass=Apple Music
-MimeType=x-scheme-handler/ame;
+MimeType=x-scheme-handler/aml;x-scheme-handler/ame;
 Keywords=music;apple;streaming;
 EOF
 
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+xdg-mime default apple-music-linux.desktop x-scheme-handler/aml 2>/dev/null || true
 
 # ── version stamp ─────────────────────────────────────────────────────────────
 echo "$VERSION" > "$INSTALL_DIR/.version"

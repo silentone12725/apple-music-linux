@@ -626,6 +626,9 @@ let _nextAlacTried   = false; // prevents re-triggering within the same track
 let _nextAacSession = null;  // { adamId, sess } — pre-warmed session for the next AAC track
 let _nextAacTried   = false; // prevents re-triggering within the same track
 let _nextAlacRetries = 0;    // retry attempts so far for current track (max 3)
+// ── Gapless MV pre-warm ───────────────────────────────────────────────────────
+let _nextMvSession = null;   // { adamId, sess } — pre-warmed session for the next MV track
+let _nextMvTried   = false;  // prevents re-triggering within the same track
 // Gapless AAC stream pre-open: during the current track's tail, open the next
 // track's audio stream fetch so its TTFB is paid before 'ended' fires. The
 // pre-warmed *session* skips the /api/v1/playback POST; this skips the audio
@@ -1121,6 +1124,21 @@ function _showQualityPopup(anchorEl) {
 }
 
 function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
+    // When codec=null (session teardown / track change), schedule an optimistic
+    // lossless badge to appear 80 ms after DOM refresh settles. Firing synchronously
+    // here is too early — Apple Music's marquee DOM rebuild detaches any badge we
+    // insert during the transition animation. The timeout gives the slot time to
+    // re-attach before we insert. If a real session confirms the codec first, the
+    // timeout is a no-op.
+    if (codec === null && _engineCaps.lossless && _streamingQuality !== 'high-quality') {
+        const optSR = _qualityBadgeInfo.sampleRate ?? 44100;
+        const optBD = _qualityBadgeInfo.bitDepth   ?? 16;
+        setTimeout(() => {
+            if (_qualityBadgeInfo.codec === null) {
+                showQualityBadge('alac', optSR, optBD, null);
+            }
+        }, 80);
+    }
     _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
     let badge = document.getElementById('aml-quality-badge');
 
@@ -1136,6 +1154,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
     } else {
         if (badge) badge.style.display = 'none';
         document.getElementById('aml-quality-popup')?.style && (document.getElementById('aml-quality-popup').style.display = 'none');
+        window.amlBridge?.mprisUpdate?.({ qualityBadge: null });
         return;
     }
 
@@ -1196,6 +1215,9 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
     badge.style.display = 'inline-flex';
 
     window._syncNpBadge?.();
+
+    // Mirror badge to miniplayer via MPRIS channel (cheapest path — no new IPC channel).
+    window.amlBridge?.mprisUpdate?.({ qualityBadge: { codec, sampleRate, bitDepth, spatialAudio } });
 }
 
 // ── Now Playing overlay quality badge (fullscreen lyrics + vertical panel) ───
@@ -1646,18 +1668,44 @@ async function startMVPipeline() {
     const _mvGen = _generation; // capture at entry; if a second handleTrackChange fires, _generation will differ
     console.log(`[AML MV-V] enter gen=${_mvGen} session=${_sessionId} t=${Date.now()}`);
 
+    // Start container poll immediately — runs in parallel with MSE setup below.
+    // getMVContainer polls every 100ms for the amp-window-takeover container (300–800ms wait).
+    // Starting it non-awaited lets us create video/audio elements and begin MSE negotiation
+    // during that window, so sourceopen is likely already resolved when we need it.
+    const containerPromise = getMVContainer(_abortCtrl.signal);
+
+    // ── Video + audio elements: created early so browser can buffer before container ──
+    // myVid is parked off-screen; once the container resolves it is moved into place.
+    const myVid = document.createElement('video');
+    myVid.muted = true; // audio is on mkAudio
+    myVid.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;';
+    document.body.appendChild(myVid);
+
+    // Separate audio element — own MSE, own SB, pipeToSourceBuffer handles everything.
+    const mkAudio = document.createElement('audio');
+    mkAudio.style.display = 'none';
+    document.body.appendChild(mkAudio);
+
+    // ── Video MSE: started early so browser buffers video frames during container poll ──
+    const ms = new MediaSource();
+    const msBlobUrl = URL.createObjectURL(ms);
+    myVid.src = msBlobUrl;
+
+    // ── Await container (already polling) ────────────────────────────────────────
     // Video: wait for DIV.container.takeover inside amp-window-takeover (the real full-screen
     // player — 908×513, position:fixed, z-index:20). amp-video-player-internal sits inside it
     // at top:256.5px and is only 185px tall, which caused the thin-strip aspect-ratio bug.
     let mvContainer;
     try {
-        mvContainer = await getMVContainer(_abortCtrl.signal);
+        mvContainer = await containerPromise;
         console.log(`[AML MV] container found ${mvContainer.offsetWidth}×${mvContainer.offsetHeight}`);
     } catch (e) {
         console.warn('[AML MV] MV container not found, aborting:', e.message);
+        myVid.src = ''; if (myVid.parentNode) myVid.parentNode.removeChild(myVid);
+        if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
+        URL.revokeObjectURL(msBlobUrl);
         return;
     }
-
 
     // amp-video-player-internal sits at top:256.5px / 185px tall inside the 513px container.
     // Expand it to fill the full container and feed our MSE directly to its native <video>
@@ -1721,17 +1769,10 @@ async function startMVPipeline() {
     mvContainer.style.setProperty('align-content', 'center', 'important');
     mvContainer.style.setProperty('cursor', 'default', 'important');
 
-    // ── Video element (Layer 3) ──────────────────────────────────────────────────
+    // ── Video element (Layer 3): move from off-screen parking into container ──────
     // CSS transform centering: top:50%+left:50%+translate(-50%,-50%) places the video
     // at the true viewport center regardless of avpi's internal layout offsets.
-    const myVid = document.createElement('video');
-    myVid.muted = true; // audio is on mkAudio
     myVid.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;';
-
-    // Separate audio element — own MSE, own SB, pipeToSourceBuffer handles everything.
-    const mkAudio = document.createElement('audio');
-    mkAudio.style.display = 'none';
-    document.body.appendChild(mkAudio);
     mvContainer.insertAdjacentElement('afterbegin', myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = '0';
     // Suppress CDN-buffering events from nativeVidEl that cause MK loading-indicator blinking.
@@ -2448,8 +2489,8 @@ async function startMVPipeline() {
     // Why mute instead of pause mkAudio:
     //   MK owns that element; pausing it triggers state=3 which can cause
     //   track-skip under sustained stalls. Muting keeps MK in "playing" state.
-    const BUF_LOW  = 1.0; // pause when lead falls below this
-    const BUF_HIGH = 5.0; // resume only when lead rises above this (4s hysteresis gap)
+    const BUF_LOW  = 2.0; // pause when lead falls below this
+    const BUF_HIGH = 10.0; // resume only when lead rises above this (8s hysteresis gap, matches Android PLAYER_BUFFER_REBUFFER_MS)
 
     let _dynBufTimer = null;
     let _bufPaused   = false; // true while hidden-paused for buffering
@@ -2648,16 +2689,16 @@ async function startMVPipeline() {
         .catch(e => { if (!_audioPipeCtrl.signal.aborted) console.error('[AML MV] audio pipe error:', e); });
 
     // ── Video MSE ─────────────────────────────────────────────────────────────────
-    const ms = new MediaSource();
-    const msBlobUrl = URL.createObjectURL(ms);
-    myVid.src = msBlobUrl;
-
+    // ms/msBlobUrl/myVid.src were set at startMVPipeline entry (parallel with container poll).
+    // sourceopen may already be resolved; if not, await it now.
     try {
-        await new Promise((resolve, reject) => {
-            const sig = _abortCtrl.signal;
-            sig.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-            ms.addEventListener('sourceopen', resolve, { once: true });
-        });
+        if (ms.readyState !== 'open') {
+            await new Promise((resolve, reject) => {
+                const sig = _abortCtrl.signal;
+                sig.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+                ms.addEventListener('sourceopen', resolve, { once: true });
+            });
+        }
     } catch (e) {
         console.warn(`[AML MV-V] video MSE sourceopen failed: ${e.message}`);
         _audioPipeCtrl.abort();
@@ -2836,18 +2877,19 @@ async function startMVPipeline() {
     videoEl.addEventListener('canplay', () => {
         if (_abortCtrl?.signal.aborted) return;
         console.log(`[AML MV] canplay videoWidth=${videoEl.videoWidth} videoHeight=${videoEl.videoHeight} readyState=${videoEl.readyState}`);
-        // Wait until ≥4s is buffered before joining the start gate — gives the pipeline
-        // enough head-start to survive HLS segment boundaries without stutter.
+        // Wait until ≥1.5 s is buffered before joining the start gate. 1.5 s is enough
+        // for a smooth start while keeping MV startup snappy; the previous 6 s added ~5 s
+        // of unnecessary blank-scrim time for viewers on a fast connection.
         const checkBuf = () => {
             if (_abortCtrl?.signal.aborted) return;
             const b = videoEl.buffered;
             const lead = b.length > 0 ? b.end(b.length - 1) : 0;
-            if (lead >= 6.0) {
+            if (lead >= 1.5) {
                 console.log(`[AML MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
                 _videoCanPlay = true;
                 tryStart();
             } else {
-                console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need 6s)`);
+                console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need 1.5s)`);
                 videoEl.addEventListener('progress', checkBuf, { once: true });
             }
         };
@@ -2956,6 +2998,10 @@ function _vlcHandleLength(lengthMs, mkAudio) {
         console.log(`[AML Gapless] trigger at track start (dur=${_durationSec.toFixed(1)}s) — starting ALAC pre-warm`);
         _prewarmNextAlac().catch(() => {});
     }
+    if (!_nextMvTried && !_nextMvSession && _durationSec > 0) {
+        _nextMvTried = true;
+        _prewarmNextMv().catch(() => {});
+    }
 }
 
 function _vlcUpdatePosition(posMs, state, mkAudio) {
@@ -2975,6 +3021,26 @@ function _vlcUpdatePosition(posMs, state, mkAudio) {
         const delta = posMs > 0 ? posMs - _vlcSeekTargetMs : null;
         const deltaStr = delta !== null ? ` Δ=${delta >= 0 ? '+' : ''}${delta}ms` : '';
         console.log(`[AML VLC seek] poll  vlc.posMs=${posMs}ms  ui.pos=${_vlcPosMs}ms  target=${_vlcSeekTargetMs}ms${deltaStr}  state=${state}  frozen=${_vlcSeekFrozen}`);
+        // Detect seek failure: VLC rewound (range request returned 416 or timed out).
+        // _seekBurstLog > 10 means we're in the first ~2.5s of the seek window, so this
+        // is a fresh rewind — not drift at the end of the burst. Use SeekReload (vlc/load
+        // with startMs) which restarts VLC from the target time without a byte-range seek.
+        if (delta !== null && delta < -5000 && _seekBurstLog > 10 && _sessionId && !_vlcSeekFrozen) {
+            _seekBurstLog = 0;
+            const reloadMs = _vlcSeekTargetMs;
+            console.warn(`[AML VLC seek] rewind detected Δ=${delta}ms — SeekReload fallback to ${reloadMs}ms`);
+            _vlcSeekFrozen = true;
+            _vlcPosMs = reloadMs;
+            fetch(`${ENGINE}/api/v1/vlc/load`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: reloadMs }),
+            }).then(() => {
+                _vlcSeekFrozen = false;
+                _seekBurstLog = 20;
+                _vlcPrevState = null;
+            }).catch(() => { _vlcSeekFrozen = false; });
+        }
     } else if (_vlcTickCount % 20 === 0) {
         // Log position every ~5 seconds during normal playback.
         console.log(`[AML VLC] pos=${posMs}ms state=${state}`);
@@ -3263,6 +3329,48 @@ async function _prewarmNextAac() {
     }
 }
 
+async function _prewarmNextMv() {
+    const mk = _mkInstance;
+    if (!mk) return;
+    const items = mk.queue?.items;
+    const pos   = mk.queue?.position ?? -1;
+    if (!items || pos < 0 || pos + 1 >= items.length) return;
+    const nextItem = items[pos + 1];
+    if (!_isVideoType(nextItem?.type)) return;
+    const nextAdamId = nextItem?.playParams?.catalogId
+        ?? nextItem?.attributes?.playParams?.catalogId
+        ?? nextItem?.id
+        ?? nextItem?.playParams?.id
+        ?? nextItem?.attributes?.playParams?.id;
+    if (!nextAdamId) return;
+
+    const nextName = nextItem?.attributes?.name ?? nextAdamId;
+    console.log(`[AML Gapless MV] opening session for "${nextName}" (${nextAdamId})`);
+    const t0 = performance.now();
+    try {
+        const sf = mk.storefrontId ?? 'us';
+        const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                assetId:    nextAdamId,
+                storefront: sf,
+                capabilities: { lossless: false, atmos: false, video: true },
+                mvMaxHeight:    _mvMaxHeight,
+                token:          mk.developerToken ?? '',
+                mediaUserToken: getMUT(),
+            }),
+        });
+        if (!sessResp.ok) return;
+        const sess = await sessResp.json();
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+        _nextMvSession = { adamId: nextAdamId, sess };
+        console.log(`[AML Gapless MV] session ready ${sess.sessionId} dur=${(sess.durationMs/1000).toFixed(1)}s in ${elapsed}s`);
+    } catch (e) {
+        console.warn(`[AML Gapless MV] pre-warm error: ${e?.message}`);
+    }
+}
+
 // Aborts and clears any pre-opened next-track audio stream. Safe to call twice.
 function _discardNextAacStream() {
     if (!_nextAacStreamResp) return;
@@ -3340,12 +3448,13 @@ function _resetPlaybackState() {
     _vlcMode = false; window._amlVlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _stopLyricsFreeze(); _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0; _vlcPostSeek = false; _vlcWasPlaying = false; _vlcSeekTargetMs = 0;
     _scVlcReapply = null; // VLC volume closure is per-track; drop the stale reference
     _nextAlacTried = false; _nextAlacRetries = 0;
-    // Preserve _nextAacSession + _nextAacStreamResp across reset (mirrors the
+    // Preserve _nextAacSession/_nextMvSession across reset (mirrors the
     // ALAC path above): reset runs at the top of handleTrackChange, BEFORE
     // _resolveSession reads the pre-warm. Nulling it here defeated the gapless
     // HIT entirely and leaked the pre-warmed engine session. _htcDiscardStalePrewarms
     // drops it on a track mismatch; _resolveSession consumes it on a hit.
     _nextAacTried = false;
+    _nextMvTried  = false;
     if (_vlcSeekTimer) { clearTimeout(_vlcSeekTimer); _vlcSeekTimer = null; }
     stopVLCPoll();
     unbridgeDuration();
@@ -3374,6 +3483,12 @@ async function _resolveSession(item, adamId, sf, mk) {
         const sess = _nextAacSession.sess;
         _nextAacSession = null;
         console.log(`[AML Gapless AAC] ✓ HIT — using pre-warmed ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs/1000).toFixed(1)}s`);
+        return sess;
+    }
+    if (isVideo && _nextMvSession?.adamId === adamId) {
+        const sess = _nextMvSession.sess;
+        _nextMvSession = null;
+        console.log(`[AML Gapless MV] ✓ HIT — using pre-warmed ${sess.sessionId} dur=${(sess.durationMs/1000).toFixed(1)}s`);
         return sess;
     }
     const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
@@ -3793,6 +3908,10 @@ async function _triggerDirectPlay(adamId, mk) {
                 _nextAacTried = true;
                 _prewarmNextAac().catch(() => {});
             }
+            if (!_nextMvTried && !_nextMvSession) {
+                _nextMvTried = true;
+                _prewarmNextMv().catch(() => {});
+            }
         }
     } catch (err) {
         if (!genStale(myGen)) {
@@ -3829,6 +3948,11 @@ function _htcDiscardStalePrewarms(adamId) {
         deleteSession(_nextAacSession.sess.sessionId);
         _nextAacSession = null;
         _discardNextAacStream(); // stream was pre-opened for the discarded session
+    }
+    if (_nextMvSession && _nextMvSession.adamId !== adamId) {
+        console.log(`[AML Gapless MV] MISS — pre-warm was for ${_nextMvSession.adamId}, playing ${adamId} — discarding`);
+        deleteSession(_nextMvSession.sess.sessionId);
+        _nextMvSession = null;
     }
 }
 
@@ -3938,6 +4062,10 @@ async function handleTrackChange(mk) {
             if (!_nextAacTried && !_nextAacSession) {
                 _nextAacTried = true;
                 _prewarmNextAac().catch(() => {});
+            }
+            if (!_nextMvTried && !_nextMvSession) {
+                _nextMvTried = true;
+                _prewarmNextMv().catch(() => {});
             }
             setPlayState(PLAY_STATE.STREAMING, `htc:aac:${adamId}`);
             await _setupMSEPath(mkAudio, sess, mk, ctrl, t0);
@@ -4217,6 +4345,61 @@ function _isPausedNow() {
     return _vlcMode ? _vlcPaused : (getMKAudio()?.paused ?? false);
 }
 
+// ── Deep link navigation ──────────────────────────────────────────────────────
+// Handles aml:// and https://music.apple.com/ URLs forwarded by main.mjs.
+// MusicKit descriptor reference:
+//   songs:       mk.setQueue({ song:        id })
+//   albums:      mk.setQueue({ album:       id })
+//   playlists:   mk.setQueue({ playlist:    id })
+//   music-video: mk.setQueue({ musicVideo:  id })
+//   artist:      not directly queueable — navigate via mk.changeUserStorefront or history.pushState
+async function _deepLinkOpen(mk, intent) {
+    const { type, id, sf } = intent;
+    if (!id) return;
+    console.log(`[AML DeepLink] type=${type} id=${id} sf=${sf}`);
+
+    // Honour the link's storefront if different from current
+    if (sf && sf !== mk.storefrontId) {
+        try { await mk.changeUserStorefront(sf); } catch (_) {}
+    }
+
+    try {
+        switch (type) {
+            case 'song':
+                await mk.setQueue({ song: id });
+                await mk.play();
+                break;
+            case 'album':
+                await mk.setQueue({ album: id });
+                await mk.play();
+                break;
+            case 'playlist':
+                await mk.setQueue({ playlist: id });
+                await mk.play();
+                break;
+            case 'music-video':
+                await mk.setQueue({ musicVideo: id });
+                await mk.play();
+                break;
+            case 'artist':
+                // Artist pages aren't directly queueable; push to the web player's router.
+                history.pushState({}, '', `/artist/${id}`);
+                window.dispatchEvent(new PopStateEvent('popstate'));
+                break;
+            default:
+                console.warn(`[AML DeepLink] unknown type: ${type}`);
+        }
+    } catch (e) {
+        console.error('[AML DeepLink] navigation error:', e.message);
+    }
+}
+
+function _deepLinkSetup(mk) {
+    window.amlBridge?.onOpenUrl?.((intent) => {
+        _deepLinkOpen(mk, intent).catch(() => {});
+    });
+}
+
 function _discordUpdateNow() {
     if (!_discordEnabled || !window.amlBridge?.discordUpdate) return;
     const item = _mkInstance?.nowPlayingItem;
@@ -4226,6 +4409,14 @@ function _discordUpdateNow() {
     const durSec  = _durationSec || (a.durationInMillis || 0) / 1000;
     const playing = !_isPausedNow();
     const startedAtMs = Date.now() - Math.round(posSec * 1000);
+
+    // Build Apple Music deep-link: music.apple.com/{sf}/{type}/{slug}/{id}
+    const sf       = _mkInstance?.storefrontId ?? 'us';
+    const isVideo  = _isVideoType(item.type);
+    const itemType = isVideo ? 'music-video' : 'song';
+    const slug     = (a.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'track';
+    const appleUrl = `https://music.apple.com/${sf}/${itemType}/${slug}/${_currentAssetId}`;
+
     window.amlBridge.discordUpdate({
         name:        a.name || '',
         artist:      a.artistName || '',
@@ -4234,6 +4425,8 @@ function _discordUpdateNow() {
         playing,
         startedAtMs: playing ? startedAtMs : 0,
         endsAtMs:    playing && durSec ? startedAtMs + Math.round(durSec * 1000) : 0,
+        appleUrl,
+        isVideo,
     });
 }
 
@@ -5061,6 +5254,7 @@ async function setup() {
         _snapshotEventId = msg?.meta?.id ?? -1;  // used to filter stale replayed drm events
         if (snap?.capabilities) {
             _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
+            window._amlLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
         }
         console.log(`[AML Engine] Engine ready — drm.session=${snap?.drm?.session ?? 'unknown'} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
     } catch (e) {
@@ -5073,6 +5267,7 @@ async function setup() {
         // lossless-enabled=false overrides streaming-quality → force AAC regardless.
         if (p['lossless-enabled'] === false) _streamingQuality = 'high-quality';
         if (p['downloads-quality']) _downloadsQuality  = p['downloads-quality'];
+        window._amlLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
 
         const body = {};
         if (p.prewarmLimitMB  != null) body.prewarmLimitMB  = p.prewarmLimitMB;
@@ -5099,6 +5294,7 @@ async function setup() {
         const sess = snap?.state?.session ?? 'unknown';
         if (snap?.capabilities) {
             _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
+            window._amlLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
         }
         console.log(`[AML Engine] DRM state → session=${sess} lossless=${_engineCaps.lossless}`);
 
@@ -6471,6 +6667,7 @@ async function setup() {
     _resumeSetup(mk);      // async; fire-and-forget: install save hooks + offer resume chip
     _discordSetup(mk);     // async; fire-and-forget: install Discord Rich Presence hooks
     _scrobbleSetup();      // async; fire-and-forget: load Last.fm + ListenBrainz status
+    _deepLinkSetup(mk);    // install aml:open / music.apple.com URL handler
     _scSetup();            // async; fire-and-forget: load Sound Check enabled state
     _xfSetup();            // async; fire-and-forget: load crossfade duration
     _hotkeysSetup();       // async; fire-and-forget: install in-app media hotkeys
@@ -6514,9 +6711,10 @@ async function setup() {
             // _amlGotoTargetId which is always stored without the prefix.
             const itemId = _extractItemId(item);
             const targetItem = mk.queue?.items?.[_amlGotoTarget];
-            // Use the stored target ID as fallback — queue.items[_amlGotoTarget] is stale
-            // immediately after setQueue() because MK hasn't propagated the new queue yet.
-            const targetId = _extractItemId(targetItem) || _amlGotoTargetId;
+            // Prefer the stored target ID over queue.items lookup: after setQueue()
+            // MK's queue.items[0] is the queue head (not the startWith target), so the
+            // lookup would match the wrong track and accept a spurious NPIDF early.
+            const targetId = _amlGotoTargetId || _extractItemId(targetItem);
             if (targetId && itemId !== targetId) {
                 // Spurious NPIDF for the OLD track during transition — drop it.
                 console.log('[AML] NPIDF filtered: spurious event for', item?.attributes?.name, '(advancing to idx', _amlGotoTarget, 'target id', targetId, ')');
@@ -6953,6 +7151,8 @@ window.amlClearSession = function () {
     _nextAlacTried = false; _nextAlacRetries = 0;
     if (_nextAacSession) { deleteSession(_nextAacSession.sess.sessionId); _nextAacSession = null; }
     _nextAacTried = false; _discardNextAacStream();
+    if (_nextMvSession) { deleteSession(_nextMvSession.sess.sessionId); _nextMvSession = null; }
+    _nextMvTried = false;
     unbridgeDuration();
     try { _mkInstance?.pause?.(); } catch (_) {}
     console.log('[AML] amlClearSession: all playback stopped and session released');
