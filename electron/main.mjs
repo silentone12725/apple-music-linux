@@ -302,8 +302,13 @@ async function startEngine() {
 
 function stopEngine() {
     if (!engineProc) return;
-    engineProc.kill('SIGTERM');
+    const proc = engineProc;
     engineProc = null;
+    proc.kill('SIGTERM');
+    // SIGTERM lets the Go engine call vlcPlayer.Close() to stop audio immediately,
+    // then drain its shutdown sequence. SIGKILL after 800ms is a safety net in case
+    // the engine hangs — keeps total quit time under ~1s.
+    setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} }, 800);
 }
 
 // ── Compositor / blur detection ───────────────────────────────────────────────

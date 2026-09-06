@@ -757,6 +757,10 @@ func (s *APIServer) Start() error {
 // Stop gracefully shuts down the HTTP server and the DRM backend.
 // The session DB is preserved so the next start reuses the session.
 func (s *APIServer) Stop() {
+	// Stop VLC immediately so audio cuts off before the rest of the shutdown sequence.
+	if s.vlcPlayer != nil {
+		s.vlcPlayer.Close()
+	}
 	// Stop the wrapper process first so it doesn't keep running as an orphan.
 	// Session files are NOT cleared — they persist for the next server start.
 	s.dm.Shutdown()
