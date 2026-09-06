@@ -101,6 +101,15 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"actualStartMs": req.PosMs})
 }
 
+func (s *APIServer) handleVLCStop(w http.ResponseWriter, r *http.Request) {
+	if s.vlcPlayer == nil {
+		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
+		return
+	}
+	s.vlcPlayer.Stop()
+	w.WriteHeader(http.StatusOK)
+}
+
 func (s *APIServer) handleVLCVolume(w http.ResponseWriter, r *http.Request) {
 	if s.vlcPlayer == nil {
 		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)

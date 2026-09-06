@@ -316,6 +316,16 @@ func (p *Player) SetVolume(vol int) {
 	C.libvlc_audio_set_volume(p.mp, C.int(vol))
 }
 
+// Stop halts playback immediately without releasing the player.
+// The player remains usable for a subsequent Load call.
+func (p *Player) Stop() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.mp != nil {
+		C.libvlc_media_player_stop(p.mp)
+	}
+}
+
 // Close releases all libvlc resources.
 func (p *Player) Close() {
 	p.mu.Lock()
