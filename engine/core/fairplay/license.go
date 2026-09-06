@@ -27,6 +27,11 @@ import (
 	"engine/utils/aacstream"
 )
 
+// WarmLicensePool pre-establishes a TLS connection to Apple's FairPlay license
+// server so the first AcquireKey call skips the handshake latency. Call once
+// at engine startup from a goroutine.
+func WarmLicensePool(ctx context.Context) { aacstream.WarmLicensePool(ctx) }
+
 // ── Licence acquisition ───────────────────────────────────────────────────────
 
 // LicenseRequest carries the key metadata extracted from an encrypted HLS
