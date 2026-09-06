@@ -3895,11 +3895,16 @@ async function handleTrackChange(mk) {
         const sess = await _resolveSession(item, adamId, sf, mk);
 
         if (genStale(myGen)) {
-            // Defer deletion: the engine singleflight may have returned this same
-            // session ID to a concurrent live call. Using queueMicrotask ensures all
-            // pending Promise resolutions (including the live call claiming _sessionId)
-            // finish before we check — so we only delete if no other gen claimed it.
-            queueMicrotask(() => { if (_sessionId !== sess.sessionId) deleteSession(sess.sessionId); });
+            // The engine singleflight may return the same session ID to the live call,
+            // which is still awaiting _resolveSession and hasn't set _sessionId yet.
+            // queueMicrotask is too early: _sessionId is still null if the live call
+            // is mid-fetch. Strategy: if _sessionId is already a different session → true
+            // orphan, delete now. If null → live call is in-flight, recheck in 5s.
+            queueMicrotask(() => {
+                if (_sessionId === sess.sessionId) return;           // live call claimed it
+                if (_sessionId !== null) { deleteSession(sess.sessionId); return; } // true orphan
+                setTimeout(() => { if (_sessionId !== sess.sessionId) deleteSession(sess.sessionId); }, 5000);
+            });
             return;
         }
 
