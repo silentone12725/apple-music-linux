@@ -71,6 +71,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('amlReady', () => ipcRenderer.send('app:ui-ready'));
 
 contextBridge.exposeInMainWorld('amlBridge', {
+    isDev: !!process.defaultApp, // true when running via `electron .`, false in packaged app
     // ── Prefs / view (settings panel) ────────────────────────────────────────
     getPrefs:       ()          => ipcRenderer.invoke('prefs:get'),
     setPref:        (k, v)      => ipcRenderer.send('pref:set', k, v),
@@ -100,6 +101,31 @@ contextBridge.exposeInMainWorld('amlBridge', {
     storeWrite:  (key, value) => ipcRenderer.invoke('store:write',  key, value),
     storeDelete: (key)        => ipcRenderer.invoke('store:delete', key),
     getPowerProfile: ()       => ipcRenderer.invoke('system:powerProfile'),
+    // Discord Rich Presence
+    discordUpdate:  (d)       => ipcRenderer.send('discord:update', d),
+    discordClear:   ()        => ipcRenderer.send('discord:clear'),
+    discordDisable: ()        => ipcRenderer.send('discord:disable'),
+    // Last.fm scrobbling (auth + signing + session key handled in main; secret never reaches renderer)
+    lastfmStatus:         ()      => ipcRenderer.invoke('lastfm:status'),
+    lastfmSetCredentials: (c)     => ipcRenderer.invoke('lastfm:set-credentials', c),
+    lastfmAuth:           ()      => ipcRenderer.invoke('lastfm:auth'),
+    lastfmSession:        (token) => ipcRenderer.invoke('lastfm:session', token),
+    lastfmDisconnect:     ()      => ipcRenderer.invoke('lastfm:disconnect'),
+    lastfmNowPlaying:     (t)     => ipcRenderer.send('lastfm:nowplaying', t),
+    lastfmScrobble:       (t)     => ipcRenderer.send('lastfm:scrobble', t),
+    // ListenBrainz scrobbling (token-based; token stays in main)
+    lbStatus:      ()       => ipcRenderer.invoke('lb:status'),
+    lbSetToken:    (token)  => ipcRenderer.invoke('lb:set-token', token),
+    lbDisconnect:  ()       => ipcRenderer.invoke('lb:disconnect'),
+    lbNowPlaying:  (t)      => ipcRenderer.send('lb:nowplaying', t),
+    lbScrobble:    (t)      => ipcRenderer.send('lb:scrobble', t),
+    // Mini player
+    toggleMiniPlayer: ()      => ipcRenderer.send('miniplayer:toggle'),
+    onMiniSync:       (cb)    => ipcRenderer.on('miniplayer:sync', () => cb()),
+    // Open a help link in the system browser
+    openExternal:     (url)   => ipcRenderer.send('app:open-external', url),
+    // App lifecycle — renderer registers a callback to flush state before quit
+    onFlushAndQuit:   (cb)    => ipcRenderer.on('app:flush-and-quit', () => cb()),
 });
 
 // ── Apple Music page setup ────────────────────────────────────────────────────

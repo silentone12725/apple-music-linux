@@ -499,6 +499,17 @@ function _findInNavStack(stack, cursor, href) {
 
     const chevronLeft  = `<svg viewBox="0 0 14 14"><polyline points="9,2 4,7 9,12"/></svg>`;
     const chevronRight = `<svg viewBox="0 0 14 14"><polyline points="5,2 10,7 5,12"/></svg>`;
+    // Mini-player (PiP) glyph — wireframe version (stroke-only) for better visibility
+    const miniIcon = `<svg viewBox="0 0 14 11" fill="none" stroke="currentColor"><rect x="0.75" y="0.75" width="12.5" height="9.5" rx="1.75" style="stroke-width:0.8;fill:none"/><rect x="7" y="5.5" width="6" height="4" rx="1" style="fill:currentColor;stroke:none"/></svg>`;
+
+    // Mini-player toggle sits left of the arrows (first in the row).
+    const mini = document.createElement('button');
+    mini.id = 'aml-miniplayer-btn';
+    mini.className = 'aml-nav-btn';
+    mini.innerHTML = miniIcon;
+    mini.title = 'Mini Player';
+    mini.setAttribute('aria-label', 'Mini Player');
+    mini.addEventListener('click', () => { window.amlBridge?.toggleMiniPlayer?.(); });
 
     const back = document.createElement('button');
     back.className = 'aml-nav-btn';
@@ -523,6 +534,7 @@ function _findInNavStack(stack, cursor, href) {
     back.addEventListener('click', () => { if (cursor > 0) history.back(); });
     fwd.addEventListener('click',  () => { if (cursor < stack.length - 1) history.forward(); });
 
+    wrap.appendChild(mini);
     wrap.appendChild(back);
     wrap.appendChild(fwd);
 

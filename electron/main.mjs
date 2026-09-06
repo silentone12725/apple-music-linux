@@ -1685,20 +1685,25 @@ function replayMprisState() {
     setTimeout(() => {
         if (!mprisPlayer) return;
         try {
-            if (_lastMprisStatus)   applyMprisData({ status: _lastMprisStatus });
-            if (_lastMprisMetadata) applyMprisData({ metadata: _lastMprisMetadata });
-            if (_lastMprisPosition) applyMprisData({ position: _lastMprisPosition });
+            if (_lastMprisStatus)        applyMprisData({ status: _lastMprisStatus });
+            if (_lastMprisMetadata)      applyMprisData({ metadata: _lastMprisMetadata });
+            if (_lastMprisPosition)      applyMprisData({ position: _lastMprisPosition });
             applyMprisData({ shuffle: _lastMprisShuffle });
+            if (_lastMprisRepeat != null) applyMprisData({ repeat: _lastMprisRepeat });
         } catch (_) {}
     }, 400);
 }
 
 ipcMain.on('mpris:update', (_, data) => {
     // Track each field independently so all survive across reconnects.
-    if (data.status)        _lastMprisStatus   = data.status;
-    if (data.metadata)      _lastMprisMetadata = data.metadata;
+    if (data.status)           _lastMprisStatus   = data.status;
+    if (data.metadata)         _lastMprisMetadata = data.metadata;
     if (data.position != null) _lastMprisPosition = data.position;
     if (data.shuffle != null)  _lastMprisShuffle  = data.shuffle;
+    if (data.repeat  != null)  _lastMprisRepeat   = data.repeat;
+
+    // Mirror now-playing to the mini player if it's open.
+    sendMiniState(data);
 
     const wasNull = !mprisPlayer;
     if (!mprisPlayer) mprisPlayer = createMprisPlayer();
@@ -1722,6 +1727,414 @@ ipcMain.on('mpris:update', (_, data) => {
     }
 });
 
+// ── Discord Rich Presence ─────────────────────────────────────────────────────
+// Native Discord IPC — framed JSON over the discord-ipc-N Unix socket, no
+// external dependency. Shows the current track as your Discord status.
+// REQUIRES a Discord application client ID: register an app at
+// https://discord.com/developers/applications and paste its Application ID
+// below. Presence stays inert until a real ID is set.
+const DISCORD_CLIENT_ID = '1545304879441121320'; // Discord application (client) ID for apple-music-linux
+
+let _discordSocket = null;
+let _discordReady = false;
+let _discordConnecting = false;
+let _discordEnabled = false;
+let _discordPendingActivity = null;
+let _discordReconnectTimer = null;
+let _discordBuf = Buffer.alloc(0);
+
+function _discordSocketPaths() {
+    const bases = [process.env.XDG_RUNTIME_DIR, process.env.TMPDIR, process.env.TMP, process.env.TEMP, '/tmp'].filter(Boolean);
+    const subdirs = ['', 'snap.discord/', 'app/com.discordapp.Discord/', 'app/com.discordapp.DiscordCanary/'];
+    const paths = [];
+    for (const base of bases)
+        for (const sub of subdirs)
+            for (let i = 0; i < 10; i++)
+                paths.push(path.join(base, sub + `discord-ipc-${i}`));
+    return paths;
+}
+
+function _discordEncode(op, payload) {
+    const json = Buffer.from(JSON.stringify(payload), 'utf8');
+    const header = Buffer.alloc(8);
+    header.writeInt32LE(op, 0);
+    header.writeInt32LE(json.length, 4);
+    return Buffer.concat([header, json]);
+}
+
+function _discordConnect() {
+    if (!DISCORD_CLIENT_ID || _discordConnecting || _discordReady) return;
+    const paths = _discordSocketPaths();
+    let idx = 0;
+    _discordConnecting = true;
+    const tryNext = () => {
+        if (idx >= paths.length) { _discordConnecting = false; return; }
+        const sock = net.createConnection(paths[idx++]);
+        sock.once('error', () => { try { sock.destroy(); } catch (_) {} tryNext(); });
+        sock.once('connect', () => {
+            _discordSocket = sock;
+            _discordConnecting = false;
+            _discordBuf = Buffer.alloc(0);
+            sock.on('data', _discordOnData);
+            sock.on('close', _discordOnClose);
+            sock.on('error', _discordOnClose);
+            sock.write(_discordEncode(0, { v: 1, client_id: DISCORD_CLIENT_ID }));
+        });
+    };
+    tryNext();
+}
+
+function _discordOnData(chunk) {
+    _discordBuf = Buffer.concat([_discordBuf, chunk]);
+    while (_discordBuf.length >= 8) {
+        const len = _discordBuf.readInt32LE(4);
+        // Guard against a malformed/negative length desyncing the parser.
+        if (len < 0 || len > (1 << 24)) { _discordBuf = Buffer.alloc(0); break; }
+        if (_discordBuf.length < 8 + len) break;
+        const payload = _discordBuf.slice(8, 8 + len).toString('utf8');
+        _discordBuf = _discordBuf.slice(8 + len);
+        try {
+            const msg = JSON.parse(payload);
+            if (msg.evt === 'READY') {
+                _discordReady = true;
+                if (_discordPendingActivity) _discordSendActivity(_discordPendingActivity);
+            }
+        } catch (_) {}
+    }
+}
+
+function _discordOnClose() {
+    _discordReady = false;
+    _discordConnecting = false;
+    if (_discordSocket) { try { _discordSocket.destroy(); } catch (_) {} _discordSocket = null; }
+    if (_discordEnabled && DISCORD_CLIENT_ID && !_discordReconnectTimer) {
+        _discordReconnectTimer = setTimeout(() => { _discordReconnectTimer = null; _discordConnect(); }, 5000);
+    }
+}
+
+function _discordSendActivity(activity) {
+    if (!_discordSocket || !_discordReady) return;
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try { _discordSocket.write(_discordEncode(1, { cmd: 'SET_ACTIVITY', args: { pid: process.pid, activity }, nonce })); } catch (_) {}
+}
+
+function _discordClearActivity() {
+    if (!_discordSocket || !_discordReady) return;
+    try { _discordSocket.write(_discordEncode(1, { cmd: 'SET_ACTIVITY', args: { pid: process.pid, activity: null }, nonce: `${Date.now()}-clear` })); } catch (_) {}
+}
+
+ipcMain.on('discord:update', (_, data) => {
+    _discordEnabled = true;
+    if (!DISCORD_CLIENT_ID) return; // inert until a client ID is configured
+    const activity = {
+        type: 2, // "Listening to …"
+        details: (data.name || '').slice(0, 128) || undefined,
+        state:   (data.artist || '').slice(0, 128) || undefined,
+    };
+    if (data.artworkUrl) {
+        activity.assets = { large_image: data.artworkUrl, large_text: (data.album || '').slice(0, 128) || undefined };
+    }
+    if (data.playing && data.startedAtMs) {
+        activity.timestamps = { start: Math.round(data.startedAtMs) };
+        if (data.endsAtMs) activity.timestamps.end = Math.round(data.endsAtMs);
+    }
+    _discordPendingActivity = activity;
+    if (!_discordSocket && !_discordConnecting) _discordConnect();
+    else if (_discordReady) _discordSendActivity(activity);
+});
+
+ipcMain.on('discord:clear', () => {
+    _discordPendingActivity = null;
+    _discordClearActivity();
+});
+
+ipcMain.on('discord:disable', () => {
+    _discordEnabled = false;
+    _discordPendingActivity = null;
+    _discordClearActivity();
+    if (_discordReconnectTimer) { clearTimeout(_discordReconnectTimer); _discordReconnectTimer = null; }
+    if (_discordSocket) { try { _discordSocket.destroy(); } catch (_) {} _discordSocket = null; }
+    _discordReady = false;
+});
+
+// ── Last.fm scrobbling ────────────────────────────────────────────────────────
+// The API key + shared secret are configured from AML Settings (create an API
+// account at https://www.last.fm/api/account/create). Both, and the user's
+// session key, live ONLY in the main process (encrypted store) — the secret is
+// never returned to the renderer.
+const LASTFM_ROOT = 'https://ws.audioscrobbler.com/2.0/';
+
+async function _lastfmCreds() {
+    const store = await _storeLoad();
+    return { key: store.lastfm_api_key || '', secret: store.lastfm_secret || '' };
+}
+
+function _lastfmSign(params, secret) {
+    // api_sig = md5( concat(sorted key+value, excluding format/callback) + secret )
+    const keys = Object.keys(params).filter(k => k !== 'format' && k !== 'callback').sort();
+    let s = '';
+    for (const k of keys) s += k + params[k];
+    s += secret;
+    return crypto.createHash('md5').update(s, 'utf8').digest('hex');
+}
+
+async function _lastfmCall(params, httpMethod = 'GET') {
+    const { key, secret } = await _lastfmCreds();
+    const full = { ...params, api_key: key };
+    full.api_sig = _lastfmSign(full, secret);
+    full.format  = 'json';
+    const body = new URLSearchParams(full).toString();
+    const resp = httpMethod === 'POST'
+        ? await fetch(LASTFM_ROOT, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body })
+        : await fetch(`${LASTFM_ROOT}?${body}`);
+    return resp.json();
+}
+
+let _lastfmPendingToken = null;
+
+ipcMain.handle('lastfm:set-credentials', async (_, c) => {
+    const store = await _storeLoad();
+    if (typeof c?.apiKey === 'string') store.lastfm_api_key = c.apiKey.trim();
+    // Only overwrite the secret when a non-empty one is provided — a blank field
+    // means "keep the saved secret".
+    if (typeof c?.secret === 'string' && c.secret.trim()) store.lastfm_secret = c.secret.trim();
+    _storeDirty = true; _storeFlush();
+    return { ok: true };
+});
+
+ipcMain.handle('lastfm:status', async () => {
+    const store = await _storeLoad();
+    const configured = !!(store.lastfm_api_key && store.lastfm_secret);
+    // apiKey is public → returned for prefill; the secret is never returned.
+    return { configured, apiKey: store.lastfm_api_key || '', secretSet: !!store.lastfm_secret,
+             connected: !!store.lastfm_sk, username: store.lastfm_user || null };
+});
+
+// Open Last.fm's authorize page IN-APP so we control the theme and avoid the
+// external browser's white flash. Dark window background + show-on-ready kills
+// the "flashbang"; a non-destructive color-scheme hint lets the page render dark
+// where it supports it (we never restyle Last.fm's form — that would wreck
+// contrast if their page is light).
+let _lastfmAuthWin = null;
+function openLastfmAuthWindow(url) {
+    if (_lastfmAuthWin && !_lastfmAuthWin.isDestroyed()) { _lastfmAuthWin.focus(); _lastfmAuthWin.loadURL(url); return; }
+    _lastfmAuthWin = new BrowserWindow({
+        width: 480, height: 760, show: false,
+        backgroundColor: '#1c1c1e',           // dark ground painted before first frame
+        title: 'Last.fm — Authorize AML',
+        parent: win, autoHideMenuBar: true,
+        webPreferences: {
+            contextIsolation: true, nodeIntegration: false, sandbox: _hasSandbox,
+            partition: 'persist:lastfm-auth',  // isolated from the Apple Music session
+            devTools: !app.isPackaged,
+        },
+    });
+    _lastfmAuthWin.once('ready-to-show', () => _lastfmAuthWin.show());
+    _lastfmAuthWin.webContents.on('dom-ready', () => {
+        // Prefer dark UA rendering (scrollbars, form controls, default canvas) and
+        // hint the page toward dark — without overriding its own colors.
+        _lastfmAuthWin.webContents.insertCSS('html{color-scheme:dark light;background:#1c1c1e;}').catch(() => {});
+        _lastfmAuthWin.webContents.executeJavaScript(
+            "try{document.documentElement.style.colorScheme='dark';}catch(e){}").catch(() => {});
+    });
+    _lastfmAuthWin.on('closed', () => { _lastfmAuthWin = null; });
+    _lastfmAuthWin.loadURL(url);
+}
+
+ipcMain.handle('lastfm:auth', async () => {
+    const { key, secret } = await _lastfmCreds();
+    if (!key || !secret) return { error: 'not-configured' };
+    try {
+        const r = await _lastfmCall({ method: 'auth.getToken' });
+        if (!r.token) return { error: r.message || 'token request failed' };
+        _lastfmPendingToken = r.token;
+        openLastfmAuthWindow(`https://www.last.fm/api/auth/?api_key=${key}&token=${r.token}`);
+        return { token: r.token };
+    } catch (e) { return { error: e.message }; }
+});
+
+ipcMain.handle('lastfm:session', async (_, token) => {
+    const { key, secret } = await _lastfmCreds();
+    if (!key || !secret) return { error: 'not-configured' };
+    const t = token || _lastfmPendingToken;
+    if (!t) return { error: 'no-token' };
+    try {
+        const r = await _lastfmCall({ method: 'auth.getSession', token: t });
+        if (!r.session?.key) return { error: r.message || 'not authorized yet — approve in the browser first' };
+        const store = await _storeLoad();
+        store.lastfm_sk = r.session.key;
+        store.lastfm_user = r.session.name;
+        _storeDirty = true; _storeFlush();
+        _lastfmPendingToken = null;
+        return { username: r.session.name };
+    } catch (e) { return { error: e.message }; }
+});
+
+ipcMain.handle('lastfm:disconnect', async () => {
+    const store = await _storeLoad();
+    delete store.lastfm_sk; delete store.lastfm_user;
+    _storeDirty = true; _storeFlush();
+    return { ok: true };
+});
+
+ipcMain.on('lastfm:nowplaying', async (_, t) => {
+    if (!t?.artist || !t?.track) return;
+    const store = await _storeLoad();
+    if (!store.lastfm_sk || !store.lastfm_api_key) return;
+    const p = { method: 'track.updateNowPlaying', artist: t.artist, track: t.track, sk: store.lastfm_sk };
+    if (t.album)       p.album       = t.album;
+    if (t.albumArtist) p.albumArtist = t.albumArtist;
+    if (t.duration)    p.duration    = String(Math.round(t.duration));
+    try { await _lastfmCall(p, 'POST'); } catch (_) {}
+});
+
+ipcMain.on('lastfm:scrobble', async (_, t) => {
+    if (!t?.artist || !t?.track || !t?.timestamp) return;
+    const store = await _storeLoad();
+    if (!store.lastfm_sk || !store.lastfm_api_key) return;
+    const p = { method: 'track.scrobble', artist: t.artist, track: t.track, timestamp: String(t.timestamp), sk: store.lastfm_sk };
+    if (t.album)       p.album       = t.album;
+    if (t.albumArtist) p.albumArtist = t.albumArtist;
+    if (t.duration)    p.duration    = String(Math.round(t.duration));
+    try { await _lastfmCall(p, 'POST'); } catch (_) {}
+});
+
+// ── ListenBrainz scrobbling ───────────────────────────────────────────────────
+// Simpler than Last.fm: a single user token (from https://listenbrainz.org/settings/)
+// authenticates via an Authorization header — no app key/secret, no signing.
+// The token lives only in the main process (encrypted store).
+const LB_ROOT = 'https://api.listenbrainz.org';
+
+async function _lbToken() { return (await _storeLoad()).lb_token || ''; }
+
+function _lbTrackMeta(t) {
+    const md = { artist_name: t.artist, track_name: t.track };
+    if (t.album) md.release_name = t.album;
+    return md;
+}
+
+async function _lbSubmit(body) {
+    const token = await _lbToken();
+    if (!token) return;
+    try {
+        await fetch(`${LB_ROOT}/1/submit-listens`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Token ${token}` },
+            body: JSON.stringify(body),
+        });
+    } catch (_) {}
+}
+
+ipcMain.handle('lb:set-token', async (_, token) => {
+    const store = await _storeLoad();
+    store.lb_token = (token || '').trim();
+    _storeDirty = true; _storeFlush();
+    return { ok: true };
+});
+
+ipcMain.handle('lb:status', async () => {
+    const token = await _lbToken();
+    if (!token) return { connected: false };
+    // Validate the token to surface the linked username.
+    try {
+        const r = await fetch(`${LB_ROOT}/1/validate-token`, { headers: { Authorization: `Token ${token}` } });
+        const j = await r.json();
+        return { connected: !!j.valid, username: j.user_name || null };
+    } catch (_) { return { connected: true, username: null }; }
+});
+
+ipcMain.handle('lb:disconnect', async () => {
+    const store = await _storeLoad();
+    delete store.lb_token;
+    _storeDirty = true; _storeFlush();
+    return { ok: true };
+});
+
+ipcMain.on('lb:nowplaying', async (_, t) => {
+    if (!t?.artist || !t?.track) return;
+    await _lbSubmit({ listen_type: 'playing_now', payload: [{ track_metadata: _lbTrackMeta(t) }] });
+});
+
+ipcMain.on('lb:scrobble', async (_, t) => {
+    if (!t?.artist || !t?.track || !t?.timestamp) return;
+    await _lbSubmit({ listen_type: 'single', payload: [{ listened_at: t.timestamp, track_metadata: _lbTrackMeta(t) }] });
+});
+
+// Open a vetted external link (settings help links) in the system browser.
+ipcMain.on('app:open-external', (_, url) => {
+    if (typeof url === 'string' && /^https:\/\//.test(url)) shell.openExternal(url);
+});
+
+
+// ── Mini player (compact always-on-top now-playing window) ────────────────────
+let miniWin = null;
+
+function createMiniPlayer() {
+    if (miniWin && !miniWin.isDestroyed()) { miniWin.show(); miniWin.focus(); return; }
+    miniWin = new BrowserWindow({
+        width: 360,
+        height: 150,
+        useContentSize: true,
+        frame: false,
+        transparent: true,
+        backgroundColor: '#00000000',
+        hasShadow: true,
+        resizable: false,
+        maximizable: false,
+        minimizable: false,
+        fullscreenable: false,
+        skipTaskbar: true,
+        alwaysOnTop: true,
+        title: 'Apple Music — Mini Player',
+        webPreferences: {
+            // Trusted local page: use nodeIntegration directly (its own inline
+            // ipcRenderer bridge) instead of a preload — the sandboxed child-window
+            // preload bootstrap crashes with "binding.startupData is null".
+            nodeIntegration: true,
+            contextIsolation: false,
+            sandbox: false,
+            devTools: !app.isPackaged,
+        },
+    });
+    miniWin.setAlwaysOnTop(true, 'floating');
+    miniWin.loadFile(path.join(__dirname, 'miniplayer.html'));
+    miniWin.once('ready-to-show', () => {
+        miniWin.show();
+        // Hide the main window (Apple's MiniPlayer replaces it) and ask the
+        // renderer to push a full now-playing snapshot to the mini.
+        if (win && !win.isDestroyed()) win.hide();
+        sendMiniState({ metadata: _lastMprisMetadata, status: _lastMprisStatus, position: _lastMprisPosition });
+        try { win?.webContents.send('miniplayer:sync'); } catch (_) {}
+    });
+    miniWin.on('closed', () => { miniWin = null; restoreMainFromMini(); });
+}
+
+function restoreMainFromMini() {
+    if (win && !win.isDestroyed()) { win.show(); win.focus(); }
+}
+
+function toggleMiniPlayer() {
+    if (miniWin && !miniWin.isDestroyed()) { miniWin.close(); miniWin = null; } // 'closed' restores main
+    else createMiniPlayer();
+}
+
+function sendMiniState(data) {
+    if (miniWin && !miniWin.isDestroyed()) {
+        try { miniWin.webContents.send('miniplayer:state', data); } catch (_) {}
+    }
+}
+
+ipcMain.on('miniplayer:toggle', () => toggleMiniPlayer());
+ipcMain.on('miniplayer:expand', () => {          // back to the full window
+    restoreMainFromMini();
+    if (miniWin && !miniWin.isDestroyed()) { miniWin.close(); miniWin = null; }
+});
+ipcMain.on('miniplayer:cmd', (_, payload) => {
+    // Forward transport commands (string or {type,...}) to the main window's
+    // MPRIS command channel, which the injected renderer already handles.
+    win?.webContents.send('mpris:cmd', payload);
+});
+
 
 function createTray() {
     const iconPath = app.isPackaged
@@ -1736,10 +2149,10 @@ function createTray() {
 
     const buildTrayMenu = () => Menu.buildFromTemplate([
         {
-            label: win?.isVisible() ? 'Show window' : 'Show window',
+            label: 'Show/Hide Window',
             click: () => {
                 if (!win) return;
-                win.show(); win.focus();
+                if (win.isVisible() && win.isFocused()) { win.hide(); } else { win.show(); win.focus(); }
             },
         },
         { type: 'separator' },
@@ -1757,8 +2170,23 @@ function createTray() {
         },
         { type: 'separator' },
         {
+            label: (miniWin && !miniWin.isDestroyed()) ? 'Hide Mini Player' : 'Mini Player',
+            click: () => toggleMiniPlayer(),
+        },
+        { type: 'separator' },
+        {
             label: 'Restart App',
-            click: () => { app.relaunch(); isQuitting = true; app.exit(0); },
+            click: async () => {
+                // Clear the resume state so a deliberate restart starts fresh,
+                // not with a "resume from X" chip confusingly appearing on boot.
+                try {
+                    const store = await _storeLoad();
+                    delete store['aml_resume_state'];
+                    _storeDirty = true;
+                    _storeFlushSync();
+                } catch (_) {}
+                app.relaunch(); isQuitting = true; app.exit(0);
+            },
         },
         {
             label: 'Exit',
@@ -1888,11 +2316,36 @@ app.whenReady().then(() => {
     startEngine();
 });
 
+// Sync-write the encrypted store to disk, cancelling any pending timer.
+// Called from before-quit so in-flight IPC writes (resume state, play counts,
+// etc.) are not lost when the process exits before the deferred writeFile fires.
+function _storeFlushSync() {
+    if (_storeFlushTimer) { clearTimeout(_storeFlushTimer); _storeFlushTimer = null; }
+    if (!_storeDirty || !_storeCache) return;
+    try {
+        mkdirSync(CONFIG_DIR, { recursive: true });
+        const enc = safeStorage.isEncryptionAvailable();
+        const json = JSON.stringify(_storeCache);
+        writeFileSync(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
+        _storeDirty = false;
+    } catch (_) {}
+}
+
 // Stop engine and mark quitting before any window closes so the close handler
 // allows the window to actually be destroyed.
-app.on('before-quit', () => {
+app.on('before-quit', (e) => {
+    if (isQuitting) return; // prevent re-entry from the app.quit() we call below
+    e.preventDefault();
     isQuitting = true;
-    stopEngine();
+    // Ask the renderer to flush its in-memory resume state to IPC immediately.
+    // We then wait 300ms for the IPC round-trip + store update to land before
+    // sync-writing to disk and really quitting.
+    try { win?.webContents?.send('app:flush-and-quit'); } catch (_) {}
+    setTimeout(() => {
+        _storeFlushSync();
+        stopEngine();
+        app.quit();
+    }, 300);
 });
 
 // window-all-closed fires only when all windows are destroyed (not hidden).
