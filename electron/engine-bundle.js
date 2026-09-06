@@ -6345,6 +6345,9 @@ async function setup() {
                 if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
                 stopVLCPoll();
                 unbridgeDuration();
+                // Stop VLC subprocess immediately so it doesn't compete with MK's incoming media.
+                // Fire-and-forget — we don't await this; the subprocess halts on its own.
+                fetch(ENGINE + '/api/v1/vlc/stop', { method: 'POST' }).catch(() => {});
                 deleteSession(_sessionId);
                 _sessionId = null; _currentAssetId = null; _durationSec = 0;
                 showQualityBadge(null);

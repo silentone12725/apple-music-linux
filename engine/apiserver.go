@@ -675,12 +675,13 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// VLC player — libvlc-backed playback for ALAC/Atmos that the browser cannot decode.
 	// Routes are no-ops when libvlc is not installed; frontend falls back to MSE.
 	s.vlcPlayer, _ = vlc.New() // nil if libvlc unavailable
-	mux.HandleFunc("POST /api/v1/vlc/load",  cors(s.handleVLCLoad))
-	mux.HandleFunc("POST /api/v1/vlc/pause", cors(s.handleVLCPause))
-	mux.HandleFunc("POST /api/v1/vlc/resume",cors(s.handleVLCResume))
-	mux.HandleFunc("GET /api/v1/vlc/time",   cors(s.handleVLCTime))
-	mux.HandleFunc("POST /api/v1/vlc/seek",  cors(s.handleVLCSeek))
-	mux.HandleFunc("POST /api/v1/vlc/volume",cors(s.handleVLCVolume))
+	mux.HandleFunc("POST /api/v1/vlc/load",   cors(s.handleVLCLoad))
+	mux.HandleFunc("POST /api/v1/vlc/pause",  cors(s.handleVLCPause))
+	mux.HandleFunc("POST /api/v1/vlc/resume", cors(s.handleVLCResume))
+	mux.HandleFunc("POST /api/v1/vlc/stop",   cors(s.handleVLCStop))
+	mux.HandleFunc("GET /api/v1/vlc/time",    cors(s.handleVLCTime))
+	mux.HandleFunc("POST /api/v1/vlc/seek",   cors(s.handleVLCSeek))
+	mux.HandleFunc("POST /api/v1/vlc/volume", cors(s.handleVLCVolume))
 
 	// Benchmark/diagnostics surface (additive; no effect on playback).
 	// /api/v1/debug/runtime exposes scalar runtime metrics the harness samples
