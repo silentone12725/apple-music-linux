@@ -769,6 +769,167 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 	return nil, fmt.Errorf("all retries exhausted")
 }
 
+// streamMVSegmentDirect fetches url and pipes bytes to w as they arrive — no
+// whole-segment buffering. If MV cache is enabled the segment is also tee'd
+// into the cache (bytes.Buffer capture). Matches ExoPlayer's InputStream.read
+// streaming model where the decoder sees bytes as soon as the CDN sends them.
+func streamMVSegmentDirect(ctx context.Context, url string, w io.Writer) error {
+	diskKey := url
+	if q := strings.IndexByte(url, '?'); q >= 0 {
+		diskKey = url[:q]
+	}
+	if cached, ok := GetCachedMVSegment(diskKey); ok {
+		log.Printf("[mv-seg] stream cache HIT key=...%s len=%d", diskKey[len(diskKey)-20:], len(cached))
+		_, err := w.Write(cached)
+		return err
+	}
+	fetchURL, rangeHdr := url, ""
+	if idx := strings.Index(url, "#bytes="); idx >= 0 {
+		fetchURL = url[:idx]
+		rangeHdr = "bytes=" + url[idx+len("#bytes="):]
+	}
+	const maxRetries = 3
+	for attempt := range maxRetries {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
+		if err != nil {
+			return err
+		}
+		if rangeHdr != "" {
+			req.Header.Set("Range", rangeHdr)
+		}
+		resp, err := mvHTTPClient.Do(req)
+		if err != nil {
+			if !mvRetry(ctx, attempt, maxRetries) {
+				return fmt.Errorf("fetch: %w", err)
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			if !mvRetry(ctx, attempt, maxRetries) {
+				return fmt.Errorf("HTTP %d", resp.StatusCode)
+			}
+			continue
+		}
+		var dst io.Writer = w
+		var cacheBuf bytes.Buffer
+		if MVCacheEnabled() {
+			dst = io.MultiWriter(w, &cacheBuf)
+		}
+		_, copyErr := io.Copy(dst, resp.Body)
+		resp.Body.Close()
+		if copyErr != nil {
+			if !mvRetry(ctx, attempt, maxRetries) {
+				return fmt.Errorf("stream body: %w", copyErr)
+			}
+			continue
+		}
+		if MVCacheEnabled() {
+			PutCachedMVSegment(diskKey, cacheBuf.Bytes())
+		}
+		return nil
+	}
+	return fmt.Errorf("all retries exhausted")
+}
+
+// DownloadMVSegmentsStreaming replaces DownloadMVSegmentsParallel on the
+// streaming branch. Segment 0 is piped directly to w as bytes arrive from
+// Apple's CDN (first byte in O(RTT), not O(segment_size/bw)), while the next
+// `prefetch` segments are fetched into RAM in parallel. When segment 0 finishes
+// streaming, segment 1 is already in RAM and writes with zero wait. This matches
+// ExoPlayer's native HLS InputStream model (PlayerHttpDataSource.read → decoder).
+func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer, prefetch int) error {
+	log.Printf("[dl] DownloadMVSegmentsStreaming nURLs=%d prefetch=%d firstURL=%s",
+		len(urls), prefetch, func() string {
+			if len(urls) > 0 {
+				return urls[0]
+			}
+			return "(none)"
+		}())
+
+	if len(urls) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type prefetched struct {
+		data []byte
+		err  error
+	}
+
+	// ahead is a pipeline of channels, one per lookahead segment (urls[1:]).
+	// Buffer size = prefetch so the producer can queue that many ahead without
+	// blocking while segment 0 is still streaming.
+	ahead := make(chan chan prefetched, prefetch)
+
+	go func() {
+		defer close(ahead)
+		// Semaphore limits concurrent prefetch HTTP requests to `prefetch`.
+		sem := make(chan struct{}, prefetch)
+		for i, url := range urls[1:] {
+			ch := make(chan prefetched, 1)
+			select {
+			case ahead <- ch:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				ch <- prefetched{err: ctx.Err()}
+				return
+			}
+			go func(idx int, url string, ch chan prefetched) {
+				defer func() { <-sem }()
+				t0 := time.Now()
+				data, err := fetchMVSegment(ctx, url)
+				if err == nil {
+					log.Printf("[dl] mv#%d prefetch arrived size=%dB elapsed=%.2fs", idx, len(data), time.Since(t0).Seconds())
+				} else {
+					log.Printf("[dl] mv#%d prefetch error elapsed=%.2fs: %v", idx, time.Since(t0).Seconds(), err)
+				}
+				ch <- prefetched{data, err}
+			}(i+1, url, ch)
+		}
+		// Drain semaphore so all in-flight goroutines finish before close.
+		for range prefetch {
+			sem <- struct{}{}
+		}
+	}()
+
+	// Stream segment 0 directly — first bytes reach MSE within O(RTT).
+	t0 := time.Now()
+	log.Printf("[dl] mv#0 streaming directly (no buffer)")
+	if err := streamMVSegmentDirect(ctx, urls[0], w); err != nil {
+		cancel()
+		return fmt.Errorf("segment 0: %w", err)
+	}
+	log.Printf("[dl] mv#0 stream done elapsed=%.2fs", time.Since(t0).Seconds())
+
+	// Drain prefetched segments in order; each is already in RAM by the time
+	// we reach it (segment 0's stream duration ≈ 1 segment download time).
+	idx := 1
+	for ch := range ahead {
+		r := <-ch
+		if r.err != nil {
+			cancel()
+			return fmt.Errorf("segment %d: %w", idx, r.err)
+		}
+		t1 := time.Now()
+		if _, err := w.Write(r.data); err != nil {
+			return err
+		}
+		log.Printf("[dl] mv#%d written size=%dB write_elapsed=%.2fs", idx, len(r.data), time.Since(t1).Seconds())
+		idx++
+	}
+	return nil
+}
+
 // fetchMVSegment is like fetchSegment but uses the separate MV video cache.
 func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 	// Strip rotating query params (accessKey changes each session) so the disk
