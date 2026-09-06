@@ -42,6 +42,12 @@ type Cache struct {
 	// concurrent requests for the same track don't both write to temp files.
 	// Value is struct{}; presence means "write in progress".
 	inFlight sync.Map
+
+	// streaming maps filename → *StreamingPutWriter for puts started via
+	// BeginStreamingPut. Lets concurrent Range requests be served from the
+	// in-progress writer (blocking at the byte level) rather than re-downloading
+	// from byte 0. Entries are removed by Commit and Discard.
+	streaming sync.Map
 }
 
 // New returns a Cache rooted at dir, creating it if necessary.
@@ -342,7 +348,19 @@ func (c *Cache) BeginStreamingPut(assetID, qualifier string) (*StreamingPutWrite
 	}
 	sw.cond = sync.NewCond(&sw.mu)
 	sw.refs.Store(1) // writer holds the initial reference
+	c.streaming.Store(key, sw)
 	return sw, nil
+}
+
+// GetStreaming returns the in-progress StreamingPutWriter for the given asset,
+// or nil if none exists. Callers can obtain a reader via spw.NewReaderAt to
+// serve Range requests from the partially-written file while the download runs.
+func (c *Cache) GetStreaming(assetID, qualifier string) *StreamingPutWriter {
+	key := c.filename(assetID, qualifier)
+	if v, ok := c.streaming.Load(key); ok {
+		return v.(*StreamingPutWriter)
+	}
+	return nil
 }
 
 func (sw *StreamingPutWriter) Write(p []byte) (int, error) {
@@ -367,6 +385,7 @@ func (sw *StreamingPutWriter) decRef() {
 // writing is done. Call exactly once after all Write calls succeed.
 func (sw *StreamingPutWriter) Commit() error {
 	sw.cache.inFlight.Delete(sw.key)
+	sw.cache.streaming.Delete(sw.key)
 	if err := os.Rename(sw.file.Name(), sw.finalPath); err != nil {
 		os.Remove(sw.file.Name())
 		sw.mu.Lock()
@@ -391,6 +410,7 @@ func (sw *StreamingPutWriter) Commit() error {
 func (sw *StreamingPutWriter) Discard() {
 	os.Remove(sw.file.Name())
 	sw.cache.inFlight.Delete(sw.key)
+	sw.cache.streaming.Delete(sw.key)
 	sw.mu.Lock()
 	sw.done = true
 	sw.writeErr = errors.New("streaming cache download failed or was abandoned")
@@ -404,6 +424,15 @@ func (sw *StreamingPutWriter) Discard() {
 func (sw *StreamingPutWriter) NewReader() *StreamingReader {
 	sw.refs.Add(1)
 	return &StreamingReader{sw: sw}
+}
+
+// NewReaderAt returns a StreamingReader that begins at offset bytes into the
+// file. Reads block when the reader catches up to the writer, just like
+// NewReader, but start from the given byte offset rather than zero. Use this
+// to serve HTTP Range requests from an in-progress streaming download.
+func (sw *StreamingPutWriter) NewReaderAt(offset int64) *StreamingReader {
+	sw.refs.Add(1)
+	return &StreamingReader{sw: sw, pos: offset}
 }
 
 // StreamingReader implements io.ReadCloser. It blocks in Read when it has

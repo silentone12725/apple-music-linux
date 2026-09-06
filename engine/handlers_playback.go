@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,20 @@ import (
 	"engine/core/prefetch"
 	"engine/utils/aacstream"
 )
+
+// parseRangeStart extracts the start offset from an HTTP Range header value.
+// Handles "bytes=X-" and "bytes=X-Y". Returns 0 for unrecognised formats.
+func parseRangeStart(rangeHdr string) int64 {
+	s, ok := strings.CutPrefix(rangeHdr, "bytes=")
+	if !ok {
+		return 0
+	}
+	if idx := strings.IndexByte(s, '-'); idx >= 0 {
+		s = s[:idx]
+	}
+	n, _ := strconv.ParseInt(s, 10, 64)
+	return n
+}
 
 func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // 64 KB
@@ -162,7 +177,29 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		// disconnects mid-stream (user skips), giving subsequent plays a cache hit.
 		// On commit the file is served via http.ServeContent with full byte-range
 		// support on every subsequent play, enabling accurate SetTime seeks.
+		//
+		// During first play, Accept-Ranges: bytes is advertised so VLC knows it
+		// can send Range requests for seeking. A concurrent Range request hits
+		// GetStreaming and is served by a NewReaderAt on the in-progress writer —
+		// it blocks at the byte level (Android RandomAccessFile model) until the
+		// requested offset is available, then streams from there.
 		if sess.Codec == "alac" {
+			// VLC Range seek during an active streaming download: serve the
+			// requested byte range from the in-progress writer. Blocks until the
+			// writer has reached the requested offset so seeking forward works.
+			if rangeHdr := r.Header.Get("Range"); rangeHdr != "" {
+				if spw := s.diskCache.GetStreaming(sess.AssetID, qualifier); spw != nil {
+					offset := parseRangeStart(rangeHdr)
+					log.Printf("[audio] ALAC Range seek id=%s offset=%d", id, offset)
+					w.Header().Set("Content-Type", "audio/mp4")
+					w.Header().Set("Accept-Ranges", "bytes")
+					reader := spw.NewReaderAt(offset)
+					defer reader.Close()
+					io.Copy(w, reader) //nolint:errcheck
+					return
+				}
+			}
+
 			if spw, _ := s.diskCache.BeginStreamingPut(sess.AssetID, qualifier); spw != nil {
 				downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 				go func() {
@@ -174,6 +211,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 					}
 				}()
 				w.Header().Set("Content-Type", "audio/mp4")
+				w.Header().Set("Accept-Ranges", "bytes")
 				reader := spw.NewReader()
 				defer reader.Close()
 				io.Copy(w, reader) //nolint:errcheck — client disconnect is normal
