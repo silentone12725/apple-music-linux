@@ -17,6 +17,7 @@
 package diskcache
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -287,6 +288,166 @@ func (c *Cache) Evict() {
 		os.Remove(f.path)
 		total -= f.size
 	}
+}
+
+// ── Streaming put ─────────────────────────────────────────────────────────────
+
+// StreamingPutWriter writes to a temp file while StreamingReaders read from it
+// concurrently. Readers block (via sync.Cond) when they catch up to the writer
+// and unblock as soon as more bytes arrive.
+//
+// Usage:
+//
+//	spw, _ := cache.BeginStreamingPut(assetID, qualifier)
+//	go func() {
+//	    if err := fillFrom(spw); err != nil { spw.Discard() } else { spw.Commit() }
+//	}()
+//	reader := spw.NewReader()
+//	defer reader.Close()
+//	io.Copy(dst, reader)
+type StreamingPutWriter struct {
+	file      *os.File
+	finalPath string
+	key       string
+	cache     *Cache
+
+	mu       sync.Mutex
+	cond     *sync.Cond
+	written  int64
+	done     bool   // set by Commit or Discard
+	writeErr error  // non-nil when Discard was called
+
+	refs atomic.Int32 // 1 (writer) + N readers; file closes when it hits 0
+}
+
+// BeginStreamingPut opens a temp file with O_RDWR so concurrent readers can
+// ReadAt while the writer appends. Returns (nil, nil) if another goroutine is
+// already writing the same key.
+func (c *Cache) BeginStreamingPut(assetID, qualifier string) (*StreamingPutWriter, error) {
+	key := c.filename(assetID, qualifier)
+	if _, loaded := c.inFlight.LoadOrStore(key, struct{}{}); loaded {
+		return nil, nil
+	}
+	tmpPath := filepath.Join(c.dir, key+".tmp")
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		c.inFlight.Delete(key)
+		return nil, err
+	}
+	sw := &StreamingPutWriter{
+		file:      f,
+		finalPath: filepath.Join(c.dir, key),
+		key:       key,
+		cache:     c,
+	}
+	sw.cond = sync.NewCond(&sw.mu)
+	sw.refs.Store(1) // writer holds the initial reference
+	return sw, nil
+}
+
+func (sw *StreamingPutWriter) Write(p []byte) (int, error) {
+	n, err := sw.file.Write(p)
+	if n > 0 {
+		sw.mu.Lock()
+		sw.written += int64(n)
+		sw.mu.Unlock()
+		sw.cond.Broadcast()
+	}
+	return n, err
+}
+
+// decRef decrements the reference count and closes the file when it reaches zero.
+func (sw *StreamingPutWriter) decRef() {
+	if sw.refs.Add(-1) == 0 {
+		sw.file.Close()
+	}
+}
+
+// Commit renames the temp file to its final path and signals all readers that
+// writing is done. Call exactly once after all Write calls succeed.
+func (sw *StreamingPutWriter) Commit() error {
+	sw.cache.inFlight.Delete(sw.key)
+	if err := os.Rename(sw.file.Name(), sw.finalPath); err != nil {
+		os.Remove(sw.file.Name())
+		sw.mu.Lock()
+		sw.done = true
+		sw.writeErr = err
+		sw.mu.Unlock()
+		sw.cond.Broadcast()
+		sw.decRef()
+		return err
+	}
+	sw.mu.Lock()
+	sw.done = true
+	sw.mu.Unlock()
+	sw.cond.Broadcast()
+	sw.decRef()
+	go sw.cache.Evict()
+	return nil
+}
+
+// Discard deletes the temp file and signals readers with an error.
+// Call exactly once when writing fails or is abandoned.
+func (sw *StreamingPutWriter) Discard() {
+	os.Remove(sw.file.Name())
+	sw.cache.inFlight.Delete(sw.key)
+	sw.mu.Lock()
+	sw.done = true
+	sw.writeErr = errors.New("streaming cache download failed or was abandoned")
+	sw.mu.Unlock()
+	sw.cond.Broadcast()
+	sw.decRef()
+}
+
+// NewReader returns a StreamingReader that reads from the temp file as it is
+// written. The caller must call Close on the reader when done.
+func (sw *StreamingPutWriter) NewReader() *StreamingReader {
+	sw.refs.Add(1)
+	return &StreamingReader{sw: sw}
+}
+
+// StreamingReader implements io.ReadCloser. It blocks in Read when it has
+// consumed all bytes written so far and resumes when the writer adds more.
+// It returns io.EOF after the writer commits and all bytes have been read.
+// It returns an error if the writer calls Discard.
+type StreamingReader struct {
+	sw  *StreamingPutWriter
+	pos int64
+}
+
+func (sr *StreamingReader) Read(p []byte) (int, error) {
+	sr.sw.mu.Lock()
+	for sr.pos >= sr.sw.written && !sr.sw.done {
+		sr.sw.cond.Wait()
+	}
+	avail := sr.sw.written - sr.pos
+	done := sr.sw.done
+	werr := sr.sw.writeErr
+	sr.sw.mu.Unlock()
+
+	if avail <= 0 && done {
+		if werr != nil {
+			return 0, werr
+		}
+		return 0, io.EOF
+	}
+	// avail > 0: bytes are present in the file at offset sr.pos.
+	toRead := avail
+	if toRead > int64(len(p)) {
+		toRead = int64(len(p))
+	}
+	// ReadAt is safe to call concurrently with Write (pread vs write syscalls).
+	n, err := sr.sw.file.ReadAt(p[:toRead], sr.pos)
+	sr.pos += int64(n)
+	if err == io.EOF {
+		err = nil // writer may append more data
+	}
+	return n, err
+}
+
+// Close releases the reader's reference to the underlying file.
+func (sr *StreamingReader) Close() {
+	sr.sw.decRef()
 }
 
 // EvictExpired removes all entries older than the configured TTL.

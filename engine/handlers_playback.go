@@ -154,12 +154,36 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 			http.ServeContent(w, r, "", time.Time{}, f)
 			return
 		}
-		// Cache miss: download the entire track to disk first, then serve with
-		// http.ServeContent so VLC gets a byte-range-capable response. This
-		// one-time download enables accurate SetTime seeks on every subsequent
-		// play (VLC builds an mp4 fragment index from the complete file).
-		// For ALAC, the full track must be downloaded anyway before VLC can
-		// seek — byte-range seeking on a streaming endpoint is not possible.
+
+		// ALAC cache miss: stream to VLC while downloading in the background.
+		// This cuts first-play latency from the full lossless download time
+		// (~5-15 s) to the initial buffer fill (~0.5 s). The download goroutine
+		// uses a detached context so the file is always committed even when VLC
+		// disconnects mid-stream (user skips), giving subsequent plays a cache hit.
+		// On commit the file is served via http.ServeContent with full byte-range
+		// support on every subsequent play, enabling accurate SetTime seeks.
+		if sess.Codec == "alac" {
+			if spw, _ := s.diskCache.BeginStreamingPut(sess.AssetID, qualifier); spw != nil {
+				downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+				go func() {
+					defer cancel()
+					if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, spw); err != nil {
+						spw.Discard()
+					} else {
+						spw.Commit()
+					}
+				}()
+				w.Header().Set("Content-Type", "audio/mp4")
+				reader := spw.NewReader()
+				defer reader.Close()
+				io.Copy(w, reader) //nolint:errcheck — client disconnect is normal
+				return
+			}
+		}
+
+		// Non-ALAC cache miss (AAC, etc.): download the full track first, then
+		// serve with http.ServeContent for byte-range support on replays.
+		// AAC files are small enough that the download overhead is not noticeable.
 		if pw, _ := s.diskCache.BeginPut(sess.AssetID, qualifier); pw != nil {
 			err := s.pm.Stream(r.Context(), id, pipeline.KindAudio, pw)
 			if err != nil {
