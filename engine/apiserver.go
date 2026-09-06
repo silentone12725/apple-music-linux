@@ -54,6 +54,7 @@ import (
 	"engine/core/diskcache"
 	"engine/core/drm"
 	"engine/core/export"
+	"engine/core/fairplay"
 	"engine/core/library"
 	"engine/core/playback"
 	"engine/core/prefetch"
@@ -564,6 +565,11 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 			s.scheduler.PruneExpiredPreWarmed()
 		}
 	}()
+
+	// Pre-warm TLS connection to Apple's FairPlay license server so the first
+	// AcquireKey call skips the handshake latency. Mirrors Android
+	// FootHillDecryptionKeyController pre-warming the CDM at player init time.
+	go fairplay.WarmLicensePool(context.Background())
 
 	// Disk cache — decrypted per-track audio; falls back gracefully on error.
 	// Limits (persistLimitMB, persistTTLDays) are pushed by the frontend on
