@@ -30,10 +30,10 @@ var alacClient = &http.Client{
 		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  true,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		// Force IPv4: Apple CDN AAAA records may resolve but be unreachable.
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, "tcp4", addr)
+		},
 	},
 }
 
