@@ -173,50 +173,6 @@ func (pw *PutWriter) Discard() {
 	pw.cache.inFlight.Delete(pw.key)
 }
 
-// TeeWriter wraps an io.Writer (the HTTP response) and simultaneously writes
-// to the PutWriter.  If the cache write fails the stream to dst continues
-// unaffected; the put is discarded on first error.
-type TeeWriter struct {
-	dst io.Writer
-	pw  *PutWriter
-	bad bool // cache write failed; stop trying
-}
-
-// NewTee returns a TeeWriter that writes to dst and pw simultaneously.
-// dst may be nil and set later via SetDst before the first Write.
-// If pw is nil the TeeWriter is a transparent pass-through to dst.
-func NewTee(dst io.Writer, pw *PutWriter) *TeeWriter {
-	return &TeeWriter{dst: dst, pw: pw}
-}
-
-// SetDst sets the primary destination writer.  Must be called before Write.
-func (t *TeeWriter) SetDst(dst io.Writer) { t.dst = dst }
-
-func (t *TeeWriter) Write(p []byte) (int, error) {
-	n, err := t.dst.Write(p)
-	if n > 0 && t.pw != nil && !t.bad {
-		if _, cerr := t.pw.Write(p[:n]); cerr != nil {
-			t.bad = true
-			t.pw.Discard()
-			t.pw = nil
-		}
-	}
-	return n, err
-}
-
-// Finish commits the cache entry if the stream completed without error, or
-// discards the temp file if err != nil.
-func (t *TeeWriter) Finish(streamErr error) {
-	if t.pw == nil {
-		return
-	}
-	if streamErr != nil {
-		t.pw.Discard()
-		return
-	}
-	t.pw.Commit()
-}
-
 // Stats returns the total size in bytes and file count of committed cache entries.
 func (c *Cache) Stats() (totalBytes int64, count int) {
 	entries, _ := os.ReadDir(c.dir)

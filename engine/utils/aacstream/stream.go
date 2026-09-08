@@ -7,9 +7,6 @@ package aacstream
 // file.  This lets downstream consumers (HTTP server, named pipe, file) start
 // reading before the upload is complete.
 //
-// StreamMvData combines parallel HLS segment download with streaming
-// decryption via an io.Pipe so playback can start before all segments arrive.
-//
 // Robustness notes:
 //   - Init segment: Apple emits ftyp + moov, but pssh boxes can follow moov
 //     in some variants.  We consume boxes until we have a moov, then stop.
@@ -27,8 +24,6 @@ import (
 	"io"
 	"log"
 	"strings"
-
-	"encoding/hex"
 
 	"engine/core/pipeline"
 	"github.com/itouakirai/mp4ff/mp4"
@@ -443,38 +438,4 @@ func PassthroughStreaming(ctx context.Context, r io.Reader, w io.Writer) error {
 			return fmt.Errorf("write fragment: %w", err)
 		}
 	}
-}
-
-// StreamMvData downloads HLS segments in parallel, assembles them in order
-// through an io.Pipe, and streams the assembled data through
-// DecryptMP4Streaming into w.  The first decrypted data reaches w as soon as
-// the init segment and first media fragment arrive — well before all segments
-// are downloaded.
-func StreamMvData(ctx context.Context, keyAndUrls string, w io.Writer) error {
-	parts := strings.SplitN(keyAndUrls, ";", 2)
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid keyAndUrls")
-	}
-	keyParts := strings.SplitN(parts[0], ":", 2)
-	if len(keyParts) < 2 {
-		return fmt.Errorf("invalid key format")
-	}
-	keyBytes, err := hex.DecodeString(keyParts[1])
-	if err != nil {
-		return fmt.Errorf("key decode: %w", err)
-	}
-	urlList := strings.Split(parts[1], ";")
-
-	log.Printf("[INTERCEPT] StreamMvData: key-len=%d urls=%d scheme=%s",
-		len(keyBytes), len(urlList), keyParts[0])
-
-	pr, pw := io.Pipe()
-
-	go func() {
-		limiter := newAimdLimiter(8, 2, 32)
-		downloadAndAssemble(ctx, urlList, pw, limiter)
-		pw.Close()
-	}()
-
-	return DecryptMP4Streaming(ctx, pr, keyBytes, w)
 }
