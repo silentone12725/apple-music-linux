@@ -96,7 +96,10 @@ func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
 	// WirePlumber applies vol=0 asynchronously after VLC opens the audio
 	// device; repeated calls ensure our value lands last.
 	p.mu.Lock()
-	if p.loadGen != myGen { p.mu.Unlock(); return }
+	if p.loadGen != myGen {
+		p.mu.Unlock()
+		return
+	}
 	C.libvlc_audio_set_volume(p.mp, C.int(vol))
 	p.mu.Unlock()
 
@@ -105,7 +108,9 @@ func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
 		p.mu.Lock()
 		stale := p.loadGen != myGen
 		p.mu.Unlock()
-		if stale { return }
+		if stale {
+			return
+		}
 		exec.Command("sh", "-c", wpctlCmd).Run() //nolint:errcheck
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -266,7 +271,9 @@ func (p *Player) SetTime(posMs int64) {
 			state := C.libvlc_media_player_get_state(p.mp)
 			gen := p.loadGen
 			p.mu.Unlock()
-			if gen != myGen { return } // track changed — drop seek
+			if gen != myGen {
+				return
+			} // track changed — drop seek
 			if state == C.libvlc_Playing || state == C.libvlc_Paused {
 				p.mu.Lock()
 				C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
@@ -363,4 +370,3 @@ func vlcStateName(s C.libvlc_state_t) string {
 		return "unknown"
 	}
 }
-

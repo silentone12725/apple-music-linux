@@ -184,10 +184,10 @@ func (s *Store) decrypt(data []byte) ([]byte, error) {
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 type diskCache struct {
-	Songs     []SongInfo               `json:"songs"`
-	Playlists []PlaylistInfo           `json:"playlists"`
+	Songs     []SongInfo                 `json:"songs"`
+	Playlists []PlaylistInfo             `json:"playlists"`
 	PlTracks  map[string][]PlaylistTrack `json:"playlistTracks"`
-	SyncedAt  time.Time                `json:"syncedAt"`
+	SyncedAt  time.Time                  `json:"syncedAt"`
 }
 
 func (s *Store) load() {
@@ -463,7 +463,7 @@ type IngestPayload struct {
 	Albums         []amItem            `json:"albums"`
 	Playlists      []amItem            `json:"playlists"`
 	PlaylistTracks map[string][]amItem `json:"playlistTracks"` // playlistID → items
-	Revision       string              `json:"revision"`        // opaque revision token for delta sync
+	Revision       string              `json:"revision"`       // opaque revision token for delta sync
 }
 
 // Ingest replaces the cache with pre-fetched library data from the JS layer.

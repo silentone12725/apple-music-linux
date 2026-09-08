@@ -953,10 +953,6 @@ let _sessionId      = null;
 let _currentAssetId = null;
 let _durationSec = 0;
 let _abortCtrl   = null;   // session-level abort — killed on track change
-let _mvRetries   = 0;      // decode-error retry counter, reset on each new MV session
-// Playhead position of the previous decode failure, used to tell a transient
-// failure from a deterministic one. Reset alongside _mvRetries.
-let _mvLastErrPos = -1;
 let _generation  = 0;
 let _videoCodec  = null;   // HLS CODECS= for the video track (MV sessions only)
 let _mvGateOpen  = true;   // false while MV A/V gate is pending; blocks play/seek
@@ -3241,34 +3237,22 @@ async function startMVPipeline() {
         // code 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
         console.error(`[AML MV-V] videoEl error code=${code} msg="${msg}" buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'} ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
         if (code === 3 || code === 4) {
-            const errPos = videoEl.currentTime;
-            // A retry replays the track from the start, so it is only worth doing
-            // when the previous attempt actually got further. If this failure is at
-            // or before the last one, the stream is deterministically bad at that
-            // point and retrying just burns another full re-download before failing
-            // in the same place — advance instead.
-            const madeProgress = _mvLastErrPos < 0 || errPos > _mvLastErrPos + 1.0;
-            if (code === 3 && _mvRetries < 2 && madeProgress) {
-                _mvRetries++;
-                _mvLastErrPos = errPos;
-                console.warn(`[AML MV] decode error at ${errPos.toFixed(1)}s — scheduling retry ${_mvRetries}/2`);
-                _mvResetScrubberRef?.(); // don't leave the bar frozen during the re-buffer
-                _abortMV(`video-error-${code}-retry-${_mvRetries}`);
-                setTimeout(() => {
-                    if (genStale(_mvGen)) return; // track changed during delay
-                    _abortCtrl = new AbortController();
-                    startMVPipeline().catch(e => console.error('[AML MV] retry failed:', e.message));
-                }, 800);
-            } else {
-                if (code === 3 && !madeProgress)
-                    console.warn(`[AML MV] decode error at ${errPos.toFixed(1)}s — no progress since last failure (${_mvLastErrPos.toFixed(1)}s), not retrying`);
-                // Retries exhausted — advance the queue rather than leaving MK in a
-                // paused-but-not-ended state, which causes it to restart the same track.
-                console.warn(`[AML MV] decode error retries exhausted — advancing track`);
-                _abortMV(`video-error-${code}`);
-                _amlNextRef?.().catch(() => {});
-                setTimeout(() => exitBtn?.click(), 200);
-            }
+            // Do not retry. A decode failure is Chromium's demuxer rejecting a
+            // sample — the direct analogue of ExoPlayer's ParserException, which
+            // Apple's own DefaultLoadErrorHandlingPolicy answers with C.TIME_UNSET
+            // ("never retry"), alongside FileNotFoundException. It is a property of
+            // the bytes, not of the attempt, so a retry re-downloads the whole
+            // track (30 s+ of dead air) only to fail at the same place.
+            //
+            // The one cause that WAS transient — a chunk dropped on
+            // QuotaExceededError desynchronising the stream — is fixed at source in
+            // _appendWithQuota, so retrying no longer has anything to recover from.
+            // Advance instead of leaving MusicKit paused-but-not-ended, which would
+            // make it restart the same track.
+            console.warn(`[AML MV] decode error at ${videoEl.currentTime.toFixed(1)}s (code=${code}) — not retryable, advancing track`);
+            _abortMV(`video-error-${code}`);
+            _amlNextRef?.().catch(() => {});
+            setTimeout(() => exitBtn?.click(), 200);
         }
     };
     const onVideoStall  = () => console.warn(`[AML MV-V] videoEl stalled ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
@@ -4561,8 +4545,6 @@ async function handleTrackChange(mk) {
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
         _broadcastNowPlaying(); // Discord presence + Last.fm now-playing/scrobble + resume snapshot
 
-        _mvRetries = 0; // reset retry counter for this new session
-        _mvLastErrPos = -1;
         _abortCtrl = new AbortController();
         const ctrl = _abortCtrl;
 
@@ -5337,16 +5319,33 @@ function _xfDecision() {
     return 'fade';
 }
 
+// Volume ramp for crossfade.
+//
+// Step count and spacing follow Apple's Android PlayerAudioFadeControl:
+// NUM_MESSAGES = 0x14 (20 steps for the whole fade, regardless of duration),
+// spaced between MIN_MS_BETWEEN_MESSAGES (0xc8 = 200 ms) and
+// MAX_MS_BETWEEN_MESSAGES (0x1f4 = 500 ms). A 6 s fade is therefore 20 writes
+// 300 ms apart, not the 120 writes at 50 ms this used to do — six times fewer
+// timer wakeups for a ramp nobody can hear the difference in. Short fades clamp
+// to the 200 ms floor, which reduces the step count rather than the smoothness.
+const XF_STEPS      = 20;
+const XF_MIN_STEP_MS = 200;
+const XF_MAX_STEP_MS = 500;
+
 function _xfRamp(audio, to, durSec, onDone) {
     _xfCancel();
     const from = audio.volume;
-    const steps = Math.max(1, Math.round(durSec * 20)); // ~50ms steps
+    // Derive spacing from the duration, then clamp; recompute steps so the ramp
+    // still finishes in durSec after clamping.
+    const rawMs   = (durSec * 1000) / XF_STEPS;
+    const stepMs  = Math.max(XF_MIN_STEP_MS, Math.min(XF_MAX_STEP_MS, rawMs));
+    const steps   = Math.max(1, Math.round((durSec * 1000) / stepMs));
     let i = 0; _xfRamping = true;
     _xfTimer = setInterval(() => {
         i++;
         try { audio.volume = Math.max(0, Math.min(1, from + (to - from) * (i / steps))); } catch (_) {}
         if (i >= steps) { _xfCancel(); onDone?.(); }
-    }, 50);
+    }, stepMs);
 }
 
 function _xfFadeIn(audio) {

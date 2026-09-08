@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"io"
 
-	"engine/core/tracer"
 	"engine/core/hls"
 	"engine/core/pipeline"
+	"engine/core/tracer"
 	"engine/utils/aacstream"
 )
 

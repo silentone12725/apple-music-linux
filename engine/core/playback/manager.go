@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"engine/core/apple"
@@ -64,7 +65,22 @@ type Manager struct {
 	contexts   map[string]*playContext
 	inflightMu sync.Mutex
 	inflight   map[string]*openFlight // key: assetID+storefront+capabilities
+
+	// activeStreams counts pipeline.Run calls currently pulling bytes from Apple
+	// for real playback. Background cache-warming consults it so it never
+	// competes for bandwidth with the stream the user is actually listening to
+	// — the same rule Apple's Android client applies in
+	// PlayerLoadControl.shouldPrepareNextPeriodForCaching, which pre-caches the
+	// next queue item only when the current period is NOT reading from network.
+	activeStreams atomic.Int64
 }
+
+// IsStreaming reports whether any playback stream is currently pulling from the
+// network. Used to defer background prefetch while real playback is in flight.
+func (m *Manager) IsStreaming() bool { return m.activeStreams.Load() > 0 }
+
+// ActiveStreams returns the number of in-flight playback streams (for metrics).
+func (m *Manager) ActiveStreams() int { return int(m.activeStreams.Load()) }
 
 // New returns a Manager backed by the Apple Music provider.
 // Swap apple.NewProvider() for any media.Provider to change the source.
@@ -204,6 +220,8 @@ func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.St
 	if !ok {
 		return fmt.Errorf("session %s has no %s stream", sessionID, kind)
 	}
+	m.activeStreams.Add(1)
+	defer m.activeStreams.Add(-1)
 	return pipeline.Run(ctx, stream, dst)
 }
 
@@ -233,6 +251,8 @@ func (m *Manager) StreamFrom(ctx context.Context, sessionID string, kind pipelin
 		Kind:   stream.Kind,
 		Codec:  stream.Codec,
 	}
+	m.activeStreams.Add(1)
+	defer m.activeStreams.Add(-1)
 	return actualStart, pipeline.Run(ctx, seekStream, dst)
 }
 

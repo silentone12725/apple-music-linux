@@ -3,27 +3,27 @@
 // Binaural rendering pipeline — Linux equivalent of DTS Sound Unbound's I3DA
 // HRTF renderer (DtsHrtfEnc.dll) and Dolby DAA headphone virtualizer:
 //
-//   Windows DTS Sound Unbound          │  This implementation
-//   ──────────────────────────────────│──────────────────────────────────────
-//   DTSXDecoder.dll (DTS:X JOC decode)│  ffmpeg EC-3/DTS decoder
-//   ISpatialAudioMetadataClient        │  ffmpeg filter graph
-//   DtsHrtfEnc::ProcessSingleBlock     │  ffmpeg headphone HRTF filter
-//   DtsHrtfEnc::MixChannelBed         │  headphone accumulation
-//   SPAC.crypt FIR filter bank        │  MIT KEMAR SOFA HRTF dataset
+//	Windows DTS Sound Unbound          │  This implementation
+//	──────────────────────────────────│──────────────────────────────────────
+//	DTSXDecoder.dll (DTS:X JOC decode)│  ffmpeg EC-3/DTS decoder
+//	ISpatialAudioMetadataClient        │  ffmpeg filter graph
+//	DtsHrtfEnc::ProcessSingleBlock     │  ffmpeg headphone HRTF filter
+//	DtsHrtfEnc::MixChannelBed         │  headphone accumulation
+//	SPAC.crypt FIR filter bank        │  MIT KEMAR SOFA HRTF dataset
 //
 // Two render modes are supported, selected automatically at startup:
 //
-//   HRTF mode (preferred)
-//     Requires /usr/share/libmysofa/MIT_KEMAR_normal_pinna.sofa (libmysofa)
-//     and python3 + h5py.  Each of the 7.1 bed channels is convolved with
-//     its speaker-position HRTF impulse response (FL=30°L, FR=30°R,
-//     FC=0°, BL=110°L, BR=110°R, SL=90°L, SR=90°R, LFE=0°), then summed
-//     to binaural stereo.  This directly mirrors DtsHrtfEnc::ProcessSingleBlock
-//     using the MIT KEMAR HRTF dataset instead of DTS's proprietary SPAC files.
+//	HRTF mode (preferred)
+//	  Requires /usr/share/libmysofa/MIT_KEMAR_normal_pinna.sofa (libmysofa)
+//	  and python3 + h5py.  Each of the 7.1 bed channels is convolved with
+//	  its speaker-position HRTF impulse response (FL=30°L, FR=30°R,
+//	  FC=0°, BL=110°L, BR=110°R, SL=90°L, SR=90°R, LFE=0°), then summed
+//	  to binaural stereo.  This directly mirrors DtsHrtfEnc::ProcessSingleBlock
+//	  using the MIT KEMAR HRTF dataset instead of DTS's proprietary SPAC files.
 //
-//   Crossfeed mode (fallback)
-//     ITU-R BS.775-3 7.1→stereo pan matrix followed by Bauer stereophonic-
-//     to-binaural (bs2b) crossfeed, matching the existing bed-channel path.
+//	Crossfeed mode (fallback)
+//	  ITU-R BS.775-3 7.1→stereo pan matrix followed by Bauer stereophonic-
+//	  to-binaural (bs2b) crossfeed, matching the existing bed-channel path.
 package ffmpeg
 
 import (

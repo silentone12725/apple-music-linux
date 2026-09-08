@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/grafov/m3u8"
 
@@ -45,6 +46,10 @@ type Selection struct {
 
 var aacStereoRe = regexp.MustCompile(`audio-stereo-\d+`)
 
+// masterClient bounds master-playlist fetches. http.DefaultClient has no
+// timeout, so a stalled CDN connection would hang FetchMaster forever.
+var masterClient = &http.Client{Timeout: 15 * time.Second}
+
 // FetchMaster fetches and decodes a master playlist. The returned base URL is
 // used to resolve relative variant URIs.
 func FetchMaster(masterURL string) (*m3u8.MasterPlaylist, *url.URL, error) {
@@ -52,7 +57,7 @@ func FetchMaster(masterURL string) (*m3u8.MasterPlaylist, *url.URL, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	resp, err := http.Get(masterURL)
+	resp, err := masterClient.Get(masterURL)
 	if err != nil {
 		return nil, nil, err
 	}

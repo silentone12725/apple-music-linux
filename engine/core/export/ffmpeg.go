@@ -60,7 +60,7 @@ func extractArtwork(ffmpegPath, m4aPath, outPath string) error {
 	}
 	cmd := exec.Command(ffmpegPath,
 		"-i", m4aPath,
-		"-an",            // no audio
+		"-an", // no audio
 		"-vcodec", "copy",
 		"-y", outPath,
 	)
@@ -99,27 +99,53 @@ func tagFLAC(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 	}
 	args = append(args, "-map_metadata", "-1")
 
-	if meta.Title != ""      { args = append(args, "-metadata", "title="+meta.Title) }
-	if meta.ArtistName != "" { args = append(args, "-metadata", "artist="+meta.ArtistName) }
-	if meta.AlbumArtist != "" { args = append(args, "-metadata", "album_artist="+meta.AlbumArtist) }
-	if meta.AlbumName != ""  { args = append(args, "-metadata", "album="+meta.AlbumName) }
+	if meta.Title != "" {
+		args = append(args, "-metadata", "title="+meta.Title)
+	}
+	if meta.ArtistName != "" {
+		args = append(args, "-metadata", "artist="+meta.ArtistName)
+	}
+	if meta.AlbumArtist != "" {
+		args = append(args, "-metadata", "album_artist="+meta.AlbumArtist)
+	}
+	if meta.AlbumName != "" {
+		args = append(args, "-metadata", "album="+meta.AlbumName)
+	}
 	if meta.TrackNumber > 0 {
 		track := fmt.Sprintf("%d", meta.TrackNumber)
-		if meta.TrackTotal > 0 { track += fmt.Sprintf("/%d", meta.TrackTotal) }
+		if meta.TrackTotal > 0 {
+			track += fmt.Sprintf("/%d", meta.TrackTotal)
+		}
 		args = append(args, "-metadata", "track="+track)
 	}
 	if meta.DiscNumber > 0 {
 		disc := fmt.Sprintf("%d", meta.DiscNumber)
-		if meta.DiscTotal > 0 { disc += fmt.Sprintf("/%d", meta.DiscTotal) }
+		if meta.DiscTotal > 0 {
+			disc += fmt.Sprintf("/%d", meta.DiscTotal)
+		}
 		args = append(args, "-metadata", "disc="+disc)
 	}
-	if meta.ReleaseDate != "" { args = append(args, "-metadata", "date="+meta.ReleaseDate) }
-	if meta.Genre != ""      { args = append(args, "-metadata", "genre="+meta.Genre) }
-	if meta.Composer != ""   { args = append(args, "-metadata", "composer="+meta.Composer) }
-	if meta.Copyright != ""  { args = append(args, "-metadata", "copyright="+meta.Copyright) }
-	if meta.RecordLabel != "" { args = append(args, "-metadata", "publisher="+meta.RecordLabel) }
-	if meta.Isrc != ""       { args = append(args, "-metadata", "isrc="+meta.Isrc) }
-	if meta.UPC != ""        { args = append(args, "-metadata", "barcode="+meta.UPC) }
+	if meta.ReleaseDate != "" {
+		args = append(args, "-metadata", "date="+meta.ReleaseDate)
+	}
+	if meta.Genre != "" {
+		args = append(args, "-metadata", "genre="+meta.Genre)
+	}
+	if meta.Composer != "" {
+		args = append(args, "-metadata", "composer="+meta.Composer)
+	}
+	if meta.Copyright != "" {
+		args = append(args, "-metadata", "copyright="+meta.Copyright)
+	}
+	if meta.RecordLabel != "" {
+		args = append(args, "-metadata", "publisher="+meta.RecordLabel)
+	}
+	if meta.Isrc != "" {
+		args = append(args, "-metadata", "isrc="+meta.Isrc)
+	}
+	if meta.UPC != "" {
+		args = append(args, "-metadata", "barcode="+meta.UPC)
+	}
 
 	args = append(args, "-f", "flac", "-y", dst)
 	cmd := exec.Command(ffmpegPath, args...)
@@ -224,10 +250,18 @@ func runFFmpeg(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 		"-map_metadata", "-1", // start clean; explicit -metadata flags below set what we need
 	)
 
-	if meta.Title != "" { args = append(args, "-metadata", "title="+meta.Title) }
-	if meta.ArtistName != "" { args = append(args, "-metadata", "artist="+meta.ArtistName) }
-	if meta.AlbumArtist != "" { args = append(args, "-metadata", "album_artist="+meta.AlbumArtist) }
-	if meta.AlbumName != "" { args = append(args, "-metadata", "album="+meta.AlbumName) }
+	if meta.Title != "" {
+		args = append(args, "-metadata", "title="+meta.Title)
+	}
+	if meta.ArtistName != "" {
+		args = append(args, "-metadata", "artist="+meta.ArtistName)
+	}
+	if meta.AlbumArtist != "" {
+		args = append(args, "-metadata", "album_artist="+meta.AlbumArtist)
+	}
+	if meta.AlbumName != "" {
+		args = append(args, "-metadata", "album="+meta.AlbumName)
+	}
 	if meta.TrackNumber > 0 {
 		track := fmt.Sprintf("%d", meta.TrackNumber)
 		if meta.TrackTotal > 0 {
@@ -242,13 +276,27 @@ func runFFmpeg(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 		}
 		args = append(args, "-metadata", "disc="+disc)
 	}
-	if meta.ReleaseDate != "" { args = append(args, "-metadata", "date="+meta.ReleaseDate) }
-	if meta.Genre != "" { args = append(args, "-metadata", "genre="+meta.Genre) }
-	if meta.Composer != "" { args = append(args, "-metadata", "composer="+meta.Composer) }
-	if meta.Copyright != "" { args = append(args, "-metadata", "copyright="+meta.Copyright) }
-	if meta.RecordLabel != "" { args = append(args, "-metadata", "publisher="+meta.RecordLabel) }
-	if meta.Isrc != "" { args = append(args, "-metadata", "isrc="+meta.Isrc) }
-	if meta.UPC != "" { args = append(args, "-metadata", "barcode="+meta.UPC) }
+	if meta.ReleaseDate != "" {
+		args = append(args, "-metadata", "date="+meta.ReleaseDate)
+	}
+	if meta.Genre != "" {
+		args = append(args, "-metadata", "genre="+meta.Genre)
+	}
+	if meta.Composer != "" {
+		args = append(args, "-metadata", "composer="+meta.Composer)
+	}
+	if meta.Copyright != "" {
+		args = append(args, "-metadata", "copyright="+meta.Copyright)
+	}
+	if meta.RecordLabel != "" {
+		args = append(args, "-metadata", "publisher="+meta.RecordLabel)
+	}
+	if meta.Isrc != "" {
+		args = append(args, "-metadata", "isrc="+meta.Isrc)
+	}
+	if meta.UPC != "" {
+		args = append(args, "-metadata", "barcode="+meta.UPC)
+	}
 
 	args = append(args, "-y", dst)
 	cmd := exec.Command(ffmpegPath, args...)

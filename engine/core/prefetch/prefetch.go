@@ -160,31 +160,48 @@ func (j *WarmJob) snapshot() WarmJob {
 	}
 	// Construct a fresh value — mu and cancel are intentionally left zero.
 	return WarmJob{
-		ID:        id, Generation: gen, Status: status,
-		Total:     total, Warming: warming,
-		Cached:    cached, Failed: failed, Cancelled: cancelled,
+		ID: id, Generation: gen, Status: status,
+		Total: total, Warming: warming,
+		Cached: cached, Failed: failed, Cancelled: cancelled,
 		CreatedAt: createdAt,
 	}
 }
 
 func (j *WarmJob) startOne() {
-	j.mu.Lock(); j.Warming++; j.mu.Unlock()
+	j.mu.Lock()
+	j.Warming++
+	j.mu.Unlock()
 }
 
 func (j *WarmJob) finishCached() (cached, total int) {
-	j.mu.Lock(); j.Cached++; j.Warming--; cached, total = j.Cached, j.Total; j.mu.Unlock(); return
+	j.mu.Lock()
+	j.Cached++
+	j.Warming--
+	cached, total = j.Cached, j.Total
+	j.mu.Unlock()
+	return
 }
 
 func (j *WarmJob) finishFailed() (failed, total int) {
-	j.mu.Lock(); j.Failed++; j.Warming--; failed, total = j.Failed, j.Total; j.mu.Unlock(); return
+	j.mu.Lock()
+	j.Failed++
+	j.Warming--
+	failed, total = j.Failed, j.Total
+	j.mu.Unlock()
+	return
 }
 
 func (j *WarmJob) finishCancelled() {
-	j.mu.Lock(); j.Cancelled++; j.Warming--; j.mu.Unlock()
+	j.mu.Lock()
+	j.Cancelled++
+	j.Warming--
+	j.mu.Unlock()
 }
 
 func (j *WarmJob) skipCancelled() {
-	j.mu.Lock(); j.Cancelled++; j.mu.Unlock()
+	j.mu.Lock()
+	j.Cancelled++
+	j.mu.Unlock()
 }
 
 func (j *WarmJob) isDone() bool {
@@ -195,18 +212,19 @@ func (j *WarmJob) isDone() bool {
 
 // Stats holds internal scheduler metrics for observability.
 type Stats struct {
-	ActiveWorkers    int64   `json:"activeWorkers"`
-	QueueDepth       int     `json:"queueDepth"`
-	DedupHits        int64   `json:"dedupHits"`
-	TotalCached      int64   `json:"totalCached"`
-	TotalFailed      int64   `json:"totalFailed"`
-	TotalCancelled   int64   `json:"totalCancelled"`
-	TotalRetries     int64   `json:"totalRetries"`     // retry attempts (not first tries)
-	AvgWarmMs        float64 `json:"avgWarmMs"`        // mean warm latency over last 200 successes
-	P95WarmMs        float64 `json:"p95WarmMs"`        // 95th-percentile warm latency
-	AvgQueueWaitMs   float64 `json:"avgQueueWaitMs"`   // mean time from enqueue to worker-start
-	P95QueueWaitMs   float64 `json:"p95QueueWaitMs"`   // 95th-percentile queue wait
-	CacheHitRatio    float64 `json:"cacheHitRatio"`    // cached / (cached + failed)
+	ActiveWorkers  int64   `json:"activeWorkers"`
+	QueueDepth     int     `json:"queueDepth"`
+	DedupHits      int64   `json:"dedupHits"`
+	PlaybackYields int64   `json:"playbackYields"` // warm jobs deferred to avoid competing with playback
+	TotalCached    int64   `json:"totalCached"`
+	TotalFailed    int64   `json:"totalFailed"`
+	TotalCancelled int64   `json:"totalCancelled"`
+	TotalRetries   int64   `json:"totalRetries"`   // retry attempts (not first tries)
+	AvgWarmMs      float64 `json:"avgWarmMs"`      // mean warm latency over last 200 successes
+	P95WarmMs      float64 `json:"p95WarmMs"`      // 95th-percentile warm latency
+	AvgQueueWaitMs float64 `json:"avgQueueWaitMs"` // mean time from enqueue to worker-start
+	P95QueueWaitMs float64 `json:"p95QueueWaitMs"` // 95th-percentile queue wait
+	CacheHitRatio  float64 `json:"cacheHitRatio"`  // cached / (cached + failed)
 }
 
 // isRetryable reports whether an error with the given reason code is worth
@@ -242,11 +260,18 @@ func (w *workItem) effectiveScore() float64 {
 // negligible without aging.
 type workHeap []*workItem
 
-func (h workHeap) Len() int            { return len(h) }
-func (h workHeap) Less(i, j int) bool  { return h[i].baseScore > h[j].baseScore } // max-heap
-func (h workHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *workHeap) Push(x any)         { *h = append(*h, x.(*workItem)) }
-func (h *workHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; old[n-1] = nil; *h = old[:n-1]; return x }
+func (h workHeap) Len() int           { return len(h) }
+func (h workHeap) Less(i, j int) bool { return h[i].baseScore > h[j].baseScore } // max-heap
+func (h workHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *workHeap) Push(x any)        { *h = append(*h, x.(*workItem)) }
+func (h *workHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	old[n-1] = nil
+	*h = old[:n-1]
+	return x
+}
 
 // workQueue is a thread-safe priority queue backed by a max-heap.
 // pop blocks until an item is available or the queue is closed.
@@ -283,11 +308,17 @@ func (q *workQueue) pop() (*workItem, bool) {
 }
 
 func (q *workQueue) close() {
-	q.mu.Lock(); q.done = true; q.cond.Broadcast(); q.mu.Unlock()
+	q.mu.Lock()
+	q.done = true
+	q.cond.Broadcast()
+	q.mu.Unlock()
 }
 
 func (q *workQueue) depth() int {
-	q.mu.Lock(); n := q.h.Len(); q.mu.Unlock(); return n
+	q.mu.Lock()
+	n := q.h.Len()
+	q.mu.Unlock()
+	return n
 }
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -313,8 +344,8 @@ type Scheduler struct {
 
 	mu         sync.RWMutex
 	jobs       map[string]*WarmJob
-	dedup      map[string]bool            // assetId → currently in-flight
-	preWarmed  map[string]preWarmedEntry  // assetId → pre-opened session (consumed on first use)
+	dedup      map[string]bool           // assetId → currently in-flight
+	preWarmed  map[string]preWarmedEntry // assetId → pre-opened session (consumed on first use)
 	generation atomic.Int64              // increments with each Submit call
 
 	wq *workQueue
@@ -330,6 +361,7 @@ type Scheduler struct {
 	totalFailed    atomic.Int64
 	totalCancelled atomic.Int64
 	totalRetries   atomic.Int64
+	playbackYields atomic.Int64 // warm jobs deferred while real playback was streaming
 	latencies      *ring.Buffer // time from worker-start to opened (not streamed)
 	queueWaits     *ring.Buffer // time from enqueue to worker-start
 }
@@ -403,6 +435,7 @@ func (s *Scheduler) Stats() Stats {
 		ActiveWorkers:  s.activeWorkers.Load(),
 		QueueDepth:     s.wq.depth(),
 		DedupHits:      s.dedupHits.Load(),
+		PlaybackYields: s.playbackYields.Load(),
 		TotalCached:    cached,
 		TotalFailed:    failed,
 		TotalCancelled: s.totalCancelled.Load(),
@@ -589,12 +622,56 @@ func (s *Scheduler) ClearPreWarmed() {
 
 // ── Workers ───────────────────────────────────────────────────────────────────
 
+// Bandwidth yielding to real playback.
+//
+// Apple's Android client gates next-item caching on the active period having
+// stopped reading from the network (PlayerLoadControl.shouldPrepareNextPeriod-
+// ForCaching ends in `return !period.isReadingFromNetwork()`). Without the
+// equivalent, warming workers download segments in parallel with the stream the
+// user is listening to and starve it — observed as MV segments taking 11-22 s
+// and the player stalling with a 2 s buffer while a 10-track warm ran.
+//
+// playbackYieldCap bounds the deferral so a stream that never finishes (a stuck
+// or very long download) cannot starve warming indefinitely.
+const (
+	playbackPollInterval = 250 * time.Millisecond
+	playbackYieldCap     = 2 * time.Minute
+)
+
+// awaitPlaybackIdle blocks while real playback is pulling from the network, so
+// background warming never competes with it for bandwidth. Returns early if the
+// item is cancelled or the cap elapses.
+func (s *Scheduler) awaitPlaybackIdle(ctx context.Context) {
+	if s.pm == nil || !s.pm.IsStreaming() {
+		return
+	}
+	deadline := time.NewTimer(playbackYieldCap)
+	defer deadline.Stop()
+	tick := time.NewTicker(playbackPollInterval)
+	defer tick.Stop()
+	s.playbackYields.Add(1)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			return // cap reached — proceed rather than starve
+		case <-tick.C:
+			if !s.pm.IsStreaming() {
+				return
+			}
+		}
+	}
+}
+
 func (s *Scheduler) worker() {
 	for {
 		item, ok := s.wq.pop()
 		if !ok {
 			return // queue closed (shutdown)
 		}
+		// Yield to active playback before spending bandwidth on warming.
+		s.awaitPlaybackIdle(item.ctx)
 		s.warm(item)
 	}
 }

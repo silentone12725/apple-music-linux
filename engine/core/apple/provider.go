@@ -22,11 +22,11 @@ import (
 	"strings"
 	"time"
 
-	"engine/core/tracer"
 	"engine/core/fairplay"
 	"engine/core/hls"
 	"engine/core/media"
 	"engine/core/pipeline"
+	"engine/core/tracer"
 	"engine/utils/ampapi"
 	"engine/utils/mvlabel"
 )

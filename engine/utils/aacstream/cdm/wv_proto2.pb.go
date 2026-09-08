@@ -3055,7 +3055,7 @@ func (x *SignedServiceCertificate) GetRemoteAttestation() *RemoteAttestation {
 	return nil
 }
 
-//vmp support
+// vmp support
 type FileHashes struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -5032,9 +5032,9 @@ func file_wv_proto2_proto_rawDescGZIP() []byte {
 var file_wv_proto2_proto_enumTypes = make([]protoimpl.EnumInfo, 19)
 var file_wv_proto2_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
 var file_wv_proto2_proto_goTypes = []interface{}{
-	(LicenseType)(0),                    // 0: LicenseType
-	(ProtocolVersion)(0),                // 1: ProtocolVersion
-	(ClientIdentification_TokenType)(0), // 2: ClientIdentification.TokenType
+	(LicenseType)(0),                                                // 0: LicenseType
+	(ProtocolVersion)(0),                                            // 1: ProtocolVersion
+	(ClientIdentification_TokenType)(0),                             // 2: ClientIdentification.TokenType
 	(ClientIdentification_ClientCapabilities_HdcpVersion)(0),        // 3: ClientIdentification.ClientCapabilities.HdcpVersion
 	(DeviceCertificate_CertificateType)(0),                          // 4: DeviceCertificate.CertificateType
 	(DeviceCertificateStatus_CertificateStatus)(0),                  // 5: DeviceCertificateStatus.CertificateStatus

@@ -80,7 +80,7 @@ func getSongLyricsContext(ctx context.Context, songId string, storefront string,
 	if err != nil {
 		return "", fmt.Errorf("failed to read response body: %v", err)
 	}
-	
+
 	obj := new(SongLyrics)
 	_ = json.Unmarshal(bodyBytes, &obj)
 	if obj.Data != nil && len(obj.Data) > 0 {
@@ -399,7 +399,7 @@ func parseTtmlMs(t string) int {
 		}
 	}
 
-	totalMs := (h*3600+m*60+s) * 1000
+	totalMs := (h*3600 + m*60 + s) * 1000
 	if fracStr != "" {
 		fracStr += strings.Repeat("0", max(0, 3-len(fracStr)))
 		if len(fracStr) > 3 {
@@ -412,9 +412,12 @@ func parseTtmlMs(t string) int {
 }
 
 func msToSubTime(ms int, sep byte) string {
-	h := ms / 3600000; ms -= h * 3600000
-	m := ms / 60000; ms -= m * 60000
-	s := ms / 1000; ms -= s * 1000
+	h := ms / 3600000
+	ms -= h * 3600000
+	m := ms / 60000
+	ms -= m * 60000
+	s := ms / 1000
+	ms -= s * 1000
 	return fmt.Sprintf("%02d:%02d:%02d%c%03d", h, m, s, sep, ms)
 }
 

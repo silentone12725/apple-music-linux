@@ -83,8 +83,8 @@ func GetPlaylistRespContext(ctx context.Context, storefront string, id string, l
 // Library tracks use "library-songs" / "library-music-videos" types; the
 // catalog ID lives in playParams.catalogId and is what the engine downloads.
 type LibraryPlaylistTrackItem struct {
-	ID   string `json:"id"`
-	Type string `json:"type"` // "library-songs" | "library-music-videos"
+	ID         string `json:"id"`
+	Type       string `json:"type"` // "library-songs" | "library-music-videos"
 	Attributes struct {
 		Name       string `json:"name"`
 		ArtistName string `json:"artistName"`

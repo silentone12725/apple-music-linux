@@ -302,7 +302,6 @@ type equalizePEQResult struct {
 	Preamp  float64                `json:"preamp"`
 }
 
-
 var apiTypeMap = map[string]string{
 	"LOW_SHELF":  "LSC",
 	"HIGH_SHELF": "HSC",
@@ -443,35 +442,35 @@ type FRData struct {
 
 // equalizeRequest is the minimal body sent to autoeq.app/equalize.
 type equalizeRequest struct {
-	Name                          string          `json:"name"`
-	Source                        string          `json:"source"`
-	Rig                           string          `json:"rig,omitempty"`
-	Target                        string          `json:"target"`
-	SoundSignature                interface{}     `json:"sound_signature"`
-	SoundSignatureSmoothingWindow float64         `json:"sound_signature_smoothing_window_size"`
-	BassBoostGain                 float64         `json:"bass_boost_gain"`
-	BassBoostFc                   float64         `json:"bass_boost_fc"`
-	BassBoostQ                    float64         `json:"bass_boost_q"`
-	TrebleBoostGain               float64         `json:"treble_boost_gain"`
-	TrebleBoostFc                 float64         `json:"treble_boost_fc"`
-	TrebleBoostQ                  float64         `json:"treble_boost_q"`
-	Tilt                          float64         `json:"tilt"`
-	FS                            int             `json:"fs"`
-	BitDepth                      int             `json:"bit_depth"`
-	Phase                         string          `json:"phase"`
-	FRes                          int             `json:"f_res"`
-	Preamp                        float64         `json:"preamp"`
-	MaxGain                       float64         `json:"max_gain"`
-	MaxSlope                      float64         `json:"max_slope"`
-	WindowSize                    float64         `json:"window_size"`
-	TrebleWindowSize              float64         `json:"treble_window_size"`
-	TrebleFLower                  float64         `json:"treble_f_lower"`
-	TrebleFUpper                  float64         `json:"treble_f_upper"`
-	TrebleGainK                   float64         `json:"treble_gain_k"`
-	GraphicEQ                     bool            `json:"graphic_eq"`
-	ParametricEQ                  bool            `json:"parametric_eq"`
-	FixedBandEQ                   bool            `json:"fixed_band_eq"`
-	ConvolutionEQ                 bool            `json:"convolution_eq"`
+	Name                          string           `json:"name"`
+	Source                        string           `json:"source"`
+	Rig                           string           `json:"rig,omitempty"`
+	Target                        string           `json:"target"`
+	SoundSignature                interface{}      `json:"sound_signature"`
+	SoundSignatureSmoothingWindow float64          `json:"sound_signature_smoothing_window_size"`
+	BassBoostGain                 float64          `json:"bass_boost_gain"`
+	BassBoostFc                   float64          `json:"bass_boost_fc"`
+	BassBoostQ                    float64          `json:"bass_boost_q"`
+	TrebleBoostGain               float64          `json:"treble_boost_gain"`
+	TrebleBoostFc                 float64          `json:"treble_boost_fc"`
+	TrebleBoostQ                  float64          `json:"treble_boost_q"`
+	Tilt                          float64          `json:"tilt"`
+	FS                            int              `json:"fs"`
+	BitDepth                      int              `json:"bit_depth"`
+	Phase                         string           `json:"phase"`
+	FRes                          int              `json:"f_res"`
+	Preamp                        float64          `json:"preamp"`
+	MaxGain                       float64          `json:"max_gain"`
+	MaxSlope                      float64          `json:"max_slope"`
+	WindowSize                    float64          `json:"window_size"`
+	TrebleWindowSize              float64          `json:"treble_window_size"`
+	TrebleFLower                  float64          `json:"treble_f_lower"`
+	TrebleFUpper                  float64          `json:"treble_f_upper"`
+	TrebleGainK                   float64          `json:"treble_gain_k"`
+	GraphicEQ                     bool             `json:"graphic_eq"`
+	ParametricEQ                  bool             `json:"parametric_eq"`
+	FixedBandEQ                   bool             `json:"fixed_band_eq"`
+	ConvolutionEQ                 bool             `json:"convolution_eq"`
 	Response                      equalizeResponse `json:"response"`
 }
 
