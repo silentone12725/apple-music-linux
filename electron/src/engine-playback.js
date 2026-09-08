@@ -2622,8 +2622,6 @@ async function startMVPipeline() {
     _mvResetScrubberRef = _resetScrubberToLoading;
 
     const _seekSyncInterval = setInterval(_updateProgress, T().poll);
-    const onNativeSeeked  = null;
-    const onNativeVolume  = null;
 
     console.log(`[AML MV-V] myVid created in mvContainer; nativeVidEl readyState=${nativeVidEl?.readyState}`);
 
