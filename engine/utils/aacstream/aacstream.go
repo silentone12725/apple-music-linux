@@ -822,10 +822,10 @@ func streamMVSegmentDirect(ctx context.Context, url string, w io.Writer) error {
 		_, copyErr := io.Copy(dst, resp.Body)
 		resp.Body.Close()
 		if copyErr != nil {
-			if !mvRetry(ctx, attempt, maxRetries) {
-				return fmt.Errorf("stream body: %w", copyErr)
-			}
-			continue
+			// Never retry after io.Copy has started — partial bytes are already in w.
+			// Retrying would re-send from byte 0, creating [partial][full] garbage that
+			// MSE cannot decode (MEDIA_ERR_DECODE). Fail fast and let the session abort.
+			return fmt.Errorf("stream body: %w", copyErr)
 		}
 		if MVCacheEnabled() {
 			PutCachedMVSegment(diskKey, cacheBuf.Bytes())
@@ -930,6 +930,10 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 	return nil
 }
 
+// mvBgDownloads tracks segments currently being background-cached so we don't
+// duplicate downloads when multiple retries cancel the same in-flight request.
+var mvBgDownloads sync.Map // diskKey → struct{}
+
 // fetchMVSegment is like fetchSegment but uses the separate MV video cache.
 func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 	// Strip rotating query params (accessKey changes each session) so the disk
@@ -951,6 +955,10 @@ func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 	const maxRetries = 3
 	for attempt := range maxRetries {
 		if ctx.Err() != nil {
+			// Session was canceled before this segment finished downloading.
+			// Kick off a background goroutine to complete the download so that
+			// the next retry (or next play of the same track) finds it in cache.
+			kickMVSegmentBackground(diskKey, fetchURL, rangeHdr)
 			return nil, ctx.Err()
 		}
 		req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
@@ -988,6 +996,47 @@ func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 		return data, nil
 	}
 	return nil, fmt.Errorf("all retries exhausted")
+}
+
+// kickMVSegmentBackground launches a background download for a segment that was
+// canceled mid-flight. It is a no-op if a background download for this key is
+// already in progress. The goroutine uses its own context with a 10-minute
+// timeout so it survives the session that triggered it.
+func kickMVSegmentBackground(diskKey, fetchURL, rangeHdr string) {
+	if _, loaded := mvBgDownloads.LoadOrStore(diskKey, struct{}{}); loaded {
+		return // already in progress
+	}
+	go func() {
+		defer mvBgDownloads.Delete(diskKey)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
+		if err != nil {
+			return
+		}
+		if rangeHdr != "" {
+			req.Header.Set("Range", rangeHdr)
+		}
+		resp, err := mvHTTPClient.Do(req)
+		if err != nil {
+			log.Printf("[mv-seg] bg-dl error key=%s: %v", diskKey[len(diskKey)-20:], err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			log.Printf("[mv-seg] bg-dl HTTP %d key=%s", resp.StatusCode, diskKey[len(diskKey)-20:])
+			return
+		}
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("[mv-seg] bg-dl read error key=%s: %v", diskKey[len(diskKey)-20:], err)
+			return
+		}
+		if MVCacheEnabled() {
+			PutCachedMVSegment(diskKey, data)
+			log.Printf("[mv-seg] bg-dl cached key=%s len=%d", diskKey[len(diskKey)-20:], len(data))
+		}
+	}()
 }
 
 // DownloadMVSegmentsParallel is like DownloadSegmentsParallel but uses the

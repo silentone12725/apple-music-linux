@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"engine/core/prefetch"
+	"engine/utils/aacstream"
 )
 
 func (s *APIServer) handleCacheConfig(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +99,7 @@ func (s *APIServer) handleMVCachePut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleCachePlaybackDelete(w http.ResponseWriter, r *http.Request) {
-	what := r.URL.Query().Get("what") // "prewarm", "persistent", or "" (both)
+	what := r.URL.Query().Get("what") // "prewarm", "persistent", "segments", or "" (all)
 	if what == "" || what == "prewarm" {
 		s.scheduler.ClearPreWarmed()
 	}
@@ -106,6 +107,9 @@ func (s *APIServer) handleCachePlaybackDelete(w http.ResponseWriter, r *http.Req
 		if s.diskCache != nil {
 			s.diskCache.Clear()
 		}
+	}
+	if what == "" || what == "segments" {
+		aacstream.ClearSegmentCache() //nolint:errcheck
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

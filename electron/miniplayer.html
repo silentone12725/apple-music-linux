@@ -200,11 +200,11 @@
       el.className = ''; el.style.display = 'none'; return;
     }
     if (qb.spatialAudio === 'binaural-lossless' || qb.spatialAudio === 'binaural') {
-      el.className = 'spatial';
+      el.style.display = ''; el.className = 'spatial';
       el.innerHTML = 'SPATIAL AUDIO';
     } else if (qb.codec === 'alac') {
       const hi = qb.sampleRate > 48000 || qb.bitDepth > 16;
-      el.className = 'lossless';
+      el.style.display = ''; el.className = 'lossless';
       el.innerHTML = LOSSLESS_SVG + (hi ? ' HI-RES' : '');
     } else {
       el.className = ''; el.style.display = 'none';

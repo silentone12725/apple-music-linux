@@ -262,6 +262,24 @@ sheet.replaceSync(`
     fill: rgba(255,255,255,0.5) !important;
   }
 
+  /* ── Search result row hover / keyboard selection ──
+     Apple highlights the active row in Apple Music pink. Use the theme's "active"
+     tint instead so search, the nav selection and the MV quality menu all
+     highlight with the same colour. The fallback applies because applyTheme in
+     main.mjs REMOVES --aml-accent-active when no palette is set (an empty custom
+     property would otherwise defeat the var() fallback). */
+  [class*="search-suggestions"] li:hover,
+  [class*="search-suggestions"] a:hover,
+  [class*="search-suggestions"] button:hover,
+  [class*="search-suggestions"] [role="option"]:hover,
+  [class*="search-suggestions"] [role="option"][aria-selected="true"],
+  [class*="search-suggestions"] [class*="list-item"]:hover,
+  [class*="search-suggestions"] [class*="selected"],
+  [class*="search-suggestions"] [class*="highlighted"] {
+    background: var(--aml-accent-active, rgba(255,255,255,0.14)) !important;
+    border-radius: 8px !important;
+  }
+
   /* ── iOS/iPadOS-style back + forward navigation buttons (sidebar header row) ── */
   #aml-nav-buttons {
     position: absolute;

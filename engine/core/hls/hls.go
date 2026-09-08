@@ -198,14 +198,23 @@ func (m *Master) SelectByCodec(codec string) string {
 	return fallback.URL
 }
 
-// VideoHeights returns the unique, sorted set of video heights present in the
-// master playlist.  Heights are read from the RESOLUTION= attribute first;
-// the _WxH_ URL-path pattern is used as fallback.  Used by the JS quality menu
-// to filter out tiers that the playlist cannot actually satisfy.
+// VideoHeights returns the unique, sorted set of video heights the quality menu
+// may offer — i.e. those SelectVideoVariantWithCodec will actually deliver.
+//
+// Only H.264-reachable heights count. SelectVideoVariantWithCodec's first pass
+// returns the highest-bandwidth avc1 variant at or below maxHeight and only falls
+// back to HEVC when the playlist has NO avc1 variant at all. So listing an
+// HEVC-only height would hand back a *lower-resolution* H.264 stream and make the
+// menu lie about what is playing. Variants with no CODECS attribute are counted:
+// they cannot be ruled out, and dropping them would hide real quality tiers.
 func (m *Master) VideoHeights() []int {
 	re := dimRe
 	seen := make(map[int]struct{})
 	for _, v := range m.Variants {
+		lc := strings.ToLower(v.Codecs)
+		if v.Codecs != "" && !strings.Contains(lc, "avc1") {
+			continue // HEVC or other: never selected while any H.264 variant exists
+		}
 		h := 0
 		if v.Resolution != "" {
 			if parts := strings.SplitN(v.Resolution, "x", 2); len(parts) == 2 {

@@ -321,6 +321,21 @@ func MVCacheTotalBytes() int64 {
 	return segSz + MVDecTotalBytes()
 }
 
+// ClearSegmentCache deletes all audio HLS segment cache files and resets the
+// in-memory index. Affects only AAC audio segments, not MV or ALAC tracks.
+func ClearSegmentCache() error {
+	segmentCache.mu.Lock()
+	segmentCache.lru.Init()
+	segmentCache.entries = make(map[string]*list.Element)
+	segmentCache.totalSz = 0
+	dir := segmentCache.dir
+	segmentCache.mu.Unlock()
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	return os.MkdirAll(dir, 0700)
+}
+
 // ClearMVCache deletes all MV segment cache files, decrypted track files,
 // and resets the in-memory index.
 func ClearMVCache() error {
