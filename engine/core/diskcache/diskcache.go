@@ -120,7 +120,7 @@ func (c *Cache) Get(assetID, qualifier string) (*os.File, bool) {
 // PutWriter is the handle returned by BeginPut.
 // Write to it; then call Commit or Discard.
 type PutWriter struct {
-	*os.File            // the temp file
+	*os.File  // the temp file
 	finalPath string
 	key       string
 	cache     *Cache
@@ -320,8 +320,8 @@ type StreamingPutWriter struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
 	written  int64
-	done     bool   // set by Commit or Discard
-	writeErr error  // non-nil when Discard was called
+	done     bool  // set by Commit or Discard
+	writeErr error // non-nil when Discard was called
 
 	refs atomic.Int32 // 1 (writer) + N readers; file closes when it hits 0
 }

@@ -6,9 +6,10 @@
 // objects, not just the 7.1 bed.
 //
 // Protocol: Unix socket at /tmp/CoreFxPipe_CavernPipe.
-//   Client → server: 8-byte header + length-prefixed EC-3 chunks + EOF marker (-1).
-//   Server → client: length-prefixed float32 PCM chunks + EOS marker (-1).
-//   Output: raw interleaved float32 LE, 48000 Hz, 2ch — no WAV header from server.
+//
+//	Client → server: 8-byte header + length-prefixed EC-3 chunks + EOF marker (-1).
+//	Server → client: length-prefixed float32 PCM chunks + EOS marker (-1).
+//	Output: raw interleaved float32 LE, 48000 Hz, 2ch — no WAV header from server.
 //
 // This package writes the 44-byte streaming WAV header before forwarding PCM,
 // so the HTTP endpoint emits a valid audio/wav stream that VLC can play.
@@ -145,8 +146,8 @@ func (c *CavernSource) Stream(ctx context.Context, w io.Writer) error {
 
 	// Send 8-byte handshake: BitDepth=32 | mandatoryFrames=1 | OutputChannels=2 (LE uint16) | UpdateRate=1024 (LE int32)
 	var hdr [8]byte
-	hdr[0] = 32 // BitDepth
-	hdr[1] = 1  // mandatoryFrames
+	hdr[0] = 32                                   // BitDepth
+	hdr[1] = 1                                    // mandatoryFrames
 	binary.LittleEndian.PutUint16(hdr[2:4], 2)    // OutputChannels
 	binary.LittleEndian.PutUint32(hdr[4:8], 1024) // UpdateRate
 	if _, err := conn.Write(hdr[:]); err != nil {
@@ -187,11 +188,11 @@ func writeStreamingWAVHeader(w io.Writer) error {
 	le := binary.LittleEndian
 	buf := make([]byte, 44)
 	copy(buf[0:4], "RIFF")
-	le.PutUint32(buf[4:8], 0xFFFFFFFF)  // file size placeholder
+	le.PutUint32(buf[4:8], 0xFFFFFFFF) // file size placeholder
 	copy(buf[8:12], "WAVE")
 	copy(buf[12:16], "fmt ")
-	le.PutUint32(buf[16:20], 16)                   // fmt chunk size
-	le.PutUint16(buf[20:22], audioFmt)              // PCM float
+	le.PutUint32(buf[16:20], 16)       // fmt chunk size
+	le.PutUint16(buf[20:22], audioFmt) // PCM float
 	le.PutUint16(buf[22:24], numCh)
 	le.PutUint32(buf[24:28], sampleRate)
 	le.PutUint32(buf[28:32], byteRate)
@@ -232,7 +233,7 @@ func feedSocket(ctx context.Context, conn net.Conn, inner pipeline.Source) error
 	// Send EOF sentinel.
 	var sentinel [4]byte
 	binary.LittleEndian.PutUint32(sentinel[:], 0xFFFFFFFF) // -1 as uint32
-	conn.Write(sentinel[:])                                 //nolint:errcheck
+	conn.Write(sentinel[:])                                //nolint:errcheck
 
 	if ie := <-innerErr; ie != nil && ie != io.EOF {
 		return ie

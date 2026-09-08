@@ -7,16 +7,16 @@ import "context"
 
 type Tracer struct{}
 
-func FromContext(_ context.Context) *Tracer  { return &Tracer{} }
+func FromContext(_ context.Context) *Tracer { return &Tracer{} }
 
-func (*Tracer) RecordWebplaybackStart()     {}
-func (*Tracer) RecordWebplaybackEnd()       {}
-func (*Tracer) RecordCatalogFetchStart()    {}
-func (*Tracer) RecordCatalogFetchEnd()      {}
-func (*Tracer) RecordLicenseStart()         {}
-func (*Tracer) RecordLicenseEnd()           {}
-func (*Tracer) RecordPlaybackReady()        {}
-func (*Tracer) RecordRetry()                {}
-func (*Tracer) RecordCBCSDialStart()        {}
-func (*Tracer) RecordCBCSDialConnected()    {}
-func (*Tracer) RecordCBCSDownloadStart()    {}
+func (*Tracer) RecordWebplaybackStart()  {}
+func (*Tracer) RecordWebplaybackEnd()    {}
+func (*Tracer) RecordCatalogFetchStart() {}
+func (*Tracer) RecordCatalogFetchEnd()   {}
+func (*Tracer) RecordLicenseStart()      {}
+func (*Tracer) RecordLicenseEnd()        {}
+func (*Tracer) RecordPlaybackReady()     {}
+func (*Tracer) RecordRetry()             {}
+func (*Tracer) RecordCBCSDialStart()     {}
+func (*Tracer) RecordCBCSDialConnected() {}
+func (*Tracer) RecordCBCSDownloadStart() {}

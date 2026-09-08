@@ -20,6 +20,7 @@ import (
 	"github.com/itouakirai/mp4ff/mp4"
 	"log/slog"
 )
+
 const prefetchKey = "skd://itunes.apple.com/P000000000/s1/e1"
 
 var ErrTimeout = errors.New("response timed out")
@@ -54,7 +55,6 @@ func (b *TimedResponseBody) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
-
 
 func Run(adamId string, playlistUrl string, outfile string, Config config.ConfigSet) error {
 	const maxRetries = 3
@@ -352,7 +352,7 @@ func parseMediaPlaylist(r io.ReadCloser) ([]*m3u8.MediaSegment, error) {
 	return mediaPlaylist.Segments, nil
 }
 
-//pasing
+// pasing
 // ReadInitSegment reads boxes from r until it finds a moov box.
 // Only ftyp and moov are added to the returned InitSegment; pssh and other
 // top-level boxes are consumed (advancing the reader) but discarded.
@@ -459,7 +459,8 @@ func TransformInit(init *mp4.InitSegment) (map[uint32]mp4.DecryptTrackInfo, erro
 	}
 	return tracks, nil
 }
-//remote
+
+// remote
 // Reset the loops on the script's end and close the connection
 func Close(conn io.WriteCloser) error {
 	defer conn.Close()
@@ -481,8 +482,6 @@ func SendString(conn io.Writer, uri string) error {
 	_, err = io.WriteString(conn, uri)
 	return err
 }
-
-
 
 func cbcsFullSubsampleDecrypt(data []byte, conn *bufio.ReadWriter) error {
 	// Drops 4 last bits -> multiple of 16

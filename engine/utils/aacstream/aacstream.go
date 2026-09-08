@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
-	"log/slog"
 	"github.com/go-resty/resty/v2"
 	"google.golang.org/protobuf/proto"
+	"log"
+	"log/slog"
 
 	cdm "engine/utils/aacstream/cdm"
 	wvkey "engine/utils/aacstream/wvkey"
@@ -170,7 +170,10 @@ type Songlist struct {
 }
 
 func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
-	resp, err := http.Get(b)
+	// webplaybackClient, not http.DefaultClient: this is a master playlist fetch
+	// (exactly what that client documents itself as covering) and DefaultClient
+	// has no timeout, so a stalled CDN would hang key extraction indefinitely.
+	resp, err := webplaybackClient.Get(b)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -336,7 +339,6 @@ type Segment struct {
 	Index int
 	Data  []byte
 }
-
 
 // aimdLimiter implements Additive-Increase / Multiplicative-Decrease
 // concurrency control. On each successful segment download the limit grows
@@ -1202,7 +1204,6 @@ func DownloadSegmentsParallel(ctx context.Context, urls []string, w io.Writer, c
 	return nil
 }
 
-
 // SelectVariantForCodec resolves a master HLS playlist URL to the media
 // playlist URL whose codec tag matches the given string (e.g. "alac",
 // "mp4a.40.2", "ec-3").  When multiple matching variants exist the one with
@@ -1261,7 +1262,6 @@ func SelectVariantForCodec(masterURL, codec string) (string, error) {
 	}
 	return "", fmt.Errorf("no variants found in master playlist")
 }
-
 
 // DecryptMP4 decrypts a fragmented MP4 file with keys from widevice license. Supports CENC and CBCS schemes.
 func DecryptMP4(r io.Reader, key []byte, w io.Writer) error {

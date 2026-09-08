@@ -30,7 +30,7 @@ type StreamKind int
 
 const (
 	KindAudio StreamKind = iota // primary audio (ALAC, AAC, Atmos)
-	KindVideo                  // video track (H.264, HEVC)
+	KindVideo                   // video track (H.264, HEVC)
 )
 
 func (k StreamKind) String() string {
@@ -39,7 +39,7 @@ func (k StreamKind) String() string {
 		return "audio"
 	case KindVideo:
 		return "video"
-default:
+	default:
 		return "unknown"
 	}
 }

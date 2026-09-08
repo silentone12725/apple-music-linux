@@ -32,9 +32,9 @@ import (
 )
 
 const (
-	mvDecDirName  = "engine/mv-dec"
-	mvDecKeyFile  = "aml/mv-dec.key" // relative to os.UserConfigDir(); mode 0600
-	mvDecIVSize   = 16
+	mvDecDirName = "engine/mv-dec"
+	mvDecKeyFile = "aml/mv-dec.key" // relative to os.UserConfigDir(); mode 0600
+	mvDecIVSize  = 16
 )
 
 var (

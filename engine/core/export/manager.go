@@ -215,17 +215,17 @@ func fetchVideoAttrs(ctx context.Context, sf, assetID, lang, token string, opts 
 	}
 	a := mv.Data[0].Attributes
 	ra := resolvedAttrs{
-		trackName:      a.Name,
-		artistName:     a.ArtistName,
-		albumName:      a.AlbumName,
-		artworkURL:     a.Artwork.URL,
-		durationMs:     a.DurationInMillis,
-		isrc:           a.Isrc,
-		trackNumber:    a.TrackNumber,
-		discNumber:     a.DiscNumber,
-		releaseDate:    a.ReleaseDate,
-		contentRating:  a.ContentRating,
-		hasLyrics:      opts.EmbedLyrics || opts.SaveLrcSidecar,
+		trackName:     a.Name,
+		artistName:    a.ArtistName,
+		albumName:     a.AlbumName,
+		artworkURL:    a.Artwork.URL,
+		durationMs:    a.DurationInMillis,
+		isrc:          a.Isrc,
+		trackNumber:   a.TrackNumber,
+		discNumber:    a.DiscNumber,
+		releaseDate:   a.ReleaseDate,
+		contentRating: a.ContentRating,
+		hasLyrics:     opts.EmbedLyrics || opts.SaveLrcSidecar,
 	}
 	if len(a.GenreNames) > 0 {
 		ra.genreStr = a.GenreNames[0]
@@ -650,56 +650,56 @@ func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *Ex
 	}
 	m.advance(job, PhaseTagging, 80)
 
-		// ── Phase 5: Fetch lyrics if requested ───────────────────────────
-		var lrcStr string
-		if (req.Options.EmbedLyrics || req.Options.SaveLrcSidecar) && meta.HasLyrics {
-			if req.Capabilities.Video {
-				lrcStr = fetchMVLyrics(ctx, sf, req.AssetID, lang, req.Token, req.MUT, tmpPath, req.Options)
-			} else {
-				lrcStr, _ = lyrics.GetContext(ctx,
-					sf, req.AssetID,
-					req.Options.LrcType, lang, req.Options.LrcFormat,
-					req.Token, req.MUT,
-				)
-			}
+	// ── Phase 5: Fetch lyrics if requested ───────────────────────────
+	var lrcStr string
+	if (req.Options.EmbedLyrics || req.Options.SaveLrcSidecar) && meta.HasLyrics {
+		if req.Capabilities.Video {
+			lrcStr = fetchMVLyrics(ctx, sf, req.AssetID, lang, req.Token, req.MUT, tmpPath, req.Options)
+		} else {
+			lrcStr, _ = lyrics.GetContext(ctx,
+				sf, req.AssetID,
+				req.Options.LrcType, lang, req.Options.LrcFormat,
+				req.Token, req.MUT,
+			)
 		}
+	}
 
-		// ── Phase 6: Tag (metadata, artwork, lyrics) ──────────────────────
-		if !req.Capabilities.Video {
-			if err := TagFile(tmpPath, meta, TagOptions{
-				EmbedArtwork: req.Options.EmbedArtwork,
-				ArtworkSize:  req.Options.ArtworkSize,
-				Lyrics:       lrcStr,
-			}); err != nil {
-				fmt.Printf("export %s: tag warning: %v\n", req.AssetID, err)
-			}
+	// ── Phase 6: Tag (metadata, artwork, lyrics) ──────────────────────
+	if !req.Capabilities.Video {
+		if err := TagFile(tmpPath, meta, TagOptions{
+			EmbedArtwork: req.Options.EmbedArtwork,
+			ArtworkSize:  req.Options.ArtworkSize,
+			Lyrics:       lrcStr,
+		}); err != nil {
+			fmt.Printf("export %s: tag warning: %v\n", req.AssetID, err)
 		}
+	}
 
-		// ── Phase 7: LRC sidecar ─────────────────────────────────────────
-		if req.Options.SaveLrcSidecar && lrcStr != "" {
-			lrcExt := req.Options.LrcFormat
-			if lrcExt == "" {
-				lrcExt = "lrc"
-			}
-			lrcPath := strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + "." + lrcExt
-			_ = os.WriteFile(lrcPath, []byte(lrcStr), 0o644)
+	// ── Phase 7: LRC sidecar ─────────────────────────────────────────
+	if req.Options.SaveLrcSidecar && lrcStr != "" {
+		lrcExt := req.Options.LrcFormat
+		if lrcExt == "" {
+			lrcExt = "lrc"
 		}
+		lrcPath := strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + "." + lrcExt
+		_ = os.WriteFile(lrcPath, []byte(lrcStr), 0o644)
+	}
 
-		// ── Phase 8: Format conversion (optional) ────────────────────────
-		if req.Options.ConvertToFLAC && req.Capabilities.Lossless && !req.Capabilities.Video {
-			tmpPath, finalPath = convertFLAC(req, meta, tmpPath, finalPath)
-		}
+	// ── Phase 8: Format conversion (optional) ────────────────────────
+	if req.Options.ConvertToFLAC && req.Capabilities.Lossless && !req.Capabilities.Video {
+		tmpPath, finalPath = convertFLAC(req, meta, tmpPath, finalPath)
+	}
 
-		// ── Phase 9: Move temp → final ────────────────────────────────────
-		m.advance(job, PhaseMoving, 96)
-		if err := os.Rename(tmpPath, finalPath); err != nil {
-			if err2 := copyFile(tmpPath, finalPath); err2 != nil {
-				os.Remove(tmpPath) //nolint:errcheck
-				m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err2))
-				return
-			}
+	// ── Phase 9: Move temp → final ────────────────────────────────────
+	m.advance(job, PhaseMoving, 96)
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		if err2 := copyFile(tmpPath, finalPath); err2 != nil {
 			os.Remove(tmpPath) //nolint:errcheck
+			m.fail(job, fmt.Errorf("move to %s: %w", finalPath, err2))
+			return
 		}
+		os.Remove(tmpPath) //nolint:errcheck
+	}
 	m.setOutput(job, finalPath)
 	m.advance(job, PhaseDone, 100)
 }

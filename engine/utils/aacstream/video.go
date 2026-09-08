@@ -100,7 +100,6 @@ func StripAudioAndPassthrough(ctx context.Context, src func(io.Writer) error, ds
 // trun DataOffset for any moof size change caused by stripping or the version
 // upgrade. Apple's original TFDT values are preserved unchanged: they are
 // already monotonically increasing and aligned with the edit list in the moov.
-//
 func patchVideoFragment(frag *mp4.Fragment, videoTrackIDs map[uint32]struct{}) {
 	if frag.Moof == nil {
 		return

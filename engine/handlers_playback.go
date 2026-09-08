@@ -533,8 +533,8 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-loglevel", "warning",
 		"-i", "pipe:0",
-		"-map", "0:v:0",  // first video stream only — drops audio and caption tracks
-		"-c:v", "copy",   // preserve original codec (avc1.640028); no re-encode
+		"-map", "0:v:0", // first video stream only — drops audio and caption tracks
+		"-c:v", "copy", // preserve original codec (avc1.640028); no re-encode
 		"-movflags", "frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets",
 		"-avoid_negative_ts", "make_zero", // B-frames: shift DTS so minimum is 0
 		"-f", "mp4",

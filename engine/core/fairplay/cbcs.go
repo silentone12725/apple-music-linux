@@ -12,9 +12,9 @@ import (
 
 	"github.com/itouakirai/mp4ff/mp4"
 
-	"engine/core/tracer"
 	"engine/core/hls"
 	"engine/core/pipeline"
+	"engine/core/tracer"
 	"engine/utils/alacstream"
 )
 

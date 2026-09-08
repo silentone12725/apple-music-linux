@@ -358,21 +358,21 @@ func writeStereoWAV(path string, left, right []float64, sr int) error {
 	put32 := func(v uint32) { binary.Write(f, le, v) } //nolint:errcheck
 
 	// RIFF header
-	f.WriteString("RIFF")                        //nolint:errcheck
-	put32(uint32(36 + dataLen))                  // file size − 8
-	f.WriteString("WAVE")                        //nolint:errcheck
-	f.WriteString("fmt ")                        //nolint:errcheck
-	put32(18)                                    // fmt chunk size (includes 2-byte extension)
-	put16(3)                                     // IEEE float
-	put16(2)                                     // stereo
-	put32(uint32(sr))                            // sample rate
-	put32(uint32(sr * 2 * 4))                   // byte rate
-	put16(2 * 4)                                 // block align
-	put16(32)                                    // bits per sample
-	put16(0)                                     // extension size
-	f.WriteString("data")                        //nolint:errcheck
-	put32(uint32(dataLen))                       // data chunk size
-	binary.Write(f, le, interleaved)             //nolint:errcheck
+	f.WriteString("RIFF")            //nolint:errcheck
+	put32(uint32(36 + dataLen))      // file size − 8
+	f.WriteString("WAVE")            //nolint:errcheck
+	f.WriteString("fmt ")            //nolint:errcheck
+	put32(18)                        // fmt chunk size (includes 2-byte extension)
+	put16(3)                         // IEEE float
+	put16(2)                         // stereo
+	put32(uint32(sr))                // sample rate
+	put32(uint32(sr * 2 * 4))        // byte rate
+	put16(2 * 4)                     // block align
+	put16(32)                        // bits per sample
+	put16(0)                         // extension size
+	f.WriteString("data")            //nolint:errcheck
+	put32(uint32(dataLen))           // data chunk size
+	binary.Write(f, le, interleaved) //nolint:errcheck
 
 	return nil
 }

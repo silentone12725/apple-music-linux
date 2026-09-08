@@ -310,7 +310,6 @@ func (m *Media) URLsFrom(startSec float64) (urls []string, actualStart float64) 
 	return out, cumulative
 }
 
-
 // OpenMediaAuth is like OpenMedia but adds Apple Music auth headers.
 // Use this for media playlists at play.itunes.apple.com that require authentication.
 func OpenMediaAuth(ctx context.Context, rawURL, token, mut string) (*Media, error) {

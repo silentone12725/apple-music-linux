@@ -60,17 +60,17 @@ type SegmentCache struct {
 	dir      string
 	maxBytes atomic.Int64
 
-	mu           sync.Mutex
-	lru          list.List                // front = most recent
-	entries      map[string]*list.Element // key → element
-	totalSz      int64
-	Hits   int64
-	Misses int64
+	mu      sync.Mutex
+	lru     list.List                // front = most recent
+	entries map[string]*list.Element // key → element
+	totalSz int64
+	Hits    int64
+	Misses  int64
 }
 
 type cacheEntry struct {
-	key  string
-	size int64
+	key   string
+	size  int64
 	atime time.Time
 }
 
@@ -229,11 +229,11 @@ func (c *SegmentCache) WarmFromDisk() {
 			return nil
 		}
 		// Subtract the 32-byte hash prefix so totalSz tracks content bytes.
-	sz := info.Size() - 32
-	if sz < 0 {
-		sz = 0
-	}
-	files = append(files, fileInfo{info.Name(), sz, info.ModTime()})
+		sz := info.Size() - 32
+		if sz < 0 {
+			sz = 0
+		}
+		files = append(files, fileInfo{info.Name(), sz, info.ModTime()})
 		return nil
 	})
 	// Sort by access time so most-recently-used ends up at front of LRU.

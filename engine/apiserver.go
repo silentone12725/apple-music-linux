@@ -84,8 +84,8 @@ type PlaybackRequest struct {
 	// Config.AuthorizationToken and Config.MediaUserToken. This lets browser
 	// renderers (e.g. electron-playback) supply the tokens they already have
 	// from MusicKit without requiring them to be hard-coded in config.yaml.
-	Token string `json:"token"`
-	MUT   string `json:"mediaUserToken"`
+	Token        string `json:"token"`
+	MUT          string `json:"mediaUserToken"`
 	Capabilities struct {
 		Lossless bool `json:"lossless"`
 		Video    bool `json:"video"`
@@ -164,9 +164,9 @@ type engineLifecycle struct {
 	lastDRMSession atomic.Value // stores string; tracks session transitions
 
 	// Proactive DRM session tracking
-	drmReadyMu    sync.Mutex
-	drmReadySince time.Time   // when FairPlayReady was last achieved
-	drmRefreshAt  time.Time   // scheduled proactive-refresh fire time
+	drmReadyMu      sync.Mutex
+	drmReadySince   time.Time   // when FairPlayReady was last achieved
+	drmRefreshAt    time.Time   // scheduled proactive-refresh fire time
 	drmRefreshTimer *time.Timer // cancels previous timer on new FairPlayReady
 }
 
@@ -213,7 +213,6 @@ func (l *engineLifecycle) DRMReadySince() time.Time {
 	return t
 }
 
-
 // ── SSE event bus ─────────────────────────────────────────────────────────────
 
 // sseEvent carries one SSE frame through the event bus.
@@ -239,7 +238,7 @@ type eventBus struct {
 	mu      sync.Mutex
 	clients map[string]chan sseEvent
 	seq     int64              // monotonic event ID; ALL allocations go through mu
-	epoch   *epochManager        // engine epoch; advanced by subsystems, not by the bus
+	epoch   *epochManager      // engine epoch; advanced by subsystems, not by the bus
 	ring    [ringSize]sseEvent // circular replay buffer
 	ringPos int                // next write slot (unbounded; masked on access)
 	ringLen int                // valid entries (0 .. ringSize)
@@ -410,7 +409,7 @@ type APIServer struct {
 	em          *export.Manager
 	dm          *drm.DRMManager
 	session     *drm.SessionManager // canonical source for MUT + storefront
-	epoch       *epochManager         // shared engine epoch; advanced by subsystems
+	epoch       *epochManager       // shared engine epoch; advanced by subsystems
 	lifecycle   *engineLifecycle    // single coordinator for epoch advancement
 	events      *eventBus
 	drmReady    bool   // true when drm binary was found at startup
@@ -422,9 +421,9 @@ type APIServer struct {
 	scheduler   *prefetch.Scheduler  // background cache-warming scheduler
 	diskCache   *diskcache.Cache     // per-track decrypted audio disk cache
 	libStore    *library.Store       // local library metadata cache (songs, playlists)
-	vlcPlayer *vlc.Player // nil when libvlc is not available
+	vlcPlayer   *vlc.Player          // nil when libvlc is not available
 
-	tokenMu sync.RWMutex
+	tokenMu     sync.RWMutex
 	cachedToken string // bearer token cached from the most recent browser request
 
 	mkTokenMu    sync.RWMutex
@@ -676,12 +675,12 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// VLC player — libvlc-backed playback for ALAC/Atmos that the browser cannot decode.
 	// Routes are no-ops when libvlc is not installed; frontend falls back to MSE.
 	s.vlcPlayer, _ = vlc.New() // nil if libvlc unavailable
-	mux.HandleFunc("POST /api/v1/vlc/load",   cors(s.handleVLCLoad))
-	mux.HandleFunc("POST /api/v1/vlc/pause",  cors(s.handleVLCPause))
+	mux.HandleFunc("POST /api/v1/vlc/load", cors(s.handleVLCLoad))
+	mux.HandleFunc("POST /api/v1/vlc/pause", cors(s.handleVLCPause))
 	mux.HandleFunc("POST /api/v1/vlc/resume", cors(s.handleVLCResume))
-	mux.HandleFunc("POST /api/v1/vlc/stop",   cors(s.handleVLCStop))
-	mux.HandleFunc("GET /api/v1/vlc/time",    cors(s.handleVLCTime))
-	mux.HandleFunc("POST /api/v1/vlc/seek",   cors(s.handleVLCSeek))
+	mux.HandleFunc("POST /api/v1/vlc/stop", cors(s.handleVLCStop))
+	mux.HandleFunc("GET /api/v1/vlc/time", cors(s.handleVLCTime))
+	mux.HandleFunc("POST /api/v1/vlc/seek", cors(s.handleVLCSeek))
 	mux.HandleFunc("POST /api/v1/vlc/volume", cors(s.handleVLCVolume))
 
 	// Benchmark/diagnostics surface (additive; no effect on playback).
@@ -805,7 +804,6 @@ func buildDRMBackend(name, drmBinaryPath, decryptAddr, m3u8Addr string) drm.DRMB
 		M3U8Addr:    m3u8Addr,
 	})
 }
-
 
 func corsPreflightHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -940,4 +938,3 @@ func randID() string {
 	rand.Read(b) //nolint:errcheck
 	return hex.EncodeToString(b)
 }
-
