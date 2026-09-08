@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/grafov/m3u8"
 )
@@ -539,6 +540,25 @@ func fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	return fetchWithHeaders(ctx, rawURL, nil)
 }
 
+// playlistClient fetches master/media playlists. These are small text files on
+// the critical path of every session open, so they must fail fast rather than
+// hang: http.DefaultClient has no timeout at all, and a stalled Apple CDN
+// connection would block the open indefinitely — long enough that the caller's
+// own deadline never even gets a chance to classify it as a timeout.
+//
+// Apple's Android client is far more aggressive here (CONNECT_TIMEOUT 4 s,
+// READ_TIMEOUT 2 s, then retry). 15 s is a conservative equivalent that still
+// bounds the hang, matching the pattern already used for artwork in apiserver.go.
+var playlistClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        20,
+		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConnsPerHost: 10,
+		TLSHandshakeTimeout: 10 * time.Second,
+	},
+}
+
 func fetchWithHeaders(ctx context.Context, rawURL string, headers map[string]string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -547,7 +567,7 @@ func fetchWithHeaders(ctx context.Context, rawURL string, headers map[string]str
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := playlistClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
