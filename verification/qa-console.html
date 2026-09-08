@@ -211,6 +211,7 @@ video { max-height: 300px; background: #000; }
   <button class="nav-btn" onclick="showTab('errors')">Error Injection</button>
   <button class="nav-btn" onclick="showTab('network')">Network <span class="badge" id="net-badge" style="background:var(--border);color:var(--muted)">0</span></button>
   <button class="nav-btn" onclick="showTab('mvprobe')">MV Probe</button>
+  <button class="nav-btn" onclick="showTab('mvtest')">MV Tester</button>
 </div>
 
 <!-- ── MAIN LAYOUT ── -->
@@ -663,6 +664,102 @@ video { max-height: 300px; background: #000; }
       </div>
     </div>
   </div>
+</div>
+
+<!-- MV TESTER -->
+<div class="panel" id="tab-mvtest">
+
+  <!-- ── Preset tracks ── -->
+  <div class="card">
+    <div class="card-title">Known Test Tracks</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin-bottom:10px">
+      <button class="btn-secondary btn-sm" onclick="mvtLoadPreset('1635027392','in','Kesariya — GOOD ✓')">Kesariya 1635027392 (IN) ← control</button>
+      <button class="btn-secondary btn-sm" onclick="mvtLoadPreset('683273379','in','Raanjhanaa — crash@FRAG16')">Raanjhanaa 683273379 (IN)</button>
+      <button class="btn-secondary btn-sm" onclick="mvtLoadPreset('1597027433','us','Die For You — crash@FRAG54')">Die For You 1597027433 (US)</button>
+      <button class="btn-secondary btn-sm" onclick="mvtLoadPreset('1495409676','us','Blinding Lights — crash@FRAG34')">Blinding Lights 1495409676 (US)</button>
+      <button class="btn-secondary btn-sm" onclick="mvtLoadPreset('1449076652','us','Lost in the Fire — was crash@FRAG3')">Lost in the Fire 1449076652 (US)</button>
+    </div>
+    <div class="row" style="margin-bottom:6px">
+      <div style="flex:2"><label>Bearer Token <span style="color:var(--dim);font-size:10px">— from Apple Music DevTools Network tab (Authorization header)</span></label><input id="mvt-token" placeholder="eyJhbGciOiJS… (from MusicKit JS Authorization header)"></div>
+      <div style="flex:2"><label>Music-User-Token <span style="color:var(--dim);font-size:10px">— Music-User-Token request header</span></label><input id="mvt-mut" placeholder="0.Ag… (Music-User-Token header value)"></div>
+    </div>
+    <div class="row">
+      <div><label>Adam ID</label><input id="mvt-id" placeholder="1635027392"></div>
+      <div style="flex:0 0 70px"><label>Storefront</label><input id="mvt-sf" value="in"></div>
+      <div style="flex:0 0 auto;display:flex;align-items:flex-end">
+        <button class="btn-primary" onclick="mvtCreate()">▶ Load &amp; Play</button>
+        <button class="btn-red btn-sm" style="margin-left:6px" onclick="mvtStop()">■ Stop</button>
+      </div>
+    </div>
+    <div id="mvt-status" style="font-size:11px;color:var(--muted);margin-top:4px">No session.</div>
+  </div>
+
+  <!-- ── Video + seekbar ── -->
+  <div class="card" id="mvt-player-card" style="display:none">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <span class="card-title" style="margin:0" id="mvt-track-label">—</span>
+      <span id="mvt-session-label" style="font-size:10px;font-family:var(--mono);color:var(--muted)"></span>
+    </div>
+
+    <!-- video element -->
+    <video id="mvt-video" style="width:100%;max-height:360px;background:#000;border-radius:6px;display:block"></video>
+    <audio  id="mvt-audio" style="display:none"></audio>
+
+    <!-- ── Custom seekbar ── -->
+    <div style="margin-top:10px">
+      <!-- Buffer canvas — sits behind the scrubber -->
+      <div style="position:relative;height:28px;margin-bottom:4px">
+        <canvas id="mvt-canvas" style="position:absolute;inset:0;width:100%;height:100%;border-radius:4px;cursor:pointer"></canvas>
+      </div>
+      <!-- Time row -->
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:8px">
+        <span id="mvt-time-cur">0:00</span>
+        <span id="mvt-time-buf" style="color:var(--green)">buf —</span>
+        <span id="mvt-time-dur">—</span>
+      </div>
+      <!-- Transport buttons -->
+      <div class="btn-row">
+        <button class="btn-secondary btn-sm" onclick="mvtPlay()">▶ Play</button>
+        <button class="btn-secondary btn-sm" onclick="mvtPause()">⏸ Pause</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeek(0)">⏮ 0s</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeekPct(0.25)">25%</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeekPct(0.50)">50%</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeekPct(0.75)">75%</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeekRel(-10)">-10s</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeekRel(+10)">+10s</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeekRel(+30)">+30s</button>
+      </div>
+      <!-- Jump-to-time row -->
+      <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">Jump to:</span>
+        <input id="mvt-seek-val" type="number" placeholder="seconds" style="width:90px;margin:0">
+        <button class="btn-secondary btn-sm" onclick="mvtSeekInput()">Go</button>
+        <span style="font-size:10px;color:var(--dim);margin-left:4px">Quick crash points →</span>
+        <button class="btn-secondary btn-sm" onclick="mvtSeek(55)" title="Die For You prev crash zone">55s</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeek(110)" title="Die For You new crash zone">110s</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeek(30)" title="Raanjhanaa crash zone">30s</button>
+        <button class="btn-secondary btn-sm" onclick="mvtSeek(70)" title="Blinding Lights crash zone">70s</button>
+      </div>
+    </div>
+
+    <!-- video stats row -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px">
+      <div class="stat"><div class="stat-val" id="mvts-ready" style="font-size:18px">—</div><div class="stat-lbl">readyState</div></div>
+      <div class="stat"><div class="stat-val" id="mvts-net" style="font-size:18px">—</div><div class="stat-lbl">networkState</div></div>
+      <div class="stat"><div class="stat-val" id="mvts-frags" style="font-size:18px">0</div><div class="stat-lbl">stalls</div></div>
+      <div class="stat"><div class="stat-val" id="mvts-drops" style="font-size:18px">0</div><div class="stat-lbl">errors</div></div>
+    </div>
+  </div>
+
+  <!-- ── Event log ── -->
+  <div class="card" id="mvt-log-card" style="display:none">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span class="card-title" style="margin:0">Event Log</span>
+      <button class="btn-secondary btn-sm" onclick="mvtClearLog()">Clear</button>
+    </div>
+    <div id="mvt-log" style="font-family:var(--mono);font-size:10px;line-height:1.7;max-height:260px;overflow-y:auto;background:var(--bg);border-radius:4px;padding:8px"></div>
+  </div>
+
 </div>
 
 </div><!-- end layout left side -->
@@ -1755,6 +1852,264 @@ function mvClear() {
   document.getElementById('mv-hls-card').style.display = 'none';
   document.getElementById('mv-compare-card').style.display = 'none';
   document.getElementById('mv-probe-status').textContent = '';
+}
+
+// ── MV Tester ──────────────────────────────────────────────────────────────
+
+let _mvtSess = null;       // current session id
+let _mvtRaf  = null;       // requestAnimationFrame handle for seekbar
+let _mvtStalls = 0;
+let _mvtErrors = 0;
+
+function mvtLoadPreset(id, sf, label) {
+  document.getElementById('mvt-id').value = id;
+  document.getElementById('mvt-sf').value = sf;
+  // Inherit tokens from MV Probe tab if the tester fields are empty
+  if (!v('mvt-token') && v('mv-token')) document.getElementById('mvt-token').value = v('mv-token');
+  if (!v('mvt-mut')   && v('mv-mut'))   document.getElementById('mvt-mut').value   = v('mv-mut');
+  document.getElementById('mvt-status').textContent = `Preset: ${label}`;
+}
+
+async function mvtCreate() {
+  const id = v('mvt-id'), sf = v('mvt-sf') || 'us';
+  if (!id) return;
+
+  // Stop any existing session first
+  await mvtStop();
+
+  document.getElementById('mvt-status').textContent = 'Creating session…';
+  const tok = v('mvt-token'), mut = v('mvt-mut');
+  const body = { assetId: id, storefront: sf, capabilities: { video: true } };
+  if (tok) body.token = tok;
+  if (mut) body.mediaUserToken = mut;
+  const { ok, data } = await api('POST', '/api/v1/playback', body);
+  if (!ok) {
+    document.getElementById('mvt-status').textContent = `Error: ${JSON.stringify(data)}`;
+    return;
+  }
+
+  _mvtSess   = data.sessionId;
+  _mvtStalls = 0;
+  _mvtErrors = 0;
+  document.getElementById('mvts-frags').textContent = '0';
+  document.getElementById('mvts-drops').textContent = '0';
+  document.getElementById('mvt-log').innerHTML = '';
+
+  const vid = document.getElementById('mvt-video');
+  const aud = document.getElementById('mvt-audio');
+
+  vid.src = `${base()}/api/v1/playback/${data.sessionId}/video`;
+  aud.src = `${base()}/api/v1/playback/${data.sessionId}/audio`;
+
+  // Sync audio to video (most reliable: drive via video controls)
+  vid.onplay   = () => aud.play().catch(() => {});
+  vid.onpause  = () => aud.pause();
+  vid.onseeked = () => { aud.currentTime = vid.currentTime; };
+  aud.oncanplay = () => { if (!vid.paused) aud.play().catch(() => {}); };
+
+  // Instrument for diagnostics
+  vid.onwaiting = () => { _mvtStalls++; document.getElementById('mvts-frags').textContent = _mvtStalls; mvtLog('wait','video waiting (stall)', 'var(--yellow)'); };
+  vid.onstalled = () => mvtLog('stall','video stalled', 'var(--orange)');
+  vid.oncanplay = () => mvtLog('ready','canplay readyState='+vid.readyState, 'var(--green)');
+  vid.onerror   = () => {
+    _mvtErrors++;
+    document.getElementById('mvts-drops').textContent = _mvtErrors;
+    const e = vid.error;
+    const codes = ['','ABORTED','NETWORK','DECODE','SRC_NOT_SUPPORTED'];
+    const msg = e ? `code=${e.code} (${codes[e.code]||'?'}) ${e.message||''}` : 'unknown';
+    mvtLog('ERR', msg, 'var(--red)');
+  };
+  aud.onerror = () => {
+    const e = aud.error;
+    if (e) mvtLog('AUD-ERR', `audio code=${e.code} ${e.message||''}`, 'var(--red)');
+  };
+
+  // Time/state updates
+  vid.ontimeupdate = mvtUpdateStats;
+  vid.onprogress   = mvtUpdateStats;
+
+  document.getElementById('mvt-track-label').textContent = `${id} · ${sf}`;
+  document.getElementById('mvt-session-label').textContent = data.sessionId;
+  document.getElementById('mvt-status').textContent = `Session ${data.sessionId} · ready`;
+  document.getElementById('mvt-player-card').style.display = 'block';
+  document.getElementById('mvt-log-card').style.display = 'block';
+
+  activeSessions.set(data.sessionId, data);
+  updateSessionBadge();
+
+  // Start canvas loop
+  mvtRafLoop();
+
+  // Wire up canvas click → seek
+  const canvas = document.getElementById('mvt-canvas');
+  canvas.onclick = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const dur = vid.duration;
+    if (isFinite(dur) && dur > 0) mvtSeek(pct * dur);
+  };
+
+  mvtLog('session', `POST /api/v1/playback → ${data.sessionId}`, 'var(--blue)');
+}
+
+async function mvtStop() {
+  if (_mvtRaf) { cancelAnimationFrame(_mvtRaf); _mvtRaf = null; }
+  const vid = document.getElementById('mvt-video');
+  const aud = document.getElementById('mvt-audio');
+  vid.pause(); vid.src = '';
+  aud.pause(); aud.src = '';
+  vid.onplay = vid.onpause = vid.onseeked = vid.onerror = vid.ontimeupdate = vid.onprogress = vid.onwaiting = vid.onstalled = vid.oncanplay = null;
+  aud.oncanplay = aud.onerror = null;
+
+  if (_mvtSess) {
+    await api('DELETE', `/api/v1/playback/${_mvtSess}`);
+    activeSessions.delete(_mvtSess);
+    updateSessionBadge();
+    _mvtSess = null;
+  }
+  document.getElementById('mvt-status').textContent = 'Stopped.';
+  document.getElementById('mvt-player-card').style.display = 'none';
+  document.getElementById('mvt-log-card').style.display   = 'none';
+  mvtDrawCanvas(null);
+}
+
+function mvtPlay()  { document.getElementById('mvt-video').play().catch(() => {}); }
+function mvtPause() { document.getElementById('mvt-video').pause(); }
+
+function mvtSeek(t) {
+  const vid = document.getElementById('mvt-video');
+  const aud = document.getElementById('mvt-audio');
+  vid.currentTime = t;
+  aud.currentTime = t;
+  mvtLog('seek', `→ ${t.toFixed(2)}s`, 'var(--purple)');
+}
+
+function mvtSeekRel(dt) {
+  const vid = document.getElementById('mvt-video');
+  mvtSeek(Math.max(0, vid.currentTime + dt));
+}
+
+function mvtSeekPct(pct) {
+  const vid = document.getElementById('mvt-video');
+  if (isFinite(vid.duration)) mvtSeek(pct * vid.duration);
+}
+
+function mvtSeekInput() {
+  const val = parseFloat(document.getElementById('mvt-seek-val').value);
+  if (isFinite(val)) mvtSeek(val);
+}
+
+function mvtUpdateStats() {
+  const vid = document.getElementById('mvt-video');
+  document.getElementById('mvts-ready').textContent = vid.readyState;
+  document.getElementById('mvts-net').textContent   = vid.networkState;
+
+  const cur = vid.currentTime;
+  const dur = vid.duration;
+  document.getElementById('mvt-time-cur').textContent = fmtSecs(cur);
+  document.getElementById('mvt-time-dur').textContent = isFinite(dur) ? fmtSecs(dur) : '—';
+
+  // Highest buffered end
+  let bufEnd = 0;
+  for (let i = 0; i < vid.buffered.length; i++) {
+    bufEnd = Math.max(bufEnd, vid.buffered.end(i));
+  }
+  document.getElementById('mvt-time-buf').textContent = bufEnd > 0 ? `buf +${(bufEnd - cur).toFixed(1)}s (→${fmtSecs(bufEnd)})` : 'buf —';
+}
+
+function mvtRafLoop() {
+  mvtDrawCanvas(document.getElementById('mvt-video'));
+  _mvtRaf = requestAnimationFrame(mvtRafLoop);
+}
+
+function mvtDrawCanvas(vid) {
+  const canvas = document.getElementById('mvt-canvas');
+  if (!canvas) return;
+  const W = canvas.clientWidth || 400;
+  const H = canvas.clientHeight || 28;
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+
+  // Background
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, W, H);
+
+  if (!vid || !isFinite(vid.duration) || vid.duration === 0) {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(0, H/2 - 2, W, 4);
+    return;
+  }
+
+  const dur = vid.duration;
+  const cur = vid.currentTime;
+
+  // Track rail
+  ctx.fillStyle = '#222';
+  const railY = H/2 - 3;
+  ctx.fillRect(0, railY, W, 6);
+
+  // Buffered ranges (green)
+  ctx.fillStyle = '#1a4d1a';
+  for (let i = 0; i < vid.buffered.length; i++) {
+    const x0 = (vid.buffered.start(i) / dur) * W;
+    const x1 = (vid.buffered.end(i)   / dur) * W;
+    ctx.fillRect(x0, railY, x1 - x0, 6);
+  }
+
+  // Played (accent red)
+  ctx.fillStyle = '#fc3c44';
+  ctx.fillRect(0, railY, (cur / dur) * W, 6);
+
+  // Thumb
+  const thumbX = (cur / dur) * W;
+  ctx.beginPath();
+  ctx.arc(thumbX, H/2, 7, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+
+  // Time labels at crash-point markers
+  const markers = [30, 55, 70, 110];
+  ctx.font = '9px monospace';
+  ctx.fillStyle = 'rgba(255,200,0,0.6)';
+  for (const t of markers) {
+    if (t < dur) {
+      const mx = (t / dur) * W;
+      ctx.fillRect(mx, railY - 3, 1, 12);
+      if (mx < W - 20) ctx.fillText(t + 's', mx + 2, railY - 1);
+    }
+  }
+}
+
+function fmtSecs(s) {
+  if (!isFinite(s)) return '—';
+  const m = Math.floor(s / 60);
+  const ss = Math.floor(s % 60);
+  return `${m}:${String(ss).padStart(2,'0')}`;
+}
+
+function mvtLog(type, msg, color) {
+  const el = document.getElementById('mvt-log');
+  if (!el) return;
+  const ts = new Date().toTimeString().slice(3, 8);  // MM:SS
+  const vid = document.getElementById('mvt-video');
+  const ct = vid ? `ct=${vid.currentTime.toFixed(2)}` : '';
+  const buf = (() => {
+    if (!vid) return '';
+    let bufEnd = 0;
+    for (let i = 0; i < vid.buffered.length; i++) bufEnd = Math.max(bufEnd, vid.buffered.end(i));
+    return bufEnd > 0 ? ` buf→${bufEnd.toFixed(2)}` : '';
+  })();
+  const line = document.createElement('div');
+  line.style.color = color || 'var(--text)';
+  line.innerHTML = `<span style="color:var(--dim)">${ts} ${ct}${buf}</span>  <b>${esc(type)}</b>  ${esc(msg)}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function mvtClearLog() {
+  const el = document.getElementById('mvt-log');
+  if (el) el.innerHTML = '';
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────

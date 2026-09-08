@@ -615,12 +615,20 @@ function _applyThemeVars(palette) {
     const navBg = JSON.stringify(_withAlpha(p.navBg || '', navAlpha) || p.navBg || '');
     win.webContents.executeJavaScript(`(function(){
         const r = document.documentElement;
-        r.style.setProperty('--aml-nav-bg', ${navBg});
-        r.style.setProperty('--aml-nav-border', ${JSON.stringify(p.navBorder || '')});
-        r.style.setProperty('--aml-accent', ${JSON.stringify(p.accent || '')});
-        r.style.setProperty('--aml-accent-active', ${JSON.stringify(p.accentActive || '')});
-        r.style.setProperty('--aml-nav-text', ${navText});
-        r.style.setProperty('--aml-nav-text-sec', ${navTextSec});
+        // Setting a custom property to "" does NOT remove it — the property still
+        // exists with an empty value, so var(--x, fallback) skips the fallback and
+        // yields an invalid declaration at computed-value time (the whole property
+        // becomes unset). Remove the property instead so fallbacks actually apply.
+        const setVar = (name, val) => {
+            if (val === null || val === undefined || String(val).trim() === '') r.style.removeProperty(name);
+            else r.style.setProperty(name, val);
+        };
+        setVar('--aml-nav-bg', ${navBg});
+        setVar('--aml-nav-border', ${JSON.stringify(p.navBorder || '')});
+        setVar('--aml-accent', ${JSON.stringify(p.accent || '')});
+        setVar('--aml-accent-active', ${JSON.stringify(p.accentActive || '')});
+        setVar('--aml-nav-text', ${navText});
+        setVar('--aml-nav-text-sec', ${navTextSec});
         let bd = document.getElementById('_amlAccentBg');
         if (!bd) {
             bd = document.createElement('div');
@@ -857,7 +865,7 @@ function createWindow() {
     // ── Early CSS via insertCSS — fires before first paint, no preload risk ──
     // webContents.insertCSS() is Electron's dedicated API for injecting CSS
     // before the page renders, unlike executeJavaScript which needs dom-ready.
-    const { glassBlur = 48, glassOpacity = 0.07, bgBlur = 18 } = loadPrefs();
+    const { glassBlur = 20, glassOpacity = 0.07, bgBlur = 18 } = loadPrefs();
     const earlyCss = `
         :root { --aml-glass-blur: ${glassBlur}px; --aml-glass-opacity: ${glassOpacity}; --aml-art-tint: rgba(255,255,255,0); --aml-fallback-bg: none; --aml-bg-blur: ${bgBlur}px; }
         html, body { background: transparent !important; overscroll-behavior: none !important; }
@@ -1302,6 +1310,9 @@ function buildTweakCSS(p) {
             : '',
         p.hidePreviewBadge !== false
             ? 'cwc-badge[kind="preview"],.preview-badge,.web-chrome-playback-lcd__preview-badge{display:none!important}'
+            : '',
+        p.hideRadio
+            ? '.navigation-item__radio{display:none!important}'
             : '',
     ].join('\n');
 }

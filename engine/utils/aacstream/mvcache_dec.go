@@ -21,6 +21,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -118,38 +119,44 @@ func newAESCTR(iv []byte) (cipher.Stream, error) {
 	return cipher.NewCTR(block, iv), nil
 }
 
-func mvDecFilePath(assetID string) string {
+func mvDecFilePath(assetID string, maxHeight int) string {
 	safe := strings.Map(func(r rune) rune {
 		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-' {
 			return r
 		}
 		return '_'
 	}, assetID)
-	return filepath.Join(mvDecDir, safe+".enc")
+	return filepath.Join(mvDecDir, fmt.Sprintf("%s-%d.enc", safe, maxHeight))
 }
 
-// MVDecExists reports whether a complete encrypted track file exists for assetID.
-func MVDecExists(assetID string) bool {
+func mvDecInFltKey(assetID string, maxHeight int) string {
+	return fmt.Sprintf("%s:%d", assetID, maxHeight)
+}
+
+// MVDecExists reports whether a complete encrypted track file exists for
+// assetID at the given quality (maxHeight). Different qualities are cached
+// separately so a quality change always triggers a fresh transcode.
+func MVDecExists(assetID string, maxHeight int) bool {
 	if !MVCacheEnabled() || assetID == "" {
 		return false
 	}
 	mvDecMu.RLock()
-	_, inflight := mvDecInFlt[assetID]
+	_, inflight := mvDecInFlt[mvDecInFltKey(assetID, maxHeight)]
 	mvDecMu.RUnlock()
 	if inflight {
 		return false
 	}
-	info, err := os.Stat(mvDecFilePath(assetID))
+	info, err := os.Stat(mvDecFilePath(assetID, maxHeight))
 	return err == nil && info.Size() > mvDecIVSize
 }
 
 // MVDecTotalBytes returns the total on-disk size of all cached encrypted track files.
 func MVDecTotalBytes() int64 { return mvDecTotalSz.Load() }
 
-// ServeMVDec decrypts and copies the cached track for assetID into dst.
-func ServeMVDec(assetID string, dst io.Writer) error {
+// ServeMVDec decrypts and copies the cached track for assetID at maxHeight into dst.
+func ServeMVDec(assetID string, maxHeight int, dst io.Writer) error {
 	initMVDecKey()
-	f, err := os.Open(mvDecFilePath(assetID))
+	f, err := os.Open(mvDecFilePath(assetID, maxHeight))
 	if err != nil {
 		return err
 	}
@@ -169,8 +176,9 @@ func ServeMVDec(assetID string, dst io.Writer) error {
 
 // MVDecCacheWriter returns a writer that writes plaintext to dst and, if
 // caching is enabled, simultaneously encrypts to a temp file for caching.
-// Call Commit() on success or Abort() on error.
-func MVDecCacheWriter(assetID string, dst io.Writer) *decCacheWriter {
+// maxHeight is included in the cache key so different quality selections
+// produce separate cache files. Call Commit() on success or Abort() on error.
+func MVDecCacheWriter(assetID string, maxHeight int, dst io.Writer) *decCacheWriter {
 	if !MVCacheEnabled() || assetID == "" {
 		return &decCacheWriter{dst: dst}
 	}
@@ -199,12 +207,13 @@ func MVDecCacheWriter(assetID string, dst io.Writer) *decCacheWriter {
 		return &decCacheWriter{dst: dst}
 	}
 
-	// Guard against two simultaneous first-plays of the same track: only the
-	// first caller caches; the second streams directly to dst without caching.
+	// Guard against two simultaneous first-plays of the same track+quality:
+	// only the first caller caches; the second streams directly without caching.
+	fltKey := mvDecInFltKey(assetID, maxHeight)
 	mvDecMu.Lock()
-	_, alreadyInFlt := mvDecInFlt[assetID]
+	_, alreadyInFlt := mvDecInFlt[fltKey]
 	if !alreadyInFlt {
-		mvDecInFlt[assetID] = struct{}{}
+		mvDecInFlt[fltKey] = struct{}{}
 	}
 	mvDecMu.Unlock()
 	if alreadyInFlt {
@@ -215,16 +224,18 @@ func MVDecCacheWriter(assetID string, dst io.Writer) *decCacheWriter {
 
 	encWriter := &cipher.StreamWriter{S: stream, W: tmp}
 	return &decCacheWriter{
-		dst:     io.MultiWriter(dst, encWriter), // plaintext → HTTP + encrypt → file
-		tmp:     tmp,
-		assetID: assetID,
+		dst:       io.MultiWriter(dst, encWriter), // plaintext → HTTP + encrypt → file
+		tmp:       tmp,
+		assetID:   assetID,
+		maxHeight: maxHeight,
 	}
 }
 
 type decCacheWriter struct {
-	dst     io.Writer
-	tmp     *os.File
-	assetID string
+	dst       io.Writer
+	tmp       *os.File
+	assetID   string
+	maxHeight int
 }
 
 func (w *decCacheWriter) Write(p []byte) (int, error) { return w.dst.Write(p) }
@@ -236,16 +247,17 @@ func (w *decCacheWriter) Commit() {
 	}
 	size, _ := w.tmp.Seek(0, io.SeekCurrent)
 	w.tmp.Close()
-	final := mvDecFilePath(w.assetID)
+	final := mvDecFilePath(w.assetID, w.maxHeight)
 	if err := os.Rename(w.tmp.Name(), final); err != nil {
 		log.Printf("[mv-dec] rename: %v", err)
 		os.Remove(w.tmp.Name())
 	} else {
 		mvDecTotalSz.Add(size)
-		log.Printf("[mv-dec] cached %s (%.1f MB encrypted)", w.assetID, float64(size)/(1<<20))
+		log.Printf("[mv-dec] cached %s@%dp (%.1f MB encrypted)", w.assetID, w.maxHeight, float64(size)/(1<<20))
 	}
+	fltKey := mvDecInFltKey(w.assetID, w.maxHeight)
 	mvDecMu.Lock()
-	delete(mvDecInFlt, w.assetID)
+	delete(mvDecInFlt, fltKey)
 	mvDecMu.Unlock()
 }
 
@@ -256,8 +268,9 @@ func (w *decCacheWriter) Abort() {
 	}
 	w.tmp.Close()
 	os.Remove(w.tmp.Name())
+	fltKey := mvDecInFltKey(w.assetID, w.maxHeight)
 	mvDecMu.Lock()
-	delete(mvDecInFlt, w.assetID)
+	delete(mvDecInFlt, fltKey)
 	mvDecMu.Unlock()
 }
 

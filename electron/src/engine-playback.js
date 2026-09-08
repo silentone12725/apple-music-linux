@@ -626,6 +626,12 @@ let _nextAlacTried   = false; // prevents re-triggering within the same track
 let _nextAacSession = null;  // { adamId, sess } — pre-warmed session for the next AAC track
 let _nextAacTried   = false; // prevents re-triggering within the same track
 let _nextAlacRetries = 0;    // retry attempts so far for current track (max 3)
+// ── Hover pre-warm (Android prefetchKeyUri equivalent) ────────────────────────
+// Map of adamId → sess for tracks the user hovered over.  LRU cap of 4.
+// On _resolveSession hit the entry is consumed (deleted).  Entries that are
+// never played expire on the engine side (TTL) — we don't need to track them.
+const _hoverSessions = new Map();   // adamId → sess
+const _hoverInflight = new Set();   // adamIds currently being opened (dedup)
 // ── Gapless MV pre-warm ───────────────────────────────────────────────────────
 let _nextMvSession = null;   // { adamId, sess } — pre-warmed session for the next MV track
 let _nextMvTried   = false;  // prevents re-triggering within the same track
@@ -791,7 +797,13 @@ function installPlayProxy(mkAudio) {
         // retries from overriding the manual pause state.
         if (_msePaused) return new Promise(() => {});
         if (!_sessionId) {
-            if (!_directPlayAdamId) return new Promise(() => {}); // no session and no direct play: stay pending
+            if (!_directPlayAdamId) {
+                // Session not open yet — push a resolver so the 'playing' event
+                // that fires when _setupMSEPath / VLC starts audio resolves this
+                // promise.  Previously returned new Promise(() => {}) which left
+                // MK's state machine stuck in loading even after audio started.
+                return new Promise(resolve => _resolvers.push(resolve));
+            }
             // Direct play is in progress — session arrives shortly via _triggerDirectPlay.
             // Advance MK's state machine with a synthetic 'playing' so NPIDF fires now
             // (updating the bottom bar), but don't start native playback yet; _setupMSEPath
@@ -868,6 +880,9 @@ function installMKSeekInterceptor(mk) {
             }, T().debounce);
         } else {
             // MSE path: set currentTime via the native prototype setter.
+            // Block seeks while MV A/V gate is pending — audio and video are not
+            // yet synced, so seeking one independently would break alignment.
+            if (!_mvGateOpen) { console.log(`[AML MV] seek blocked — A/V gate not open yet (seekSec=${seekSec.toFixed(2)})`); return; }
             // This fires the DOM 'seeking' event which our onSeeking handler
             // (installed after canplay) picks up to call mseSeekToTime().
             _ourSeekPending = true;
@@ -938,8 +953,30 @@ let _sessionId      = null;
 let _currentAssetId = null;
 let _durationSec = 0;
 let _abortCtrl   = null;   // session-level abort — killed on track change
+let _mvRetries   = 0;      // decode-error retry counter, reset on each new MV session
+// Playhead position of the previous decode failure, used to tell a transient
+// failure from a deterministic one. Reset alongside _mvRetries.
+let _mvLastErrPos = -1;
 let _generation  = 0;
 let _videoCodec  = null;   // HLS CODECS= for the video track (MV sessions only)
+let _mvGateOpen  = true;   // false while MV A/V gate is pending; blocks play/seek
+// Set by the active MV pipeline; resets the native scrubber to its loading look.
+// Held at module scope so a quality change can call it without depending on the
+// declaration order inside the pipeline function.
+let _mvResetScrubberRef = null;
+
+// CSS injected into any amp-playback-controls-progress shadow root to show a
+// YouTube-style buffer indicator on the seek track (uses --aml-buffer CSS var).
+const _BUF_BAR_CSS = [
+    '#playback-progress::-webkit-slider-runnable-track,',
+    'input[type=range]::-webkit-slider-runnable-track{',
+    'background:linear-gradient(to right,',
+    '#fff var(--progress,0%),',
+    'rgba(255,255,255,.26) var(--progress,0%),',
+    'rgba(255,255,255,.26) var(--aml-buffer,var(--progress,0%)),',
+    'rgba(255,255,255,.12) var(--aml-buffer,var(--progress,0%))',
+    ')!important}',
+].join('');
 
 // ── Playback state machine ─────────────────────────────────────────────────────
 // Encodes the current phase of one playback attempt so call sites can read a
@@ -1179,6 +1216,9 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
             }, 200);
         });
         badge.addEventListener('click', (e) => {
+            // Capture-phase: runs before the global close-on-click listener so we
+            // can read the popup's pre-click state and toggle correctly.
+            e.stopImmediatePropagation();
             e.stopPropagation();
             const pop = document.getElementById('aml-quality-popup');
             if (pop && pop.style.display !== 'none') {
@@ -1186,8 +1226,8 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
             } else {
                 _showQualityPopup(badge);
             }
-        });
-        // Click anywhere else closes popup
+        }, true);
+        // Click anywhere else closes popup (capture phase, after badge's own handler above)
         document.addEventListener('click', () => {
             const pop = document.getElementById('aml-quality-popup');
             if (pop) pop.style.display = 'none';
@@ -1667,6 +1707,7 @@ function getMVContainer(signal, timeoutMs = 10000) {
 async function startMVPipeline() {
     const _mvGen = _generation; // capture at entry; if a second handleTrackChange fires, _generation will differ
     console.log(`[AML MV-V] enter gen=${_mvGen} session=${_sessionId} t=${Date.now()}`);
+    _mvGateOpen = false; // block play/seek until A/V gate opens
 
     // Start container poll immediately — runs in parallel with MSE setup below.
     // getMVContainer polls every 100ms for the amp-window-takeover container (300–800ms wait).
@@ -1699,6 +1740,10 @@ async function startMVPipeline() {
     try {
         mvContainer = await containerPromise;
         console.log(`[AML MV] container found ${mvContainer.offsetWidth}×${mvContainer.offsetHeight}`);
+        // Block all user interaction until both A/V streams are ready (tryStart).
+        // Directly on mvContainer — avoids z-index fights with the shadow DOM stacking context.
+        mvContainer.style.setProperty('pointer-events', 'none', 'important');
+        mvContainer.style.setProperty('cursor', 'wait', 'important');
     } catch (e) {
         console.warn('[AML MV] MV container not found, aborting:', e.message);
         myVid.src = ''; if (myVid.parentNode) myVid.parentNode.removeChild(myVid);
@@ -1857,6 +1902,34 @@ async function startMVPipeline() {
         } catch (_) {}
     })();
 
+    // ── Wire native CC/Subtitles button ─────────────────────────────────────────
+    // amp-captions-control lives in avp's light DOM (slot="footer"). The button
+    // is two shadow roots deep: amp-captions-control → amp-contextual-menu-button → button.
+    // We intercept in capture phase directly on the innermost button so stopImmediatePropagation
+    // prevents the web-component's own bubble-phase handler from opening the native menu.
+    const _nativeCCCtrl = avp?.querySelector('amp-captions-control')
+        ?? document.querySelector('amp-captions-control');
+    const _syncCCOpacity = () => {
+        if (_nativeCCCtrl) _nativeCCCtrl.style.opacity = _ccEnabled ? '1' : '0.45';
+    };
+    const _wireCCBtn = () => {
+        const menuComp = _nativeCCCtrl?.shadowRoot?.querySelector('amp-contextual-menu-button');
+        const btn = menuComp?.shadowRoot?.querySelector('button');
+        if (btn) {
+            btn.addEventListener('click', e => {
+                e.stopImmediatePropagation();
+                e.stopPropagation();
+                _ccEnabled = !_ccEnabled;
+                _renderSubs();
+                _syncCCOpacity();
+            }, true);
+            _syncCCOpacity();
+        } else if (_nativeCCCtrl) {
+            setTimeout(_wireCCBtn, 300); // retry until shadow roots hydrate
+        }
+    };
+    _wireCCBtn();
+
     // Expand avpi + avp to fill the entire container so the native scrim controls
     // span the full viewport (header at top, footer at bottom, clickable in between).
     // Cancel Apple Music's transform:translateY(-256.5px) animation on avpi. Without
@@ -1902,6 +1975,18 @@ async function startMVPipeline() {
     const mvPlay  = () => { _iframePlay.call(myVid).then(() => mkAudio.play().catch(() => {})).catch(() => {}); };
     const mvPause = () => { myVid.pause(); mkAudio.pause(); };
     const togglePlayPause = () => { if (myVid.paused) mvPlay(); else mvPause(); };
+
+    // When Apple Music's center play overlay (or any MK code) calls nativeVidEl.play()
+    // on resume, forward it to myVid. nativeVidEl is opacity:0 and never actually plays,
+    // so without this intercept myVid stays paused → unrecoverable black screen.
+    if (nativeVidEl) {
+        nativeVidEl.play = function() {
+            console.log(`[AML MV] nativeVidEl.play() intercepted → myVid.paused=${myVid?.paused} _bufPaused=${_bufPaused} _avStarted=${_avStarted}`);
+            if (!_avStarted || _videoStalled || _bufPaused) { console.log(`[AML MV] play blocked — avStarted=${_avStarted} stalled=${_videoStalled} bufPaused=${_bufPaused}`); return Promise.resolve(); }
+            if (myVid?.paused) mvPlay();
+            return Promise.resolve();
+        };
+    }
 
     // ── Fullscreen ────────────────────────────────────────────────────────────
     const toggleFullscreen = () => {
@@ -1990,13 +2075,24 @@ async function startMVPipeline() {
         scrimInfo.style.setProperty('visibility', 'visible', 'important');
     }
 
-    const onExitClick = (e) => { e.stopPropagation(); _abortCtrl?.abort(); };
+    // Abort reason tracking — set before every _abortCtrl.abort() call so cleanup knows why.
+    let _abortReason = 'unknown';
+    const _abortMV = (reason) => {
+        _abortReason = reason;
+        console.log(`[AML MV] abort: ${reason}`);
+        _abortCtrl?.abort();
+    };
+
+    const onExitClick = (e) => { e.stopPropagation(); _abortMV('exit-button'); };
     if (exitBtn) {
         exitBtn.style.transition = 'opacity 0.3s ease';
         exitBtn.style.setProperty('cursor', 'default', 'important');
         // Raise above avpi's shadow stacking context without touching position — Apple Music
         // already positions exitBtn absolutely in the corner; overriding position moves it.
         exitBtn.style.setProperty('z-index', '999999', 'important');
+        // Punch through the load blocker (mvContainer pointer-events:none) so the user
+        // can always exit even while the A/V pipeline is still loading.
+        exitBtn.style.setProperty('pointer-events', 'auto', 'important');
         exitBtn.addEventListener('click', onExitClick);
     }
 
@@ -2061,18 +2157,35 @@ async function startMVPipeline() {
         `<path d="M1 4.5L4 7.5L10 1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>` +
         `</svg>`;
 
+    // Resolved active/accent tint for hover states.
+    // --aml-accent-active is set from the theme palette (main.mjs applyTheme) but is
+    // an EMPTY string when no palette is active. An empty custom property still
+    // "exists", so `var(--x, fallback)` would NOT use the fallback — it would yield
+    // an invalid declaration and drop the background entirely. Resolve it in JS so
+    // the fallback is real.
+    const _activeTint = () => {
+        try {
+            const v = getComputedStyle(document.documentElement)
+                .getPropertyValue('--aml-accent-active').trim();
+            if (v) return v;
+        } catch (_) {}
+        return 'rgba(255,255,255,0.16)';
+    };
+
     const _qualityMenu = document.createElement('div');
     Object.assign(_qualityMenu.style, {
         position: 'fixed', zIndex: '1000001',
         width: '150px',
-        background: 'rgba(28,28,30,0.82)',
-        backdropFilter: 'blur(48px) saturate(180%)',
-        WebkitBackdropFilter: 'blur(48px) saturate(180%)',
-        border: '0.5px solid rgba(255,255,255,0.13)',
-        borderRadius: '10px',
+        // Matches the search-suggestions dropdown (vision-glass.js) so the two
+        // popovers read as the same material.
+        background: 'rgba(14,14,18,0.55)',
+        backdropFilter: 'blur(32px) saturate(1.8) brightness(0.92)',
+        WebkitBackdropFilter: 'blur(32px) saturate(1.8) brightness(0.92)',
+        border: '0.5px solid rgba(255,255,255,0.10)',
+        borderRadius: '12px',
         padding: '5px 0',
         display: 'none', flexDirection: 'column',
-        boxShadow: '0 4px 24px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.04) inset, 0 0 0 0.5px rgba(0,0,0,0.3)',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
         fontFamily: _sfFont,
         overflow: 'hidden',
         boxSizing: 'border-box',
@@ -2095,9 +2208,11 @@ async function startMVPipeline() {
             const below = _allTiers[i + 1];
             return !below || myBest > _bestForMax(below.height); // adds a distinct quality step
         });
-    // Snap _mvMaxHeight to highest available tier so the button label is accurate
+    // Snap _mvMaxHeight to highest available tier so the button label is accurate.
+    // Also update the button text — it was set before options were computed.
     if (_qualityOptions.length > 0 && !_qualityOptions.some(o => o.height === _mvMaxHeight)) {
         _mvMaxHeight = _qualityOptions[0].height;
+        _qualitySpanEl.textContent = _qualityLabel();
     }
 
     _qualityOptions.forEach(({ label, height }) => {
@@ -2126,7 +2241,9 @@ async function startMVPipeline() {
         opt.append(checkEl, labelEl);
 
         opt.addEventListener('mouseenter', () => {
-            opt.style.background = 'rgba(252,60,68,0.82)';
+            // Theme "active" tint, not Apple Music pink — matches nav selection and
+            // the search-results hover so every popover highlights consistently.
+            opt.style.background = _activeTint();
             opt.style.color = '#fff';
         });
         opt.addEventListener('mouseleave', () => {
@@ -2147,7 +2264,11 @@ async function startMVPipeline() {
             // may cause MK to fire nowPlayingItemDidChange naturally. Only call handleTrackChange
             // manually if the generation hasn't advanced (i.e. no natural restart happened).
             const _genSnap = _generation;
-            _abortCtrl.abort();
+            // Blank the scrubber before tearing down: cleanup stops the sync interval,
+            // so otherwise it freezes showing the old session's progress for the whole
+            // re-buffer and looks like playback hung.
+            _mvResetScrubberRef?.();
+            _abortMV('quality-change');
             setTimeout(() => { if (_generation === _genSnap && _mkInstance) handleTrackChange(_mkInstance); }, T().qualityRace);
         });
         _qualityMenu.appendChild(opt);
@@ -2236,6 +2357,12 @@ async function startMVPipeline() {
                     ?? footerRow?.querySelector('amp-playback-controls-progress');
     const scrubberShadow = scrubberEl?.shadowRoot;
     const rangeInput = scrubberShadow?.querySelector('#playback-progress') ?? scrubberShadow?.querySelector('input[type=range]');
+    if (scrubberShadow && !scrubberShadow.getElementById('aml-buf-style')) {
+        const st = document.createElement('style');
+        st.id = 'aml-buf-style';
+        st.textContent = _BUF_BAR_CSS;
+        scrubberShadow.appendChild(st);
+    }
     if (scrubberEl) {
         scrubberEl.style.setProperty('visibility', 'visible', 'important');
         scrubberEl.style.setProperty('opacity', '1', 'important');
@@ -2370,7 +2497,7 @@ async function startMVPipeline() {
             case 'm': case 'M':
                 mkAudio.muted = !mkAudio.muted; _showControls(); break;
             case 'Escape':
-                if (!document.fullscreenElement) _abortCtrl.abort(); break;
+                if (!document.fullscreenElement) _abortMV('escape-key'); break;
             default: _showControls();
         }
     };
@@ -2426,6 +2553,39 @@ async function startMVPipeline() {
     const progShadow   = scrubberEl?.shadowRoot;
     const timeElapsed  = progShadow?.querySelector('.time.elapsed');
     const timeRemain   = progShadow?.querySelector('.time.remaining');
+
+    // Thumb-aligned fill percentage.
+    //
+    // A range input never lets its thumb overflow the track, so the browser insets
+    // it by half the thumb width at each end:
+    //     thumbCentre = thumbW/2 + frac * (trackW - thumbW)
+    // A naive `frac * 100%` gradient stop instead puts the fill edge at
+    //     fillEdge    = frac * trackW
+    // The two agree only at frac = 0.5: before it the thumb leads, after it the
+    // fill leads — which is why the progress bar visibly ran ahead of the circle in
+    // the second half of a track. Mapping the fill through the same inset keeps the
+    // gradient edge exactly under the thumb centre for every frac.
+    let _thumbW = 0;
+    const _measureThumb = () => {
+        if (!rangeInput) return 0;
+        try {
+            const w = parseFloat(getComputedStyle(rangeInput, '::-webkit-slider-thumb').width);
+            if (Number.isFinite(w) && w > 0 && w < 60) return w;
+        } catch (_) {}
+        return 12; // Apple's scrubber knob is ~12px; sane fallback if the pseudo-element is opaque
+    };
+    const _fillPct = (frac) => {
+        const trackW = rangeInput?.clientWidth ?? 0;
+        if (!(trackW > 0)) return frac * 100;
+        if (_thumbW <= 0) _thumbW = _measureThumb();
+        const tw = Math.min(_thumbW, trackW);
+        return ((tw / 2 + frac * (trackW - tw)) / trackW) * 100;
+    };
+    // Re-measure when the layout changes (fullscreen toggle, window resize) — the
+    // knob is sized in CSS px and the track width changes underneath it.
+    const _thumbResizeObs = rangeInput ? new ResizeObserver(() => { _thumbW = _measureThumb(); }) : null;
+    _thumbResizeObs?.observe(rangeInput);
+
     const _updateProgress = () => {
         if (!rangeInput) return;
         const t   = myVid.currentTime;
@@ -2435,12 +2595,36 @@ async function startMVPipeline() {
         // Not writing it causes amp-playback-controls-progress to see a stale value of 0 and
         // enter its loading/blink state repeatedly.
         rangeInput.value = String(t);
-        const pct = (t / max * 100).toFixed(2) + '%';
+        const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
+        const pct  = _fillPct(frac).toFixed(2) + '%';
         rangeInput.style.setProperty('--progress', pct);
         rangeInput.style.setProperty('--width',    pct);
+        const vBuf = myVid.buffered;
+        if (vBuf && vBuf.length > 0 && max > 0) {
+            const bFrac = Math.min(1, Math.max(0, vBuf.end(vBuf.length - 1) / max));
+            rangeInput.style.setProperty('--aml-buffer', _fillPct(bFrac).toFixed(2) + '%');
+        }
         if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
         if (timeRemain)  timeRemain.textContent  = '-' + _fmtTime(max - t);
     };
+    // Put the scrubber back into its "loading" look. Cleanup clears the sync
+    // interval, so without this the bar freezes showing the *previous* session's
+    // progress while the new one buffers — on a quality change that reads as if
+    // playback is stuck. Zeroing the value is what makes
+    // amp-playback-controls-progress fall back to its own loading/blink state.
+    const _resetScrubberToLoading = () => {
+        if (!rangeInput) return;
+        try {
+            rangeInput.value = '0';
+            rangeInput.style.setProperty('--progress',   '0%');
+            rangeInput.style.setProperty('--width',      '0%');
+            rangeInput.style.setProperty('--aml-buffer', '0%');
+            if (timeElapsed) timeElapsed.textContent = _fmtTime(0);
+            if (timeRemain)  timeRemain.textContent  = '--:--';
+        } catch (_) {}
+    };
+    _mvResetScrubberRef = _resetScrubberToLoading;
+
     const _seekSyncInterval = setInterval(_updateProgress, T().poll);
     const onNativeSeeked  = null;
     const onNativeVolume  = null;
@@ -2492,8 +2676,9 @@ async function startMVPipeline() {
     const BUF_LOW  = 2.0; // pause when lead falls below this
     const BUF_HIGH = 10.0; // resume only when lead rises above this (8s hysteresis gap, matches Android PLAYER_BUFFER_REBUFFER_MS)
 
-    let _dynBufTimer = null;
-    let _bufPaused   = false; // true while hidden-paused for buffering
+    let _dynBufTimer  = null;
+    let _bufPaused    = false; // true while hidden-paused for buffering
+    let _bufWaitStart = 0;    // Date.now() when buf:LOW triggered, for timeout detection
 
     const _getVidLead = () => {
         const ct = videoEl.currentTime;
@@ -2515,19 +2700,34 @@ async function startMVPipeline() {
             if (_bufPaused) {
                 if (lead >= BUF_HIGH) {
                     _bufPaused = false;
+                    _mvGateOpen = _avStarted; // unblock seeks when buffer recovers
                     mkAudio.currentTime = videoEl.currentTime; // re-anchor while still muted
                     mkAudio.muted = false;
                     _iframePlay.call(videoEl).catch(() => {}); // onVideoPlay → mkAudio.play()
                     console.log(`[AML MV buf:resume] lead=${lead.toFixed(2)}s ct=${videoEl.currentTime.toFixed(2)}`);
                 } else {
+                    // Re-enforce pause if Chrome auto-resumed (MSE 'play' event race).
+                    if (!videoEl.paused) {
+                        console.warn('[AML MV buf:waiting] video escaped pause — re-pausing');
+                        videoEl.pause();
+                    }
+                    // Abort if stalled too long — Chrome MSE resets decoder after ~60s idle,
+                    // causing SB error on the next append. 45s gives a clean restart margin.
+                    if (Date.now() - _bufWaitStart > 45000) {
+                        console.warn(`[AML MV buf:timeout] stalled ${((Date.now()-_bufWaitStart)/1000).toFixed(0)}s — restarting session`);
+                        _abortMV('buf-timeout');
+                        return;
+                    }
                     console.debug(`[AML MV buf:waiting] lead=${lead.toFixed(2)}s (need ${BUF_HIGH}s to resume)`);
                 }
             } else {
                 if (lead < BUF_LOW && !videoEl.paused) {
                     _bufPaused = true;
+                    _mvGateOpen = false; // block seeks during buffer stall
+                    _bufWaitStart = Date.now();
                     videoEl.pause();      // onVideoPause suppressed via _bufPaused guard
                     mkAudio.muted = true; // silent but still "playing" — MK sees no pause
-                    console.warn(`[AML MV buf:pre-pause] lead=${lead.toFixed(2)}s ct=${videoEl.currentTime.toFixed(2)}`);
+                    console.warn(`[AML MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s → pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'}`);
                 } else {
                     console.debug(`[AML MV buf:ok] lead=${lead.toFixed(2)}s`);
                 }
@@ -2538,10 +2738,21 @@ async function startMVPipeline() {
     const tryStart = () => {
         if (_avStarted || !_audioCanPlay || !_videoCanPlay || _abortCtrl?.signal.aborted) return;
         _avStarted = true;
-        // Sync video time to audio (audio loads faster; set video to audio reference)
-        if (Math.abs(videoEl.currentTime - mkAudio.currentTime) > 0.05)
-            videoEl.currentTime = mkAudio.currentTime;
-        console.log(`[AML MV buf:gate] A/V gate open — starting playback audio=${mkAudio.currentTime.toFixed(2)} video=${videoEl.currentTime.toFixed(2)}`);
+        mvContainer.style.removeProperty('pointer-events');
+        mvContainer.style.removeProperty('cursor');
+        if (exitBtn) exitBtn.style.removeProperty('pointer-events');
+        _mvGateOpen = true; // unblock play/seek now that both streams are ready
+
+        // Sync video time to audio (audio loads faster; set video to audio reference).
+        // Guard: only seek video to audio position when the video buffer already covers
+        // that position.  On retry, audio is at mid-track but the fresh video buffer
+        // starts at 0 — seeking video to t=13 with an empty buffer causes immediate stall.
+        const audCt = mkAudio.currentTime;
+        const vidCt = videoEl.currentTime;
+        const vidBufEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : 0;
+        const canSyncToAudio = Math.abs(vidCt - audCt) > 0.05 && audCt <= vidBufEnd + 1.0;
+        console.log(`[AML MV buf:gate] A/V gate open audio=${audCt.toFixed(2)} video=${vidCt.toFixed(2)} vidBufEnd=${vidBufEnd.toFixed(2)} canSyncToAudio=${canSyncToAudio}`);
+        if (canSyncToAudio) videoEl.currentTime = audCt;
         // onVideoPlay fires on the 'play' event and calls mkAudio.play()
         _iframePlay.call(videoEl).catch(e => console.warn('[AML MV] av-gate play rejected:', e.message));
         _startDynBuf();
@@ -2708,6 +2919,10 @@ async function startMVPipeline() {
         return;
     }
     URL.revokeObjectURL(msBlobUrl);
+    // Set MSE duration so myVid.duration is finite — without this the seek bar's
+    // _setRangeMax guard (isFinite check) never writes rangeInput.max, leaving it
+    // at the default 100 and breaking the total-duration and time-remaining display.
+    if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
 
     // Extract video-only codec string (manifest may carry "avc1.xxx,mp4a.40.2").
     const rawVideoCodec = _videoCodec || '';
@@ -2715,12 +2930,16 @@ async function startMVPipeline() {
         .find(c => /^(avc1|hvc1|hev1|vp09|av01)/.test(c)) ?? 'avc1.640028';
     const videoMime = `video/mp4; codecs="${videoCodecStr}"`;
     if (!MediaSource.isTypeSupported(videoMime)) {
-        console.error(`[AML MV] video codec not supported: ${videoMime}`);
+        // Unplayable here (typically HEVC on a Linux Chromium build with no hvc1
+        // decoder). Tear down AND advance the queue — returning silently leaves MK
+        // paused-but-not-ended on a track it will keep trying to restart.
+        console.error(`[AML MV] video codec not supported: ${videoMime} — skipping track`);
         _audioPipeCtrl.abort();
         mkAudio.pause(); mkAudio.src = '';
         if (audioMs.readyState === 'open') { try { audioMs.endOfStream(); } catch (_) {} }
         if (ms.readyState === 'open') { try { ms.endOfStream(); } catch (_) {} }
         if (mkAudio.parentNode) mkAudio.parentNode.removeChild(mkAudio);
+        _amlNextRef?.().catch(() => {});
         return;
     }
     console.log(`[AML MV] video codec="${videoCodecStr}"`);
@@ -2733,40 +2952,193 @@ async function startMVPipeline() {
     const videoUrl = `${ENGINE}/api/v1/playback/${_sessionId}/video`;
 
     // ── Video pipe (with chunk cache for backward seek re-injection) ──────────────
+    //
+    // Buffer bounds mirror Apple's own Android PlayerLoadControl
+    // (com.apple.android.music.playback.player.PlayerLoadControl):
+    //   PLAYER_BUFFER_START_MS    = 0x1388 =  5 s   (start playback)
+    //   PLAYER_BUFFER_REBUFFER_MS = 0x2710 = 10 s   (resume after stall — BUF_HIGH)
+    //   PLAYER_MIN_BUFFER_MS      = 0xc350 = 50 s
+    //   PLAYER_MAX_BUFFER_MS      = 0xc350 = 50 s   ← hard ceiling (BUF_MAX_AHEAD)
+    // ExoPlayer stops pulling from the network once the buffered duration reaches
+    // MAX (shouldContinueLoading returns false). Without an equivalent ceiling the
+    // fetch loop here buffered 90 s+ of 1920x816 H.264 (~100 MB), blew past
+    // Chromium's MSE quota, and the QuotaExceededError branch below used to DROP
+    // the chunk — punching a hole in the fMP4 byte stream that corrupted every
+    // following fragment and surfaced as
+    // "CHUNK_DEMUXER_ERROR_APPEND_FAILED: Failed to prepare video sample for decode".
+    // Retrying re-downloaded from scratch and hit the same wall, hence the loop.
+    const BUF_MAX_AHEAD = 50;  // stop reading once this many seconds are buffered ahead
+    const BUF_BACK_KEEP = 15;  // seconds behind the playhead to retain when evicting
     const _vidCache = [];
+    // Cap the re-injection cache so a long MV does not pin its full decoded size in
+    // the JS heap (a 4:40 MV is ~330 MB), which itself starves the MSE buffer.
+    // Once the cap is passed the cache is a truncated prefix and must not be
+    // re-injected; _mvVideoSeek falls back to a ranged re-fetch instead.
+    const VID_CACHE_MAX_BYTES = 96 << 20; // 96 MB
+    let _vidCacheBytes = 0;
+    let _vidCacheComplete = true;
     const _waitVidIdle = () => new Promise((res, rej) => {
         if (!videoSb.updating) return res();
         const onEnd = () => { videoSb.removeEventListener('error', onErr); res(); };
-        const onErr = () => { videoSb.removeEventListener('updateend', onEnd); rej(new Error('SB error')); };
+        const onErr = () => {
+            videoSb.removeEventListener('updateend', onEnd);
+            // 50ms delay: Chrome populates videoEl.error asynchronously after the SB error event
+            setTimeout(() => {
+                const buf = videoSb.buffered?.length
+                    ? `${videoSb.buffered.start(0).toFixed(1)}-${videoSb.buffered.end(videoSb.buffered.length-1).toFixed(1)}`
+                    : 'empty';
+                const veCode = videoEl.error?.code ?? 'none';
+                const veMsg  = videoEl.error?.message ?? '';
+                rej(new Error(`SB error buffered=${buf} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState} veCode=${veCode} veMsg="${veMsg}"`));
+            }, 50);
+        };
         videoSb.addEventListener('updateend', onEnd, { once: true });
         videoSb.addEventListener('error',     onErr, { once: true });
     });
+    const _boxName = (chunk) => {
+        if (!chunk || chunk.byteLength < 8) return '?';
+        const v = new DataView(chunk.buffer, chunk.byteOffset, Math.min(chunk.byteLength, 8));
+        return String.fromCharCode(v.getUint8(4), v.getUint8(5), v.getUint8(6), v.getUint8(7));
+    };
+    const _bufRanges = (sb) => {
+        const r = [];
+        for (let i = 0; i < sb.buffered.length; i++) r.push(`${sb.buffered.start(i).toFixed(2)}-${sb.buffered.end(i).toFixed(2)}`);
+        return r.join(',') || '(empty)';
+    };
+    // Seconds currently buffered ahead of the playhead (0 when nothing is buffered).
+    const _leadAhead = () => {
+        const b = videoSb.buffered;
+        if (!b || b.length === 0) return 0;
+        return Math.max(0, b.end(b.length - 1) - videoEl.currentTime);
+    };
+    // Drop everything older than currentTime - BUF_BACK_KEEP. Returns true when
+    // bytes were actually released, so callers know whether a retry can help.
+    // Takes the caller's signal rather than reading pipeCtrl: _mvVideoSeek swaps
+    // pipeCtrl before re-injecting, so pipeCtrl.signal is not necessarily the
+    // signal governing this append.
+    const _evictBackBuffer = async (keepSec, signal) => {
+        const b = videoSb.buffered;
+        if (!b || b.length === 0) return false;
+        const cutoff = videoEl.currentTime - keepSec;
+        const start  = b.start(0);
+        if (cutoff <= start + 0.1) return false; // nothing meaningful to reclaim
+        await _waitVidIdle();
+        if (signal.aborted || ms.readyState !== 'open') return false;
+        try { videoSb.remove(start, cutoff); } catch (_) { return false; }
+        await _waitVidIdle();
+        console.log(`[AML MV-pipe] evicted ${start.toFixed(1)}-${cutoff.toFixed(1)}s (ct=${videoEl.currentTime.toFixed(1)}) buf=${_bufRanges(videoSb)}`);
+        return true;
+    };
+    // Backpressure: hold the reader while the buffer is at/over the ceiling, the
+    // MSE equivalent of ExoPlayer's LoadControl.shouldContinueLoading() == false.
+    // Resolves early on abort so teardown is never delayed by a full buffer.
+    const _awaitBufferHeadroom = (signal) => new Promise(resolve => {
+        if (signal.aborted || ms.readyState !== 'open') return resolve();
+        if (_leadAhead() < BUF_MAX_AHEAD) return resolve();
+        console.log(`[AML MV-pipe] backpressure: lead=${_leadAhead().toFixed(1)}s >= ${BUF_MAX_AHEAD}s — pausing fetch`);
+        let tick = 0;
+        const onAbort = () => { clearInterval(tick); resolve(); };
+        tick = setInterval(() => {
+            if (signal.aborted || ms.readyState !== 'open' || _leadAhead() < BUF_MAX_AHEAD) {
+                clearInterval(tick);
+                signal.removeEventListener('abort', onAbort);
+                resolve();
+            }
+        }, BUF_POLL_MS);
+        signal.addEventListener('abort', onAbort, { once: true });
+    });
+
+    // Append one chunk, never skipping it. The fMP4 byte stream is contiguous, so
+    // dropping a chunk desynchronises the demuxer for the rest of the track and
+    // surfaces later as CHUNK_DEMUXER_ERROR_APPEND_FAILED. Under quota pressure we
+    // reclaim the back buffer and retry the same bytes instead.
+    // Returns true when appended, false when the signal aborted mid-append.
+    const _appendWithQuota = async (chunk, signal) => {
+        for (let attempt = 0; attempt < 4; attempt++) {
+            if (signal.aborted || ms.readyState !== 'open') return false;
+            try {
+                videoSb.appendBuffer(chunk);
+                return true;
+            } catch (e) {
+                if (e.name === 'QuotaExceededError') {
+                    // Shrink the retained back buffer on each attempt; the last keeps
+                    // only 2 s so a heavily-buffered stream can still recover.
+                    const keep = [BUF_BACK_KEEP, 8, 2][Math.min(attempt, 2)];
+                    console.warn(`[AML MV-pipe] quota exceeded size=${chunk.byteLength} attempt=${attempt + 1} — evicting to ${keep}s back buffer`);
+                    const freed = await _evictBackBuffer(keep, signal);
+                    if (!freed && attempt >= 1) {
+                        // Nothing left to reclaim (playhead near 0 with a full buffer).
+                        // Surface it rather than silently corrupting the stream.
+                        throw new Error(`MSE quota exhausted, nothing to evict (buf=${_bufRanges(videoSb)} ct=${videoEl.currentTime.toFixed(2)})`);
+                    }
+                } else if (e.name === 'InvalidStateError') {
+                    await _waitVidIdle();
+                } else {
+                    throw e;
+                }
+            }
+        }
+        if (signal.aborted || ms.readyState !== 'open') return false;
+        throw new Error(`appendBuffer failed after retries size=${chunk.byteLength} buf=${_bufRanges(videoSb)}`);
+    };
+
     const runVideoPipe = async (url, cache, signal) => {
+        console.log(`[AML MV-pipe] start url=${url.split('?')[1]||'base'} cache=${cache} signal.aborted=${signal.aborted}`);
         const resp = await fetch(url, { signal });
         if (!resp.ok) throw new Error(`video ${resp.status}`);
         const reader = resp.body.getReader();
+        let chunkN = 0;
         try {
             while (true) {
-                const { done, value } = await reader.read();
-                if (done || signal.aborted || ms.readyState !== 'open') break;
-                if (cache) _vidCache.push(value);
-                await _waitVidIdle();
-                if (signal.aborted || ms.readyState !== 'open') break;
-                try { videoSb.appendBuffer(value); }
-                catch (e) {
-                    if (e.name === 'InvalidStateError') {
-                        await _waitVidIdle();
-                        if (signal.aborted || ms.readyState !== 'open') break;
-                        videoSb.appendBuffer(value);
-                    } else if (e.name !== 'QuotaExceededError') throw e;
+                // Hold before reading more so the network stays idle while the
+                // buffer is full, rather than reading into a chunk we cannot append.
+                await _awaitBufferHeadroom(signal);
+                if (signal.aborted || ms.readyState !== 'open') {
+                    console.log(`[AML MV-pipe] break-backpressure chunk#${chunkN} signal.aborted=${signal.aborted}`);
+                    break;
                 }
+                const { done, value } = await reader.read();
+                if (done) { console.log(`[AML MV-pipe] done after ${chunkN} chunks buf=${_bufRanges(videoSb)}`); break; }
+                if (signal.aborted || ms.readyState !== 'open') {
+                    console.log(`[AML MV-pipe] break chunk#${chunkN} signal.aborted=${signal.aborted} msState=${ms.readyState}`);
+                    break;
+                }
+                if (cache && _vidCacheComplete) {
+                    if (_vidCacheBytes + value.byteLength <= VID_CACHE_MAX_BYTES) {
+                        _vidCache.push(value);
+                        _vidCacheBytes += value.byteLength;
+                    } else {
+                        // Past the cap the cache is a truncated prefix and can never
+                        // be re-injected, so release it instead of pinning tens of MB
+                        // of Uint8Arrays that nothing will ever read.
+                        _vidCacheComplete = false;
+                        console.log(`[AML MV-pipe] re-inject cache exceeded ${(VID_CACHE_MAX_BYTES/(1<<20)).toFixed(0)} MB — released, backward seek will re-fetch`);
+                        _vidCache.length = 0;
+                        _vidCacheBytes = 0;
+                    }
+                }
+                const box = _boxName(value);
+                const bufBefore = _bufRanges(videoSb);
+                await _waitVidIdle();
+                if (signal.aborted || ms.readyState !== 'open') {
+                    console.log(`[AML MV-pipe] break-after-idle chunk#${chunkN} box=${box} signal.aborted=${signal.aborted}`);
+                    break;
+                }
+                if (!await _appendWithQuota(value, signal)) break; // aborted mid-append
+                chunkN++;
+                if (chunkN <= 6 || chunkN % 20 === 0)
+                    console.log(`[AML MV-pipe] appended chunk#${chunkN} size=${value.byteLength} box=${box} lead=${_leadAhead().toFixed(1)}s bufBefore=${bufBefore}`);
             }
         } finally { reader.cancel().catch(() => {}); }
         await _waitVidIdle().catch(() => {});
         if (!signal.aborted && ms.readyState === 'open') ms.endOfStream();
     };
     runVideoPipe(videoUrl, true, pipeCtrl.signal)
-        .catch(e => { if (!pipeCtrl.signal.aborted) console.error('[AML MV] video pipe error:', e); });
+        .catch(e => {
+            const aborted = pipeCtrl.signal.aborted;
+            console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
+            if (!aborted) { console.error(`[AML MV] video pipe error: ${e.message} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`); _abortMV(`video-pipe-error`); }
+        });
 
     // ── Backward seek: re-inject cached chunks for both video and audio ──────────
     let _mvVidSeeking = false;
@@ -2775,7 +3147,6 @@ async function startMVPipeline() {
         for (let i = 0; i < videoSb.buffered.length; i++) {
             if (seekSec >= videoSb.buffered.start(i) - 1.0 && seekSec <= videoSb.buffered.end(i) + 1.0) return;
         }
-        if (_vidCache.length === 0) return;
         _mvVidSeeking = true;
         try {
             const prev = pipeCtrl;
@@ -2784,16 +3155,26 @@ async function startMVPipeline() {
             const sig = pipeCtrl.signal;
             await _waitVidIdle();
             if (videoSb.buffered.length > 0) { videoSb.remove(0, Infinity); await _waitVidIdle(); }
-            videoSb.timestampOffset = 0;
-            for (const chunk of [..._vidCache]) {
-                if (sig.aborted || ms.readyState !== 'open') return;
-                await _waitVidIdle();
-                try { videoSb.appendBuffer(chunk); } catch (e) { break; }
-            }
             if (sig.aborted || ms.readyState !== 'open') return;
-            const bufEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : 0;
-            if (bufEnd < (_durationSec || 1e9) - 1) {
-                runVideoPipe(`${videoUrl}?t=${bufEnd.toFixed(3)}`, false, sig)
+            videoSb.timestampOffset = 0;
+            // Re-inject locally only when the cache holds the whole stream so far.
+            // Once VID_CACHE_MAX_BYTES is passed the cache is a truncated prefix and
+            // replaying it would leave a gap; re-fetch from the seek point instead.
+            let resumeFrom = seekSec;
+            if (_vidCacheComplete && _vidCache.length > 0) {
+                for (const chunk of [..._vidCache]) {
+                    if (sig.aborted || ms.readyState !== 'open') return;
+                    await _waitVidIdle();
+                    if (!await _appendWithQuota(chunk, sig)) return;
+                }
+                if (sig.aborted || ms.readyState !== 'open') return;
+                if (videoSb.buffered.length > 0)
+                    resumeFrom = videoSb.buffered.end(videoSb.buffered.length - 1);
+            } else {
+                console.log(`[AML MV-V] backward seek to ${seekSec.toFixed(1)}s — re-fetching (cache incomplete)`);
+            }
+            if (resumeFrom < (_durationSec || 1e9) - 1) {
+                runVideoPipe(`${videoUrl}?t=${resumeFrom.toFixed(3)}`, false, sig)
                     .catch(e => { if (!sig.aborted) console.error('[AML MV] video resume error:', e); });
             }
         } finally { _mvVidSeeking = false; }
@@ -2808,15 +3189,18 @@ async function startMVPipeline() {
             mkAudio.currentTime = videoEl.currentTime;
         mkAudio.play().catch(() => {});
     };
-    // Dispatch synthetic 'playing'/'pause' on nativeVidEl so MK's state machine
-    // transitions from state=1 (loading) to state=2 (playing) / state=3 (paused).
-    // MK observes nativeVidEl events; we never play nativeVidEl so it never fires
-    // these on its own. The counter-pause interceptor (Function.prototype.call override)
-    // blocks MK's savedPause.call(nativeVidEl) that fires on 'playing'.
+    // Dispatch synthetic 'playing'/'pause' on nativeVidEl AND getMKAudio() so MK's
+    // state machine transitions from state=1 (loading) to state=2 (playing) / state=3
+    // (paused) for BOTH the video element (MK's video state) and the global playback
+    // state shown in the bottom transport bar (MK observes the native audio element).
+    // The counter-pause interceptor (Function.prototype.call override) blocks MK's
+    // savedPause.call(nativeVidEl) that fires on 'playing'.
     const onVideoPlaying = () => {
         nativeVidEl?.dispatchEvent(new Event('playing', { bubbles: false }));
+        getMKAudio()?.dispatchEvent(new Event('playing', { bubbles: false }));
         if (_videoStalled) {
             _videoStalled = false;
+            _mvGateOpen = _avStarted; // unblock seeks when video resumes
             const drift = mkAudio.currentTime - videoEl.currentTime;
             // Resync while muted — seek is inaudible. Unmute after sync.
             if (Math.abs(drift) > 0.05) {
@@ -2832,6 +3216,7 @@ async function startMVPipeline() {
         console.log(`[AML MV-V] videoEl pause ct=${videoEl.currentTime.toFixed(2)}`);
         mkAudio.pause();
         nativeVidEl?.dispatchEvent(new Event('pause', { bubbles: false }));
+        getMKAudio()?.dispatchEvent(new Event('pause', { bubbles: false }));
     };
     const onVideoSeek  = () => {
         if (_mvVidSeeking) return; // videoSb.remove() fires a spurious seeked with ct=0
@@ -2839,27 +3224,59 @@ async function startMVPipeline() {
         if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
             mkAudio.currentTime = videoEl.currentTime;
     };
-    const onEnded = () => {
+    const onEnded = (ev) => {
         if (_abortCtrl?.signal.aborted) return; // already cleaning up
-        console.log(`[AML MV-V] videoEl/audio ended — advancing queue`);
+        console.log(`[AML MV-V] ${ev?.target === videoEl ? 'video' : 'audio'} ended ct=${videoEl.currentTime.toFixed(2)} dur=${videoEl.duration?.toFixed(2)}`);
         // Restore native audio.load() so MK's queue-advance machinery can run.
         // The shadow may already be deleted by runAudioPipe (audio-ends-first path),
         // but guard here for the video-ends-first path.
         try { delete mkAudio.load; } catch (_) {}
-        _abortCtrl.abort();
+        _abortMV('track-ended');
         _amlNextRef?.().catch(() => {});
         setTimeout(() => exitBtn?.click(), 200);
     };
     const onVideoError  = () => {
         const code = videoEl.error?.code;
-        console.error(`[AML MV-V] videoEl error code=${code} msg="${videoEl.error?.message}"`);
-        if (code === 3 || code === 4) _abortCtrl.abort();
+        const msg  = videoEl.error?.message ?? '';
+        // code 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
+        console.error(`[AML MV-V] videoEl error code=${code} msg="${msg}" buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'} ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+        if (code === 3 || code === 4) {
+            const errPos = videoEl.currentTime;
+            // A retry replays the track from the start, so it is only worth doing
+            // when the previous attempt actually got further. If this failure is at
+            // or before the last one, the stream is deterministically bad at that
+            // point and retrying just burns another full re-download before failing
+            // in the same place — advance instead.
+            const madeProgress = _mvLastErrPos < 0 || errPos > _mvLastErrPos + 1.0;
+            if (code === 3 && _mvRetries < 2 && madeProgress) {
+                _mvRetries++;
+                _mvLastErrPos = errPos;
+                console.warn(`[AML MV] decode error at ${errPos.toFixed(1)}s — scheduling retry ${_mvRetries}/2`);
+                _mvResetScrubberRef?.(); // don't leave the bar frozen during the re-buffer
+                _abortMV(`video-error-${code}-retry-${_mvRetries}`);
+                setTimeout(() => {
+                    if (genStale(_mvGen)) return; // track changed during delay
+                    _abortCtrl = new AbortController();
+                    startMVPipeline().catch(e => console.error('[AML MV] retry failed:', e.message));
+                }, 800);
+            } else {
+                if (code === 3 && !madeProgress)
+                    console.warn(`[AML MV] decode error at ${errPos.toFixed(1)}s — no progress since last failure (${_mvLastErrPos.toFixed(1)}s), not retrying`);
+                // Retries exhausted — advance the queue rather than leaving MK in a
+                // paused-but-not-ended state, which causes it to restart the same track.
+                console.warn(`[AML MV] decode error retries exhausted — advancing track`);
+                _abortMV(`video-error-${code}`);
+                _amlNextRef?.().catch(() => {});
+                setTimeout(() => exitBtn?.click(), 200);
+            }
+        }
     };
     const onVideoStall  = () => console.warn(`[AML MV-V] videoEl stalled ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
     const onVideoWait = () => {
         console.warn(`[AML MV buf:stall] videoEl waiting ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
         if (_avStarted && !_videoStalled && !_bufPaused) {
             _videoStalled = true;
+            _mvGateOpen = false; // block seeks during video stall
             mkAudio.muted = true; // silence without pausing — MK sees "playing", no state=3
             console.warn(`[AML MV buf:stall] audio muted during video stall ct=${mkAudio.currentTime.toFixed(2)}`);
         }
@@ -2912,7 +3329,7 @@ async function startMVPipeline() {
     };
 
     const cleanup = () => {
-        console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation}`);
+        console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation} reason=${_abortReason}`);
         // Always clear the load() shadow so the next handleTrackChange or MK queue
         // advance isn't blocked. Harmless if already deleted; re-set by handleTrackChange.
         try { delete mkAudio.load; } catch (_) {}
@@ -2944,18 +3361,23 @@ async function startMVPipeline() {
         // Restore container forced styles.
         for (const p of _containerProps) mvContainer.style.removeProperty(p);
         mvContainer.style.removeProperty('cursor');
+        mvContainer.style.removeProperty('pointer-events');
         // Restore scrim forced styles.
         _scrimObs?.disconnect();
         _scrimResizeObs?.disconnect();
         myVid.removeEventListener('loadedmetadata', _resizeScrim);
         myVid.removeEventListener('resize', _resizeScrim);
         cleanupScrimStyles();
-        if (exitBtn)  { exitBtn.removeEventListener('click', onExitClick); exitBtn.style.opacity = ''; exitBtn.style.transition = ''; ['cursor','z-index'].forEach(p => exitBtn.style.removeProperty(p)); }
+        if (exitBtn)  { exitBtn.removeEventListener('click', onExitClick); exitBtn.style.opacity = ''; exitBtn.style.transition = ''; ['cursor','z-index','pointer-events'].forEach(p => exitBtn.style.removeProperty(p)); }
         if (_qualityBtn.parentNode) _qualityBtn.parentNode.removeChild(_qualityBtn);
         if (_qualityMenu.parentNode) _qualityMenu.parentNode.removeChild(_qualityMenu);
         if (vcDiv) vcDiv.classList.remove('hide-cursor');
         clearTimeout(_hideTimer);
         clearInterval(_seekSyncInterval);
+        _thumbResizeObs?.disconnect();
+        // Only clear the shared ref if it still points at THIS pipeline — a newer
+        // pipeline may already have installed its own during a fast quality change.
+        if (_mvResetScrubberRef === _resetScrubberToLoading) _mvResetScrubberRef = null;
         // Restore avpi / avpEl / vcDiv expansions.
         cleanupVideoContainerStyles();
         mvContainer.style.removeProperty('cursor');
@@ -2973,6 +3395,7 @@ async function startMVPipeline() {
         myVid.removeEventListener('volumechange', _syncVolSlider);
         Function.prototype.call  = _origFnCall;
         Function.prototype.apply = _origFnApply;
+        _mvGateOpen = true; // restore for next session
         // Subtitle cleanup
         if (_subDiv.parentNode) _subDiv.parentNode.removeChild(_subDiv);
         for (let i = 0; i < myVid.textTracks.length; i++)
@@ -3223,6 +3646,82 @@ function _prewarmHandlePrecache(r) {
     if (r.status === 204) console.log('[AML Gapless] disk cache already populated — gapless ready ✓');
     else if (r.status === 202) console.log('[AML Gapless] disk cache download started in engine background');
     else console.warn(`[AML Gapless] precache returned unexpected ${r.status}`);
+}
+
+// ── Hover pre-warm ────────────────────────────────────────────────────────────
+// Fire-and-forget session open triggered on pointerenter over a track element.
+// Android does the same thing via HlsKeyConfiguration.prefetchKeyUri — the DRM
+// key is fetched as soon as the item enters focus/hover, so the tap/click finds
+// everything already resolved.  On desktop every click is preceded by a hover
+// giving us ~200–600ms head start on the HLS fetch + DRM license acquisition.
+
+async function _hoverPrewarmById(adamId, isVideo = false) {
+    const mk = _mkInstance;
+    if (!mk) return;
+    if (_hoverSessions.has(adamId) || _hoverInflight.has(adamId)) return;
+    _hoverInflight.add(adamId);
+    try {
+        const sf = mk.storefrontId ?? 'us';
+        const lossless = !isVideo && _engineCaps.lossless && _streamingQuality !== 'high-quality';
+        const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                assetId:    adamId,
+                storefront: sf,
+                capabilities: { lossless, atmos: false, video: isVideo },
+                ...(isVideo ? { mvMaxHeight: _mvMaxHeight } : {}),
+                token:          mk.developerToken ?? '',
+                mediaUserToken: getMUT(),
+            }),
+        });
+        if (!sessResp.ok) return;
+        const sess = await sessResp.json();
+        // Evict oldest entry when at cap (Map preserves insertion order)
+        if (_hoverSessions.size >= 4) {
+            const oldest = _hoverSessions.keys().next().value;
+            const { sess: old } = _hoverSessions.get(oldest);
+            deleteSession(old.sessionId);
+            _hoverSessions.delete(oldest);
+        }
+        _hoverSessions.set(adamId, { sess, isVideo });
+        console.log(`[AML Hover] pre-warmed ${isVideo ? 'MV' : 'audio'} ${adamId} → ${sess.sessionId} codec=${sess.codec} dur=${(sess.durationMs/1000).toFixed(1)}s`);
+    } catch (_) {
+        // fire-and-forget; ignore all errors
+    } finally {
+        _hoverInflight.delete(adamId);
+    }
+}
+
+function _installHoverPrewarm(mk) {
+    document.addEventListener('pointerenter', (e) => {
+        // Skip if no DRM or engine not ready
+        if (!_engineCaps.lossless && !_engineCaps.aac) return;
+        try {
+            let el = e.target;
+            for (let depth = 0; depth < 12 && el; depth++) {
+                // Same extraction logic as the external-click handler (line ~6442)
+                const did = el.dataset?.id || el.dataset?.contentId || el.dataset?.songId;
+                if (did) {
+                    const numId = did.startsWith('a.') ? did.slice(2) : did;
+                    if (/^\d{7,12}$/.test(numId) && numId !== _adamId) {
+                        _hoverPrewarmById(numId);
+                        return;
+                    }
+                }
+                // href on an anchor containing a numeric song/MV ID
+                if (el.tagName === 'A' && el.href) {
+                    const m = el.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
+                    if (m && m[1] !== _adamId) {
+                        const isMV = el.href.includes('/music-video/');
+                        _hoverPrewarmById(m[1], isMV);
+                        return;
+                    }
+                }
+                el = el.parentElement;
+            }
+        } catch (_) {}
+    }, { capture: true, passive: true });
 }
 
 async function _prewarmNextAlac() {
@@ -3490,6 +3989,16 @@ async function _resolveSession(item, adamId, sf, mk) {
         _nextMvSession = null;
         console.log(`[AML Gapless MV] ✓ HIT — using pre-warmed ${sess.sessionId} dur=${(sess.durationMs/1000).toFixed(1)}s`);
         return sess;
+    }
+    if (_hoverSessions.has(adamId)) {
+        const entry = _hoverSessions.get(adamId);
+        // Only use if the pre-warmed type matches (song vs MV) — same-ID conflicts are
+        // theoretically impossible but guard anyway to avoid handing a song session to MV.
+        if (entry.isVideo === isVideo) {
+            _hoverSessions.delete(adamId);
+            console.log(`[AML Hover] ✓ HIT — using hover pre-warmed ${isVideo ? 'MV' : 'audio'} ${entry.sess.sessionId} codec=${entry.sess.codec} dur=${(entry.sess.durationMs/1000).toFixed(1)}s`);
+            return entry.sess;
+        }
     }
     const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
         method:  'POST',
@@ -3820,6 +4329,17 @@ async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
 // handleTrackChange detects this and skips re-opening the session.
 async function _triggerDirectPlay(adamId, mk) {
     if (!adamId) return;
+    // Music videos are never handled here: the session below is opened with
+    // capabilities.video=false, so the engine resolves a music-video adamId as a
+    // song and returns 500 ("MV catalog lookup ... 404"). That 500 both leaves the
+    // MV showing a black screen AND counts against the engine's session-open
+    // circuit breaker — three of them in a row trip it and every subsequent open
+    // (songs included) fails with 503 "Apple servers appear unreachable".
+    // The NPIDF path (handleTrackChange) opens MVs correctly with video=true.
+    if (_isVideoId(adamId)) {
+        console.log(`[AML DirectPlay] skip ${adamId} — music video, deferring to NPIDF path`);
+        return;
+    }
     const mkAudio = getMKAudio();
     if (!mkAudio) return;
 
@@ -4041,6 +4561,8 @@ async function handleTrackChange(mk) {
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
         _broadcastNowPlaying(); // Discord presence + Last.fm now-playing/scrobble + resume snapshot
 
+        _mvRetries = 0; // reset retry counter for this new session
+        _mvLastErrPos = -1;
         _abortCtrl = new AbortController();
         const ctrl = _abortCtrl;
 
@@ -6671,6 +7193,7 @@ async function setup() {
     _scSetup();            // async; fire-and-forget: load Sound Check enabled state
     _xfSetup();            // async; fire-and-forget: load crossfade duration
     _hotkeysSetup();       // async; fire-and-forget: install in-app media hotkeys
+    _installHoverPrewarm(mk); // hover → pre-warm DRM+HLS so external clicks are instant
 
     // Persistent listener: whenever MK appends tracks to the queue (station/autoplay
     // fetches the next batch asynchronously), sync them into the active container so
@@ -7153,6 +7676,8 @@ window.amlClearSession = function () {
     _nextAacTried = false; _discardNextAacStream();
     if (_nextMvSession) { deleteSession(_nextMvSession.sess.sessionId); _nextMvSession = null; }
     _nextMvTried = false;
+    for (const [, { sess }] of _hoverSessions) deleteSession(sess.sessionId);
+    _hoverSessions.clear(); _hoverInflight.clear();
     unbridgeDuration();
     try { _mkInstance?.pause?.(); } catch (_) {}
     console.log('[AML] amlClearSession: all playback stopped and session released');
@@ -8007,7 +8532,12 @@ window.amlGetQueueInfo = function () {
         toggle.type = 'checkbox'; toggle.checked = prefs.hideUpsell !== false;
         toggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
         toggle.onchange = () => window.amlBridge.setTweak('hideUpsell', toggle.checked);
-        dBody.appendChild(makeRow('Hide upsell banners', toggle, null, true));
+        dBody.appendChild(makeRow('Hide upsell banners', toggle, null, false));
+        const radioToggle = document.createElement('input');
+        radioToggle.type = 'checkbox'; radioToggle.checked = !!prefs.hideRadio;
+        radioToggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
+        radioToggle.onchange = () => window.amlBridge.setTweak('hideRadio', radioToggle.checked);
+        dBody.appendChild(makeRow('Hide Radio', radioToggle, 'Remove Radio from the sidebar', true));
         return wrap;
     }
 
@@ -8307,7 +8837,13 @@ window.amlGetQueueInfo = function () {
             clearSongsBtn.onclick = () => {
                 fetch(`${ENGINE}/api/v1/cache/playback?what=persistent`, { method: 'DELETE' }).then(() => openSettings()).catch(() => {});
             };
+            const clearAudioSegBtn = makeBtn('Clear Audio Cache');
+            clearAudioSegBtn.title = 'Clears cached AAC audio HLS segments (~/.cache/apple-music-linux/engine/segments/)';
+            clearAudioSegBtn.onclick = () => {
+                fetch(`${ENGINE}/api/v1/cache/playback?what=segments`, { method: 'DELETE' }).then(() => openSettings()).catch(() => {});
+            };
             clearRow.appendChild(clearSongsBtn);
+            clearRow.appendChild(clearAudioSegBtn);
             cBody.appendChild(clearRow);
         }
 

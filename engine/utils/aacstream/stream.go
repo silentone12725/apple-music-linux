@@ -320,6 +320,20 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		return fmt.Errorf("write init: %w", err)
 	}
 
+	// Video streams carry valid ELST-aligned TFDTs (media_time=T0, first TFDT=T0).
+	// Shifting them to 0 breaks Chrome's ELST→decode-time mapping and causes
+	// CHUNK_DEMUXER_ERROR_APPEND_FAILED. Audio streams have ELST media_time=0
+	// and a pre-roll TFDT, so shifting to 0 is correct for audio.
+	isVideoStream := false
+	if init.Moov != nil {
+		for _, trak := range init.Moov.Traks {
+			if trak.Mdia != nil && trak.Mdia.Hdlr != nil && trak.Mdia.Hdlr.HandlerType == "vide" {
+				isVideoStream = true
+				break
+			}
+		}
+	}
+
 	var (
 		tfdtT0          int64
 		tfdtInitialized bool
@@ -341,7 +355,9 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		fragNum++
 
 		logInterceptFrag(fragNum, frag, &tfdtT0, &tfdtInitialized)
-		shiftFragTfdt(frag, tfdtT0)
+		if !isVideoStream {
+			shiftFragTfdt(frag, tfdtT0)
+		}
 
 		decErr := mp4.DecryptFragment(frag, decryptInfo, key)
 		if decErr != nil && !isNoSencBox(decErr) {

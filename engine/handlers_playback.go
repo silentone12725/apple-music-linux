@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -32,6 +36,70 @@ func parseRangeStart(rangeHdr string) int64 {
 	}
 	n, _ := strconv.ParseInt(s, 10, 64)
 	return n
+}
+
+// isNotFoundFailure reports whether a session-open error is a per-track content
+// failure — the asset does not exist, or is not available in this storefront.
+// These are addressed to one track and must not be reported as a server outage.
+func isNotFoundFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// Check transport markers first: "503 Service Unavailable" is an outage, not a
+	// missing track, and must not be captured by the content patterns below.
+	for _, needle := range []string{"500", "502", "503", "504", "timeout", "connection"} {
+		if strings.Contains(s, needle) {
+			return false
+		}
+	}
+	// "no such host" is DNS and belongs to isTransportFailure, so it is deliberately
+	// absent here.
+	for _, needle := range []string{
+		"404", "not found", "no playable",
+		"no video variant", "no audio alternative",
+	} {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// isTransportFailure reports whether a session-open error indicates that Apple's
+// servers (or the network path to them) are actually unreachable, as opposed to a
+// per-track content problem. Only these may trip the session-open circuit breaker.
+func isTransportFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isNotFoundFailure(err) {
+		return false
+	}
+	// context.Canceled means the *client* went away (user skipped) — not an outage.
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"connection refused", "connection reset", "no such host", "network is unreachable",
+		"i/o timeout", "timeout", "eof", "tls", "dial tcp", "broken pipe",
+		"502", "503", "504", "500 internal",
+	} {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	// Unclassified: treat as content-level so an unknown per-track error can never
+	// lock out the whole app. A genuine outage always surfaces one of the above.
+	return false
 }
 
 func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request) {
@@ -106,8 +174,22 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 		})
 		latMs := time.Since(t0).Milliseconds()
 		if err != nil {
-			s.openCB.RecordFailure()
-			http.Error(w, "playback resolution failed: "+err.Error(), http.StatusInternalServerError)
+			// Only transport-level failures may trip the breaker. A per-track
+			// content failure (catalog 404, unavailable in this storefront) says
+			// nothing about Apple's reachability — counting those let three bad
+			// tracks in a row open the breaker and fail every subsequent open,
+			// songs included, with a misleading "servers appear unreachable".
+			if isTransportFailure(err) {
+				s.openCB.RecordFailure()
+			} else {
+				// A content failure proves the round-trip worked.
+				s.openCB.RecordSuccess()
+			}
+			status := http.StatusInternalServerError
+			if isNotFoundFailure(err) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, "playback resolution failed: "+err.Error(), status)
 			return
 		}
 		s.openCB.RecordSuccess()
@@ -341,18 +423,25 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
 		seekSec = v
 	}
-	log.Printf("[video] GET id=%s assetID=%q seekSec=%.2f decExists=%v", id, assetID, seekSec, aacstream.MVDecExists(assetID))
+	log.Printf("[video] GET id=%s assetID=%q seekSec=%.2f maxHeight=%d decExists=%v", id, assetID, seekSec, sess.MVMaxHeight, aacstream.MVDecExists(assetID, sess.MVMaxHeight))
 
 	// Serve from decrypted-track cache for full plays (seekSec==0).
+	// Cache is keyed by assetID + maxHeight so quality changes always re-transcode.
 	// Seeks fall through to the normal pipeline so the segment cache handles them.
-	if seekSec == 0 && aacstream.MVDecExists(assetID) {
+	if seekSec == 0 && aacstream.MVDecExists(assetID, sess.MVMaxHeight) {
 		streamMedia(w, r, func(dst io.Writer) error {
-			return aacstream.ServeMVDec(assetID, dst)
+			return aacstream.ServeMVDec(assetID, sess.MVMaxHeight, dst)
 		}, "video/mp4")
 		return
 	}
 
-	srcFn := func(w io.Writer) error {
+	// videoSrc streams the raw decrypted multi-track fMP4 from the pipeline.
+	// FFmpeg receives it directly — its -map 0:v:0 flag selects only the first
+	// video stream and drops audio/caption tracks during remux. Stripping audio
+	// trafs from the moof while leaving audio bytes in the mdat causes the moof
+	// declared size to diverge from the DataOffset, making FFmpeg's mov demuxer
+	// avio_skip past the correct sample position ("partial file" error).
+	videoSrc := func(w io.Writer) error {
 		if seekSec > 0 {
 			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, w)
 			return err
@@ -362,18 +451,38 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 	// Only cache full plays; seek streams produce a partial file and must not be cached.
 	streamMedia(w, r, func(dst io.Writer) error {
 		if seekSec > 0 {
-			return transcodeVideoForMSE(r.Context(), srcFn, dst)
+			return transcodeVideoForMSE(r.Context(), videoSrc, dst)
 		}
-		cw := aacstream.MVDecCacheWriter(assetID, dst)
-		err := transcodeVideoForMSE(r.Context(), srcFn, cw)
+		cw := aacstream.MVDecCacheWriter(assetID, sess.MVMaxHeight, dst)
+		err := transcodeVideoForMSE(r.Context(), videoSrc, cw)
 		if err == nil {
-			log.Printf("[video] transcode OK — committing dec cache assetID=%s", assetID)
+			log.Printf("[video] transcode OK — committing dec cache assetID=%s height=%d", assetID, sess.MVMaxHeight)
 			cw.Commit()
 		} else {
 			log.Printf("[video] transcode ERR — aborting dec cache assetID=%s err=%v", assetID, err)
 			cw.Abort()
 		}
 		return err
+	}, "video/mp4")
+}
+
+// handlePlaybackVideoRaw streams the raw decrypted multi-track fMP4 for a
+// video session — before FFmpeg remux. Useful for pipeline debugging with
+// ffprobe to check that the decrypt stage is producing valid output.
+func (s *APIServer) handlePlaybackVideoRaw(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, ok := s.pm.GetSession(id)
+	if !ok {
+		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
+	if !sess.Capabilities.Video {
+		http.Error(w, "no video stream in this session", http.StatusNotFound)
+		return
+	}
+	log.Printf("[video-raw] GET id=%s assetID=%q maxHeight=%d", id, sess.AssetID, sess.MVMaxHeight)
+	streamMedia(w, r, func(dst io.Writer) error {
+		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
 	}, "video/mp4")
 }
 
@@ -422,16 +531,22 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 	}
 	pr, pw := io.Pipe()
 	cmd := exec.CommandContext(ctx, ffmpegPath,
-		"-loglevel", "error",
+		"-loglevel", "warning",
 		"-i", "pipe:0",
-		"-map", "0:v:0", // first video stream only — drops audio and caption tracks
-		"-c:v", "copy",  // preserve original codec (avc1.640028); no re-encode
-		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
+		"-map", "0:v:0",  // first video stream only — drops audio and caption tracks
+		"-c:v", "copy",   // preserve original codec (avc1.640028); no re-encode
+		"-movflags", "frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets",
+		"-avoid_negative_ts", "make_zero", // B-frames: shift DTS so minimum is 0
 		"-f", "mp4",
 		"pipe:1",
 	)
 	cmd.Stdin = pr
 	cmd.Stdout = dst
+
+	// Capture stderr line-by-line so FFmpeg warnings appear immediately in logs
+	// rather than only after the process exits (useful for mid-GOP kill diagnosis).
+	stderrR, stderrW, _ := os.Pipe()
+	cmd.Stderr = stderrW
 
 	srcErrCh := make(chan error, 1)
 	go func() {
@@ -440,11 +555,32 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 		srcErrCh <- err
 	}()
 
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		sc := bufio.NewScanner(stderrR)
+		for sc.Scan() {
+			log.Printf("[ffmpeg-video] %s", sc.Text())
 		}
-		return fmt.Errorf("ffmpeg video remux: %w", err)
+	}()
+
+	t0ff := time.Now()
+	runErr := cmd.Run()
+	stderrW.Close()
+	<-stderrDone
+
+	ctxErr := ctx.Err()
+	if runErr != nil {
+		if ctxErr != nil {
+			log.Printf("[ffmpeg-video] killed by context after %.2fs: %v", time.Since(t0ff).Seconds(), ctxErr)
+			return ctxErr
+		}
+		return fmt.Errorf("ffmpeg video remux: %w", runErr)
+	}
+	if ctxErr != nil {
+		// FFmpeg exited cleanly but context was already cancelled — treat as cancel.
+		log.Printf("[ffmpeg-video] exited OK but ctx cancelled after %.2fs", time.Since(t0ff).Seconds())
+		return ctxErr
 	}
 	srcErr := <-srcErrCh
 	if srcErr != nil && ctx.Err() == nil {

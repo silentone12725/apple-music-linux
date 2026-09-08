@@ -88,7 +88,7 @@ func TestTakePreWarmed_ExpiredReturnsNotFound(t *testing.T) {
 		expiresAt: time.Now().Add(-time.Hour), // already expired
 	}
 
-	id, ok := s.TakePreWarmed("asset1")
+	id, ok := s.TakePreWarmed("asset1", false)
 	if ok {
 		t.Errorf("expected ok=false for expired entry, got sessionID=%q", id)
 	}
@@ -109,7 +109,7 @@ func TestTakePreWarmed_ValidReturnsSession(t *testing.T) {
 		expiresAt: time.Now().Add(time.Hour),
 	}
 
-	id, ok := s.TakePreWarmed("asset2")
+	id, ok := s.TakePreWarmed("asset2", false)
 	if !ok {
 		t.Fatal("expected ok=true for valid entry")
 	}
@@ -117,9 +117,47 @@ func TestTakePreWarmed_ValidReturnsSession(t *testing.T) {
 		t.Errorf("expected sessionID %q, got %q", "sess-2", id)
 	}
 	// Must be consumed on first successful take.
-	_, ok2 := s.TakePreWarmed("asset2")
+	_, ok2 := s.TakePreWarmed("asset2", false)
 	if ok2 {
 		t.Error("TakePreWarmed must consume the entry — second call must return ok=false")
+	}
+}
+
+// A session pre-warmed at one quality tier must not be handed to a request for
+// the other tier: serving a lossless session to an AAC request (or vice versa)
+// would play the wrong codec. This is the branch the lossless parameter exists
+// for, so it is the one worth pinning.
+func TestTakePreWarmed_QualityMismatchRejected(t *testing.T) {
+	s := &Scheduler{
+		preWarmed:  map[string]preWarmedEntry{},
+		wq:         newWorkQueue(),
+		latencies:  ring.New(10),
+		queueWaits: ring.New(10),
+	}
+	s.preWarmed["asset3"] = preWarmedEntry{
+		sessionID: "sess-3",
+		expiresAt: time.Now().Add(time.Hour),
+		lossless:  false, // warmed for AAC
+	}
+
+	// Requesting lossless must not receive the AAC session.
+	if id, ok := s.TakePreWarmed("asset3", true); ok {
+		t.Errorf("expected ok=false on quality mismatch, got sessionID=%q", id)
+	}
+	// The mismatched entry is released, not left behind for a later caller to hit.
+	if _, present := s.preWarmed["asset3"]; present {
+		t.Error("mismatched entry must be consumed, not left in the map")
+	}
+
+	// Matching quality still succeeds.
+	s.preWarmed["asset4"] = preWarmedEntry{
+		sessionID: "sess-4",
+		expiresAt: time.Now().Add(time.Hour),
+		lossless:  true,
+	}
+	id, ok := s.TakePreWarmed("asset4", true)
+	if !ok || id != "sess-4" {
+		t.Errorf("expected sess-4 on quality match, got %q ok=%v", id, ok)
 	}
 }
 
@@ -130,7 +168,7 @@ func TestTakePreWarmed_MissingReturnsNotFound(t *testing.T) {
 		latencies:  ring.New(10),
 		queueWaits: ring.New(10),
 	}
-	_, ok := s.TakePreWarmed("nonexistent")
+	_, ok := s.TakePreWarmed("nonexistent", false)
 	if ok {
 		t.Error("TakePreWarmed must return ok=false for missing asset")
 	}

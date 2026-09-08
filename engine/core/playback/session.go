@@ -39,7 +39,8 @@ type Session struct {
 	DurationMs int    `json:"durationMs"`
 	ArtworkURL string `json:"artworkUrl"`
 
-	VideoHeights []int `json:"videoHeights,omitempty"` // available heights from HLS master (MV only)
+	VideoHeights []int `json:"videoHeights,omitempty"` // available H.264 heights from HLS master (MV only)
+	MVMaxHeight  int   `json:"mvMaxHeight,omitempty"`  // requested max height for this MV session
 
 	ExpiresIn int `json:"expiresIn"`
 }

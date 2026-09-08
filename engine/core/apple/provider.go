@@ -225,6 +225,13 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 		return nil, fmt.Errorf("open MV master playlist: %w", err)
 	}
 
+	// Dump all master variants so we can verify what quality tiers Apple provides.
+	log.Printf("[mv] assetID=%s masterURL=%s nVariants=%d", req.AssetID, masterURL, len(master.Variants))
+	for i, v := range master.Variants {
+		log.Printf("[mv] variant[%d] bw=%d codecs=%q resolution=%q url=%s", i, v.AverageBandwidth, v.Codecs, v.Resolution, v.URL)
+	}
+	log.Printf("[mv] h264Heights=%v", master.VideoHeights())
+
 	videoURL, videoCodecs, videoResolution, err := master.SelectVideoVariantWithCodec(req.MVMaxHeight)
 	if err != nil {
 		return nil, fmt.Errorf("select video variant: %w", err)

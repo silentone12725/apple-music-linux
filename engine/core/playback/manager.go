@@ -154,6 +154,7 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest) (*Session, er
 		DurationMs:   ms.Metadata.DurationMs,
 		ArtworkURL:   ms.Metadata.ArtworkURL,
 		VideoHeights: ms.VideoHeights,
+		MVMaxHeight:  req.MVMaxHeight,
 		ExpiresIn:    int(sessionTTL.Seconds()),
 	}
 	sess.Capabilities.Lyrics = ms.Metadata.HasLyrics

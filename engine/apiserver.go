@@ -619,6 +619,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("POST /api/v1/playback", cors(s.handleCreatePlayback))
 	mux.HandleFunc("GET /api/v1/playback/{id}/audio", cors(s.handlePlaybackAudio))
 	mux.HandleFunc("GET /api/v1/playback/{id}/video", cors(s.handlePlaybackVideo))
+	mux.HandleFunc("GET /api/v1/playback/{id}/video-raw", cors(s.handlePlaybackVideoRaw))
 	mux.HandleFunc("POST /api/v1/playback/{id}/precache", cors(s.handlePlaybackPrecache))
 	mux.HandleFunc("DELETE /api/v1/playback/{id}", cors(s.handleDeletePlayback))
 
@@ -823,10 +824,9 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case origin == "https://music.apple.com",
 		strings.HasPrefix(origin, "http://localhost"),
-		strings.HasPrefix(origin, "http://127.0.0.1"):
+		strings.HasPrefix(origin, "http://127.0.0.1"),
+		origin == "null": // file:// QA console and local dev tools
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-	// origin == "null" (file:// or sandboxed iframe) intentionally not allowed;
-	// any local HTML file would otherwise have full access to the engine API.
 	default:
 		w.Header().Set("Access-Control-Allow-Origin", "https://music.apple.com")
 	}

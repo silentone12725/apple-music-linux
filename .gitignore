@@ -126,3 +126,9 @@ context.md
 
 # ── Docs (design notes, investigation logs — not part of the shipped product) ──
 docs/
+
+# ── Reverse-engineering tooling (APK/MSIX graph analysis) — local only ──
+.sentrux/
+
+# ── verification/pipeline-check.go output (multi-hundred-MB captured streams) ──
+pipeline-out/
