@@ -3145,12 +3145,51 @@ async function startMVPipeline() {
         await _waitVidIdle().catch(() => {});
         if (!signal.aborted && ms.readyState === 'open') ms.endOfStream();
     };
-    runVideoPipe(videoUrl, true, pipeCtrl.signal)
-        .catch(e => {
-            const aborted = pipeCtrl.signal.aborted;
-            console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
-            if (!aborted) { console.error(`[AML MV] video pipe error: ${e.message} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`); _abortMV(`video-pipe-error`); }
-        });
+    const _startVideoPipe = () => {
+        runVideoPipe(videoUrl, true, pipeCtrl.signal)
+            .catch(async e => {
+                const aborted = pipeCtrl.signal.aborted;
+                console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
+
+                // CHUNK_DEMUXER_ERROR (veCode=3) — first occurrence.
+                // The Chrome demuxer rejects a keyframe at a CDN-stall burst boundary.
+                // The segment is already in the MV cache. Strategy: clear the SourceBuffer,
+                // seek back 1 s (forces Chrome to clear demuxer error state on seeked),
+                // then restart the pipe — cache hits make the first few segments instant.
+                if (!aborted && !_decodeRetried && e.message.includes('veCode=3')) {
+                    _decodeRetried = true;
+                    const ct = videoEl.currentTime;
+                    const seekTo = videoSb.buffered.length > 0
+                        ? Math.max(videoSb.buffered.start(0), ct - 1)
+                        : 0;
+                    console.warn(`[AML MV-pipe] veCode=3 — clearing SB, seeking to ${seekTo.toFixed(1)}s, restarting pipe`);
+                    try {
+                        // Wait for any in-flight append to settle before removing.
+                        if (videoSb.updating) {
+                            await new Promise(res => videoSb.addEventListener('updateend', res, { once: true }));
+                        }
+                        if (!_abortCtrl.signal.aborted && ms.readyState === 'open') {
+                            videoSb.remove(0, Infinity);
+                            await new Promise(res => videoSb.addEventListener('updateend', res, { once: true }));
+                        }
+                        videoEl.currentTime = seekTo;
+                        await new Promise(res => videoEl.addEventListener('seeked', res, { once: true }));
+                    } catch (_) {}
+
+                    if (!_abortCtrl.signal.aborted) {
+                        pipeCtrl = new AbortController();
+                        _startVideoPipe();
+                    }
+                    return;
+                }
+
+                if (!aborted) {
+                    console.error(`[AML MV] video pipe error: ${e.message} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
+                    _abortMV(`video-pipe-error`);
+                }
+            });
+    };
+    _startVideoPipe();
 
     // ── Backward seek: re-inject cached chunks for both video and audio ──────────
     let _mvVidSeeking = false;
@@ -3247,6 +3286,9 @@ async function startMVPipeline() {
         _amlNextRef?.().catch(() => {});
         setTimeout(() => exitBtn?.click(), 200);
     };
+    // Set by the pipe catch on first CHUNK_DEMUXER_ERROR_APPEND_FAILED (veCode=3).
+    // While true: onVideoError defers to the pipe (which is restarting the stream).
+    // After the pipe retry: if code=3 fires again, we advance the track.
     let _decodeRetried = false;
     const onVideoError  = () => {
         const code = videoEl.error?.code;
@@ -3254,22 +3296,15 @@ async function startMVPipeline() {
         // code 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
         console.error(`[AML MV-V] videoEl error code=${code} msg="${msg}" buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'} ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
         if (code === 3) {
-            // code=3 (CHUNK_DEMUXER_ERROR_APPEND_FAILED) can be transient when a
-            // CDN-stalled segment arrives in a burst at a GOP keyframe boundary.
-            // Chrome's demuxer rejects the keyframe at that point, but the data is
-            // already in the in-memory MV segment cache.  Seeking back 1s within the
-            // already-buffered MSE range forces Chrome to re-parse from the previous
-            // keyframe — no re-download, no engine request.  Only one retry: if the
-            // seek itself fails, the underlying bytes are genuinely bad.
-            if (!_decodeRetried && videoEl.buffered.length > 0) {
-                _decodeRetried = true;
-                const seekTo = Math.max(videoEl.buffered.start(0), videoEl.currentTime - 1);
-                console.warn(`[AML MV] decode error (code=3) at ${videoEl.currentTime.toFixed(1)}s — seeking back to ${seekTo.toFixed(1)}s (retry 1/1)`);
-                videoEl.currentTime = seekTo;
+            if (!_decodeRetried) {
+                // First occurrence — the pipe catch handles the retry (clears SourceBuffer,
+                // seeks, restarts the stream). Don't abort here.
+                console.warn(`[AML MV-V] decode error code=3 — deferring to pipe restart`);
                 return;
             }
-            console.warn(`[AML MV] decode error (code=3) — retry exhausted, advancing track`);
-            _abortMV(`video-error-${code}`);
+            // Pipe restart already attempted and failed; advance track.
+            console.warn(`[AML MV] decode error code=3 — pipe retry exhausted, advancing track`);
+            _abortMV(`video-error-3`);
             _amlNextRef?.().catch(() => {});
             setTimeout(() => exitBtn?.click(), 200);
         } else if (code === 4) {
