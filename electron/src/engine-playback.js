@@ -2268,6 +2268,21 @@ async function startMVPipeline() {
             // re-buffer and looks like playback hung.
             _mvResetScrubberRef?.();
             _abortMV('quality-change');
+            // Hold the scrubber at 0 (loading/blink state) for the full quality-race
+            // gap. Apple Music's own RAF loop overwrites value=0 with the old current
+            // time; this interval wins each frame until the new session's sync interval
+            // takes over (at which point _mvResetScrubberRef is non-null and we stop).
+            if (rangeInput) {
+                const _holdId = setInterval(() => {
+                    if (_mvResetScrubberRef) { clearInterval(_holdId); return; }
+                    try {
+                        rangeInput.value = '0';
+                        rangeInput.style.setProperty('--progress', '0%');
+                        rangeInput.style.setProperty('--width',    '0%');
+                    } catch (_) {}
+                }, 16);
+                setTimeout(() => clearInterval(_holdId), T().qualityRace + 500);
+            }
             setTimeout(() => { if (_generation === _genSnap && _mkInstance) handleTrackChange(_mkInstance); }, T().qualityRace);
         });
         _qualityMenu.appendChild(opt);
@@ -3232,25 +3247,33 @@ async function startMVPipeline() {
         _amlNextRef?.().catch(() => {});
         setTimeout(() => exitBtn?.click(), 200);
     };
+    let _decodeRetried = false;
     const onVideoError  = () => {
         const code = videoEl.error?.code;
         const msg  = videoEl.error?.message ?? '';
         // code 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
         console.error(`[AML MV-V] videoEl error code=${code} msg="${msg}" buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'} ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
-        if (code === 3 || code === 4) {
-            // Do not retry. A decode failure is Chromium's demuxer rejecting a
-            // sample — the direct analogue of ExoPlayer's ParserException, which
-            // Apple's own DefaultLoadErrorHandlingPolicy answers with C.TIME_UNSET
-            // ("never retry"), alongside FileNotFoundException. It is a property of
-            // the bytes, not of the attempt, so a retry re-downloads the whole
-            // track (30 s+ of dead air) only to fail at the same place.
-            //
-            // The one cause that WAS transient — a chunk dropped on
-            // QuotaExceededError desynchronising the stream — is fixed at source in
-            // _appendWithQuota, so retrying no longer has anything to recover from.
-            // Advance instead of leaving MusicKit paused-but-not-ended, which would
-            // make it restart the same track.
-            console.warn(`[AML MV] decode error at ${videoEl.currentTime.toFixed(1)}s (code=${code}) — not retryable, advancing track`);
+        if (code === 3) {
+            // code=3 (CHUNK_DEMUXER_ERROR_APPEND_FAILED) can be transient when a
+            // CDN-stalled segment arrives in a burst at a GOP keyframe boundary.
+            // Chrome's demuxer rejects the keyframe at that point, but the data is
+            // already in the in-memory MV segment cache.  Seeking back 1s within the
+            // already-buffered MSE range forces Chrome to re-parse from the previous
+            // keyframe — no re-download, no engine request.  Only one retry: if the
+            // seek itself fails, the underlying bytes are genuinely bad.
+            if (!_decodeRetried && videoEl.buffered.length > 0) {
+                _decodeRetried = true;
+                const seekTo = Math.max(videoEl.buffered.start(0), videoEl.currentTime - 1);
+                console.warn(`[AML MV] decode error (code=3) at ${videoEl.currentTime.toFixed(1)}s — seeking back to ${seekTo.toFixed(1)}s (retry 1/1)`);
+                videoEl.currentTime = seekTo;
+                return;
+            }
+            console.warn(`[AML MV] decode error (code=3) — retry exhausted, advancing track`);
+            _abortMV(`video-error-${code}`);
+            _amlNextRef?.().catch(() => {});
+            setTimeout(() => exitBtn?.click(), 200);
+        } else if (code === 4) {
+            console.warn(`[AML MV] src-not-supported (code=4) — not retryable, advancing track`);
             _abortMV(`video-error-${code}`);
             _amlNextRef?.().catch(() => {});
             setTimeout(() => exitBtn?.click(), 200);

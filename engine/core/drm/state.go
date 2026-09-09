@@ -191,7 +191,7 @@ var stateFileStrings = map[string]stateFileResult{
 	"LOGIN":                 {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthLoggingIn},
 	"WAITING_2FA":           {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
 	"INITIALIZING_FAIRPLAY": {Process: ProcessRunning, FairPlay: FairPlayInitializing, Auth: AuthLoggedIn},
-	"RUNNING":               {Process: ProcessRunning, FairPlay: FairPlayReady, Auth: AuthLoggedIn},
+	"RUNNING":               {Process: ProcessRunning, FairPlay: FairPlayReady, Auth: AuthLoggedIn, Recovery: RecoveryIdle},
 	"RECOVERY":              {Process: ProcessRunning, FairPlay: FairPlayReady, Recovery: RecoveryRefreshing},
 	"FAILED":                {Process: ProcessFailed},
 	"STOPPED":               {Process: ProcessStopped},

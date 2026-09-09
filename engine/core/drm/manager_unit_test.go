@@ -727,13 +727,13 @@ func TestParseStateFile(t *testing.T) {
 		{"LOGIN", drm.ProcessStarting, drm.FairPlayUnknown, drm.AuthLoggingIn, drm.RecoveryUnknown},
 		{"WAITING_2FA", drm.ProcessStarting, drm.FairPlayUnknown, drm.AuthChallenging, drm.RecoveryUnknown},
 		{"INITIALIZING_FAIRPLAY", drm.ProcessRunning, drm.FairPlayInitializing, drm.AuthLoggedIn, drm.RecoveryUnknown},
-		{"RUNNING", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryUnknown},
+		{"RUNNING", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryIdle},
 		{"RECOVERY", drm.ProcessRunning, drm.FairPlayReady, drm.AuthUnknown, drm.RecoveryRefreshing},
 		{"FAILED", drm.ProcessFailed, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
 		{"STOPPED", drm.ProcessStopped, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
 		// Trailing whitespace / newline (written by real main.c via fprintf).
-		{"RUNNING\n", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryUnknown},
-		{"RUNNING\r\n", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryUnknown},
+		{"RUNNING\n", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryIdle},
+		{"RUNNING\r\n", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryIdle},
 		// Unknown state: all fields must be zero.
 		{"UNKNOWN_GARBAGE", drm.ProcessUnknown, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
 		{"", drm.ProcessUnknown, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
@@ -858,7 +858,7 @@ func TestDRMStateStrings(t *testing.T) {
 		drm.AuthChallenging, drm.AuthLoggedIn, drm.AuthFailed,
 		drm.FairPlayUnknown, drm.FairPlayInitializing, drm.FairPlayReady, drm.FairPlayFailed,
 		drm.SessionUnknown, drm.SessionEmpty, drm.SessionValid, drm.SessionExpired,
-		drm.RecoveryUnknown, drm.RecoveryIdle, drm.RecoveryScheduled,
+		drm.RecoveryIdle, drm.RecoveryIdle, drm.RecoveryScheduled,
 		drm.RecoveryRefreshing, drm.RecoveryFailed,
 	}
 	for _, s := range states {
@@ -875,5 +875,86 @@ func TestDRMStateStrings(t *testing.T) {
 	}
 	if drm.SessionUnknown.String() != "unknown" {
 		t.Errorf("SessionUnknown.String() = %q, want %q", drm.SessionUnknown.String(), "unknown")
+	}
+}
+
+// TestDecryptWaitsForLeaseRecovery verifies that Decrypt() pauses when lease
+// recovery is active and retries once the recovery gate is opened.
+func TestDecryptWaitsForLeaseRecovery(t *testing.T) {
+	backend := newMockBackend()
+	backend.running = true
+	// First Decrypt call fails (simulates connection-refused during recovery).
+	call := 0
+	backend.decryptErr = errors.New("connection refused")
+
+	mgr, _ := newUnitManager(t, backend)
+
+	// Drive the manager into RecoveryRefreshing state.
+	backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
+		State: drm.DRMState{
+			Process:  drm.ProcessRunning,
+			FairPlay: drm.FairPlayReady,
+			Recovery: drm.RecoveryRefreshing,
+		},
+		Message: "RECOVERY",
+	}})
+	time.Sleep(20 * time.Millisecond) // let watchEvents apply the state
+
+	// After 50ms, end recovery by emitting RUNNING (RecoveryIdle).
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		backend.mu.Lock()
+		call++
+		backend.decryptErr = nil // second attempt succeeds
+		backend.decryptResp = drm.DecryptResponse{Samples: [][]byte{{0xAB}}}
+		backend.mu.Unlock()
+		backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
+			State: drm.DRMState{
+				Process:  drm.ProcessRunning,
+				FairPlay: drm.FairPlayReady,
+				Recovery: drm.RecoveryIdle,
+			},
+			Message: "RUNNING",
+		}})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := mgr.Decrypt(ctx, drm.DecryptRequest{AdamID: "test", KeyURI: "uri"})
+	if err != nil {
+		t.Fatalf("Decrypt: unexpected error after recovery: %v", err)
+	}
+	if len(resp.Samples) == 0 || resp.Samples[0][0] != 0xAB {
+		t.Errorf("Decrypt: unexpected response %v", resp.Samples)
+	}
+}
+
+// TestDecryptTimesOutIfRecoveryStalls verifies that Decrypt returns an error
+// when the recovery gate never opens within the context deadline.
+func TestDecryptTimesOutIfRecoveryStalls(t *testing.T) {
+	backend := newMockBackend()
+	backend.running = true
+	backend.decryptErr = errors.New("connection refused")
+
+	mgr, _ := newUnitManager(t, backend)
+
+	// Drive into recovery — never emit RUNNING, so the gate stays open.
+	backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
+		State: drm.DRMState{
+			Process:  drm.ProcessRunning,
+			FairPlay: drm.FairPlayReady,
+			Recovery: drm.RecoveryRefreshing,
+		},
+		Message: "RECOVERY",
+	}})
+	time.Sleep(20 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := mgr.Decrypt(ctx, drm.DecryptRequest{AdamID: "test", KeyURI: "uri"})
+	if err == nil {
+		t.Fatal("Decrypt: expected timeout error, got nil")
 	}
 }
