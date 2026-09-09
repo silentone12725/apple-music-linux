@@ -41,6 +41,9 @@ type Track struct {
 	CodecString  string // MSE codec string from HLS CODECS= attribute (e.g. "avc1.640028")
 	SampleRate   int    // optional; meaningful only for lossless audio
 	BitDepth     int    // optional; meaningful only for lossless audio
+	BitRate      int    // average bit-rate in bits/s (0 = unknown)
+	ChannelCount int    // number of audio channels (0 = unknown)
+	CodecMIMEType string // MIME type + codec param e.g. "audio/mp4; codecs=\"mp4a.40.2\""
 	SpatialAudio string // "binaural" | "binaural-lossless" | "" (empty = normal stereo)
 	Open         func(context.Context) (*pipeline.Stream, error)
 }

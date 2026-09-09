@@ -952,6 +952,9 @@ function unbridgeDuration() {
 let _sessionId      = null;
 let _currentAssetId = null;
 let _durationSec = 0;
+// Audio analysis for the current track (null = not yet fetched or unavailable).
+// Populated asynchronously after session open; used to refine gapless/crossfade timing.
+let _audioAnalysis  = null;
 let _abortCtrl   = null;   // session-level abort — killed on track change
 let _generation  = 0;
 let _videoCodec  = null;   // HLS CODECS= for the video track (MV sessions only)
@@ -3766,6 +3769,24 @@ async function _prewarmNextAlac() {
     }
 }
 
+// _fetchAudioAnalysis fetches crossfade/loudness timing for adamId from the
+// engine audio-analysis endpoint and stores it in _audioAnalysis.
+// Called non-blocking after session open; does not throw.
+async function _fetchAudioAnalysis(adamId, sf, token) {
+    try {
+        const params = new URLSearchParams({ sf: sf || 'us' });
+        if (token) params.set('token', token);
+        const r = await fetch(`${ENGINE}/api/v1/audioanalysis/${encodeURIComponent(adamId)}?${params}`);
+        if (!r.ok || r.status === 204) return; // 204 = no analysis available
+        const data = await r.json();
+        // Only store if the session hasn't changed since the fetch started.
+        if (_currentAssetId === adamId) {
+            _audioAnalysis = data;
+            console.log(`[AML AA] ${adamId} fadeOut=${data.fadeOut?.startMs}–${data.fadeOut?.endMs}ms bpm=${data.bpm || '?'}`);
+        }
+    } catch { /* non-critical — silence errors */ }
+}
+
 async function _prewarmNextAac() {
     const mk = _mkInstance;
     if (!mk) return;
@@ -3928,7 +3949,7 @@ function _resetPlaybackState() {
     // VLC state reset
     _vlcMode = false; window._amlVlcMode = false; _vlcPosMs = 0; _vlcPaused = false; _stopLyricsFreeze(); _vlcSeekFrozen = false; _vlcRetryCount = 0; _vlcSeekOffsetMs = 0; _vlcPrevState = null; _vlcLoading = false; _seekBurstLog = 0; _vlcPostSeek = false; _vlcWasPlaying = false; _vlcSeekTargetMs = 0;
     _scVlcReapply = null; // VLC volume closure is per-track; drop the stale reference
-    _nextAlacTried = false; _nextAlacRetries = 0;
+    _nextAlacTried = false; _nextAlacRetries = 0; _audioAnalysis = null;
     // Preserve _nextAacSession/_nextMvSession across reset (mirrors the
     // ALAC path above): reset runs at the top of handleTrackChange, BEFORE
     // _resolveSession reads the pre-warm. Nulling it here defeated the gapless
@@ -4104,21 +4125,44 @@ async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
     const onGaplessTick = () => {
         if (ctrl.signal.aborted || _durationSec <= 0) return;
         const remaining = _durationSec - mkAudio.currentTime;
-        if (!_gaplessArmed && remaining <= GAPLESS_STREAM_LEAD) {
+
+        // When audio analysis is available, use fadeOut.startMs as the actual
+        // gapless-arm point — this is where the track naturally starts decaying,
+        // matching Android's PlayerAudioFadeControl which arms at fadeOut.startInMilliseconds.
+        // Fall back to the fixed GAPLESS_STREAM_LEAD constant when analysis is absent.
+        const analysisLeadSec = _audioAnalysis?.fadeOut
+            ? Math.max(GAPLESS_STREAM_LEAD, (_durationSec * 1000 - _audioAnalysis.fadeOut.startMs) / 1000)
+            : GAPLESS_STREAM_LEAD;
+
+        if (!_gaplessArmed && remaining <= analysisLeadSec) {
             _gaplessArmed = true;
             _prefetchNextAacStream();
             // After gapless caching, precompute the Adaptive fade length offline
             // (background, non-blocking) so the tail handler needs no live sampling.
             if (_crossfadeMode === 'adaptive') _xfPlanAdaptive();
         }
-        if (!_xfFadedOut && _crossfadeSec > 0 && remaining <= _crossfadeSec) {
+
+        // When audio analysis reports a fadeOut window, use it as the effective
+        // crossfade duration instead of the user-configured or adaptive value.
+        // fadeOut.endMs marks full silence; startMs is when the decay begins.
+        const analysisCrossfadeSec = _audioAnalysis?.fadeOut
+            ? Math.max(1, (_audioAnalysis.fadeOut.endMs - _audioAnalysis.fadeOut.startMs) / 1000)
+            : null;
+        const effectiveCrossfadeSec = analysisCrossfadeSec ?? _crossfadeSec;
+
+        if (!_xfFadedOut && effectiveCrossfadeSec > 0 && remaining <= effectiveCrossfadeSec) {
             // Dynamic decision (Apple Music Android parity). 'wait' leaves
             // _xfFadedOut false so we keep polling: if the station appends its
             // pick before the track ends we still fade over the time that's left,
             // turning "sometimes" into "every time".
             const d = _xfDecision();
             if (d === 'fade') {
-                if (_crossfadeMode === 'adaptive') {
+                if (analysisCrossfadeSec != null) {
+                    // Audio analysis path: use the actual fade window from Apple's data.
+                    // This is the exact duration Android uses in PlayerAudioFadeControl
+                    // when CrossFadeState.AUTOMATIC mode is backed by audio-analysis data.
+                    _xfFadedOut = true; _xfFadeOut(mkAudio, remaining, analysisCrossfadeSec);
+                } else if (_crossfadeMode === 'adaptive') {
                     // Prefer the offline plan (computed from the cached ending);
                     // fall back to live loudness sampling if it isn't ready.
                     const dur = (_xfPlanSession === _sessionId && _xfPlannedSec != null)
@@ -4133,7 +4177,7 @@ async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
             else if (d === 'skip')         { _xfFadedOut = true; }
             // 'wait' → do nothing this tick; re-evaluate on the next timeupdate.
         }
-        if (_gaplessArmed && (_xfFadedOut || _crossfadeSec <= 0)) {
+        if (_gaplessArmed && (_xfFadedOut || effectiveCrossfadeSec <= 0)) {
             mkAudio.removeEventListener('timeupdate', onGaplessTick);
         }
     };
@@ -4538,6 +4582,7 @@ async function handleTrackChange(mk) {
         _durationSec    = (sess.durationMs ?? 0) / 1000;
         _videoCodec     = sess.capabilities?.videoCodec || null;
         _mvVideoHeights = sess.videoHeights ?? [];
+        _audioAnalysis  = null; // reset; async fetch below may populate it
         console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now()-t0)/1000).toFixed(2)}s`);
 
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
@@ -4559,6 +4604,9 @@ async function handleTrackChange(mk) {
         bridgeDuration(mk, _durationSec);
 
         if (sess.codec === 'aac') {
+            // Fetch audio analysis for smarter crossfade/gapless timing (non-blocking).
+            _fetchAudioAnalysis(adamId, sf, mk.developerToken ?? '').catch(() => {});
+
             // Pre-warm the next track's AAC session in the background so _amlNext()
             // can skip the /api/v1/playback round-trip on gapless advance.
             if (!_nextAacTried && !_nextAacSession) {

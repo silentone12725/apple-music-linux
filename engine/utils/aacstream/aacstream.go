@@ -295,6 +295,22 @@ func WarmLicensePool(ctx context.Context) {
 	}
 }
 
+// keyCache caches acquired Widevine content keys keyed by "kidBase64:uriPrefix".
+// A cached key eliminates the full CDM round-trip on subsequent opens of the
+// same track (e.g. pause → resume), mirroring Android's PlayerPlaybackCertManager
+// which persists the FPS Application Certificate across sessions.
+// The cache is process-scoped and never written to disk; keys survive only for
+// the engine process lifetime.
+var keyCache sync.Map // string → []byte
+
+// cacheKeyFor builds the cache lookup key from the content-key identifiers.
+func cacheKeyFor(kidBase64, uriPrefix string) string { return kidBase64 + "\x00" + uriPrefix }
+
+// InvalidateKey evicts a cached content key so the next AcquireKey call is
+// forced to re-negotiate with the licence server.  Call this when a segment
+// decrypts with an error — the cached key may be stale.
+func InvalidateKey(kidBase64, uriPrefix string) { keyCache.Delete(cacheKeyFor(kidBase64, uriPrefix)) }
+
 // AcquireKey acquires the AES decryption key for one Apple Music track via the
 // Widevine licence endpoint and returns the raw key bytes.  This is the only
 // exported key-acquisition function; callers must not store the bytes in any
@@ -303,7 +319,18 @@ func WarmLicensePool(ctx context.Context) {
 // kidBase64 and uriPrefix come from the EXT-X-KEY URI field in the HLS media
 // playlist (split on the first comma: uriPrefix,kidBase64).
 // adamID is the Apple Music asset identifier used in the licence request body.
-func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoken string) ([]byte, error) {
+//
+// When forceRefresh is false, a previously cached key is returned immediately
+// (eliminating the CDM round-trip on track resume).  When forceRefresh is true,
+// the cache is bypassed and a fresh licence is acquired — use this after a
+// decryption failure to recover from a stale cached key.
+func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoken string, forceRefresh bool) ([]byte, error) {
+	ck := cacheKeyFor(kidBase64, uriPrefix)
+	if !forceRefresh {
+		if v, ok := keyCache.Load(ck); ok {
+			return v.([]byte), nil
+		}
+	}
 	ctx = context.WithValue(ctx, "pssh", kidBase64)
 	ctx = context.WithValue(ctx, "adamId", adamID)
 	ctx = context.WithValue(ctx, "uriPrefix", uriPrefix)
@@ -329,6 +356,9 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 	_, keyBytes, err := k.GetKey(ctx,
 		"https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense",
 		pssh, nil)
+	if err == nil && len(keyBytes) > 0 {
+		keyCache.Store(ck, keyBytes)
+	}
 	return keyBytes, err
 }
 
