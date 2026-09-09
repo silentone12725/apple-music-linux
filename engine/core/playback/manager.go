@@ -63,6 +63,7 @@ type Manager struct {
 	mu         sync.RWMutex
 	sessions   map[string]*Session
 	contexts   map[string]*playContext
+	assetIndex map[string]string // openKey → sessionID; secondary index for resume reuse
 	inflightMu sync.Mutex
 	inflight   map[string]*openFlight // key: assetID+storefront+capabilities
 
@@ -85,7 +86,7 @@ func (m *Manager) ActiveStreams() int { return int(m.activeStreams.Load()) }
 // New returns a Manager backed by the Apple Music provider.
 // Swap apple.NewProvider() for any media.Provider to change the source.
 func New() *Manager {
-	m := &Manager{provider: apple.NewProvider(), sessions: make(map[string]*Session), contexts: make(map[string]*playContext), inflight: make(map[string]*openFlight)}
+	m := &Manager{provider: apple.NewProvider(), sessions: make(map[string]*Session), contexts: make(map[string]*playContext), assetIndex: make(map[string]string), inflight: make(map[string]*openFlight)}
 	go m.reap()
 	return m
 }
@@ -94,7 +95,7 @@ func New() *Manager {
 // Use this when the caller needs to configure the provider before wiring it
 // (e.g. passing a CBCS socket address to apple.NewProviderWithCBCS).
 func NewWithProvider(p media.Provider) *Manager {
-	m := &Manager{provider: p, sessions: make(map[string]*Session), contexts: make(map[string]*playContext), inflight: make(map[string]*openFlight)}
+	m := &Manager{provider: p, sessions: make(map[string]*Session), contexts: make(map[string]*playContext), assetIndex: make(map[string]string), inflight: make(map[string]*openFlight)}
 	go m.reap()
 	return m
 }
@@ -115,6 +116,13 @@ func openKey(req OpenRequest) string {
 func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 	key := openKey(req)
 
+	// Reuse an existing valid session for this asset+capabilities combination.
+	// Mirrors Android SVFootHillSessionController.getExistingContextKey — avoids
+	// a full DRM round-trip when the user pauses and resumes the same track.
+	if sess := m.getByAssetKey(key); sess != nil {
+		return sess, nil
+	}
+
 	m.inflightMu.Lock()
 	if m.inflight == nil {
 		m.inflight = make(map[string]*openFlight)
@@ -134,7 +142,7 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 	m.inflightMu.Unlock()
 
 	// We are the leader: open the session, then signal all waiters.
-	fl.sess, fl.err = m.openDirect(ctx, req)
+	fl.sess, fl.err = m.openDirect(ctx, req, key)
 	close(fl.done)
 	m.inflightMu.Lock()
 	delete(m.inflight, key)
@@ -142,7 +150,7 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 	return fl.sess, fl.err
 }
 
-func (m *Manager) openDirect(ctx context.Context, req OpenRequest) (*Session, error) {
+func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey string) (*Session, error) {
 	ms, err := m.provider.Open(ctx, media.OpenRequest{
 		AssetID:           req.AssetID,
 		Storefront:        req.Storefront,
@@ -195,6 +203,9 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest) (*Session, er
 				sess.Codec = string(track.Codec)
 				sess.SampleRate = track.SampleRate
 				sess.BitDepth = track.BitDepth
+				sess.BitRate = track.BitRate
+				sess.ChannelCount = track.ChannelCount
+				sess.CodecMIMEType = track.CodecMIMEType
 				sess.SpatialAudio = track.SpatialAudio
 			}
 			_, sess.Capabilities.Seekable = stream.Source.(pipeline.SeekableSource)
@@ -205,7 +216,7 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest) (*Session, er
 		}
 	}
 
-	m.store(sess, pctx)
+	m.store(assetKey, sess, pctx)
 	return sess, nil
 }
 
@@ -287,6 +298,15 @@ func (m *Manager) GetSeekStart(id string, kind pipeline.StreamKind, startSec flo
 // Release deletes a session and its private context.
 func (m *Manager) Release(id string) {
 	m.mu.Lock()
+	if sess, ok := m.sessions[id]; ok {
+		// Remove from asset index so the next Open for this asset re-opens DRM.
+		for k, v := range m.assetIndex {
+			if v == sess.ID {
+				delete(m.assetIndex, k)
+				break
+			}
+		}
+	}
 	delete(m.sessions, id)
 	delete(m.contexts, id)
 	m.mu.Unlock()
@@ -294,14 +314,36 @@ func (m *Manager) Release(id string) {
 
 // ── Internal ──────────────────────────────────────────────────────────────────
 
-func (m *Manager) store(sess *Session, pctx *playContext) {
+// getByAssetKey returns a live session for the given asset key, or nil if none exists.
+func (m *Manager) getByAssetKey(assetKey string) *Session {
+	m.mu.RLock()
+	sessID, ok := m.assetIndex[assetKey]
+	if !ok {
+		m.mu.RUnlock()
+		return nil
+	}
+	pctx, ok := m.contexts[sessID]
+	if !ok || time.Now().After(pctx.expiry) {
+		m.mu.RUnlock()
+		return nil
+	}
+	sess := m.sessions[sessID]
+	m.mu.RUnlock()
+	return sess
+}
+
+func (m *Manager) store(assetKey string, sess *Session, pctx *playContext) {
 	m.mu.Lock()
 	if m.sessions == nil {
 		m.sessions = make(map[string]*Session)
 		m.contexts = make(map[string]*playContext)
+		m.assetIndex = make(map[string]string)
 	}
 	m.contexts[sess.ID] = pctx // context first — lookup won't see the session without its context
 	m.sessions[sess.ID] = sess
+	if assetKey != "" {
+		m.assetIndex[assetKey] = sess.ID
+	}
 	m.mu.Unlock()
 }
 
@@ -339,6 +381,12 @@ func (m *Manager) reap() {
 			if now.After(pctx.expiry) {
 				delete(m.sessions, id)
 				delete(m.contexts, id)
+			}
+		}
+		// Sweep asset index: remove entries pointing to sessions that no longer exist.
+		for k, sessID := range m.assetIndex {
+			if _, ok := m.sessions[sessID]; !ok {
+				delete(m.assetIndex, k)
 			}
 		}
 		m.mu.Unlock()

@@ -15,10 +15,13 @@ type Session struct {
 	Storefront string `json:"storefront"`
 	Type       string `json:"type"` // "song" | "mv"
 
-	Codec        string `json:"codec,omitempty"`
-	SampleRate   int    `json:"sampleRate,omitempty"`
-	BitDepth     int    `json:"bitDepth,omitempty"`
-	SpatialAudio string `json:"spatialAudio,omitempty"` // "binaural" | "binaural-lossless"
+	Codec         string `json:"codec,omitempty"`
+	SampleRate    int    `json:"sampleRate,omitempty"`
+	BitDepth      int    `json:"bitDepth,omitempty"`
+	BitRate       int    `json:"bitRate,omitempty"`
+	ChannelCount  int    `json:"channelCount,omitempty"`
+	CodecMIMEType string `json:"codecMimeType,omitempty"`
+	SpatialAudio  string `json:"spatialAudio,omitempty"` // "binaural" | "binaural-lossless"
 
 	Capabilities struct {
 		Audio      bool   `json:"audio"`

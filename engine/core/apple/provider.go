@@ -166,6 +166,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 		trackOpen = p.makeCBCSTrackOpener(assetID, playlistURL, pipeline.KindAudio, codec, a.DurationInMillis)
 	}
 
+	br, ch, mimeType := audioFormatFields(codec, sr)
 	return &media.Session{
 		Kind: "song",
 		Metadata: media.Metadata{
@@ -177,13 +178,34 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 			HasLyrics:  a.HasLyrics,
 		},
 		Tracks: []media.Track{{
-			Kind:       pipeline.KindAudio,
-			Codec:      codec,
-			SampleRate: sr,
-			BitDepth:   bd,
-			Open:       trackOpen,
+			Kind:          pipeline.KindAudio,
+			Codec:         codec,
+			SampleRate:    sr,
+			BitDepth:      bd,
+			BitRate:       br,
+			ChannelCount:  ch,
+			CodecMIMEType: mimeType,
+			Open:          trackOpen,
 		}},
 	}, nil
+}
+
+// audioFormatFields returns (bitRate bps, channelCount, codecMIMEType) for the
+// given codec.  Values are Apple Music defaults; they are informational only and
+// never used in the decryption path.
+func audioFormatFields(codec pipeline.Codec, sampleRate int) (bitRate, channelCount int, mimeType string) {
+	switch codec {
+	case pipeline.CodecAAC:
+		return 256_000, 2, `audio/mp4; codecs="mp4a.40.2"`
+	case pipeline.CodecALAC:
+		// Lossless bitrate is track-dependent; report 0 (unknown).
+		return 0, 2, `audio/mp4; codecs="alac"`
+	case pipeline.CodecAtmos:
+		// Dolby Atmos EC-3 7.1+objects; base bed is 7.1 (8 channels).
+		return 768_000, 8, `audio/mp4; codecs="ec-3"`
+	default:
+		return 0, 0, ""
+	}
 }
 
 // ── Music video ───────────────────────────────────────────────────────────────

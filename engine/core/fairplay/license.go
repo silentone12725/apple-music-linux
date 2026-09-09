@@ -56,25 +56,43 @@ func New() LicenseProvider { return &fpLicenseProvider{} }
 type fpLicenseProvider struct{}
 
 func (p *fpLicenseProvider) Open(ctx context.Context, req LicenseRequest) (pipeline.Decryptor, error) {
+	return p.open(ctx, req, false)
+}
+
+func (p *fpLicenseProvider) open(ctx context.Context, req LicenseRequest, forceRefresh bool) (pipeline.Decryptor, error) {
 	tr := tracer.FromContext(ctx)
 	tr.RecordLicenseStart()
 	keyBytes, err := aacstream.AcquireKey(ctx,
-		req.AssetID, req.KIDBase64, req.URIPrefix, req.Token, req.MediaUserToken)
+		req.AssetID, req.KIDBase64, req.URIPrefix, req.Token, req.MediaUserToken, forceRefresh)
 	tr.RecordLicenseEnd()
 	if err != nil {
 		return nil, fmt.Errorf("fairplay licence: %w", err)
 	}
-	return &fairplayDecryptor{key: keyBytes}, nil
+	return &fairplayDecryptor{key: keyBytes, kid: req.KIDBase64, uriPrefix: req.URIPrefix}, nil
 }
+
+// InvalidateKey evicts a cached content key identified by kidBase64 and
+// uriPrefix so the next Open call is forced to re-negotiate with the licence
+// server.  Use after a decrypt error to recover from a stale cached key.
+func InvalidateKey(kidBase64, uriPrefix string) { aacstream.InvalidateKey(kidBase64, uriPrefix) }
 
 // fairplayDecryptor is the ONLY type in the engine that holds key bytes.
 // It is unexported; callers receive it only through the pipeline.Decryptor interface.
 type fairplayDecryptor struct {
-	key []byte
+	key       []byte
+	kid       string // kidBase64 — for cache invalidation on decrypt error
+	uriPrefix string
 }
 
 func (d *fairplayDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Writer) error {
-	return aacstream.DecryptMP4Streaming(ctx, r, d.key, w)
+	err := aacstream.DecryptMP4Streaming(ctx, r, d.key, w)
+	if err != nil && d.kid != "" {
+		// Evict the stale cached key so the next session Open re-negotiates.
+		// Matches Android FootHillDecryptionKey.fetchKeyData(forceRefresh=true)
+		// which bypasses the key cache after a decrypt failure.
+		aacstream.InvalidateKey(d.kid, d.uriPrefix)
+	}
+	return err
 }
 
 // ── HLS segment source ────────────────────────────────────────────────────────

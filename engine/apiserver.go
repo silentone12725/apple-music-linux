@@ -640,6 +640,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("GET /api/v1/metadata/{id}", cors(s.handleMetadata))
 	mux.HandleFunc("GET /api/v1/artwork/{id}", cors(s.handleArtwork))
 	mux.HandleFunc("GET /api/v1/lyrics/{id}", cors(s.handleLyrics))
+	mux.HandleFunc("GET /api/v1/audioanalysis/{id}", cors(s.handleAudioAnalysis))
 
 	mux.HandleFunc("POST /api/v1/export", cors(s.handleExportCreate))
 	mux.HandleFunc("GET /api/v1/export", cors(s.handleExportList))
