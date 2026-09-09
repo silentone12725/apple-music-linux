@@ -81,17 +81,30 @@ type DRMManager struct {
 	// crash restart state
 	crashCount int
 	restartMu  sync.Mutex // serialises concurrent handleCrash goroutines
+
+	// recoveryGate is a channel that is CLOSED when the DRM backend is not in
+	// active lease recovery, and OPEN (not yet closed) while recovery is in
+	// progress. Decrypt() selects on it to pause until recovery completes rather
+	// than propagating a transient connection-refused error.
+	//
+	// Invariant (held under mu): gate is closed when Recovery ∉ {Scheduled, Refreshing}.
+	// ponytail: per-recovery chan, reset on each transition; upgrade to singleflight
+	//           if >1 concurrent Decrypt waiter becomes a concern.
+	recoveryGate chan struct{}
 }
 
 // NewDRMManager creates a DRMManager with the given backend.
 // sink receives every DRMSnapshot and forwards it to SSE.
 func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, cfg BackendConfig, policy RestartPolicy) *DRMManager {
+	gate := make(chan struct{})
+	close(gate) // start closed: no recovery in progress
 	m := &DRMManager{
-		backend: backend,
-		session: session,
-		cfg:     cfg,
-		policy:  policy,
-		sink:    sink,
+		backend:      backend,
+		session:      session,
+		cfg:          cfg,
+		policy:       policy,
+		sink:         sink,
+		recoveryGate: gate,
 	}
 	m.auth = NewAuthCoordinator(func(snap DRMSnapshot) {
 		m.mergeAndEmit(snap)
@@ -113,12 +126,38 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 
 // ── DRMProvider implementation ────────────────────────────────────────────────
 
+// recoveryActive reports whether lease recovery is in progress and returns the
+// current gate channel. Callers select on the gate to wake when recovery ends.
+func (m *DRMManager) recoveryActive() (bool, chan struct{}) {
+	m.mu.RLock()
+	s := m.snapshot.State.Recovery
+	gate := m.recoveryGate
+	m.mu.RUnlock()
+	return s == RecoveryRefreshing || s == RecoveryScheduled, gate
+}
+
 // Decrypt auto-starts the backend if a session exists, then decrypts.
+// If lease recovery is active when the backend call fails, Decrypt waits up
+// to 15 s for recovery to complete and retries once — so active MV playback
+// can buffer through a LEASE_END event without aborting.
 func (m *DRMManager) Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error) {
 	if err := m.ensureRunning(ctx); err != nil {
 		return DecryptResponse{}, err
 	}
 	resp, err := m.backend.Decrypt(ctx, req)
+	if err != nil {
+		if active, gate := m.recoveryActive(); active {
+			waitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			select {
+			case <-gate:
+				// Recovery complete — retry the decrypt once.
+				resp, err = m.backend.Decrypt(waitCtx, req)
+			case <-waitCtx.Done():
+				err = fmt.Errorf("drm decrypt: timed out waiting for lease recovery: %w", waitCtx.Err())
+			}
+		}
+	}
 	if err == nil {
 		m.session.RecordSuccess()
 	}
@@ -405,9 +444,6 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 	if snap.State.FairPlay != 0 {
 		m.snapshot.State.FairPlay = snap.State.FairPlay
 	}
-	if snap.State.Recovery != 0 {
-		m.snapshot.State.Recovery = snap.State.Recovery
-	}
 	if snap.State.Session != 0 {
 		m.snapshot.State.Session = snap.State.Session
 	}
@@ -416,10 +452,53 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 	} else if snap.State.Authentication != AuthChallenging {
 		m.snapshot.Challenge = nil
 	}
+
+	// Recovery gate: manage the channel that Decrypt() waits on.
+	// RecoveryUnknown (0) is treated as "not recovering" so the gate stays closed.
+	prevRecovery := m.snapshot.State.Recovery
+	if snap.State.Recovery != 0 {
+		m.snapshot.State.Recovery = snap.State.Recovery
+	}
+	newRecovery := m.snapshot.State.Recovery
+
+	var closeGate chan struct{}
+	if prevRecovery != newRecovery {
+		inRecovery := func(s RecoveryState) bool {
+			return s == RecoveryRefreshing || s == RecoveryScheduled
+		}
+		switch {
+		case !inRecovery(prevRecovery) && inRecovery(newRecovery):
+			// Recovery starting — open a new gate (block Decrypt waiters).
+			select {
+			case <-m.recoveryGate:
+				m.recoveryGate = make(chan struct{}) // prev was closed, open a fresh one
+			default:
+				// Gate already open; reuse it.
+			}
+		case inRecovery(prevRecovery) && !inRecovery(newRecovery):
+			// Recovery ending — capture gate to close after unlock (wake all waiters).
+			closeGate = m.recoveryGate
+			// Replace with a pre-closed gate for the next non-recovery period.
+			next := make(chan struct{})
+			close(next)
+			m.recoveryGate = next
+		}
+	}
+
 	m.snapshot.Timestamp = time.Now()
 	m.snapshot.Message = snap.Message
 	out := m.snapshot
 	m.mu.Unlock()
+
+	// Close outside the lock so Decrypt waiters don't re-enter mu.
+	if closeGate != nil {
+		select {
+		case <-closeGate:
+			// Already closed (e.g., duplicate RUNNING event); nothing to do.
+		default:
+			close(closeGate)
+		}
+	}
 
 	if m.sink != nil {
 		m.sink(out)
