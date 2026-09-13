@@ -667,11 +667,15 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // MSE-only: used solely by the MV video path. The audio path keeps per-write
 // flushing because it can carry ALAC→VLC, which must not be touched.
 type boxCoalescer struct {
-	w   io.Writer
-	buf []byte
+	w        io.Writer
+	buf      []byte
+	writesIn int   // Write() calls received (≈ network/pipe chunks)
+	boxesOut int   // downstream flushes emitted (one per whole box)
+	bytesOut int64 // total bytes forwarded
 }
 
 func (c *boxCoalescer) Write(p []byte) (int, error) {
+	c.writesIn++
 	c.buf = append(c.buf, p...)
 	for len(c.buf) >= 8 {
 		size := int(binary.BigEndian.Uint32(c.buf[:4]))
@@ -692,6 +696,8 @@ func (c *boxCoalescer) Write(p []byte) (int, error) {
 		if _, err := c.w.Write(c.buf[:size]); err != nil {
 			return 0, err
 		}
+		c.boxesOut++
+		c.bytesOut += int64(size)
 		c.buf = c.buf[size:]
 	}
 	return len(p), nil
@@ -702,7 +708,9 @@ func (c *boxCoalescer) Flush() error {
 	if len(c.buf) == 0 {
 		return nil
 	}
-	_, err := c.w.Write(c.buf)
+	n, err := c.w.Write(c.buf)
+	c.boxesOut++
+	c.bytesOut += int64(n)
 	c.buf = nil
 	return err
 }
@@ -732,4 +740,8 @@ func streamMediaCoalesced(w http.ResponseWriter, r *http.Request, fn func(io.Wri
 	if ferr := bc.Flush(); ferr != nil && r.Context().Err() == nil {
 		slog.Error("stream flush error", "err", ferr)
 	}
+	// Proof line: flushes collapsed to one-per-box. boxesOut ≪ writesIn confirms
+	// coalescing is active; boxesOut == the fragment count for the track.
+	log.Printf("[video] coalesced flushes: %d boxes from %d writes (%d bytes)",
+		bc.boxesOut, bc.writesIn, bc.bytesOut)
 }
