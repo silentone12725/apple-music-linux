@@ -322,23 +322,32 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 
-		// Non-ALAC cache miss (AAC, etc.): download the full track first, then
-		// serve with http.ServeContent for byte-range support on replays.
-		// AAC files are small enough that the download overhead is not noticeable.
-		if pw, _ := s.diskCache.BeginPut(sess.AssetID, qualifier); pw != nil {
-			err := s.pm.Stream(r.Context(), id, pipeline.KindAudio, pw)
-			if err != nil {
-				pw.Discard()
-			} else if pw.Commit() == nil {
-				if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
-					defer f.Close()
-					w.Header().Set("Content-Type", "audio/mp4")
-					http.ServeContent(w, r, "", time.Time{}, f)
-					return
+		// Non-ALAC cache miss (AAC, etc.): stream to the client WHILE caching in the
+		// background, instead of downloading the whole track before the first byte.
+		// This drops first-play TTFB from O(whole-track download) to O(first segment)
+		// — the same mechanism already proven on the ALAC path. The background
+		// download uses a detached context so the cache still commits when the client
+		// disconnects mid-stream (skip), giving the next play a byte-range cache hit.
+		// MSE reads sequentially, so no Range handling is needed on first play; replays
+		// hit the committed file above via http.ServeContent.
+		if spw, _ := s.diskCache.BeginStreamingPut(sess.AssetID, qualifier); spw != nil {
+			downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			go func() {
+				defer cancel()
+				if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, spw); err != nil {
+					spw.Discard()
+				} else {
+					spw.Commit()
 				}
-			}
+			}()
+			w.Header().Set("Content-Type", "audio/mp4")
+			reader := spw.NewReader()
+			defer reader.Close()
+			io.Copy(w, reader) //nolint:errcheck — client disconnect is normal
+			return
 		}
-		// Fallback: stream without caching (no byte-range seek support).
+		// Fallback: another goroutine is already caching this key (BeginStreamingPut
+		// returned nil) — stream without caching.
 		streamMedia(w, r, func(dst io.Writer) error {
 			return s.pm.Stream(r.Context(), id, pipeline.KindAudio, dst)
 		}, "audio/mp4")
