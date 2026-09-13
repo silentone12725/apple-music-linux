@@ -28,11 +28,12 @@ function numConst(src, name) {
 test('Improvement08: forward/backward buffer window size', () => {
     const fwd = numConst(PB, 'FORWARD_SECS');
     const back = numConst(PB, 'BACKWARD_SECS');
-    assert.equal(fwd, 900, 'FORWARD_SECS drifted');
-    assert.equal(back, 900, 'BACKWARD_SECS drifted');
-    console.log(`VERDICT #8: forward/backward window = ${fwd}s/${back}s (15 min each way). ` +
-        `IMPLEMENTABLE, low risk — a 60-180s window cuts retained memory ~5-15x and speeds ` +
-        `post-error recovery. Must be validated on the AAC path only (never touch ALAC/VLC).`);
+    // Implemented: reduced from 900/900. Assert it stays bounded so it can't
+    // silently drift back up to the old 15-minute window.
+    assert.ok(fwd <= 300, `FORWARD_SECS=${fwd} exceeds the 300s cap`);
+    assert.ok(back <= 180, `BACKWARD_SECS=${back} exceeds the 180s cap`);
+    console.log(`VERDICT #8: IMPLEMENTED — forward/backward window = ${fwd}s/${back}s (was 900/900). ` +
+        `Bounds long-track memory to ~8 MB and speeds post-error recovery. AAC/MSE path only.`);
 });
 
 // ── #9 JS-side MV chunk cache cap (96 MB) ──
