@@ -280,35 +280,35 @@ sheet.replaceSync(`
     border-radius: 8px !important;
   }
   /* Keep ONE highlight — the big row hover above. Each row nests title/subtitle
-     <li>s (ul.top-search-list-lookup__description > li.__explicit-wrapper /
+     <li>s (ul.top-search-list-lockup__description > li.__explicit-wrapper /
      __secondary); the row-hover rule matches those too, painting a smaller pill on
      each line. Strip background + radius from every inner row element so only the
      row shows a highlight. Container-agnostic + !important so it applies whatever
      the dropdown wrapper class is and wins over the (also-!important) hover rule
      by coming later in source at equal specificity. */
-  [class*="top-search-list-lookup__description"],
-  [class*="top-search-list-lookup__description"] li,
-  [class*="top-search-list-lookup__description"] li:hover,
-  li[class*="top-search-list-lookup__explicit-wrapper"],
-  li[class*="top-search-list-lookup__explicit-wrapper"]:hover,
-  li[class*="top-search-list-lookup__secondary"],
-  li[class*="top-search-list-lookup__secondary"]:hover,
-  [class*="top-search-list-lookup__primary"] {
+  [class*="top-search-list-lockup__description"],
+  [class*="top-search-list-lockup__description"] li,
+  [class*="top-search-list-lockup__description"] li:hover,
+  li[class*="top-search-list-lockup__explicit-wrapper"],
+  li[class*="top-search-list-lockup__explicit-wrapper"]:hover,
+  li[class*="top-search-list-lockup__secondary"],
+  li[class*="top-search-list-lockup__secondary"]:hover,
+  [class*="top-search-list-lockup__primary"] {
     background: transparent !important;
     border-radius: 0 !important;
   }
   /* If the pill is drawn as a pseudo-element on an inner row element rather than a
      plain background, the rule above can't reach it — kill the pseudos too. */
-  [class*="top-search-list-lookup__description"]::before,
-  [class*="top-search-list-lookup__description"]::after,
-  [class*="top-search-list-lookup__description"] li::before,
-  [class*="top-search-list-lookup__description"] li::after,
-  li[class*="top-search-list-lookup__explicit-wrapper"]::before,
-  li[class*="top-search-list-lookup__explicit-wrapper"]::after,
-  li[class*="top-search-list-lookup__secondary"]::before,
-  li[class*="top-search-list-lookup__secondary"]::after,
-  [class*="top-search-list-lookup__primary"]::before,
-  [class*="top-search-list-lookup__primary"]::after {
+  [class*="top-search-list-lockup__description"]::before,
+  [class*="top-search-list-lockup__description"]::after,
+  [class*="top-search-list-lockup__description"] li::before,
+  [class*="top-search-list-lockup__description"] li::after,
+  li[class*="top-search-list-lockup__explicit-wrapper"]::before,
+  li[class*="top-search-list-lockup__explicit-wrapper"]::after,
+  li[class*="top-search-list-lockup__secondary"]::before,
+  li[class*="top-search-list-lockup__secondary"]::after,
+  [class*="top-search-list-lockup__primary"]::before,
+  [class*="top-search-list-lockup__primary"]::after {
     background: transparent !important;
     display: none !important;
   }
