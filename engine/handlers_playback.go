@@ -343,7 +343,17 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 			w.Header().Set("Content-Type", "audio/mp4")
 			reader := spw.NewReader()
 			defer reader.Close()
-			io.Copy(w, reader) //nolint:errcheck — client disconnect is normal
+			// The streaming reader surfaces the download error (Discard sets it) as a
+			// non-EOF read error. If it fails before any byte reached the client, the
+			// 200 headers are not yet committed, so report a clean 502 instead of an
+			// empty 200. A mid-stream failure (n>0) can only be logged — headers are out.
+			if n, err := io.Copy(w, reader); err != nil {
+				if n == 0 && r.Context().Err() == nil {
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+				} else if r.Context().Err() == nil {
+					slog.Error("AAC stream error (partial)", "id", id, "err", err)
+				}
+			}
 			return
 		}
 		// Fallback: another goroutine is already caching this key (BeginStreamingPut
@@ -475,13 +485,24 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 		}
 		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, w)
 	}
+	// Real timeline anchor for seeks: the nearest segment start <= seekSec. Without
+	// it, make_zero would emit 0-based fragments and the client's currentTime=seekSec
+	// would fall outside the buffered range (stall). Full plays use 0.
+	var tsOffset float64
+	if seekSec > 0 {
+		if actual, ok := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok {
+			tsOffset = actual
+		} else {
+			tsOffset = seekSec
+		}
+	}
 	// Only cache full plays; seek streams produce a partial file and must not be cached.
 	streamMediaCoalesced(w, r, func(dst io.Writer) error {
 		if seekSec > 0 {
-			return transcodeVideoForMSE(r.Context(), videoSrc, dst)
+			return transcodeVideoForMSE(r.Context(), videoSrc, dst, tsOffset)
 		}
 		cw := aacstream.MVDecCacheWriter(assetID, sess.MVMaxHeight, dst)
-		err := transcodeVideoForMSE(r.Context(), videoSrc, cw)
+		err := transcodeVideoForMSE(r.Context(), videoSrc, cw, 0)
 		if err == nil {
 			log.Printf("[video] transcode OK — committing dec cache assetID=%s height=%d", assetID, sess.MVMaxHeight)
 			cw.Commit()
@@ -546,7 +567,14 @@ var (
 // without re-encoding so the original codec string (e.g. avc1.640028) is preserved
 // and matches the SourceBuffer declaration in the renderer. Near-zero CPU overhead.
 // Falls back to direct pass-through if FFmpeg is not in PATH.
-func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io.Writer) error {
+// transcodeVideoForMSE remuxes decrypted fMP4 to a fragmented MSE-friendly form.
+// tsOffsetSec re-anchors the output onto the real timeline: make_zero shifts the
+// first output timestamp to 0, then -output_ts_offset adds tsOffsetSec back, so a
+// seek stream starting at segment time T outputs fragments at real time T instead
+// of 0. Pass the actual segment start for seeks (so the client's currentTime lands
+// inside the buffered range, matching ServeMVDecFrom) and 0 for full plays (whose
+// cached output must start at 0 to stay consistent with the fragment index).
+func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io.Writer, tsOffsetSec float64) error {
 	ffmpegOnce.Do(func() {
 		ffmpegPath, _ = exec.LookPath("ffmpeg")
 		if ffmpegPath == "" {
@@ -557,16 +585,21 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 		return src(dst)
 	}
 	pr, pw := io.Pipe()
-	cmd := exec.CommandContext(ctx, ffmpegPath,
+	args := []string{
 		"-loglevel", "warning",
 		"-i", "pipe:0",
 		"-map", "0:v:0", // first video stream only — drops audio and caption tracks
 		"-c:v", "copy", // preserve original codec (avc1.640028); no re-encode
 		"-movflags", "frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets",
 		"-avoid_negative_ts", "make_zero", // B-frames: shift DTS so minimum is 0
-		"-f", "mp4",
-		"pipe:1",
-	)
+	}
+	if tsOffsetSec > 0 {
+		// Re-anchor make_zero's 0-based output back onto the real timeline so a
+		// seek's fragments carry their true presentation times.
+		args = append(args, "-output_ts_offset", strconv.FormatFloat(tsOffsetSec, 'f', 6, 64))
+	}
+	args = append(args, "-f", "mp4", "pipe:1")
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 	cmd.Stdin = pr
 	cmd.Stdout = dst
 
@@ -695,6 +728,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 type boxCoalescer struct {
 	w        io.Writer
 	buf      []byte
+	pass     bool  // once set, stop framing and stream directly (never buffer)
 	writesIn int   // Write() calls received (≈ network/pipe chunks)
 	boxesOut int   // downstream flushes emitted (one per whole box)
 	bytesOut int64 // total bytes forwarded
@@ -702,6 +736,11 @@ type boxCoalescer struct {
 
 func (c *boxCoalescer) Write(p []byte) (int, error) {
 	c.writesIn++
+	if c.pass {
+		n, err := c.w.Write(p)
+		c.bytesOut += int64(n)
+		return len(p), err
+	}
 	c.buf = append(c.buf, p...)
 	for len(c.buf) >= 8 {
 		size := int(binary.BigEndian.Uint32(c.buf[:4]))
@@ -712,8 +751,12 @@ func (c *boxCoalescer) Write(p []byte) (int, error) {
 			size = int(binary.BigEndian.Uint64(c.buf[8:16]))
 		}
 		if size < 8 {
-			// size==0 means "extends to EOF"; anything else <8 is malformed.
-			// Stop coalescing — Flush() emits whatever remains.
+			// size==0 ("extends to EOF") or malformed: we can't frame further.
+			// Flush what we have and switch to direct passthrough so the rest of
+			// the stream is never buffered unboundedly in memory.
+			if err := c.enterPassthrough(); err != nil {
+				return 0, err
+			}
 			return len(p), nil
 		}
 		if len(c.buf) < size {
@@ -727,6 +770,20 @@ func (c *boxCoalescer) Write(p []byte) (int, error) {
 		c.buf = c.buf[size:]
 	}
 	return len(p), nil
+}
+
+// enterPassthrough flushes the current buffer and disables framing, so any
+// remaining (unframeable) bytes stream directly instead of accumulating.
+func (c *boxCoalescer) enterPassthrough() error {
+	c.pass = true
+	if len(c.buf) == 0 {
+		return nil
+	}
+	n, err := c.w.Write(c.buf)
+	c.boxesOut++
+	c.bytesOut += int64(n)
+	c.buf = nil
+	return err
 }
 
 // Flush emits any bytes buffered past the last complete box.
