@@ -22,8 +22,11 @@ package aacstream
 
 import (
 	"bytes"
+	"crypto/cipher"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 
 	"github.com/itouakirai/mp4ff/mp4"
@@ -239,4 +242,95 @@ func ReadMVDecIndex(assetID string, maxHeight int) (*MVDecIndex, bool) {
 		return nil, false
 	}
 	return &idx, true
+}
+
+// MVDecIndexExists reports whether a usable fragment index exists for the cached
+// track. Callers check this BEFORE serving so a missing/unusable index cleanly
+// falls through to the FFmpeg seek path instead of erroring mid-stream.
+func MVDecIndexExists(assetID string, maxHeight int) bool {
+	_, ok := ReadMVDecIndex(assetID, maxHeight)
+	return ok
+}
+
+// addToCounter returns iv + add as a big-endian 128-bit counter, for seeking an
+// AES-CTR keystream to an arbitrary block without re-decrypting the prefix.
+func addToCounter(iv []byte, add uint64) []byte {
+	out := make([]byte, len(iv))
+	copy(out, iv)
+	for i := len(out) - 1; i >= 0 && add > 0; i-- {
+		add += uint64(out[i])
+		out[i] = byte(add & 0xff)
+		add >>= 8
+	}
+	return out
+}
+
+// ServeMVDecFrom serves the cached remuxed track starting at the fragment that
+// covers seekSec: it emits the init segment (ftyp+moov) followed by every
+// fragment from the last moof whose start time <= seekSec. This lets a backward
+// seek replay from the dec-cache WITHOUT re-running FFmpeg.
+//
+// AES-CTR is a 1:1 stream cipher, so the tail is decrypted by seeking the file to
+// the fragment's ciphertext offset (mvDecIVSize + blockStart) and advancing the
+// CTR counter to the matching block — the prefix is never read or decrypted.
+func ServeMVDecFrom(assetID string, maxHeight int, seekSec float64, dst io.Writer) error {
+	initMVDecKey()
+	idx, ok := ReadMVDecIndex(assetID, maxHeight)
+	if !ok {
+		return fmt.Errorf("no MV index for %s@%dp", assetID, maxHeight)
+	}
+
+	// Target = last fragment starting at or before seekSec (so seekSec is covered);
+	// fall back to the first fragment when seeking before it.
+	target := idx.Frags[0]
+	for _, f := range idx.Frags {
+		if f.T <= seekSec {
+			target = f
+		} else {
+			break
+		}
+	}
+
+	f, err := os.Open(mvDecFilePath(assetID, maxHeight))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var iv [mvDecIVSize]byte
+	if _, err := io.ReadFull(f, iv[:]); err != nil {
+		return err
+	}
+
+	// 1) Init segment: decrypt [0, InitSize) from the start of the ciphertext.
+	initStream, err := newAESCTR(iv[:])
+	if err != nil {
+		return err
+	}
+	if _, err := f.Seek(mvDecIVSize, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := io.CopyN(dst, &cipher.StreamReader{S: initStream, R: f}, idx.InitSize); err != nil {
+		return err
+	}
+
+	// 2) Tail from the target fragment via a seeked CTR keystream.
+	off := target.Off
+	block := uint64(off) / mvDecIVSize
+	lead := uint64(off) % mvDecIVSize // bytes to discard so output starts exactly at off
+	tailStream, err := newAESCTR(addToCounter(iv[:], block))
+	if err != nil {
+		return err
+	}
+	if _, err := f.Seek(mvDecIVSize+int64(block)*mvDecIVSize, io.SeekStart); err != nil {
+		return err
+	}
+	sr := &cipher.StreamReader{S: tailStream, R: f}
+	if lead > 0 {
+		if _, err := io.CopyN(io.Discard, sr, int64(lead)); err != nil {
+			return err
+		}
+	}
+	_, err = io.Copy(dst, sr)
+	return err
 }
