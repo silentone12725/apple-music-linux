@@ -2818,6 +2818,24 @@ async function startMVPipeline() {
                     }
                     console.debug(`[AML MV buf:waiting] lead=${lead.toFixed(2)}s (need ${BUF_HIGH}s to resume)`);
                 }
+            } else if (videoEl.paused && lead < BUF_LOW && pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted) {
+                // Deadlock recovery: the video pipe died (its signal is aborted) while
+                // the MV session is still active and the element is paused with no
+                // buffer. The buf-LOW pause path below can't fire (it needs
+                // !videoEl.paused), so nothing would ever recover this — the symptom is
+                // an endless "buf:ok lead=0.00s". A user pause never aborts pipeCtrl, so
+                // this is genuine starvation. Restart the pipe from the current position
+                // and resume; one-shot, then abort if it still doesn't recover.
+                if (!_pipeRestarted) {
+                    _pipeRestarted = true;
+                    console.warn(`[AML MV buf:recover] pipe dead + starved at ct=${videoEl.currentTime.toFixed(2)}s — restarting pipe`);
+                    pipeCtrl = new AbortController();
+                    _startVideoPipe(`${videoUrl}?t=${videoEl.currentTime.toFixed(3)}`);
+                    _iframePlay.call(videoEl).catch(() => {});
+                } else {
+                    console.warn('[AML MV buf:recover] pipe restart did not recover — aborting session');
+                    _abortMV('pipe-dead');
+                }
             } else {
                 if (lead < BUF_LOW && !videoEl.paused) {
                     _bufPaused = true;
@@ -2827,6 +2845,7 @@ async function startMVPipeline() {
                     mkAudio.muted = true; // silent but still "playing" — MK sees no pause
                     console.warn(`[AML MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s → pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'}`);
                 } else {
+                    if (lead >= BUF_HIGH) _pipeRestarted = false; // healthy again — re-arm recovery
                     console.debug(`[AML MV buf:ok] lead=${lead.toFixed(2)}s`);
                 }
             }
@@ -3047,6 +3066,7 @@ async function startMVPipeline() {
 
     const videoEl = myVid;
     let pipeCtrl = new AbortController();
+    let _pipeRestarted = false; // one-shot guard for the buf-monitor pipe-dead recovery
     const videoUrl = `${ENGINE}/api/v1/playback/${_sessionId}/video`;
 
     // ── Video pipe ────────────────────────────────────────────────────────────────
