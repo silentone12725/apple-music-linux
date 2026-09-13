@@ -534,6 +534,63 @@ func (s *APIServer) handlePlaybackVideoRaw(w http.ResponseWriter, r *http.Reques
 	}, "video/mp4")
 }
 
+// handlePlaybackVideoES streams the MV video as a demuxed H.264 elementary
+// stream (access units + avcC) for the renderer's WebCodecs VideoDecoder — the
+// path that bypasses Chromium's MSE ChunkDemuxer (source of code=3). It reuses
+// the same FFmpeg single-track remux as /video, then demuxes it here with mp4ff
+// instead of handing fMP4 to the browser. Spike endpoint, gated by a renderer
+// feature flag; /video (MSE) remains the default.
+func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, ok := s.pm.GetSession(id)
+	if !ok {
+		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
+	if !sess.Capabilities.Video {
+		http.Error(w, "no video stream in this session", http.StatusNotFound)
+		return
+	}
+	var seekSec float64
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
+		seekSec = v
+	}
+	// Anchor seek output onto the real timeline (same as /video) so the ES access
+	// units carry true presentation times the renderer can sync to the audio clock.
+	var tsOffset float64
+	if seekSec > 0 {
+		if actual, ok := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok {
+			tsOffset = actual
+		} else {
+			tsOffset = seekSec
+		}
+	}
+	log.Printf("[video-es] GET id=%s assetID=%q seekSec=%.2f", id, sess.AssetID, seekSec)
+
+	videoSrc := func(dst io.Writer) error {
+		if seekSec > 0 {
+			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, dst)
+			return err
+		}
+		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
+	}
+
+	// FFmpeg single-track remux → pipe → mp4ff demux → ES to the client.
+	pr, pw := io.Pipe()
+	go func() {
+		err := transcodeVideoForMSE(r.Context(), videoSrc, pw, tsOffset)
+		pw.CloseWithError(err)
+	}()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Accept-Ranges", "none")
+	if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil {
+		if r.Context().Err() == nil {
+			log.Printf("[video-es] demux error id=%s: %v", id, err)
+		}
+	}
+}
+
 func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.pm.Release(id)
