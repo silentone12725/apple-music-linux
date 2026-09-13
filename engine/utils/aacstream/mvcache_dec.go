@@ -224,10 +224,13 @@ func MVDecCacheWriter(assetID string, maxHeight int, dst io.Writer) *decCacheWri
 
 	encWriter := &cipher.StreamWriter{S: stream, W: tmp}
 	return &decCacheWriter{
-		dst:       io.MultiWriter(dst, encWriter), // plaintext → HTTP + encrypt → file
+		// plaintext → HTTP + encrypt → file. The indexer is fed separately in
+		// Write() with exactly the bytes that reached the cache.
+		dst:       io.MultiWriter(dst, encWriter),
 		tmp:       tmp,
 		assetID:   assetID,
 		maxHeight: maxHeight,
+		idx:       newMVDecIndexer(),
 	}
 }
 
@@ -236,9 +239,18 @@ type decCacheWriter struct {
 	tmp       *os.File
 	assetID   string
 	maxHeight int
+	idx       *mvDecIndexer // fragment index built inline during write (best-effort)
 }
 
-func (w *decCacheWriter) Write(p []byte) (int, error) { return w.dst.Write(p) }
+func (w *decCacheWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	// Feed the indexer exactly the bytes that landed in the cache, so its offsets
+	// match the cached stream even on a short write.
+	if n > 0 {
+		w.idx.feed(p[:n])
+	}
+	return n, err
+}
 
 // Commit finalises the cached encrypted file. Call after a successful stream.
 func (w *decCacheWriter) Commit() {
@@ -253,7 +265,14 @@ func (w *decCacheWriter) Commit() {
 		os.Remove(w.tmp.Name())
 	} else {
 		mvDecTotalSz.Add(size)
-		log.Printf("[mv-dec] cached %s@%dp (%.1f MB encrypted)", w.assetID, w.maxHeight, float64(size)/(1<<20))
+		// Persist the fragment index alongside the committed cache (best-effort;
+		// writes nothing if indexing was disabled, leaving seeks on the FFmpeg path).
+		w.idx.finish(final)
+		nFrags := 0
+		if w.idx != nil {
+			nFrags = len(w.idx.frags)
+		}
+		log.Printf("[mv-dec] cached %s@%dp (%.1f MB encrypted, %d fragments indexed)", w.assetID, w.maxHeight, float64(size)/(1<<20), nFrags)
 	}
 	fltKey := mvDecInFltKey(w.assetID, w.maxHeight)
 	mvDecMu.Lock()
