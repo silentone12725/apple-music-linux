@@ -52,13 +52,20 @@ test('Improvement09: JS MV re-inject cache cap', () => {
 //
 // Proposal: adaptively enable HW decode for high-res MV. This confirms it is
 // currently force-disabled and that any change is a real behavior switch.
-test('Improvement10: VA-API decode disabled in main process', () => {
-    const disabled = /disable-features'[\s\S]{0,400}Vaapi(Video)?Decoder/.test(MAIN)
-        || /Vaapi(Video)?Decoder/.test(MAIN);
+test('Improvement10: VA-API decode disabled — and WHY it is unsafe to flip', () => {
+    const disabled = /Vaapi(Video)?Decoder/.test(MAIN);
     assert.ok(disabled, 'expected VaapiVideoDecoder in a disable-features switch');
-    console.log('VERDICT #10: VA-API decode is force-disabled → MV decodes in software (CPU-heavy at 1080p). ' +
-        'IMPLEMENTABLE but RISKY — it was disabled for a reason (Chromium/driver regressions). ' +
-        'Needs a per-GPU allowlist + runtime fallback + dropped-frame telemetry before flipping. Low priority.');
+    // The decisive fact: VA-API was disabled specifically to STOP the same
+    // CHUNK_DEMUXER_ERROR_APPEND_FAILED (code=3) we build retry machinery for.
+    const rationale = /VA-?API[\s\S]{0,400}CHUNK_DEMUXER_ERROR_APPEND_FAILED/.test(MAIN);
+    assert.ok(rationale, 'expected the documented code=3 rationale next to the VA-API disable');
+    // And there is no runtime fallback / per-GPU allowlist to make flipping safe.
+    const hasFallback = /Vaapi[\s\S]{0,600}(fallback|allowlist|gpuAllow|decodeError)/i.test(MAIN);
+    assert.equal(hasFallback, false, 'no VA-API runtime fallback present (as expected)');
+    console.log('VERDICT #10: DO NOT IMPLEMENT — VA-API is force-disabled precisely because the ' +
+        'Chrome 138 Linux VA-API→FFmpeg mid-stream fallback is the DOCUMENTED CAUSE of the ' +
+        'CHUNK_DEMUXER_ERROR_APPEND_FAILED (code=3) failures. Re-enabling it reintroduces the exact ' +
+        'bug the retry machinery mitigates. Software decode is the deliberate, correct choice here.');
 });
 
 // ── #11 & #12 — NOT function-testable (documented, deliberately skipped) ──
