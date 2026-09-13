@@ -12,7 +12,8 @@
     "abstract-socket@2.1.1": true
   },
   "scripts": {
-    "dist": "electron-builder --linux AppImage"
+    "dist": "electron-builder --linux AppImage",
+    "build:engine": "esbuild src/engine-playback.js --bundle --format=iife --outfile=engine-bundle.js && cp engine-bundle.js dist/linux-unpacked/resources/engine-bundle.js"
   },
   "desktopName": "apple-music-linux.desktop",
   "devDependencies": {
