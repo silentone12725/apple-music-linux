@@ -279,19 +279,18 @@ sheet.replaceSync(`
     background: var(--aml-accent-active, rgba(255,255,255,0.14)) !important;
     border-radius: 8px !important;
   }
-  /* Hide the squircle corner connectors Apple draws as pseudo-elements on highlighted
-     search rows — they appear as a curved nested line above/below the selection. */
-  [class*="search-suggestions"] li::before,
-  [class*="search-suggestions"] li::after,
-  [class*="search-suggestions"] [role="option"]::before,
-  [class*="search-suggestions"] [role="option"]::after,
-  [class*="search-suggestions"] [class*="list-item"]::before,
-  [class*="search-suggestions"] [class*="list-item"]::after,
-  [class*="search-suggestions"] [class*="selected"]::before,
-  [class*="search-suggestions"] [class*="selected"]::after,
-  [class*="search-suggestions"] [class*="highlighted"]::before,
-  [class*="search-suggestions"] [class*="highlighted"]::after {
-    display: none !important;
+  /* The "nested highlight" is self-inflicted: each result row is an <li>, but Apple
+     also nests inner <li>s inside it (ul.top-search-list-lookup__description >
+     li.top-search-list-lookup__explicit-wrapper / __secondary). The row-hover rule
+     above (…li:hover) therefore matches those inner <li>s too — hovering the row
+     hovers them, giving each a second, smaller tinted box. Keep the tint on the row
+     only by clearing background + radius on the inner description list and its <li>s.
+     Specificity here (≥0,3,0) beats the …li:hover rule (0,2,1). */
+  [class*="search-suggestions"] [class*="top-search-list-lookup__description"],
+  [class*="search-suggestions"] [class*="top-search-list-lookup__description"] li,
+  [class*="search-suggestions"] [class*="top-search-list-lookup__description"] li:hover {
+    background: transparent !important;
+    border-radius: 0 !important;
   }
 
   /* ── iOS/iPadOS-style back + forward navigation buttons (sidebar header row) ── */
