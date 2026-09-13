@@ -13,6 +13,7 @@ package aacstream
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -109,6 +110,75 @@ func TestMVDecIndex_MalformedDisables(t *testing.T) {
 		t.Fatal("disabled indexer must not write a sidecar")
 	}
 	t.Log("VERDICT: malformed input disables the indexer and writes no index (seek falls back to FFmpeg).")
+}
+
+// setupMVDecForTest points the dec-cache at a temp dir with a fixed key and
+// enables caching, so MVDecCacheWriter/ServeMVDecFrom run without touching real
+// user files. Package-level globals → tests here must not run in parallel.
+func setupMVDecForTest(t *testing.T) {
+	t.Helper()
+	mvDecDir = t.TempDir()
+	mvDecKey = bytes.Repeat([]byte{0x24}, 32)
+	mvDecKeyOnce.Do(func() {}) // consume Once so initMVDecKey() won't overwrite the test key
+	SetMVCacheMaxBytes(1 << 30)
+	t.Cleanup(func() { SetMVCacheMaxBytes(0) })
+}
+
+// TestServeMVDecFrom_SeekableRoundTrip writes a real fMP4 through the caching
+// writer (which builds the index + encrypts), then serves seeks from the cache
+// and checks the output equals init segment + the exact plaintext tail from the
+// covering fragment — proving the seekable AES-CTR decrypt reconstructs bytes.
+func TestServeMVDecFrom_SeekableRoundTrip(t *testing.T) {
+	setupMVDecForTest(t)
+	const timescale = 1000
+	decTimes := []uint64{0, 1000, 2000, 3000, 4000} // 0,1,2,3,4s
+	stream, initSize, wantTimes, wantOffsets := buildMVStream(t, timescale, decTimes)
+
+	const assetID, maxHeight = "asset-seek", 720
+	cw := MVDecCacheWriter(assetID, maxHeight, io.Discard)
+	// Feed in small chunks to exercise indexing across write boundaries.
+	feedWriterChunked(t, cw, stream, 7)
+	cw.Commit()
+
+	if !MVDecExists(assetID, maxHeight) {
+		t.Fatal("dec cache not committed")
+	}
+	if !MVDecIndexExists(assetID, maxHeight) {
+		t.Fatal("index sidecar not written")
+	}
+
+	// For each seek, target = last fragment with T <= seekSec.
+	cases := []struct {
+		seek     float64
+		wantFrag int
+	}{
+		{0.0, 0}, {0.5, 0}, {1.0, 1}, {2.5, 2}, {3.9, 3}, {4.0, 4}, {99.0, 4},
+	}
+	for _, c := range cases {
+		var out bytes.Buffer
+		if err := ServeMVDecFrom(assetID, maxHeight, c.seek, &out); err != nil {
+			t.Fatalf("seek=%.1f: ServeMVDecFrom: %v", c.seek, err)
+		}
+		want := append(append([]byte{}, stream[:initSize]...), stream[wantOffsets[c.wantFrag]:]...)
+		if !bytes.Equal(out.Bytes(), want) {
+			t.Fatalf("seek=%.1f (frag %d @ t=%.1f): output %d bytes != expected %d bytes",
+				c.seek, c.wantFrag, wantTimes[c.wantFrag], out.Len(), len(want))
+		}
+	}
+	t.Log("VERDICT: ServeMVDecFrom emits init + exact plaintext tail from the covering fragment for every seek.")
+}
+
+func feedWriterChunked(t *testing.T, w io.Writer, data []byte, chunk int) {
+	t.Helper()
+	for off := 0; off < len(data); off += chunk {
+		end := off + chunk
+		if end > len(data) {
+			end = len(data)
+		}
+		if _, err := w.Write(data[off:end]); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
 }
 
 func TestMVDecIndex_FinishRoundTrips(t *testing.T) {
