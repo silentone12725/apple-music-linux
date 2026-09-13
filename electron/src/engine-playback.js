@@ -1915,6 +1915,18 @@ async function startMVPipeline() {
     myVid.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;';
     mvContainer.insertAdjacentElement('afterbegin', myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = '0';
+
+    // ── Video backend selection ─────────────────────────────────────────────────
+    // WebCodecs path (default when available): our engine demuxes H.264 (/video-es)
+    // and Chromium's VideoDecoder decodes to a <canvas> — bypassing the MSE
+    // ChunkDemuxer that throws code=3. Audio still rides the MSE pipe below. Set
+    // window._amlMVBackend='mse' to fall back to the original MSE video path.
+    // The MSE video block still runs its DECLARATIONS (pipeCtrl, videoSb, onVideo*
+    // handlers) so the shared cleanup() resolves them; only its active work (the
+    // /video fetch + buffer monitor + tryStart's video-element play) is gated off.
+    const _wcVideo = (window._amlMVBackend !== 'mse') && (typeof VideoDecoder !== 'undefined');
+    let _wcCleanup = null; // set by _setupWebCodecsVideo; called from cleanup()
+    console.log(`[AML MV] video backend = ${_wcVideo ? 'webcodecs' : 'mse'}`);
     // Suppress CDN-buffering events from nativeVidEl that cause MK loading-indicator blinking.
     // nativeVidEl keeps loading from Apple CDN in the background; its waiting/stalled/suspend
     // events propagate to MK's state machine and toggle the loading spinner continuously.
@@ -2870,6 +2882,13 @@ async function startMVPipeline() {
         if (exitBtn) exitBtn.style.removeProperty('pointer-events');
         _mvGateOpen = true; // unblock play/seek now that both streams are ready
 
+        if (_wcVideo) {
+            // WebCodecs: the canvas render loop follows mkAudio.currentTime, so we
+            // only need to start audio. No video-element play, no MSE buffer monitor.
+            _iframePlay.call(mkAudio).catch(e => console.warn('[AML MV-WC] audio play rejected:', e.message));
+            return;
+        }
+
         // Sync video time to audio (audio loads faster; set video to audio reference).
         // Guard: only seek video to audio position when the video buffer already covers
         // that position.  On retry, audio is at mid-track but the fresh video buffer
@@ -3056,7 +3075,7 @@ async function startMVPipeline() {
     const videoCodecStr = rawVideoCodec.split(',').map(c => c.trim())
         .find(c => /^(avc1|hvc1|hev1|vp09|av01)/.test(c)) ?? 'avc1.640028';
     const videoMime = `video/mp4; codecs="${videoCodecStr}"`;
-    if (!MediaSource.isTypeSupported(videoMime)) {
+    if (!_wcVideo && !MediaSource.isTypeSupported(videoMime)) {
         // Unplayable here (typically HEVC on a Linux Chromium build with no hvc1
         // decoder). Tear down AND advance the queue — returning silently leaves MK
         // paused-but-not-ended on a track it will keep trying to restart.
@@ -3348,7 +3367,146 @@ async function startMVPipeline() {
                 }
             });
     };
-    _startVideoPipe();
+
+    // ── WebCodecs video renderer (default path) ─────────────────────────────────
+    // Demux happens in the engine (/video-es); Chromium's VideoDecoder decodes to a
+    // <canvas> layered over the (hidden) MSE video element. The canvas is paced by
+    // mkAudio.currentTime so audio remains the master clock. Bypasses ChunkDemuxer
+    // entirely → code=3 cannot occur; a bad access unit surfaces on the decoder's
+    // error callback and is skipped instead of tearing down the pipeline.
+    const _setupWebCodecsVideo = () => {
+        const canvas = document.createElement('canvas');
+        canvas.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;z-index:2;pointer-events:none;background:#000;';
+        mvContainer.insertAdjacentElement('afterbegin', canvas);
+        if (myVid) myVid.style.display = 'none'; // hide the empty MSE video element
+        const cctx = canvas.getContext('2d', { alpha: false });
+
+        let dec = null;
+        let fetchCtrl = null;
+        let raf = 0;
+        let firstFrame = false;
+        const queue = [];              // {frame, tUs} in display order (VideoDecoder reorders B-frames)
+        const QUEUE_MAX = 24;          // ~1s at 24fps of decoded frames held before backpressure
+        const aborted = () => _abortCtrl?.signal.aborted;
+
+        // Render loop: draw the newest frame whose PTS has been reached by the audio
+        // clock, closing anything older. Runs off rAF; naturally pauses when audio
+        // pauses (currentTime freezes) and resumes when it advances.
+        const render = () => {
+            if (aborted()) return;
+            const nowUs = mkAudio.currentTime * 1e6;
+            let drew = false;
+            while (queue.length && queue[0].tUs <= nowUs) {
+                const f = queue.shift();
+                if (queue.length && queue[0].tUs <= nowUs) { f.frame.close(); continue; } // stale — skip
+                if (canvas.width !== f.frame.displayWidth) { canvas.width = f.frame.displayWidth; canvas.height = f.frame.displayHeight; }
+                cctx.drawImage(f.frame, 0, 0, canvas.width, canvas.height);
+                f.frame.close();
+                drew = true;
+            }
+            void drew;
+            raf = requestAnimationFrame(render);
+        };
+
+        const start = async (seekSec = 0) => {
+            fetchCtrl = new AbortController();
+            const sig = fetchCtrl.signal;
+            dec = new VideoDecoder({
+                output: (frame) => {
+                    if (aborted() || sig.aborted) { frame.close(); return; }
+                    queue.push({ frame, tUs: frame.timestamp });
+                    if (!firstFrame) { firstFrame = true; _videoCanPlay = true; tryStart(); if (!raf) raf = requestAnimationFrame(render); }
+                },
+                error: (e) => console.error(`[AML MV-WC] decode error: ${e.message}`),
+            });
+
+            let buf = new Uint8Array(0);
+            const td = new TextDecoder();
+            let state = 'magic', codec = '';
+            const drain = () => {
+                for (;;) {
+                    if (state === 'magic') {
+                        if (buf.length < 4) return;
+                        if (td.decode(buf.slice(0, 4)) !== 'AME1') { console.error('[AML MV-WC] bad ES magic'); fetchCtrl.abort(); return; }
+                        buf = buf.slice(4); state = 'codec';
+                    } else if (state === 'codec') {
+                        if (buf.length < 2) return;
+                        const l = (buf[0] << 8) | buf[1]; if (buf.length < 2 + l) return;
+                        codec = td.decode(buf.slice(2, 2 + l)); buf = buf.slice(2 + l); state = 'avcc';
+                    } else if (state === 'avcc') {
+                        if (buf.length < 2) return;
+                        const l = (buf[0] << 8) | buf[1]; if (buf.length < 2 + l) return;
+                        const avcC = buf.slice(2, 2 + l); buf = buf.slice(2 + l); state = 'samples';
+                        try { dec.configure({ codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: 'no-preference' }); }
+                        catch (e) { console.error(`[AML MV-WC] configure failed: ${e.message}`); fetchCtrl.abort(); return; }
+                        console.log(`[AML MV-WC] configured codec=${codec} avcC=${avcC.length}B`);
+                    } else { // samples
+                        if (buf.length < 17) return;
+                        const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
+                        const len = dv.getUint32(13);
+                        if (buf.length < 17 + len) return;
+                        const key = (buf[0] & 1) === 1;
+                        const tUs = Number(dv.getBigInt64(1));
+                        const durUs = dv.getUint32(9);
+                        const data = buf.slice(17, 17 + len); buf = buf.slice(17 + len);
+                        if (dec.decodeQueueSize > QUEUE_MAX) { /* soft backpressure */ }
+                        try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: tUs, duration: durUs, data })); }
+                        catch (e) { console.error(`[AML MV-WC] decode() threw: ${e.message}`); }
+                    }
+                }
+            };
+
+            try {
+                const resp = await fetch(`${videoUrl}-es${seekSec > 0 ? `?t=${seekSec.toFixed(3)}` : ''}`, { signal: sig });
+                if (!resp.ok) { console.error(`[AML MV-WC] /video-es ${resp.status}`); return; }
+                const reader = resp.body.getReader();
+                for (;;) {
+                    // Backpressure: cap decode-ahead to ~5s / 60 frames so we don't
+                    // decode the whole track into VideoFrames (GPU memory) faster than
+                    // playback consumes them. Naturally stalls while audio is paused.
+                    while (!aborted() && !sig.aborted) {
+                        const lastUs = queue.length ? queue[queue.length - 1].tUs : 0;
+                        if ((lastUs - mkAudio.currentTime * 1e6) < 5e6 && dec.decodeQueueSize < 60) break;
+                        await new Promise(r => setTimeout(r, 30));
+                    }
+                    if (aborted() || sig.aborted) break;
+                    const { done, value } = await reader.read();
+                    if (done || aborted() || sig.aborted) break;
+                    const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
+                    drain();
+                }
+                if (dec && dec.state === 'configured') await dec.flush().catch(() => {});
+            } catch (e) {
+                if (!sig.aborted && !aborted()) console.error(`[AML MV-WC] stream error: ${e.message}`);
+            }
+        };
+
+        // Seek: mkAudio drives the clock; restart the video ES from the new position.
+        const onWcSeek = () => {
+            if (aborted()) return;
+            const t = mkAudio.currentTime;
+            try { fetchCtrl?.abort(); } catch (_) {}
+            try { if (dec && dec.state !== 'closed') dec.close(); } catch (_) {}
+            while (queue.length) queue.shift().frame.close();
+            firstFrame = true; // already started once; don't re-gate
+            start(t).catch(() => {});
+        };
+        mkAudio.addEventListener('seeking', onWcSeek);
+
+        _wcCleanup = () => {
+            try { mkAudio.removeEventListener('seeking', onWcSeek); } catch (_) {}
+            try { fetchCtrl?.abort(); } catch (_) {}
+            if (raf) cancelAnimationFrame(raf);
+            while (queue.length) { try { queue.shift().frame.close(); } catch (_) {} }
+            try { if (dec && dec.state !== 'closed') dec.close(); } catch (_) {}
+            try { canvas.remove(); } catch (_) {}
+        };
+
+        start(0).catch(e => console.error('[AML MV-WC] start error:', e.message));
+    };
+
+    if (_wcVideo) _setupWebCodecsVideo();
+    else _startVideoPipe();
 
     // ── Seek outside the buffered range: clear the SB and restart the pipe from the
     // engine at ?t=<target>. The engine serves the nearest fragment from its disk
@@ -3386,6 +3544,7 @@ async function startMVPipeline() {
         } finally { _mvVidSeeking = false; }
     };
     videoEl.addEventListener('seeking', () => {
+        if (_wcVideo) return; // WebCodecs handles seeks via mkAudio 'seeking' (onWcSeek)
         if (Date.now() < _ignoreSeekUntil) return; // our own managed currentTime set — not a user seek
         _mvVideoSeek(videoEl.currentTime).catch(() => {});
     });
@@ -3536,6 +3695,8 @@ async function startMVPipeline() {
 
     const cleanup = () => {
         console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation} reason=${_abortReason}`);
+        // WebCodecs teardown (decoder, canvas, ES fetch, render loop) if that path ran.
+        if (_wcCleanup) { try { _wcCleanup(); } catch (_) {} _wcCleanup = null; }
         // Always clear the load() shadow so the next handleTrackChange or MK queue
         // advance isn't blocked. Harmless if already deleted; re-set by handleTrackChange.
         try { delete mkAudio.load; } catch (_) {}
