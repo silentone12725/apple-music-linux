@@ -900,6 +900,26 @@ function getMKAudio() {
     return document.getElementById('apple-music-player') || document.querySelector('audio') || null;
 }
 
+// Current playback position in ms for MPRIS. VLC (ALAC) tracks it in _vlcPosMs
+// via the poll; MSE (AAC) has no poll, so read the <audio> element directly.
+// Without this, MPRIS position was frozen at 0 for every AAC track (all four
+// mprisUpdate position emitters used _vlcPosMs, which stays 0 in MSE mode).
+function _mprisPosMs() {
+    if (_vlcMode) return _vlcPosMs;
+    const a = getMKAudio();
+    return a && Number.isFinite(a.currentTime) ? Math.round(a.currentTime * 1000) : _vlcPosMs;
+}
+
+// Periodic MPRIS position tick for the MSE/AAC path (the VLC poll covers ALAC).
+// Emits ~1/s only while an AAC track is actively playing, so desktop widgets and
+// the lock screen show a live, advancing position instead of a stuck 0:00.
+setInterval(() => {
+    if (_vlcMode) return; // VLC poll already emits position
+    const a = getMKAudio();
+    if (!a || a.paused || !Number.isFinite(a.currentTime) || a.currentTime <= 0) return;
+    window.amlBridge?.mprisUpdate?.({ position: Math.round(a.currentTime * 1000) * 1000 }); // ms → µs
+}, 1000);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DORMANT — client-side Web Audio EQ for the AAC/MSE path. NOT WIRED IN.
 //
@@ -6602,7 +6622,7 @@ async function setup() {
         // jumping: on fresh track starts _vlcPosMs is 0/stale until VLC reports
         // its first tick, which causes the seek bar to visibly skip ahead.
         const seeked = isResume && status === 'Playing' && _vlcPosMs > 0;
-        window.amlBridge?.mprisUpdate?.({ status, position: _vlcPosMs * 1000, seeked });
+        window.amlBridge?.mprisUpdate?.({ status, position: _mprisPosMs() * 1000, seeked });
     }
 
     // Handle MPRIS commands from system media controls / media keys.
@@ -6628,7 +6648,7 @@ async function setup() {
             if (mk.nowPlayingItem) sendMprisMetadata(mk.nowPlayingItem);
             _pushMiniState();
             const playing = mk.playbackState === window.MusicKit?.PlaybackStates?.playing;
-            window.amlBridge?.mprisUpdate?.({ status: playing ? 'Playing' : 'Paused', position: _vlcPosMs * 1000 });
+            window.amlBridge?.mprisUpdate?.({ status: playing ? 'Playing' : 'Paused', position: _mprisPosMs() * 1000 });
         } catch (_) {}
     });
 
