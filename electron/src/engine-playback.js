@@ -17,6 +17,7 @@
 
 // Extracted modules (esbuild inlines these into engine-bundle.js at build time).
 import { mp4ParseBoxes as _mp4ParseBoxes } from './engine/mp4parse.js';
+import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 
 if (window.__amlEngineInjected) throw new Error('[AML] double-injection guard');
 window.__amlEngineInjected = true;
@@ -295,25 +296,13 @@ let _amlNavInternal      = false; // true when NPIDF is expected from our _amlGo
 let _amlPendingCI        = -1;   // container index to apply in NPIDF (set by _amlGoto)
 let _amlPendingII        = -1;   // item index to apply in NPIDF
 
-const _extractItemId = (item) =>
-    item?.playParams?.catalogId
-    ?? item?.attributes?.playParams?.catalogId
-    ?? item?.id
-    ?? item?.playParams?.id
-    ?? item?.attributes?.playParams?.id
-    ?? null;
+// _extractItemId / _isVideoType / _extractItemType are imported from ./engine/catalog.js above.
 
 // Container items stay bare IDs so every index calculation below is untouched;
 // the song/music-video distinction rides alongside in this map. Needed because
 // _amlGoto's queue-rebuild has to name the right descriptor key, and an MV sent
 // as {songs:[id]} is not a valid catalog song. Playlists can mix both types.
 const _itemTypes = new Map(); // id → 'music-videos' | 'songs'
-
-const _isVideoType = (t) =>
-    t === 'music-videos' || t === 'musicVideo' || t === 'library-music-videos';
-
-const _extractItemType = (item) =>
-    item?.type ?? item?.attributes?.playParams?.kind ?? item?.playParams?.kind ?? null;
 
 // Remember the type of every item MK hands us, so a later cross-container jump
 // can rebuild the queue with the correct descriptor.
