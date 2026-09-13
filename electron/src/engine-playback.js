@@ -2971,7 +2971,7 @@ async function startMVPipeline() {
     let pipeCtrl = new AbortController();
     const videoUrl = `${ENGINE}/api/v1/playback/${_sessionId}/video`;
 
-    // ── Video pipe (with chunk cache for backward seek re-injection) ──────────────
+    // ── Video pipe ────────────────────────────────────────────────────────────────
     //
     // Buffer bounds mirror Apple's own Android PlayerLoadControl
     // (com.apple.android.music.playback.player.PlayerLoadControl):
@@ -2989,14 +2989,11 @@ async function startMVPipeline() {
     // Retrying re-downloaded from scratch and hit the same wall, hence the loop.
     const BUF_MAX_AHEAD = 50;  // stop reading once this many seconds are buffered ahead
     const BUF_BACK_KEEP = 15;  // seconds behind the playhead to retain when evicting
-    const _vidCache = [];
-    // Cap the re-injection cache so a long MV does not pin its full decoded size in
-    // the JS heap (a 4:40 MV is ~330 MB), which itself starves the MSE buffer.
-    // Once the cap is passed the cache is a truncated prefix and must not be
-    // re-injected; _mvVideoSeek falls back to a ranged re-fetch instead.
-    const VID_CACHE_MAX_BYTES = 96 << 20; // 96 MB
-    let _vidCacheBytes = 0;
-    let _vidCacheComplete = true;
+    // Backward seeks re-fetch from the engine at ?t=<target> rather than replaying a
+    // renderer-side RAM cache. The engine already caches decrypted MV segments (and
+    // the full remuxed track) on disk, so the re-fetch is a local read — not worth
+    // pinning up to ~96 MB of Uint8Arrays on the JS heap, which itself starved the
+    // MSE buffer on long videos.
     const _waitVidIdle = () => new Promise((res, rej) => {
         if (!videoSb.updating) return res();
         const onEnd = () => { videoSb.removeEventListener('error', onErr); res(); };
@@ -3102,8 +3099,8 @@ async function startMVPipeline() {
         throw new Error(`appendBuffer failed after retries size=${chunk.byteLength} buf=${_bufRanges(videoSb)}`);
     };
 
-    const runVideoPipe = async (url, cache, signal) => {
-        console.log(`[AML MV-pipe] start url=${url.split('?')[1]||'base'} cache=${cache} signal.aborted=${signal.aborted}`);
+    const runVideoPipe = async (url, signal) => {
+        console.log(`[AML MV-pipe] start url=${url.split('?')[1]||'base'} signal.aborted=${signal.aborted}`);
         const resp = await fetch(url, { signal });
         if (!resp.ok) throw new Error(`video ${resp.status}`);
         const reader = resp.body.getReader();
@@ -3122,20 +3119,6 @@ async function startMVPipeline() {
                 if (signal.aborted || ms.readyState !== 'open') {
                     console.log(`[AML MV-pipe] break chunk#${chunkN} signal.aborted=${signal.aborted} msState=${ms.readyState}`);
                     break;
-                }
-                if (cache && _vidCacheComplete) {
-                    if (_vidCacheBytes + value.byteLength <= VID_CACHE_MAX_BYTES) {
-                        _vidCache.push(value);
-                        _vidCacheBytes += value.byteLength;
-                    } else {
-                        // Past the cap the cache is a truncated prefix and can never
-                        // be re-injected, so release it instead of pinning tens of MB
-                        // of Uint8Arrays that nothing will ever read.
-                        _vidCacheComplete = false;
-                        console.log(`[AML MV-pipe] re-inject cache exceeded ${(VID_CACHE_MAX_BYTES/(1<<20)).toFixed(0)} MB — released, backward seek will re-fetch`);
-                        _vidCache.length = 0;
-                        _vidCacheBytes = 0;
-                    }
                 }
                 const box = _boxName(value);
                 const bufBefore = _bufRanges(videoSb);
@@ -3169,7 +3152,7 @@ async function startMVPipeline() {
     // jumping FORWARD past the bad segment so the engine skips the problematic
     // keyframe entirely instead of re-serving it from t=0.
     const _startVideoPipe = (url = videoUrl) => {
-        runVideoPipe(url, true, pipeCtrl.signal)
+        runVideoPipe(url, pipeCtrl.signal)
             .catch(async e => {
                 const aborted = pipeCtrl.signal.aborted;
                 console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
@@ -3249,7 +3232,10 @@ async function startMVPipeline() {
     };
     _startVideoPipe();
 
-    // ── Backward seek: re-inject cached chunks for both video and audio ──────────
+    // ── Seek outside the buffered range: clear the SB and restart the pipe from the
+    // engine at ?t=<target>. The engine serves the nearest fragment from its disk
+    // cache (decrypted segments + full remuxed track), so this is a local read, not
+    // a CDN round-trip. Replaces the old renderer-side RAM re-injection cache. ──────
     let _mvVidSeeking = false;
     const _mvVideoSeek = async (seekSec) => {
         if (_mvVidSeeking || pipeCtrl.signal.aborted) return;
@@ -3266,24 +3252,9 @@ async function startMVPipeline() {
             if (videoSb.buffered.length > 0) { videoSb.remove(0, Infinity); await _waitVidIdle(); }
             if (sig.aborted || ms.readyState !== 'open') return;
             videoSb.timestampOffset = 0;
-            // Re-inject locally only when the cache holds the whole stream so far.
-            // Once VID_CACHE_MAX_BYTES is passed the cache is a truncated prefix and
-            // replaying it would leave a gap; re-fetch from the seek point instead.
-            let resumeFrom = seekSec;
-            if (_vidCacheComplete && _vidCache.length > 0) {
-                for (const chunk of [..._vidCache]) {
-                    if (sig.aborted || ms.readyState !== 'open') return;
-                    await _waitVidIdle();
-                    if (!await _appendWithQuota(chunk, sig)) return;
-                }
-                if (sig.aborted || ms.readyState !== 'open') return;
-                if (videoSb.buffered.length > 0)
-                    resumeFrom = videoSb.buffered.end(videoSb.buffered.length - 1);
-            } else {
-                console.log(`[AML MV-V] backward seek to ${seekSec.toFixed(1)}s — re-fetching (cache incomplete)`);
-            }
-            if (resumeFrom < (_durationSec || 1e9) - 1) {
-                runVideoPipe(`${videoUrl}?t=${resumeFrom.toFixed(3)}`, false, sig)
+            console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s — re-fetching from engine`);
+            if (seekSec < (_durationSec || 1e9) - 1) {
+                runVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`, sig)
                     .catch(e => { if (!sig.aborted) console.error('[AML MV] video resume error:', e); });
             }
         } finally { _mvVidSeeking = false; }
