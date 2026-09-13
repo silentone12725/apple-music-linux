@@ -3262,12 +3262,18 @@ async function startMVPipeline() {
                 if (!aborted && _decodeRetryCount < 3 && e.message.includes('veCode=3')) {
                     _decodeRetryCount++;
                     const ct = videoEl.currentTime;
-                    // Jump past the bad segment — the buffered end is where the append failed.
                     const badEnd = videoSb.buffered.length > 0
                         ? videoSb.buffered.end(videoSb.buffered.length - 1)
                         : ct;
-                    const skipTo = Math.max(ct + 0.5, badEnd + 3);
-                    console.warn(`[AML MV-pipe] veCode=3 retry #${_decodeRetryCount} — clearing SB, skipping to ${skipTo.toFixed(1)}s`);
+                    // ExoPlayer-style escalation: CHUNK_DEMUXER_ERROR is usually a transient
+                    // decode-prep failure, not a reproducibly-bad keyframe, so first recover
+                    // IN PLACE — re-fetch the current region as a fresh remux (keeps the
+                    // playhead, doesn't discard the forward buffer). Only if it recurs do we
+                    // escalate to skipping PAST the bad region.
+                    const skipTo = _decodeRetryCount === 1
+                        ? ct + 0.5
+                        : Math.max(ct + 0.5, badEnd + 3);
+                    console.warn(`[AML MV-pipe] veCode=3 retry #${_decodeRetryCount} (${_decodeRetryCount === 1 ? 'recover-in-place' : 'skip-past'}) — clearing SB, seeking to ${skipTo.toFixed(1)}s`);
                     try {
                         // Block _mvVideoSeek from firing on our managed seek — otherwise it
                         // grabs pipeCtrl, aborts our restart pipe, and starts a conflicting one
