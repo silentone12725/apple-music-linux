@@ -900,6 +900,64 @@ function getMKAudio() {
     return document.getElementById('apple-music-player') || document.querySelector('audio') || null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DORMANT — client-side Web Audio EQ for the AAC/MSE path. NOT WIRED IN.
+//
+// Reference implementation preserved for the not-yet-built EQ Studio (CLAUDE.md:
+// "The EQ Studio UI in engine-playback.js ... is not yet implemented"). Current
+// EQ only applies on the FFmpeg binaural path, never on AAC/MSE — this fills that
+// gap client-side: preamp gain → chain of biquad filters → destination, mapping
+// EqualizerAPO band types (LSC/HSC/NO/BP/AP) to Web Audio filter types.
+//
+// Nothing calls these on purpose. Do NOT wire them in without handling the risks:
+//   • AudioContext.createMediaElementSource(el) may be called AT MOST ONCE per
+//     element and reroutes ALL of that element's audio through the graph — if the
+//     graph is ever left disconnected, playback goes silent.
+//   • It attaches to the same <audio> the MSE/VLC hijack drives; interaction with
+//     that pipeline (and with VLC, which bypasses the element) is unverified.
+//   • Salvaged from an old branch (65 commits behind); re-validate against the
+//     current audio setup before use.
+// eslint-disable-next-line no-unused-vars
+const _webEQ = { ctx: null, src: null, preamp: null, filters: [] };
+// eslint-disable-next-line no-unused-vars
+function _ensureWebAudioEQ() {
+    if (_webEQ.src) { if (_webEQ.ctx?.state === 'suspended') _webEQ.ctx.resume().catch(() => {}); return true; }
+    const el = getMKAudio();
+    if (!el) return false;
+    try {
+        _webEQ.ctx = _webEQ.ctx || new AudioContext();
+        _webEQ.src = _webEQ.ctx.createMediaElementSource(el);
+        _webEQ.preamp = _webEQ.ctx.createGain();
+        _webEQ.src.connect(_webEQ.preamp);
+        _webEQ.preamp.connect(_webEQ.ctx.destination);
+        if (_webEQ.ctx.state === 'suspended') _webEQ.ctx.resume().catch(() => {});
+        return true;
+    } catch (e) { console.warn('[AML EQ] Web Audio init:', e); return false; }
+}
+// eslint-disable-next-line no-unused-vars
+function _applyWebAudioEQ(bands, preampDb) {
+    if (!_ensureWebAudioEQ()) return;
+    const ctx = _webEQ.ctx;
+    _webEQ.preamp.gain.value = Math.pow(10, (preampDb || 0) / 20);
+    try { _webEQ.preamp.disconnect(); } catch (_) {}
+    _webEQ.filters.forEach(f => { try { f.disconnect(); } catch (_) {} });
+    _webEQ.filters = [];
+    const active = (bands || []).filter(b => b.enabled !== false && b.freq > 0);
+    if (!active.length) { _webEQ.preamp.connect(ctx.destination); return; }
+    _webEQ.filters = active.map(b => {
+        const f = ctx.createBiquadFilter();
+        f.type = { LSC: 'lowshelf', HSC: 'highshelf', NO: 'notch', BP: 'bandpass', AP: 'allpass' }[(b.type || '').toUpperCase()] || 'peaking';
+        f.frequency.value = b.freq;
+        f.Q.value = b.q || 1;
+        f.gain.value = b.gain || 0;
+        return f;
+    });
+    _webEQ.preamp.connect(_webEQ.filters[0]);
+    for (let i = 0; i < _webEQ.filters.length - 1; i++) _webEQ.filters[i].connect(_webEQ.filters[i + 1]);
+    _webEQ.filters[_webEQ.filters.length - 1].connect(ctx.destination);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 
 function waitForMusicKit() {
     return new Promise(resolve => {
