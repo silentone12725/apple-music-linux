@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -429,7 +430,7 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 	// Cache is keyed by assetID + maxHeight so quality changes always re-transcode.
 	// Seeks fall through to the normal pipeline so the segment cache handles them.
 	if seekSec == 0 && aacstream.MVDecExists(assetID, sess.MVMaxHeight) {
-		streamMedia(w, r, func(dst io.Writer) error {
+		streamMediaCoalesced(w, r, func(dst io.Writer) error {
 			return aacstream.ServeMVDec(assetID, sess.MVMaxHeight, dst)
 		}, "video/mp4")
 		return
@@ -449,7 +450,7 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, w)
 	}
 	// Only cache full plays; seek streams produce a partial file and must not be cached.
-	streamMedia(w, r, func(dst io.Writer) error {
+	streamMediaCoalesced(w, r, func(dst io.Writer) error {
 		if seekSec > 0 {
 			return transcodeVideoForMSE(r.Context(), videoSrc, dst)
 		}
@@ -481,7 +482,7 @@ func (s *APIServer) handlePlaybackVideoRaw(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	log.Printf("[video-raw] GET id=%s assetID=%q maxHeight=%d", id, sess.AssetID, sess.MVMaxHeight)
-	streamMedia(w, r, func(dst io.Writer) error {
+	streamMediaCoalesced(w, r, func(dst io.Writer) error {
 		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
 	}, "video/mp4")
 }
@@ -653,4 +654,82 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// boxCoalescer buffers incoming bytes and forwards only COMPLETE top-level MP4
+// boxes to the wrapped writer. Layered over firstByteWriter (which flushes every
+// Write), this collapses one-flush-per-network-chunk down to one-flush-per-box,
+// so FFmpeg's heavily fragmented output no longer triggers thousands of tiny
+// flush syscalls — while the player still receives each moof/mdat whole (never a
+// partial fragment, so no stall). Call Flush() after the stream ends to emit any
+// trailing bytes (a final partial box, or a size==0 "to EOF" box).
+//
+// MSE-only: used solely by the MV video path. The audio path keeps per-write
+// flushing because it can carry ALAC→VLC, which must not be touched.
+type boxCoalescer struct {
+	w   io.Writer
+	buf []byte
+}
+
+func (c *boxCoalescer) Write(p []byte) (int, error) {
+	c.buf = append(c.buf, p...)
+	for len(c.buf) >= 8 {
+		size := int(binary.BigEndian.Uint32(c.buf[:4]))
+		if size == 1 { // 64-bit largesize lives in bytes[8:16]
+			if len(c.buf) < 16 {
+				break // need the largesize field before we can measure the box
+			}
+			size = int(binary.BigEndian.Uint64(c.buf[8:16]))
+		}
+		if size < 8 {
+			// size==0 means "extends to EOF"; anything else <8 is malformed.
+			// Stop coalescing — Flush() emits whatever remains.
+			return len(p), nil
+		}
+		if len(c.buf) < size {
+			break // box not fully buffered yet
+		}
+		if _, err := c.w.Write(c.buf[:size]); err != nil {
+			return 0, err
+		}
+		c.buf = c.buf[size:]
+	}
+	return len(p), nil
+}
+
+// Flush emits any bytes buffered past the last complete box.
+func (c *boxCoalescer) Flush() error {
+	if len(c.buf) == 0 {
+		return nil
+	}
+	_, err := c.w.Write(c.buf)
+	c.buf = nil
+	return err
+}
+
+// streamMediaCoalesced is streamMedia with fragment-aligned flushing for the MV
+// video path. fn writes an fMP4 byte stream into a boxCoalescer that forwards
+// whole boxes to a firstByteWriter (header-defer + flush). It must NOT be used
+// for audio — that path can serve ALAC to VLC and relies on per-write flushing.
+func streamMediaCoalesced(w http.ResponseWriter, r *http.Request, fn func(io.Writer) error, ct string) {
+	bw := &firstByteWriter{w: w, ct: ct}
+	bc := &boxCoalescer{w: bw}
+	err := fn(bc)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return // client disconnected — not an error
+		}
+		if !bw.started {
+			// No complete box was ever emitted — report a clean error instead of
+			// committing 200 headers over a sub-fragment of garbage.
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		bc.Flush() //nolint:errcheck — emit the trailing partial fragment of an already-started stream
+		slog.Error("stream error (partial)", "err", err)
+		return
+	}
+	if ferr := bc.Flush(); ferr != nil && r.Context().Err() == nil {
+		slog.Error("stream flush error", "err", ferr)
+	}
 }
