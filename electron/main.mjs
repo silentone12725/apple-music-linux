@@ -1751,7 +1751,9 @@ function applyMprisData(data) {
         try { p.shuffle = data.shuffle; } catch (_) {}
     }
     if (data.repeat != null) {
-        const loopMap = ['None', 'Playlist', 'Track']; // mk.repeatMode: 0=none, 1=all, 2=one
+        // MusicKit repeatMode: 0=none, 1=one, 2=all → MPRIS LoopStatus.
+        // (Was ['None','Playlist','Track'], which swapped one↔all.)
+        const loopMap = ['None', 'Track', 'Playlist'];
         try { p.loopStatus = loopMap[data.repeat] ?? 'None'; } catch (_) {}
     }
 }
