@@ -3299,6 +3299,10 @@ async function startMVPipeline() {
                             videoSb = ms.addSourceBuffer(videoMime);
                             console.log(`[AML MV-pipe] rebuilt MediaSource for retry (was ended)`);
                         }
+                        // Suppress the seeking-listener across our managed seek AND the
+                        // window in which its deferred 'seeking' event fires — otherwise it
+                        // re-enters _mvVideoSeek and aborts the pipe we restart below.
+                        _ignoreSeekUntil = Date.now() + 2000;
                         videoEl.currentTime = skipTo;
                         // HAVE_NOTHING (readyState=1) elements may never fire seeked because
                         // there is no buffered data to confirm the seek against. Race with a
@@ -3335,8 +3339,16 @@ async function startMVPipeline() {
     // cache (decrypted segments + full remuxed track), so this is a local read, not
     // a CDN round-trip. Replaces the old renderer-side RAM re-injection cache. ──────
     let _mvVidSeeking = false;
+    // Suppress the seeking-listener while WE drive videoEl.currentTime (code=3 retry,
+    // managed seeks). Setting currentTime queues a deferred 'seeking' event that fires
+    // AFTER our _mvVidSeeking guard clears, which otherwise re-enters _mvVideoSeek and
+    // aborts the pipe we just restarted (root cause of the "break-after-idle chunk#1,
+    // no seek log, stuck forever" hang).
+    let _ignoreSeekUntil = 0;
     const _mvVideoSeek = async (seekSec) => {
-        if (_mvVidSeeking || pipeCtrl.signal.aborted) return;
+        // ms must be open to append; check BEFORE aborting so a spurious seek during a
+        // MediaSource rebuild can never kill the pipe and then bail without restarting.
+        if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
         for (let i = 0; i < videoSb.buffered.length; i++) {
             if (seekSec >= videoSb.buffered.start(i) - 1.0 && seekSec <= videoSb.buffered.end(i) + 1.0) return;
         }
@@ -3357,7 +3369,10 @@ async function startMVPipeline() {
             }
         } finally { _mvVidSeeking = false; }
     };
-    videoEl.addEventListener('seeking', () => { _mvVideoSeek(videoEl.currentTime).catch(() => {}); });
+    videoEl.addEventListener('seeking', () => {
+        if (Date.now() < _ignoreSeekUntil) return; // our own managed currentTime set — not a user seek
+        _mvVideoSeek(videoEl.currentTime).catch(() => {});
+    });
 
     // Start audio from the exact video frame position on first timeupdate — avoids
     // snapping audio to 0 during FFmpeg startup latency.
