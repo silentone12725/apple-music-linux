@@ -900,6 +900,92 @@ function getMKAudio() {
     return document.getElementById('apple-music-player') || document.querySelector('audio') || null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WebCodecs MV video SPIKE (dev-only, manually invoked, zero-risk to the MSE path).
+//
+// Proves whether routing MV video through our own demuxer (engine /video-es) +
+// Chromium's WebCodecs VideoDecoder avoids code=3 (CHUNK_DEMUXER_ERROR). It does
+// NOT touch startMVPipeline — call it from DevTools while an MV session exists:
+//     _amlTestWebCodecs()            // uses the current session
+//     _amlTestWebCodecs('843309075-sessionId')
+// It decodes the session's video into an overlay canvas and logs decoded/error
+// counts. errors===0 means WebCodecs handled samples MSE would have rejected.
+// _amlWCTestStop() removes the canvas and aborts the fetch.
+window._amlTestWebCodecs = async function (sessionId) {
+    sessionId = sessionId || _sessionId;
+    if (!sessionId) { console.error('[WC-TEST] no active session id — start an MV first'); return; }
+    if (typeof VideoDecoder === 'undefined') { console.error('[WC-TEST] WebCodecs not available in this runtime'); return; }
+    const url = `${ENGINE}/api/v1/playback/${sessionId}/video-es`;
+    console.log(`[WC-TEST] start session=${sessionId} url=${url}`);
+
+    const cv = document.createElement('canvas');
+    cv.style.cssText = 'position:fixed;top:20px;right:20px;width:480px;height:auto;z-index:2147483647;background:#000;border:2px solid #0f0;box-shadow:0 8px 40px rgba(0,0,0,.6);';
+    document.body.appendChild(cv);
+    const ctx = cv.getContext('2d');
+    const ctrl = new AbortController();
+    let decoded = 0, drawn = 0, errors = 0, samples = 0;
+
+    const dec = new VideoDecoder({
+        output: (frame) => {
+            decoded++;
+            try { if (cv.width !== frame.displayWidth) { cv.width = frame.displayWidth; cv.height = frame.displayHeight; } ctx.drawImage(frame, 0, 0); drawn++; } catch (_) {}
+            frame.close();
+            if (decoded % 30 === 0) console.log(`[WC-TEST] decoded=${decoded} drawn=${drawn} samples=${samples} errors=${errors}`);
+        },
+        error: (e) => { errors++; console.error(`[WC-TEST] decoder error #${errors}: ${e.message}`); },
+    });
+
+    window._amlWCTestStop = () => { try { ctrl.abort(); } catch (_) {} try { dec.close(); } catch (_) {} cv.remove(); console.log('[WC-TEST] stopped'); };
+
+    let buf = new Uint8Array(0);
+    const append = (c) => { const b = new Uint8Array(buf.length + c.length); b.set(buf); b.set(c, buf.length); buf = b; };
+    const take = (n) => { const p = buf.slice(0, n); buf = buf.slice(n); return p; };
+    const u16 = () => new DataView(buf.buffer, buf.byteOffset, buf.length).getUint16(0);
+    let state = 'magic', codec = '';
+    const td = new TextDecoder();
+    const parse = () => {
+        for (;;) {
+            if (state === 'magic') {
+                if (buf.length < 4) return;
+                if (td.decode(take(4)) !== 'AME1') { console.error('[WC-TEST] bad magic'); ctrl.abort(); return; }
+                state = 'codec';
+            } else if (state === 'codec') {
+                if (buf.length < 2) return; const l = u16(); if (buf.length < 2 + l) return;
+                take(2); codec = td.decode(take(l)); state = 'avcc';
+            } else if (state === 'avcc') {
+                if (buf.length < 2) return; const l = u16(); if (buf.length < 2 + l) return;
+                take(2); const avcC = take(l);
+                dec.configure({ codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: 'no-preference' });
+                console.log(`[WC-TEST] configured codec=${codec} avcC=${avcC.length}B`);
+                state = 'samples';
+            } else { // samples
+                if (buf.length < 17) return;
+                const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
+                const len = dv.getUint32(13);
+                if (buf.length < 17 + len) return;
+                const key = (buf[0] & 1) === 1;
+                const ptsUs = Number(dv.getBigInt64(1));
+                const durUs = dv.getUint32(9);
+                take(17); const data = take(len); samples++;
+                try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ptsUs, duration: durUs, data })); }
+                catch (e) { errors++; console.error(`[WC-TEST] decode() threw: ${e.message}`); }
+            }
+        }
+    };
+
+    try {
+        const resp = await fetch(url, { signal: ctrl.signal });
+        if (!resp.ok) { console.error(`[WC-TEST] fetch ${resp.status}`); cv.remove(); return; }
+        const reader = resp.body.getReader();
+        for (;;) { const { done, value } = await reader.read(); if (done) break; append(value); parse(); }
+        await dec.flush().catch(() => {});
+        console.log(`[WC-TEST] DONE samples=${samples} decoded=${decoded} drawn=${drawn} errors=${errors} — ${errors === 0 ? '✅ no decode errors (code=3-class avoided)' : '⚠️ decode errors occurred'}`);
+    } catch (e) {
+        if (!ctrl.signal.aborted) console.error(`[WC-TEST] stream error: ${e.message}`);
+    }
+};
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Current playback position in ms for MPRIS. VLC (ALAC) tracks it in _vlcPosMs
 // via the poll; MSE (AAC) has no poll, so read the <audio> element directly.
 // Without this, MPRIS position was frozen at 0 for every AAC track (all four
