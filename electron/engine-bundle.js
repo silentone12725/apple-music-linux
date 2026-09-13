@@ -73,6 +73,11 @@
     return result;
   }
 
+  // src/engine/catalog.js
+  var extractItemId = (item) => item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
+  var isVideoType = (t) => t === "music-videos" || t === "musicVideo" || t === "library-music-videos";
+  var extractItemType = (item) => item?.type ?? item?.attributes?.playParams?.kind ?? item?.playParams?.kind ?? null;
+
   // src/engine-playback.js
   if (window.__amlEngineInjected) throw new Error("[AML] double-injection guard");
   window.__amlEngineInjected = true;
@@ -274,16 +279,13 @@
   var _amlNavInternal = false;
   var _amlPendingCI = -1;
   var _amlPendingII = -1;
-  var _extractItemId = (item) => item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
   var _itemTypes = /* @__PURE__ */ new Map();
-  var _isVideoType = (t) => t === "music-videos" || t === "musicVideo" || t === "library-music-videos";
-  var _extractItemType = (item) => item?.type ?? item?.attributes?.playParams?.kind ?? item?.playParams?.kind ?? null;
   function _recordItemTypes(mkItems) {
     for (const it of mkItems ?? []) {
-      const id = _extractItemId(it);
+      const id = extractItemId(it);
       if (!id) continue;
-      const t = _extractItemType(it);
-      if (t) _itemTypes.set(id, _isVideoType(t) ? "music-videos" : "songs");
+      const t = extractItemType(it);
+      if (t) _itemTypes.set(id, isVideoType(t) ? "music-videos" : "songs");
     }
   }
   var _isVideoId = (id) => _itemTypes.get(id) === "music-videos";
@@ -1707,6 +1709,9 @@
     myVid.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;";
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
+    const _wcVideo = window._amlMVBackend !== "mse" && typeof VideoDecoder !== "undefined";
+    let _wcCleanup = null;
+    console.log(`[AML MV] video backend = ${_wcVideo ? "webcodecs" : "mse"}`);
     const _nativeVidStopEvt = (e) => e.stopImmediatePropagation();
     if (nativeVidEl) {
       ["waiting", "stalled", "suspend"].forEach(
@@ -2542,6 +2547,10 @@
       mvContainer.style.removeProperty("cursor");
       if (exitBtn) exitBtn.style.removeProperty("pointer-events");
       _mvGateOpen = true;
+      if (_wcVideo) {
+        _iframePlay.call(mkAudio).catch((e) => console.warn("[AML MV-WC] audio play rejected:", e.message));
+        return;
+      }
       const audCt = mkAudio.currentTime;
       const vidCt = videoEl.currentTime;
       const vidBufEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : 0;
@@ -2732,7 +2741,7 @@
     const rawVideoCodec = _videoCodec || "";
     const videoCodecStr = rawVideoCodec.split(",").map((c) => c.trim()).find((c) => /^(avc1|hvc1|hev1|vp09|av01)/.test(c)) ?? "avc1.640028";
     const videoMime = `video/mp4; codecs="${videoCodecStr}"`;
-    if (!MediaSource.isTypeSupported(videoMime)) {
+    if (!_wcVideo && !MediaSource.isTypeSupported(videoMime)) {
       console.error(`[AML MV] video codec not supported: ${videoMime} \u2014 skipping track`);
       _audioPipeCtrl.abort();
       mkAudio.pause();
@@ -2965,7 +2974,189 @@
         }
       });
     };
-    _startVideoPipe();
+    const _setupWebCodecsVideo = () => {
+      const canvas = document.createElement("canvas");
+      canvas.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;z-index:2;pointer-events:none;background:#000;";
+      mvContainer.insertAdjacentElement("afterbegin", canvas);
+      if (myVid) myVid.style.display = "none";
+      const cctx = canvas.getContext("2d", { alpha: false });
+      let dec = null;
+      let fetchCtrl = null;
+      let raf = 0;
+      let firstFrame = false;
+      const queue = [];
+      const QUEUE_MAX = 24;
+      const aborted = () => _abortCtrl?.signal.aborted;
+      const render = () => {
+        if (aborted()) return;
+        const nowUs = mkAudio.currentTime * 1e6;
+        let drew = false;
+        while (queue.length && queue[0].tUs <= nowUs) {
+          const f = queue.shift();
+          if (queue.length && queue[0].tUs <= nowUs) {
+            f.frame.close();
+            continue;
+          }
+          if (canvas.width !== f.frame.displayWidth) {
+            canvas.width = f.frame.displayWidth;
+            canvas.height = f.frame.displayHeight;
+          }
+          cctx.drawImage(f.frame, 0, 0, canvas.width, canvas.height);
+          f.frame.close();
+          drew = true;
+        }
+        void drew;
+        raf = requestAnimationFrame(render);
+      };
+      const start = async (seekSec = 0) => {
+        fetchCtrl = new AbortController();
+        const sig = fetchCtrl.signal;
+        dec = new VideoDecoder({
+          output: (frame) => {
+            if (aborted() || sig.aborted) {
+              frame.close();
+              return;
+            }
+            queue.push({ frame, tUs: frame.timestamp });
+            if (!firstFrame) {
+              firstFrame = true;
+              _videoCanPlay = true;
+              tryStart();
+              if (!raf) raf = requestAnimationFrame(render);
+            }
+          },
+          error: (e) => console.error(`[AML MV-WC] decode error: ${e.message}`)
+        });
+        let buf = new Uint8Array(0);
+        const td = new TextDecoder();
+        let state = "magic", codec = "";
+        const drain = () => {
+          for (; ; ) {
+            if (state === "magic") {
+              if (buf.length < 4) return;
+              if (td.decode(buf.slice(0, 4)) !== "AME1") {
+                console.error("[AML MV-WC] bad ES magic");
+                fetchCtrl.abort();
+                return;
+              }
+              buf = buf.slice(4);
+              state = "codec";
+            } else if (state === "codec") {
+              if (buf.length < 2) return;
+              const l = buf[0] << 8 | buf[1];
+              if (buf.length < 2 + l) return;
+              codec = td.decode(buf.slice(2, 2 + l));
+              buf = buf.slice(2 + l);
+              state = "avcc";
+            } else if (state === "avcc") {
+              if (buf.length < 2) return;
+              const l = buf[0] << 8 | buf[1];
+              if (buf.length < 2 + l) return;
+              const avcC = buf.slice(2, 2 + l);
+              buf = buf.slice(2 + l);
+              state = "samples";
+              try {
+                dec.configure({ codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
+              } catch (e) {
+                console.error(`[AML MV-WC] configure failed: ${e.message}`);
+                fetchCtrl.abort();
+                return;
+              }
+              console.log(`[AML MV-WC] configured codec=${codec} avcC=${avcC.length}B`);
+            } else {
+              if (buf.length < 17) return;
+              const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
+              const len = dv.getUint32(13);
+              if (buf.length < 17 + len) return;
+              const key = (buf[0] & 1) === 1;
+              const tUs = Number(dv.getBigInt64(1));
+              const durUs = dv.getUint32(9);
+              const data = buf.slice(17, 17 + len);
+              buf = buf.slice(17 + len);
+              if (dec.decodeQueueSize > QUEUE_MAX) {
+              }
+              try {
+                dec.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: tUs, duration: durUs, data }));
+              } catch (e) {
+                console.error(`[AML MV-WC] decode() threw: ${e.message}`);
+              }
+            }
+          }
+        };
+        try {
+          const resp = await fetch(`${videoUrl}-es${seekSec > 0 ? `?t=${seekSec.toFixed(3)}` : ""}`, { signal: sig });
+          if (!resp.ok) {
+            console.error(`[AML MV-WC] /video-es ${resp.status}`);
+            return;
+          }
+          const reader = resp.body.getReader();
+          for (; ; ) {
+            while (!aborted() && !sig.aborted) {
+              const lastUs = queue.length ? queue[queue.length - 1].tUs : 0;
+              if (lastUs - mkAudio.currentTime * 1e6 < 5e6 && dec.decodeQueueSize < 60) break;
+              await new Promise((r) => setTimeout(r, 30));
+            }
+            if (aborted() || sig.aborted) break;
+            const { done, value } = await reader.read();
+            if (done || aborted() || sig.aborted) break;
+            const nb = new Uint8Array(buf.length + value.length);
+            nb.set(buf);
+            nb.set(value, buf.length);
+            buf = nb;
+            drain();
+          }
+          if (dec && dec.state === "configured") await dec.flush().catch(() => {
+          });
+        } catch (e) {
+          if (!sig.aborted && !aborted()) console.error(`[AML MV-WC] stream error: ${e.message}`);
+        }
+      };
+      const onWcSeek = () => {
+        if (aborted()) return;
+        const t = mkAudio.currentTime;
+        try {
+          fetchCtrl?.abort();
+        } catch (_) {
+        }
+        try {
+          if (dec && dec.state !== "closed") dec.close();
+        } catch (_) {
+        }
+        while (queue.length) queue.shift().frame.close();
+        firstFrame = true;
+        start(t).catch(() => {
+        });
+      };
+      mkAudio.addEventListener("seeking", onWcSeek);
+      _wcCleanup = () => {
+        try {
+          mkAudio.removeEventListener("seeking", onWcSeek);
+        } catch (_) {
+        }
+        try {
+          fetchCtrl?.abort();
+        } catch (_) {
+        }
+        if (raf) cancelAnimationFrame(raf);
+        while (queue.length) {
+          try {
+            queue.shift().frame.close();
+          } catch (_) {
+          }
+        }
+        try {
+          if (dec && dec.state !== "closed") dec.close();
+        } catch (_) {
+        }
+        try {
+          canvas.remove();
+        } catch (_) {
+        }
+      };
+      start(0).catch((e) => console.error("[AML MV-WC] start error:", e.message));
+    };
+    if (_wcVideo) _setupWebCodecsVideo();
+    else _startVideoPipe();
     let _mvVidSeeking = false;
     let _ignoreSeekUntil = 0;
     const _mvVideoSeek = async (seekSec) => {
@@ -2997,6 +3188,7 @@
       }
     };
     videoEl.addEventListener("seeking", () => {
+      if (_wcVideo) return;
       if (Date.now() < _ignoreSeekUntil) return;
       _mvVideoSeek(videoEl.currentTime).catch(() => {
       });
@@ -3148,6 +3340,13 @@
     };
     const cleanup = () => {
       console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation} reason=${_abortReason}`);
+      if (_wcCleanup) {
+        try {
+          _wcCleanup();
+        } catch (_) {
+        }
+        _wcCleanup = null;
+      }
       try {
         delete mkAudio.load;
       } catch (_) {
@@ -3586,7 +3785,7 @@
     const pos = mk.queue?.position ?? -1;
     if (!items || pos < 0 || pos + 1 >= items.length) return;
     const nextItem = items[pos + 1];
-    if (!_isVideoType(nextItem?.type)) return;
+    if (!isVideoType(nextItem?.type)) return;
     const nextAdamId = nextItem?.playParams?.catalogId ?? nextItem?.attributes?.playParams?.catalogId ?? nextItem?.id ?? nextItem?.playParams?.id ?? nextItem?.attributes?.playParams?.id;
     if (!nextAdamId) return;
     const nextName = nextItem?.attributes?.name ?? nextAdamId;
@@ -3756,7 +3955,7 @@
     showQualityBadge(null);
   }
   async function _resolveSession(item, adamId, sf, mk) {
-    const isVideo = _isVideoType(item.type);
+    const isVideo = isVideoType(item.type);
     if (adamId) _itemTypes.set(adamId, isVideo ? "music-videos" : "songs");
     const losslessWanted = _engineCaps.lossless && _streamingQuality !== "high-quality";
     if (!isVideo && losslessWanted && _nextAlacSession?.adamId === adamId) {
@@ -4652,7 +4851,7 @@
     const playing = !_isPausedNow();
     const startedAtMs = Date.now() - Math.round(posSec * 1e3);
     const sf = _mkInstance?.storefrontId ?? "us";
-    const isVideo = _isVideoType(item.type);
+    const isVideo = isVideoType(item.type);
     const itemType = isVideo ? "music-video" : "song";
     const slug = (a.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "track";
     const appleUrl = `https://music.apple.com/${sf}/${itemType}/${slug}/${_currentAssetId}`;
@@ -5710,7 +5909,7 @@
       _proxyInstalled = false;
       _vlcMode = false;
       const targetSongId = _sessionContainers[ci]?.items[ii];
-      const targetItem = targetSongId ? (mk.queue?.items ?? []).find((it) => _extractItemId(it) === targetSongId) : null;
+      const targetItem = targetSongId ? (mk.queue?.items ?? []).find((it) => extractItemId(it) === targetSongId) : null;
       if (targetItem) sendMprisMetadata(targetItem);
       _amlAdvancingTimer = setTimeout(() => {
         _amlGotoTarget = null;
@@ -5723,7 +5922,7 @@
         _clearAdvancing();
       }, 6e3);
       const mkCurrentItems = mk.queue?.items ?? [];
-      const mkDirectIdx = targetSongId ? mkCurrentItems.findIndex((it) => _extractItemId(it) === targetSongId) : -1;
+      const mkDirectIdx = targetSongId ? mkCurrentItems.findIndex((it) => extractItemId(it) === targetSongId) : -1;
       const targetIsVideo = _isVideoId(targetSongId);
       if (mkDirectIdx >= 0 && !targetIsVideo) {
         _amlGotoTarget = mkDirectIdx;
@@ -5786,7 +5985,7 @@
         await _amlGoto(ci + 1, 0);
       } else {
         const mkItems = mk.queue?.items ?? [];
-        const freshIds = mkItems.map(_extractItemId).filter((id) => id && !cur.items.includes(id));
+        const freshIds = mkItems.map(extractItemId).filter((id) => id && !cur.items.includes(id));
         if (freshIds.length) {
           cur.items.push(...freshIds);
           await _amlGoto(ci, ii + 1);
@@ -5909,7 +6108,7 @@
       if (a.releaseDate) meta["xesam:contentCreated"] = a.releaseDate;
       if (Number.isFinite(a.userRating)) meta["xesam:userRating"] = Math.max(0, Math.min(1, a.userRating / 5));
       if (Number.isFinite(a.popularity)) meta["xesam:autoRating"] = Math.max(0, Math.min(1, a.popularity / 100));
-      const iid = _extractItemId(item);
+      const iid = extractItemId(item);
       if (iid && iid in _lovedState) meta["xesam:userRating"] = _lovedState[iid] ? 1 : 0;
       window.amlBridge.mprisUpdate({
         metadata: meta,
@@ -6341,7 +6540,7 @@
         try {
           const qItems = mk.queue?.items;
           if (qItems?.length && _pendingExternalClickCatalogId) {
-            _pendingExternalClickQueueIdx = qItems.findIndex((it) => _extractItemId(it) === _pendingExternalClickCatalogId);
+            _pendingExternalClickQueueIdx = qItems.findIndex((it) => extractItemId(it) === _pendingExternalClickCatalogId);
           }
           if (_AML_DEBUG && qItems?.length && !window._amlQueueItemDumped) {
             window._amlQueueItemDumped = true;
@@ -6416,7 +6615,7 @@
             if (_pendingExternalClickQueueIdx >= 0 && id) {
               const mkQ = mk.queue?.items;
               const slotIt = mkQ?.[_pendingExternalClickQueueIdx];
-              if (slotIt && _extractItemId(slotIt) === id) {
+              if (slotIt && extractItemId(slotIt) === id) {
                 const ci2 = _sessionContainerIdx;
                 const cur2 = _sessionContainers[ci2];
                 if (cur2) {
@@ -6441,7 +6640,7 @@
             const mkQ2 = mk.queue?.items;
             const ci = _sessionContainerIdx;
             const cur = _sessionContainers[ci];
-            if (cur && mkQ2?.length && mkQ2.findIndex((it) => _extractItemId(it) === id) >= 0) {
+            if (cur && mkQ2?.length && mkQ2.findIndex((it) => extractItemId(it) === id) >= 0) {
               if (!cur.items.includes(id)) cur.items.push(id);
               const ii = cur.items.indexOf(id);
               console.log("[AML VLC] \u2192 _amlGoto(" + ci + "," + ii + ") id=" + id + " (added to container)");
@@ -6609,7 +6808,7 @@
       const activeCurSet = new Set(activeCur.items);
       let added = 0;
       for (const mkItem of mkLive) {
-        const id = _extractItemId(mkItem);
+        const id = extractItemId(mkItem);
         if (id && !activeCurSet.has(id)) {
           activeCur.items.push(id);
           activeCurSet.add(id);
@@ -6626,9 +6825,9 @@
       if (_amlGotoTarget !== null) {
         const item2 = mk.nowPlayingItem;
         if (!item2) return;
-        const itemId = _extractItemId(item2);
+        const itemId = extractItemId(item2);
         const targetItem = mk.queue?.items?.[_amlGotoTarget];
-        const targetId = _amlGotoTargetId || _extractItemId(targetItem);
+        const targetId = _amlGotoTargetId || extractItemId(targetItem);
         if (targetId && itemId !== targetId) {
           console.log("[AML] NPIDF filtered: spurious event for", item2?.attributes?.name, "(advancing to idx", _amlGotoTarget, "target id", targetId, ")");
           return;
@@ -6667,7 +6866,7 @@
       const wasInternal = _amlNavInternal;
       _amlNavInternal = false;
       if (item) {
-        const songId = _extractItemId(item);
+        const songId = extractItemId(item);
         if (wasInternal && _amlPendingCI >= 0) {
           _sessionContainerIdx = _amlPendingCI;
           _sessionItemIdx = _amlPendingII;
@@ -6700,7 +6899,7 @@
               } else {
                 const mkItems2 = mk.queue?.items ?? [];
                 const mkPos2 = mk.queue?.position ?? 0;
-                const newIds = mkItems2.map(_extractItemId).filter(Boolean);
+                const newIds = mkItems2.map(extractItemId).filter(Boolean);
                 if (newIds.length) {
                   const curItems = cur?.items ?? [];
                   const newIdsSet = new Set(newIds);
@@ -6730,7 +6929,7 @@
           _recordItemTypes(mkLive);
           const activeCurSet = new Set(activeCur.items);
           for (const mkItem of mkLive) {
-            const id = _extractItemId(mkItem);
+            const id = extractItemId(mkItem);
             if (id && !activeCurSet.has(id)) {
               activeCur.items.push(id);
               activeCurSet.add(id);
