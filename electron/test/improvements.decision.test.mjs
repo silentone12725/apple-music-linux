@@ -36,16 +36,17 @@ test('Improvement08: forward/backward buffer window size', () => {
         `Bounds long-track memory to ~8 MB and speeds post-error recovery. AAC/MSE path only.`);
 });
 
-// ── #9 JS-side MV chunk cache cap (96 MB) ──
+// ── #9 JS-side MV chunk cache — REMOVED ──
 //
-// Proposal: move the backward-seek chunk cache off the JS heap into the engine.
-// This pins the heap cost so the trade-off is quantified.
-test('Improvement09: JS MV re-inject cache cap', () => {
-    const cap = numConst(PB, 'VID_CACHE_MAX_BYTES');
-    assert.equal(cap, 96 << 20, 'VID_CACHE_MAX_BYTES drifted');
-    console.log(`VERDICT #9: JS MV cache cap = ${(cap / (1 << 20)).toFixed(0)} MB of Uint8Arrays on the ` +
-        `renderer heap. IMPLEMENTABLE but MEDIUM effort — depends on the engine seek index ` +
-        `(aacstream Improvement06). Do #6 first, then this becomes a deletion (remove _vidCache).`);
+// Implemented as a deletion: the up-to-96 MB renderer-side re-injection cache
+// (_vidCache / VID_CACHE_MAX_BYTES) is gone. Backward seeks now re-fetch from the
+// engine at ?t=<target>, served from the engine's disk cache. Guard that the
+// cache stays gone so it can't creep back onto the JS heap.
+test('Improvement09: JS MV re-inject cache removed', () => {
+    assert.equal(/VID_CACHE_MAX_BYTES/.test(PB), false, 'VID_CACHE_MAX_BYTES came back');
+    assert.equal(/\b_vidCache\b/.test(PB), false, '_vidCache came back');
+    console.log('VERDICT #9: IMPLEMENTED (deletion) — the ~96 MB renderer-side MV re-inject cache is ' +
+        'removed; backward seeks re-fetch from the engine (?t=) served from its disk cache.');
 });
 
 // ── #10 VA-API hardware video decode is disabled ──
