@@ -2764,7 +2764,7 @@
       return;
     }
     console.log(`[AML MV] video codec="${videoCodecStr}"`);
-    let videoSb = ms.addSourceBuffer(videoMime);
+    let videoSb = _wcVideo ? null : ms.addSourceBuffer(videoMime);
     const videoEl = myVid;
     let pipeCtrl = new AbortController();
     let _pipeRestarted = false;

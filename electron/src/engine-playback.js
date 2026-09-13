@@ -3091,7 +3091,10 @@ async function startMVPipeline() {
     console.log(`[AML MV] video codec="${videoCodecStr}"`);
 
     // segments mode (default) — preserves HLS fMP4 timestamps.
-    let videoSb = ms.addSourceBuffer(videoMime);
+    // In WebCodecs mode we never append MSE video, so skip creating the SourceBuffer
+    // (also avoids addSourceBuffer throwing for HEVC that VideoDecoder could handle).
+    // Only gated-off code dereferences videoSb, so null is safe here.
+    let videoSb = _wcVideo ? null : ms.addSourceBuffer(videoMime);
 
     const videoEl = myVid;
     let pipeCtrl = new AbortController();
