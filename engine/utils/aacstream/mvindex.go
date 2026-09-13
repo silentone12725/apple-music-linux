@@ -291,11 +291,24 @@ func ServeMVDecFrom(assetID string, maxHeight int, seekSec float64, dst io.Write
 		}
 	}
 
-	f, err := os.Open(mvDecFilePath(assetID, maxHeight))
+	decPath := mvDecFilePath(assetID, maxHeight)
+	f, err := os.Open(decPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
+	// Guard against a cache file shorter than the index claims (truncation/
+	// corruption): the offsets would read past EOF. Drop the stale index so the
+	// next seek falls back to FFmpeg and re-caches, and fail this request cleanly.
+	if fi, statErr := f.Stat(); statErr == nil {
+		plainLen := fi.Size() - mvDecIVSize
+		if plainLen < idx.InitSize || plainLen <= target.Off {
+			os.Remove(decPath + ".idx")
+			return fmt.Errorf("mv dec-cache truncated (%s@%dp): plainLen=%d initSize=%d targetOff=%d",
+				assetID, maxHeight, plainLen, idx.InitSize, target.Off)
+		}
+	}
 
 	var iv [mvDecIVSize]byte
 	if _, err := io.ReadFull(f, iv[:]); err != nil {

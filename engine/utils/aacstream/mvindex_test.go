@@ -168,6 +168,36 @@ func TestServeMVDecFrom_SeekableRoundTrip(t *testing.T) {
 	t.Log("VERDICT: ServeMVDecFrom emits init + exact plaintext tail from the covering fragment for every seek.")
 }
 
+// TestServeMVDecFrom_TruncatedSelfHeals verifies that a cache file shorter than
+// its index claims is detected: ServeMVDecFrom errors cleanly and removes the
+// stale sidecar so the next seek falls back to FFmpeg instead of reading past EOF.
+func TestServeMVDecFrom_TruncatedSelfHeals(t *testing.T) {
+	setupMVDecForTest(t)
+	stream, _, _, _ := buildMVStream(t, 1000, []uint64{0, 1000, 2000, 3000})
+	const assetID, maxHeight = "asset-trunc", 720
+	cw := MVDecCacheWriter(assetID, maxHeight, io.Discard)
+	cw.Write(stream) //nolint:errcheck
+	cw.Commit()
+
+	// Truncate the committed .enc to just past the IV — far shorter than the index.
+	decPath := mvDecFilePath(assetID, maxHeight)
+	if err := os.Truncate(decPath, mvDecIVSize+8); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if !MVDecIndexExists(assetID, maxHeight) {
+		t.Fatal("precondition: index should exist")
+	}
+
+	var out bytes.Buffer
+	if err := ServeMVDecFrom(assetID, maxHeight, 2.5, &out); err == nil {
+		t.Fatal("expected error serving a truncated cache file")
+	}
+	if MVDecIndexExists(assetID, maxHeight) {
+		t.Fatal("stale index should have been removed for self-heal")
+	}
+	t.Log("VERDICT: truncated cache is detected, errors cleanly, and drops the stale index (next seek falls back).")
+}
+
 func feedWriterChunked(t *testing.T, w io.Writer, data []byte, chunk int) {
 	t.Helper()
 	for off := 0; off < len(data); off += chunk {

@@ -114,6 +114,39 @@ func TestBoxCoalescer_Handles64BitLargesize(t *testing.T) {
 	t.Log("VERDICT: 64-bit largesize boxes are measured and emitted whole.")
 }
 
+func TestBoxCoalescer_Size0BoxSwitchesToPassthrough(t *testing.T) {
+	// A size==0 ("to EOF") box must NOT be buffered unboundedly: after it, the
+	// coalescer streams directly. Build ftyp + a size-0 "mdat" header + a large
+	// trailing body, feed in tiny chunks, and assert nothing is lost or held.
+	var hdr [8]byte
+	binary.BigEndian.PutUint32(hdr[:4], 0) // size==0
+	copy(hdr[4:8], "mdat")
+	body := bytes.Repeat([]byte{0x9}, 100000)
+	stream := bytes.Join([][]byte{box32("ftyp", []byte("iso5")), hdr[:], body}, nil)
+
+	spy := &flushSpy{}
+	c := &boxCoalescer{w: spy}
+	for off := 0; off < len(stream); off += 5 {
+		end := off + 5
+		if end > len(stream) {
+			end = len(stream)
+		}
+		c.Write(stream[off:end]) //nolint:errcheck
+	}
+	c.Flush() //nolint:errcheck
+
+	if !c.pass {
+		t.Fatal("expected passthrough mode after size==0 box")
+	}
+	if len(c.buf) != 0 {
+		t.Fatalf("expected empty buffer in passthrough, got %d bytes held", len(c.buf))
+	}
+	if !bytes.Equal(spy.got.Bytes(), stream) {
+		t.Fatal("passthrough lost or reordered bytes")
+	}
+	t.Log("VERDICT: size==0 box switches to direct passthrough — no unbounded buffering, nothing lost.")
+}
+
 func TestBoxCoalescer_FlushEmitsTrailingRemainder(t *testing.T) {
 	// A complete box followed by a truncated/partial box (as a mid-stream error
 	// or a size==0 tail would leave). Flush must emit the remainder so nothing
