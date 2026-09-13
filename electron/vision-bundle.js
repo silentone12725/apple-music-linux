@@ -279,16 +279,21 @@ sheet.replaceSync(`
     background: var(--aml-accent-active, rgba(255,255,255,0.14)) !important;
     border-radius: 8px !important;
   }
-  /* The "nested highlight" is self-inflicted: each result row is an <li>, but Apple
-     also nests inner <li>s inside it (ul.top-search-list-lookup__description >
-     li.top-search-list-lookup__explicit-wrapper / __secondary). The row-hover rule
-     above (…li:hover) therefore matches those inner <li>s too — hovering the row
-     hovers them, giving each a second, smaller tinted box. Keep the tint on the row
-     only by clearing background + radius on the inner description list and its <li>s.
-     Specificity here (≥0,3,0) beats the …li:hover rule (0,2,1). */
-  [class*="search-suggestions"] [class*="top-search-list-lookup__description"],
-  [class*="search-suggestions"] [class*="top-search-list-lookup__description"] li,
-  [class*="search-suggestions"] [class*="top-search-list-lookup__description"] li:hover {
+  /* Keep ONE highlight — the big row hover above. Each row nests title/subtitle
+     <li>s (ul.top-search-list-lookup__description > li.__explicit-wrapper /
+     __secondary); the row-hover rule matches those too, painting a smaller pill on
+     each line. Strip background + radius from every inner row element so only the
+     row shows a highlight. Container-agnostic + !important so it applies whatever
+     the dropdown wrapper class is and wins over the (also-!important) hover rule
+     by coming later in source at equal specificity. */
+  [class*="top-search-list-lookup__description"],
+  [class*="top-search-list-lookup__description"] li,
+  [class*="top-search-list-lookup__description"] li:hover,
+  li[class*="top-search-list-lookup__explicit-wrapper"],
+  li[class*="top-search-list-lookup__explicit-wrapper"]:hover,
+  li[class*="top-search-list-lookup__secondary"],
+  li[class*="top-search-list-lookup__secondary"]:hover,
+  [class*="top-search-list-lookup__primary"] {
     background: transparent !important;
     border-radius: 0 !important;
   }
