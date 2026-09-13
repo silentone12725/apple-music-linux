@@ -297,6 +297,21 @@ sheet.replaceSync(`
     background: transparent !important;
     border-radius: 0 !important;
   }
+  /* If the pill is drawn as a pseudo-element on an inner row element rather than a
+     plain background, the rule above can't reach it — kill the pseudos too. */
+  [class*="top-search-list-lookup__description"]::before,
+  [class*="top-search-list-lookup__description"]::after,
+  [class*="top-search-list-lookup__description"] li::before,
+  [class*="top-search-list-lookup__description"] li::after,
+  li[class*="top-search-list-lookup__explicit-wrapper"]::before,
+  li[class*="top-search-list-lookup__explicit-wrapper"]::after,
+  li[class*="top-search-list-lookup__secondary"]::before,
+  li[class*="top-search-list-lookup__secondary"]::after,
+  [class*="top-search-list-lookup__primary"]::before,
+  [class*="top-search-list-lookup__primary"]::after {
+    background: transparent !important;
+    display: none !important;
+  }
 
   /* ── iOS/iPadOS-style back + forward navigation buttons (sidebar header row) ── */
   #aml-nav-buttons {
