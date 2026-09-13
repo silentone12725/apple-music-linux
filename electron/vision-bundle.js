@@ -279,6 +279,20 @@ sheet.replaceSync(`
     background: var(--aml-accent-active, rgba(255,255,255,0.14)) !important;
     border-radius: 8px !important;
   }
+  /* Hide the squircle corner connectors Apple draws as pseudo-elements on highlighted
+     search rows — they appear as a curved nested line above/below the selection. */
+  [class*="search-suggestions"] li::before,
+  [class*="search-suggestions"] li::after,
+  [class*="search-suggestions"] [role="option"]::before,
+  [class*="search-suggestions"] [role="option"]::after,
+  [class*="search-suggestions"] [class*="list-item"]::before,
+  [class*="search-suggestions"] [class*="list-item"]::after,
+  [class*="search-suggestions"] [class*="selected"]::before,
+  [class*="search-suggestions"] [class*="selected"]::after,
+  [class*="search-suggestions"] [class*="highlighted"]::before,
+  [class*="search-suggestions"] [class*="highlighted"]::after {
+    display: none !important;
+  }
 
   /* ── iOS/iPadOS-style back + forward navigation buttons (sidebar header row) ── */
   #aml-nav-buttons {
