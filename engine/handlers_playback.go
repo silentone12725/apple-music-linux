@@ -438,6 +438,15 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 	// Serve from decrypted-track cache for full plays (seekSec==0).
 	// Cache is keyed by assetID + maxHeight so quality changes always re-transcode.
 	// Seeks fall through to the normal pipeline so the segment cache handles them.
+	//
+	// ponytail: seekSec>0 re-runs FFmpeg even when the full dec-cache exists; a
+	// backward seek after a full play remuxes from disk-cached segments (~1-2s).
+	// upgrade path (#6, do only if that latency is felt): add ServeMVDecFrom that
+	// scans the cached remuxed fMP4 (init segment + per-moof tfdt vs mdhd timescale),
+	// emits init + the first fragment whose start >= seekSec, and serve it here for
+	// seekSec>0 & MVDecExists — skipping the FFmpeg re-run. Not built now: backward
+	// seeks in MVs are rare and this doesn't beat the already-shipping seek path by
+	// much, so the fMP4-parser risk isn't justified yet.
 	if seekSec == 0 && aacstream.MVDecExists(assetID, sess.MVMaxHeight) {
 		streamMediaCoalesced(w, r, func(dst io.Writer) error {
 			return aacstream.ServeMVDec(assetID, sess.MVMaxHeight, dst)
