@@ -1440,8 +1440,14 @@ async function _appendWithRetry(sb, value, ms, audio, signal, BACKWARD_SECS, chu
 
 async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durationSec, t0) {
     const localSessionId = _sessionId;
-    const FORWARD_SECS  = 900;
-    const BACKWARD_SECS = 900;
+    // AAC MSE buffer window. Capped well below the old 900s/900s: a normal song
+    // ends before either bound is reached, so this only bounds long tracks
+    // (mixes, podcasts) — holding ~8 MB instead of ~30 MB and re-buffering far
+    // less after a decode error. 240s forward still rides out any network blip;
+    // 120s back keeps short backward seeks in-buffer. AAC/MSE path only — ALAC
+    // plays through VLC and never touches these.
+    const FORWARD_SECS  = 240;
+    const BACKWARD_SECS = 120;
     let resp;
     if (typeof streamUrlOrResp === 'string') {
         resp = await fetch(streamUrlOrResp, { signal });
