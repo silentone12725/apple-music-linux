@@ -1727,8 +1727,10 @@ async function startMVPipeline() {
     document.body.appendChild(mkAudio);
 
     // ── Video MSE: started early so browser buffers video frames during container poll ──
-    const ms = new MediaSource();
-    const msBlobUrl = URL.createObjectURL(ms);
+    // `let` not `const`: retry path re-creates ms/msBlobUrl/videoSb when Chrome ends the MS
+    // after a CHUNK_DEMUXER_ERROR (MSE spec §2.5.3 End of Stream after append error).
+    let ms = new MediaSource();
+    let msBlobUrl = URL.createObjectURL(ms);
     myVid.src = msBlobUrl;
 
     // ── Await container (already polling) ────────────────────────────────────────
@@ -2957,7 +2959,7 @@ async function startMVPipeline() {
     console.log(`[AML MV] video codec="${videoCodecStr}"`);
 
     // segments mode (default) — preserves HLS fMP4 timestamps.
-    const videoSb = ms.addSourceBuffer(videoMime);
+    let videoSb = ms.addSourceBuffer(videoMime);
 
     const videoEl = myVid;
     let pipeCtrl = new AbortController();
@@ -3143,42 +3145,89 @@ async function startMVPipeline() {
             }
         } finally { reader.cancel().catch(() => {}); }
         await _waitVidIdle().catch(() => {});
+        // A CHUNK_DEMUXER_ERROR makes Chrome run the End of Stream algorithm (MSE spec
+        // §2.5.3), flipping ms.readyState to "ended" WITHOUT the append itself throwing.
+        // The loop then breaks quietly on the ms.readyState check and we'd return as if
+        // the stream finished. Detect that here and throw so _startVideoPipe's catch runs
+        // the decode-error retry (which rebuilds the ended MediaSource).
+        if (!signal.aborted && ms.readyState !== 'open' && videoEl.error?.code === 3) {
+            const buf = videoSb.buffered?.length
+                ? `${videoSb.buffered.start(0).toFixed(2)}-${videoSb.buffered.end(videoSb.buffered.length - 1).toFixed(2)}`
+                : 'empty';
+            throw new Error(`SB error buffered=${buf} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState} veCode=3 veMsg="${videoEl.error?.message ?? ''}"`);
+        }
         if (!signal.aborted && ms.readyState === 'open') ms.endOfStream();
     };
-    const _startVideoPipe = () => {
-        runVideoPipe(videoUrl, true, pipeCtrl.signal)
+    // _startVideoPipe(url?) — starts runVideoPipe from the given URL (defaults to
+    // videoUrl from t=0). Restarts itself on veCode=3 up to 3 times, each time
+    // jumping FORWARD past the bad segment so the engine skips the problematic
+    // keyframe entirely instead of re-serving it from t=0.
+    const _startVideoPipe = (url = videoUrl) => {
+        runVideoPipe(url, true, pipeCtrl.signal)
             .catch(async e => {
                 const aborted = pipeCtrl.signal.aborted;
                 console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
 
-                // CHUNK_DEMUXER_ERROR (veCode=3) — first occurrence.
-                // The Chrome demuxer rejects a keyframe at a CDN-stall burst boundary.
-                // The segment is already in the MV cache. Strategy: clear the SourceBuffer,
-                // seek back 1 s (forces Chrome to clear demuxer error state on seeked),
-                // then restart the pipe — cache hits make the first few segments instant.
-                if (!aborted && !_decodeRetried && e.message.includes('veCode=3')) {
-                    _decodeRetried = true;
+                // CHUNK_DEMUXER_ERROR (veCode=3): Chrome demuxer rejected a keyframe.
+                // Strategy: clear the SourceBuffer (resets demuxer state), seek the video
+                // element FORWARD past the bad segment's buffered end, then ask the engine
+                // to start from that position so the bad segment is never re-served.
+                if (!aborted && _decodeRetryCount < 3 && e.message.includes('veCode=3')) {
+                    _decodeRetryCount++;
                     const ct = videoEl.currentTime;
-                    const seekTo = videoSb.buffered.length > 0
-                        ? Math.max(videoSb.buffered.start(0), ct - 1)
-                        : 0;
-                    console.warn(`[AML MV-pipe] veCode=3 — clearing SB, seeking to ${seekTo.toFixed(1)}s, restarting pipe`);
+                    // Jump past the bad segment — the buffered end is where the append failed.
+                    const badEnd = videoSb.buffered.length > 0
+                        ? videoSb.buffered.end(videoSb.buffered.length - 1)
+                        : ct;
+                    const skipTo = Math.max(ct + 0.5, badEnd + 3);
+                    console.warn(`[AML MV-pipe] veCode=3 retry #${_decodeRetryCount} — clearing SB, skipping to ${skipTo.toFixed(1)}s`);
                     try {
-                        // Wait for any in-flight append to settle before removing.
+                        // Block _mvVideoSeek from firing on our managed seek — otherwise it
+                        // grabs pipeCtrl, aborts our restart pipe, and starts a conflicting one
+                        // that races our appends and leaves the SourceBuffer permanently empty.
+                        _mvVidSeeking = true;
                         if (videoSb.updating) {
                             await new Promise(res => videoSb.addEventListener('updateend', res, { once: true }));
                         }
                         if (!_abortCtrl.signal.aborted && ms.readyState === 'open') {
+                            // MS still open (append threw synchronously before Chrome ended it):
+                            // clearing the SB resets the demuxer and we reuse the same MediaSource.
                             videoSb.remove(0, Infinity);
                             await new Promise(res => videoSb.addEventListener('updateend', res, { once: true }));
+                        } else if (!_abortCtrl.signal.aborted && ms.readyState !== 'open') {
+                            // Chrome ended the MediaSource after the decode error. An ended MS
+                            // can't be reopened and rejects every append, so build a fresh one
+                            // and re-point the video element at it. ms/msBlobUrl/videoSb are
+                            // `let`; the pipe closures read them live, so reassigning is enough.
+                            try { URL.revokeObjectURL(msBlobUrl); } catch (_) {}
+                            ms = new MediaSource();
+                            msBlobUrl = URL.createObjectURL(ms);
+                            myVid.src = msBlobUrl;
+                            await new Promise((res, rej) => {
+                                const sig = _abortCtrl.signal;
+                                sig.addEventListener('abort', () => rej(new Error('aborted')), { once: true });
+                                ms.addEventListener('sourceopen', res, { once: true });
+                            });
+                            if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
+                            videoSb = ms.addSourceBuffer(videoMime);
+                            console.log(`[AML MV-pipe] rebuilt MediaSource for retry (was ended)`);
                         }
-                        videoEl.currentTime = seekTo;
-                        await new Promise(res => videoEl.addEventListener('seeked', res, { once: true }));
-                    } catch (_) {}
+                        videoEl.currentTime = skipTo;
+                        // HAVE_NOTHING (readyState=1) elements may never fire seeked because
+                        // there is no buffered data to confirm the seek against. Race with a
+                        // short timeout so the retry always proceeds.
+                        await Promise.race([
+                            new Promise(res => videoEl.addEventListener('seeked', res, { once: true })),
+                            new Promise(res => setTimeout(res, 500)),
+                        ]);
+                    } catch (_) {
+                    } finally {
+                        _mvVidSeeking = false;
+                    }
 
                     if (!_abortCtrl.signal.aborted) {
                         pipeCtrl = new AbortController();
-                        _startVideoPipe();
+                        _startVideoPipe(`${videoUrl}?t=${skipTo.toFixed(3)}`);
                     }
                     return;
                 }
@@ -3186,6 +3235,9 @@ async function startMVPipeline() {
                 if (!aborted) {
                     console.error(`[AML MV] video pipe error: ${e.message} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
                     _abortMV(`video-pipe-error`);
+                    // Advance track — don't leave the user stuck on a frozen MV frame.
+                    _amlNextRef?.().catch(() => {});
+                    setTimeout(() => exitBtn?.click(), 200);
                 }
             });
     };
@@ -3286,24 +3338,29 @@ async function startMVPipeline() {
         _amlNextRef?.().catch(() => {});
         setTimeout(() => exitBtn?.click(), 200);
     };
-    // Set by the pipe catch on first CHUNK_DEMUXER_ERROR_APPEND_FAILED (veCode=3).
-    // While true: onVideoError defers to the pipe (which is restarting the stream).
-    // After the pipe retry: if code=3 fires again, we advance the track.
-    let _decodeRetried = false;
+    // Counts CHUNK_DEMUXER_ERROR_APPEND_FAILED (veCode=3) pipe retries.
+    // 0 = no retry yet; onVideoError defers to the pipe catch on first error.
+    // ≥1 = pipe catch is restarting; onVideoError stays quiet.
+    // ≥3 = retries exhausted; next code=3 advances the track.
+    let _decodeRetryCount = 0;
     const onVideoError  = () => {
         const code = videoEl.error?.code;
         const msg  = videoEl.error?.message ?? '';
         // code 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
         console.error(`[AML MV-V] videoEl error code=${code} msg="${msg}" buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'} ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
         if (code === 3) {
-            if (!_decodeRetried) {
+            if (_decodeRetryCount === 0) {
                 // First occurrence — the pipe catch handles the retry (clears SourceBuffer,
-                // seeks, restarts the stream). Don't abort here.
+                // seeks forward, restarts the stream). Don't abort here.
                 console.warn(`[AML MV-V] decode error code=3 — deferring to pipe restart`);
                 return;
             }
-            // Pipe restart already attempted and failed; advance track.
-            console.warn(`[AML MV] decode error code=3 — pipe retry exhausted, advancing track`);
+            if (_decodeRetryCount < 3) {
+                // Pipe catch is still retrying — stay quiet; it will call us back if needed.
+                return;
+            }
+            // Pipe retries exhausted; advance track.
+            console.warn(`[AML MV] decode error code=3 — pipe retries exhausted, advancing track`);
             _abortMV(`video-error-3`);
             _amlNextRef?.().catch(() => {});
             setTimeout(() => exitBtn?.click(), 200);
@@ -6222,7 +6279,11 @@ async function setup() {
             ? mkCurrentItems.findIndex(it => _extractItemId(it) === targetSongId)
             : -1;
 
-        if (mkDirectIdx >= 0) {
+        // Music videos must always go through setQueue({musicVideo}) + ctmi(0) even when
+        // the item is already in MK's queue. If MK is already at that position, ctmi alone
+        // is a no-op and nowPlayingItemDidChange never fires, leaving the player stuck.
+        const targetIsVideo = _isVideoId(targetSongId);
+        if (mkDirectIdx >= 0 && !targetIsVideo) {
             _amlGotoTarget = mkDirectIdx;
             _amlGotoTargetId = targetSongId ?? null;
             await mk.changeToMediaAtIndex(mkDirectIdx).catch(() => {});
@@ -6245,9 +6306,9 @@ async function setup() {
             // contains one we set the queue to just the target under its own descriptor
             // key. Context is not lost for long: the NPIDF sync folds MK's live queue
             // back into the active container on the next track load.
-            const hasVideo = allIds.some(_isVideoId);
+            const hasVideo = targetIsVideo || allIds.some(_isVideoId);
             if (hasVideo) {
-                const desc = _isVideoId(targetSongId)
+                const desc = targetIsVideo
                     ? { musicVideo: targetSongId }
                     : { song: targetSongId };
                 console.log('[AML] _amlGoto mixed/MV session — targeted setQueue ' + JSON.stringify(desc));
@@ -6652,18 +6713,39 @@ async function setup() {
             _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1;
             let aacCatalogId = null;
             let aacSetQueueDesc = null;
+            let _domWalkIsMV = false;
             try {
                 let el = e.target;
+                // If the click originates from inside a vertical video card, mark as MV now
+                // before the full walk so the URL fallback below skips the song path.
+                if (e.target?.closest?.('[class*="vertical-video"]')) _domWalkIsMV = true;
                 for (let depth = 0; depth < 12 && el; depth++) {
                     // Library song IDs carry an "a." prefix — strip before testing.
                     const did = el.dataset?.id || el.dataset?.contentId || el.dataset?.songId;
                     if (did) {
                         const numId = did.startsWith('a.') ? did.slice(2) : did;
-                        if (/^\d{7,12}$/.test(numId)) { aacCatalogId = numId; break; }
+                        if (/^\d{7,12}$/.test(numId)) {
+                            aacCatalogId = numId;
+                            if (_domWalkIsMV) {
+                                _itemTypes.set(aacCatalogId, 'music-videos');
+                                aacSetQueueDesc = { musicVideo: aacCatalogId };
+                            }
+                            break;
+                        }
                     }
                     if (el.tagName === 'A' && el.href) {
+                        const mvM = el.href.match(/\/music-video\/[^/]+\/(\d{7,12})(?:[/?#]|$)/);
+                        if (mvM) {
+                            aacCatalogId = mvM[1];
+                            _itemTypes.set(aacCatalogId, 'music-videos');
+                            aacSetQueueDesc = { musicVideo: aacCatalogId };
+                            break;
+                        }
                         const m = el.href.match(/\/(\d{7,12})(?:[/?#]|$)/);
                         if (m) { aacCatalogId = m[1]; break; }
+                    }
+                    if (el.className && typeof el.className === 'string' && el.className.includes('vertical-video')) {
+                        _domWalkIsMV = true;
                     }
                     el = el.parentElement;
                 }
