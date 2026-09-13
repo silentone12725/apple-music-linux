@@ -38,7 +38,7 @@ test('engine-bundle.js is a valid injectable esbuild bundle', () => {
     assert.equal(badImport, false,
         'engine-bundle.js has un-inlined import/export — run `npm run build:engine`');
     // 2) Freshness: each extracted src/engine module must appear inlined.
-    const markers = ['mp4ParseBoxes']; // extend as more modules are extracted
+    const markers = ['mp4ParseBoxes', 'extractItemId']; // extend as more modules are extracted
     for (const m of markers) {
         assert.ok(b.includes(m), `engine-bundle.js missing "${m}" — stale; run \`npm run build:engine\``);
     }
