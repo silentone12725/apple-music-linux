@@ -96,7 +96,6 @@ sheet.replaceSync(`
   nav.navigation [class*="selected"] {
     background: var(--aml-accent-active, rgba(255,255,255,0.12)) !important;
     border-radius: 8px !important;
-    color: var(--aml-accent, #fc3c44) !important;
   }
 
 
