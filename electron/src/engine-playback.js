@@ -806,9 +806,8 @@ function installMKSeekInterceptor(mk) {
                 window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000, seeked: true });
             }, T().debounce);
         } else if (_activeMvControls) {
-            // WC MV: drive the local mkAudio clock directly — getMKAudio() is not
-            // the WC clock and must not be seeked here.
-            if (!_mvGateOpen) { console.log(`[AML MV-WC] seek blocked — gate not open (seekSec=${seekSec.toFixed(2)})`); return; }
+            // MV: drive seek through _activeMvControls (mode-aware: myVid in MSE, mkAudio in WC).
+            if (!_mvGateOpen) { console.log(`[AML MV] seek blocked — gate not open (seekSec=${seekSec.toFixed(2)})`); return; }
             _activeMvControls.seekTo(seekSec);
         } else {
             // MSE path: set currentTime via the native prototype setter.
@@ -3704,9 +3703,9 @@ async function startMVPipeline() {
         play:   mvPlay,
         pause:  mvPause,
         seekTo: _mvSeekTo,
-        get currentTime() { return mkAudio.currentTime || 0; },
-        get duration()    { return mkAudio.duration || _durationSec || 0; },
-        get paused()      { return mkAudio.paused; },
+        get currentTime() { return (_wcVideo ? mkAudio.currentTime : myVid.currentTime) || 0; },
+        get duration()    { return (_wcVideo ? mkAudio.duration : myVid.duration) || _durationSec || 0; },
+        get paused()      { return _wcVideo ? mkAudio.paused : myVid.paused; },
         get volume()      { return mkAudio.volume; },
         set volume(v)     { mkAudio.volume = v; },
         get muted()       { return mkAudio.muted; },
@@ -6585,8 +6584,7 @@ async function setup() {
                 fetch(`${ENGINE}/api/v1/vlc/resume`, { method: 'POST' }).catch(() => {});
             }
         } else if (_activeMvControls) {
-            // WC MV: drive the local audio clock. Clear _msePaused so the play proxy
-            // (which guards getMKAudio().play()) does not block MK's state transition.
+            // MV: route through mode-aware mvPlay (myVid in MSE, mkAudio in WC).
             _msePaused = false;
             _activeMvControls.play();
         } else {
@@ -6606,8 +6604,7 @@ async function setup() {
             getMKAudio()?.dispatchEvent(new Event('pause'));
             fetch(`${ENGINE}/api/v1/vlc/pause`, { method: 'POST' }).catch(() => {});
         } else if (_activeMvControls) {
-            // WC MV: pause the local audio clock. Set _msePaused so MK's internal
-            // audio.play() retry loop is blocked while WC is paused (same guard as MSE).
+            // MV: route through mode-aware mvPause.
             _msePaused = true;
             _activeMvControls.pause();
         } else {

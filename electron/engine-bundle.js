@@ -731,7 +731,7 @@
         }, T().debounce);
       } else if (_activeMvControls) {
         if (!_mvGateOpen) {
-          console.log(`[AML MV-WC] seek blocked \u2014 gate not open (seekSec=${seekSec.toFixed(2)})`);
+          console.log(`[AML MV] seek blocked \u2014 gate not open (seekSec=${seekSec.toFixed(2)})`);
           return;
         }
         _activeMvControls.seekTo(seekSec);
@@ -3322,13 +3322,13 @@
       pause: mvPause,
       seekTo: _mvSeekTo,
       get currentTime() {
-        return mkAudio.currentTime || 0;
+        return (_wcVideo ? mkAudio.currentTime : myVid.currentTime) || 0;
       },
       get duration() {
-        return mkAudio.duration || _durationSec || 0;
+        return (_wcVideo ? mkAudio.duration : myVid.duration) || _durationSec || 0;
       },
       get paused() {
-        return mkAudio.paused;
+        return _wcVideo ? mkAudio.paused : myVid.paused;
       },
       get volume() {
         return mkAudio.volume;
