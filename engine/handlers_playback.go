@@ -565,8 +565,43 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 			tsOffset = seekSec
 		}
 	}
-	log.Printf("[video-es] GET id=%s assetID=%q seekSec=%.2f", id, sess.AssetID, seekSec)
+	assetID := sess.AssetID
+	log.Printf("[video-es] GET id=%s assetID=%q seekSec=%.2f decExists=%v", id, assetID, seekSec, aacstream.MVDecExists(assetID, sess.MVMaxHeight))
 
+	esHeaders := func() {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Accept-Ranges", "none")
+	}
+
+	// Full play from dec-cache: no FFmpeg, real-timeline PTS already in the fMP4.
+	if seekSec == 0 && aacstream.MVDecExists(assetID, sess.MVMaxHeight) {
+		log.Printf("[video-es] full play from dec-cache id=%s", id)
+		pr, pw := io.Pipe()
+		go func() { pw.CloseWithError(aacstream.ServeMVDec(assetID, sess.MVMaxHeight, pw)) }()
+		esHeaders()
+		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+			log.Printf("[video-es] dec-cache demux error id=%s: %v", id, err)
+		}
+		return
+	}
+
+	// Seek from indexed dec-cache: accurate real-timeline seek, no FFmpeg re-run.
+	if seekSec > 0 && aacstream.MVDecExists(assetID, sess.MVMaxHeight) &&
+		aacstream.MVDecIndexExists(assetID, sess.MVMaxHeight) {
+		log.Printf("[video-es] seek from dec-cache index seekSec=%.2f id=%s", seekSec, id)
+		pr, pw := io.Pipe()
+		go func() {
+			pw.CloseWithError(aacstream.ServeMVDecFrom(assetID, sess.MVMaxHeight, seekSec, pw))
+		}()
+		esHeaders()
+		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+			log.Printf("[video-es] indexed seek demux error id=%s: %v", id, err)
+		}
+		return
+	}
+
+	// FFmpeg fallback: single-track remux → pipe → mp4ff demux → ES to client.
 	videoSrc := func(dst io.Writer) error {
 		if seekSec > 0 {
 			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, dst)
@@ -574,20 +609,14 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 		}
 		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
 	}
-
-	// FFmpeg single-track remux → pipe → mp4ff demux → ES to the client.
 	pr, pw := io.Pipe()
 	go func() {
 		err := transcodeVideoForMSE(r.Context(), videoSrc, pw, tsOffset)
 		pw.CloseWithError(err)
 	}()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Accept-Ranges", "none")
-	if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil {
-		if r.Context().Err() == nil {
-			log.Printf("[video-es] demux error id=%s: %v", id, err)
-		}
+	esHeaders()
+	if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+		log.Printf("[video-es] demux error id=%s: %v", id, err)
 	}
 }
 
