@@ -3355,12 +3355,38 @@
     else _startVideoPipe();
     let _mvVidSeeking = false;
     let _ignoreSeekUntil = 0;
+    let _seekSnapCanvas = null;
+    const _showSeekSnap = () => {
+      if (videoEl.readyState < 2 || videoEl.videoWidth === 0) return;
+      if (_seekSnapCanvas) {
+        try {
+          _seekSnapCanvas.remove();
+        } catch (_) {
+        }
+      }
+      const c = document.createElement("canvas");
+      c.width = videoEl.videoWidth;
+      c.height = videoEl.videoHeight;
+      c.getContext("2d").drawImage(videoEl, 0, 0);
+      c.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;z-index:3;pointer-events:none;";
+      mvContainer.appendChild(c);
+      _seekSnapCanvas = c;
+    };
+    const _hideSeekSnap = () => {
+      if (!_seekSnapCanvas) return;
+      try {
+        _seekSnapCanvas.remove();
+      } catch (_) {
+      }
+      _seekSnapCanvas = null;
+    };
     const _mvVideoSeek = async (seekSec) => {
       if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== "open") return;
       for (let i = 0; i < videoSb.buffered.length; i++) {
         if (seekSec >= videoSb.buffered.start(i) - 1 && seekSec <= videoSb.buffered.end(i) + 1) return;
       }
       _mvVidSeeking = true;
+      _showSeekSnap();
       try {
         const prev = pipeCtrl;
         pipeCtrl = new AbortController();
@@ -3377,7 +3403,10 @@
           } catch (_) {
           }
         }
-        if (sig.aborted || ms.readyState !== "open") return;
+        if (sig.aborted || ms.readyState !== "open") {
+          _hideSeekSnap();
+          return;
+        }
         videoSb.timestampOffset = 0;
         console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s \u2014 re-fetching from engine`);
         if (seekSec < (_durationSec || 1e9) - 1) {
@@ -3403,6 +3432,7 @@
       });
     };
     const onVideoPlaying = () => {
+      _hideSeekSnap();
       nativeVidEl?.dispatchEvent(new Event("playing", { bubbles: false }));
       getMKAudio()?.dispatchEvent(new Event("playing", { bubbles: false }));
       if (_videoStalled) {
@@ -3563,6 +3593,7 @@
         }
         _wcCleanup = null;
       }
+      _hideSeekSnap();
       _activeMvControls = null;
       try {
         delete mkAudio.load;
