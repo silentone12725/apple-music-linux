@@ -7192,6 +7192,15 @@ async function setup() {
         );
         if (!_vlcMode && _dbgPlaySel) {
             console.log('[AML AAC-GATE] click caught vlc=' + _vlcMode + ' sel=' + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0,30) || '?'));
+            // Inside a vertical-video card, data-testid="click-action" is the artwork/banner
+            // navigation link (an <A> tag), not a play button. Clicking the banner should only
+            // navigate to the MV detail page — our interceptor must not start playback here.
+            // Only the play-button overlay (data-testid="play-button") should trigger playback.
+            if (_dbgPlaySel?.dataset?.testid === 'click-action'
+                    && !!e.target?.closest?.('[class*="vertical-video"]')) {
+                console.log('[AML AAC-GATE] MV banner/link click — skipping interceptor, allowing navigation');
+                return;
+            }
             // AAC mode: user clicked a play button on a browse/album/single/library page.
             // Four things block MK from completing its track-change sequence:
             //   1. mkAudio.load = () => {} (no-op) — MK calls load() to reset the element;
@@ -7516,7 +7525,15 @@ async function setup() {
                 if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout)');
                 _aacCloseGate();
             }, 20000);
-            const _aacDesc = aacSetQueueDesc ?? (aacCatalogId ? { song: aacCatalogId } : null);
+            // For MV play buttons inside vertical-video cards: do NOT call setQueue directly.
+            // MK's own bubble-phase handler will call mk.setQueue({musicVideo:id, startWith:{id:id}})
+            // through our wrapper, which routes it through _aacOwnedGoto → _amlGoto — a single
+            // clean transition. Calling setQueue here too causes a double setQueue: MK processes
+            // ours first (navigating/firing an old-track NPIDF) and then processes its own through
+            // the wrapper, making the NPIDF filter see the old track as spurious and block it.
+            const _aacDesc = (_domWalkIsMV && _isVideoId(aacCatalogId))
+                ? null  // MV play button: let MK's bubble-phase handler drive via our wrapper
+                : aacSetQueueDesc ?? (aacCatalogId ? { song: aacCatalogId } : null);
             if (_aacDesc) {
                 // Use the original (not our wrapper) to avoid double-logging for our own call.
                 _aacMkApiSaved.setQueue.call(mk, _aacDesc).then(() => _aacMkApiSaved.setQueue && mk.play()).catch(() => {});
@@ -7531,6 +7548,13 @@ async function setup() {
             // click would overwrite _mkApiSaved with already-patched methods, permanently
             // corrupting mk.play/setQueue/changeToMediaAtIndex until page reload.
             console.log('[AML VLC-GATE] click caught vlc=' + _vlcMode + ' saved=' + !!_mkApiSaved + ' sel=' + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0,30) || '?'));
+            // Same banner-click guard as the AAC path: a click-action inside a vertical-video
+            // card is a navigation link, not a play command. Skip the VLC gate for those too.
+            if (_dbgPlaySel?.dataset?.testid === 'click-action'
+                    && !!e.target?.closest?.('[class*="vertical-video"]')) {
+                console.log('[AML VLC-GATE] MV banner/link click — skipping interceptor, allowing navigation');
+                return;
+            }
             if (_mkApiSaved) return;
             // MK's setQueue reuses the existing mkAudio element. It calls:
             //   mkAudio.src = ''  → fine
