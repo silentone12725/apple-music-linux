@@ -3949,6 +3949,15 @@ async function startMVPipeline() {
         if (mkAudio.muted) mkAudio.muted = false; // restore mute state on session end
         _audioPipeCtrl.abort();
         mkAudio.pause();
+        // For user-initiated exit, explicitly remove the play() proxy so MK's auto-resume
+        // mechanism doesn't bypass the pause above and restart audio through our proxy.
+        // Also reset play state so subsequent MK state-machine calls see a clean slate.
+        if (_abortReason === 'exit-button') {
+            try { delete mkAudio.play; } catch (_) {}
+            _proxyInstalled = false;
+            _msePaused = false;
+            setPlayState(PLAY_STATE.IDLE, 'mv:exit');
+        }
         // Signal MK's state machine: session ended
         nativeVidEl?.dispatchEvent(new Event('pause', { bubbles: false }));
         if (myVid.parentNode) myVid.parentNode.removeChild(myVid);
@@ -7192,13 +7201,16 @@ async function setup() {
         );
         if (!_vlcMode && _dbgPlaySel) {
             console.log('[AML AAC-GATE] click caught vlc=' + _vlcMode + ' sel=' + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0,30) || '?'));
-            // Inside a vertical-video card, data-testid="click-action" is the artwork/banner
-            // navigation link (an <A> tag), not a play button. Clicking the banner should only
-            // navigate to the MV detail page — our interceptor must not start playback here.
-            // Only the play-button overlay (data-testid="play-button") should trigger playback.
+            // data-testid="click-action" is always an <A> tag that covers the entire card
+            // (recently-searched rows, search result lockups, vertical-video artwork, etc.).
+            // For music videos it is always a navigation link — clicking the card/artwork
+            // should route to the MV detail page, not start playback from our interceptor.
+            // For songs/albums the bubble-phase MK handler still fires setQueue so we keep
+            // click-action in the selector for those; only skip it when the href is an MV URL.
             if (_dbgPlaySel?.dataset?.testid === 'click-action'
-                    && !!e.target?.closest?.('[class*="vertical-video"]')) {
-                console.log('[AML AAC-GATE] MV banner/link click — skipping interceptor, allowing navigation');
+                    && (_dbgPlaySel?.href?.includes('/music-video/')
+                        || !!e.target?.closest?.('[class*="vertical-video"]'))) {
+                console.log('[AML AAC-GATE] MV click-action — skipping interceptor, allowing navigation');
                 return;
             }
             // AAC mode: user clicked a play button on a browse/album/single/library page.
@@ -7548,11 +7560,12 @@ async function setup() {
             // click would overwrite _mkApiSaved with already-patched methods, permanently
             // corrupting mk.play/setQueue/changeToMediaAtIndex until page reload.
             console.log('[AML VLC-GATE] click caught vlc=' + _vlcMode + ' saved=' + !!_mkApiSaved + ' sel=' + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0,30) || '?'));
-            // Same banner-click guard as the AAC path: a click-action inside a vertical-video
-            // card is a navigation link, not a play command. Skip the VLC gate for those too.
+            // Same MV navigation guard as the AAC path: click-action on any MV card/row is
+            // a navigation link pointing to /music-video/ — skip the VLC gate for those.
             if (_dbgPlaySel?.dataset?.testid === 'click-action'
-                    && !!e.target?.closest?.('[class*="vertical-video"]')) {
-                console.log('[AML VLC-GATE] MV banner/link click — skipping interceptor, allowing navigation');
+                    && (_dbgPlaySel?.href?.includes('/music-video/')
+                        || !!e.target?.closest?.('[class*="vertical-video"]'))) {
+                console.log('[AML VLC-GATE] MV click-action — skipping interceptor, allowing navigation');
                 return;
             }
             if (_mkApiSaved) return;
