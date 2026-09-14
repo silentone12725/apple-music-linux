@@ -1722,7 +1722,7 @@
     myVid.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;";
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
-    const _wcVideo = true;
+    const _wcVideo = false;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
     let _wcVW = 0, _wcVH = 0;
@@ -2921,6 +2921,71 @@
       }
       if (!signal.aborted && ms.readyState === "open") ms.endOfStream();
     };
+    const _startVideoPipe = (url = videoUrl) => {
+      runVideoPipe(url, pipeCtrl.signal).catch(async (e) => {
+        const aborted = pipeCtrl.signal.aborted;
+        console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
+        if (!aborted && _decodeRetryCount < 3 && e.message.includes("veCode=3")) {
+          _decodeRetryCount++;
+          const ct = videoEl.currentTime;
+          const badEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : ct;
+          const skipTo = _decodeRetryCount === 1 ? ct + 0.5 : Math.max(ct + 0.5, badEnd + 3);
+          console.warn(`[AML MV-pipe] veCode=3 retry #${_decodeRetryCount} (${_decodeRetryCount === 1 ? "recover-in-place" : "skip-past"}) \u2014 clearing SB, seeking to ${skipTo.toFixed(1)}s`);
+          try {
+            _mvVidSeeking = true;
+            if (videoSb.updating) {
+              await new Promise((res) => videoSb.addEventListener("updateend", res, { once: true }));
+            }
+            if (!_abortCtrl.signal.aborted && ms.readyState === "open") {
+              videoSb.remove(0, Infinity);
+              await new Promise((res) => videoSb.addEventListener("updateend", res, { once: true }));
+            } else if (!_abortCtrl.signal.aborted && ms.readyState !== "open") {
+              try {
+                URL.revokeObjectURL(msBlobUrl);
+              } catch (_) {
+              }
+              ms = new MediaSource();
+              msBlobUrl = URL.createObjectURL(ms);
+              myVid.src = msBlobUrl;
+              await new Promise((res, rej) => {
+                const sig = _abortCtrl.signal;
+                sig.addEventListener("abort", () => rej(new Error("aborted")), { once: true });
+                ms.addEventListener("sourceopen", res, { once: true });
+              });
+              if (_durationSec > 0) {
+                try {
+                  ms.duration = _durationSec;
+                } catch (_) {
+                }
+              }
+              videoSb = ms.addSourceBuffer(videoMime);
+              console.log(`[AML MV-pipe] rebuilt MediaSource for retry (was ended)`);
+            }
+            _ignoreSeekUntil = Date.now() + 2e3;
+            videoEl.currentTime = skipTo;
+            await Promise.race([
+              new Promise((res) => videoEl.addEventListener("seeked", res, { once: true })),
+              new Promise((res) => setTimeout(res, 500))
+            ]);
+          } catch (_) {
+          } finally {
+            _mvVidSeeking = false;
+          }
+          if (!_abortCtrl.signal.aborted) {
+            pipeCtrl = new AbortController();
+            _startVideoPipe(`${videoUrl}?t=${skipTo.toFixed(3)}`);
+          }
+          return;
+        }
+        if (!aborted) {
+          console.error(`[AML MV] video pipe error: ${e.message} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
+          _abortMV(`video-pipe-error`);
+          _amlNextRef?.().catch(() => {
+          });
+          setTimeout(() => exitBtn?.click(), 200);
+        }
+      });
+    };
     const _setupWebCodecsVideo = () => {
       const canvas = document.createElement("canvas");
       canvas.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;z-index:2;pointer-events:none;background:#000;";
@@ -3246,10 +3311,81 @@
         mkAudio.muted = m;
       }
     };
-    _setupWebCodecsVideo();
+    if (_wcVideo) _setupWebCodecsVideo();
+    else _startVideoPipe();
+    const _mvVideoSeek = async (seekSec) => {
+      if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== "open") return;
+      for (let i = 0; i < videoSb.buffered.length; i++) {
+        if (seekSec >= videoSb.buffered.start(i) - 1 && seekSec <= videoSb.buffered.end(i) + 1) return;
+      }
+      _mvVidSeeking = true;
+      try {
+        const prev = pipeCtrl;
+        pipeCtrl = new AbortController();
+        prev.abort();
+        const sig = pipeCtrl.signal;
+        await _waitVidIdle();
+        if (videoSb.buffered.length > 0) {
+          videoSb.remove(0, Infinity);
+          await _waitVidIdle();
+        }
+        if (sig.aborted || ms.readyState !== "open") return;
+        videoSb.timestampOffset = 0;
+        console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s \u2014 re-fetching from engine`);
+        if (seekSec < (_durationSec || 1e9) - 1) {
+          runVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`, sig).catch((e) => {
+            if (!sig.aborted) console.error("[AML MV] video resume error:", e);
+          });
+        }
+      } finally {
+        _mvVidSeeking = false;
+      }
+    };
+    videoEl.addEventListener("seeking", () => {
+      if (_wcVideo) return;
+      if (Date.now() < _ignoreSeekUntil) return;
+      _mvVideoSeek(videoEl.currentTime).catch(() => {
+      });
+    });
+    const onVideoPlay = () => {
+      console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)}`);
+      if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
+        mkAudio.currentTime = videoEl.currentTime;
+      mkAudio.play().catch(() => {
+      });
+    };
+    const onVideoPlaying = () => {
+      nativeVidEl?.dispatchEvent(new Event("playing", { bubbles: false }));
+      getMKAudio()?.dispatchEvent(new Event("playing", { bubbles: false }));
+      if (_videoStalled) {
+        _videoStalled = false;
+        _mvGateOpen = _avStarted;
+        const drift = mkAudio.currentTime - videoEl.currentTime;
+        if (Math.abs(drift) > 0.05) {
+          console.log(`[AML MV buf:sync] stall recovery drift=${drift.toFixed(2)}s, snapping audio ct=${videoEl.currentTime.toFixed(2)}`);
+          mkAudio.currentTime = videoEl.currentTime;
+        }
+        mkAudio.muted = false;
+        console.log(`[AML MV buf:sync] audio unmuted, video resumed ct=${videoEl.currentTime.toFixed(2)}`);
+      }
+    };
+    const onVideoPause = () => {
+      if (_bufPaused) return;
+      console.log(`[AML MV-V] videoEl pause ct=${videoEl.currentTime.toFixed(2)}`);
+      mkAudio.pause();
+      nativeVidEl?.dispatchEvent(new Event("pause", { bubbles: false }));
+      getMKAudio()?.dispatchEvent(new Event("pause", { bubbles: false }));
+    };
+    const onVideoSeek = () => {
+      if (_mvVidSeeking) return;
+      console.log(`[AML MV-V] videoEl seeked ct=${videoEl.currentTime.toFixed(2)}`);
+      if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
+        mkAudio.currentTime = videoEl.currentTime;
+    };
     const onEnded = (ev) => {
       if (_abortCtrl?.signal.aborted) return;
-      console.log(`[AML MV-WC] audio ended ct=${mkAudio.currentTime.toFixed(2)} dur=${mkAudio.duration?.toFixed(2)}`);
+      const src = _wcVideo ? "audio" : ev?.target === videoEl ? "video" : "audio";
+      console.log(`[AML MV] ${src} ended ct=${(videoEl.currentTime || mkAudio.currentTime)?.toFixed(2)}`);
       try {
         delete mkAudio.load;
       } catch (_) {
@@ -3259,18 +3395,82 @@
       });
       setTimeout(() => exitBtn?.click(), 200);
     };
-    mkAudio.addEventListener("ended", onEnded);
-    const _wcDispatch = (type) => {
-      nativeVidEl?.dispatchEvent(new Event(type, { bubbles: false }));
-      const mka = getMKAudio();
-      if (mka && mka !== mkAudio) mka.dispatchEvent(new Event(type, { bubbles: false }));
+    let _decodeRetryCount = 0;
+    const onVideoError = () => {
+      const code = videoEl.error?.code;
+      const msg = videoEl.error?.message ?? "";
+      console.error(`[AML MV-V] videoEl error code=${code} msg="${msg}" buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length - 1).toFixed(2)}` : "empty"} ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+      if (code === 3) {
+        if (_decodeRetryCount === 0) {
+          console.warn(`[AML MV-V] decode error code=3 \u2014 deferring to pipe restart`);
+          return;
+        }
+        if (_decodeRetryCount < 3) return;
+        console.warn(`[AML MV] decode error code=3 \u2014 pipe retries exhausted, advancing track`);
+        _abortMV(`video-error-3`);
+        _amlNextRef?.().catch(() => {
+        });
+        setTimeout(() => exitBtn?.click(), 200);
+      } else if (code === 4) {
+        console.warn(`[AML MV] src-not-supported (code=4) \u2014 not retryable, advancing track`);
+        _abortMV(`video-error-${code}`);
+        _amlNextRef?.().catch(() => {
+        });
+        setTimeout(() => exitBtn?.click(), 200);
+      }
     };
-    mkAudio.addEventListener("playing", () => {
-      console.log(`[AML MV-WC] mkAudio playing ct=${mkAudio.currentTime.toFixed(2)} \u2192 clearing loading`);
-      _wcDispatch("playing");
-    });
-    mkAudio.addEventListener("play", () => _wcDispatch("playing"));
-    mkAudio.addEventListener("pause", () => _wcDispatch("pause"));
+    const onVideoStall = () => console.warn(`[AML MV-V] videoEl stalled ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+    const onVideoWait = () => {
+      console.warn(`[AML MV buf:stall] videoEl waiting ct=${videoEl.currentTime.toFixed(2)} readyState=${videoEl.readyState}`);
+      if (_avStarted && !_videoStalled && !_bufPaused) {
+        _videoStalled = true;
+        _mvGateOpen = false;
+        mkAudio.muted = true;
+        console.warn(`[AML MV buf:stall] audio muted during video stall ct=${mkAudio.currentTime.toFixed(2)}`);
+      }
+    };
+    if (!_wcVideo) {
+      videoEl.addEventListener("play", onVideoPlay);
+      videoEl.addEventListener("playing", onVideoPlaying);
+      videoEl.addEventListener("pause", onVideoPause);
+      videoEl.addEventListener("seeked", onVideoSeek);
+      videoEl.addEventListener("error", onVideoError);
+      videoEl.addEventListener("stalled", onVideoStall);
+      videoEl.addEventListener("waiting", onVideoWait);
+      videoEl.addEventListener("ended", onEnded);
+      videoEl.addEventListener("canplay", () => {
+        if (_abortCtrl?.signal.aborted) return;
+        console.log(`[AML MV] canplay videoWidth=${videoEl.videoWidth} videoHeight=${videoEl.videoHeight} readyState=${videoEl.readyState}`);
+        const checkBuf = () => {
+          if (_abortCtrl?.signal.aborted) return;
+          const b = videoEl.buffered;
+          const lead = b.length > 0 ? b.end(b.length - 1) : 0;
+          if (lead >= 1.5) {
+            console.log(`[AML MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
+            _videoCanPlay = true;
+            tryStart();
+          } else {
+            console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need 1.5s)`);
+            videoEl.addEventListener("progress", checkBuf, { once: true });
+          }
+        };
+        checkBuf();
+      }, { once: true });
+    }
+    mkAudio.addEventListener("ended", onEnded);
+    if (_wcVideo) {
+      const _wcDispatch = (type) => {
+        nativeVidEl?.dispatchEvent(new Event(type, { bubbles: false }));
+        const mka = getMKAudio();
+        if (mka && mka !== mkAudio) mka.dispatchEvent(new Event(type, { bubbles: false }));
+      };
+      mkAudio.addEventListener("playing", () => {
+        console.log(`[AML MV-WC] mkAudio playing ct=${mkAudio.currentTime.toFixed(2)} \u2192 clearing loading`);
+        _wcDispatch("playing");
+      });
+      mkAudio.addEventListener("play", () => _wcDispatch("playing"));
+      mkAudio.addEventListener("pause", () => _wcDispatch("pause"));
+    }
     const cleanupScrimStyles = () => {
       if (scrimEl) {
         ["opacity", "visibility", "transition", "cursor"].forEach((p) => scrimEl.style.removeProperty(p));
