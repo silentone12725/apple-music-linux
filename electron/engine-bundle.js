@@ -6469,6 +6469,10 @@
       );
       if (!_vlcMode && _dbgPlaySel) {
         console.log("[AML AAC-GATE] click caught vlc=" + _vlcMode + " sel=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 30) || "?"));
+        if (_dbgPlaySel?.dataset?.testid === "click-action" && !!e.target?.closest?.('[class*="vertical-video"]')) {
+          console.log("[AML AAC-GATE] MV banner/link click \u2014 skipping interceptor, allowing navigation");
+          return;
+        }
         if (_allowCDNTransition) return;
         const _aacMkAudio = getMKAudio();
         if (_aacMkAudio) {
@@ -6739,7 +6743,7 @@
           if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
           _aacCloseGate();
         }, 2e4);
-        const _aacDesc = aacSetQueueDesc ?? (aacCatalogId ? { song: aacCatalogId } : null);
+        const _aacDesc = _domWalkIsMV && _isVideoId(aacCatalogId) ? null : aacSetQueueDesc ?? (aacCatalogId ? { song: aacCatalogId } : null);
         if (_aacDesc) {
           _aacMkApiSaved.setQueue.call(mk, _aacDesc).then(() => _aacMkApiSaved.setQueue && mk.play()).catch(() => {
           });
@@ -6748,6 +6752,10 @@
       }
       if (_vlcMode && _dbgPlaySel) {
         console.log("[AML VLC-GATE] click caught vlc=" + _vlcMode + " saved=" + !!_mkApiSaved + " sel=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 30) || "?"));
+        if (_dbgPlaySel?.dataset?.testid === "click-action" && !!e.target?.closest?.('[class*="vertical-video"]')) {
+          console.log("[AML VLC-GATE] MV banner/link click \u2014 skipping interceptor, allowing navigation");
+          return;
+        }
         if (_mkApiSaved) return;
         const mkAudioEl = getMKAudio();
         if (mkAudioEl) {
