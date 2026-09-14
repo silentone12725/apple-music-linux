@@ -3349,9 +3349,13 @@ async function startMVPipeline() {
     };
     // ── MSE video pipe ────────────────────────────────────────────────────────────
     const _startVideoPipe = (url = videoUrl) => {
-        runVideoPipe(url, pipeCtrl.signal)
+        // Snapshot the signal NOW: _mvVideoSeek reassigns pipeCtrl (the closure variable)
+        // before this catch runs, so reading pipeCtrl.signal.aborted in the catch would
+        // check the NEW controller (not aborted) and incorrectly call _abortMV.
+        const mySignal = pipeCtrl.signal;
+        runVideoPipe(url, mySignal)
             .catch(async e => {
-                const aborted = pipeCtrl.signal.aborted;
+                const aborted = mySignal.aborted;
                 console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
 
                 // CHUNK_DEMUXER_ERROR (veCode=3): Chrome demuxer rejected a keyframe.
