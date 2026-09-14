@@ -2550,6 +2550,13 @@
               console.warn("[AML MV buf:waiting] video escaped pause \u2014 re-pausing");
               videoEl.pause();
             }
+            if (pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted && !_pipeRestarted) {
+              _pipeRestarted = true;
+              const restartAt = videoEl.currentTime;
+              console.warn(`[AML MV buf:recover] pipe dead + buf stalled at ct=${restartAt.toFixed(2)}s \u2014 restarting pipe`);
+              pipeCtrl = new AbortController();
+              _startVideoPipe(`${videoUrl}?t=${restartAt.toFixed(3)}`);
+            }
             if (Date.now() - _bufWaitStart > 45e3) {
               console.warn(`[AML MV buf:timeout] stalled ${((Date.now() - _bufWaitStart) / 1e3).toFixed(0)}s \u2014 restarting session`);
               _abortMV("buf-timeout");
@@ -3358,10 +3365,16 @@
         pipeCtrl = new AbortController();
         prev.abort();
         const sig = pipeCtrl.signal;
-        await _waitVidIdle();
+        try {
+          await _waitVidIdle();
+        } catch (_) {
+        }
         if (videoSb.buffered.length > 0) {
           videoSb.remove(0, Infinity);
-          await _waitVidIdle();
+          try {
+            await _waitVidIdle();
+          } catch (_) {
+          }
         }
         if (sig.aborted || ms.readyState !== "open") return;
         videoSb.timestampOffset = 0;
