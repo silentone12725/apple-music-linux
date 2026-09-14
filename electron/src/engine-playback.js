@@ -2893,6 +2893,16 @@ async function startMVPipeline() {
                         console.warn('[AML MV buf:waiting] video escaped pause — re-pausing');
                         videoEl.pause();
                     }
+                    // Dead-pipe recovery: if the fetch pipe died (its signal aborted) while
+                    // _bufPaused is true, the normal deadlock-recovery branch below (which
+                    // gates on !_bufPaused) can never fire. Detect and restart here instead.
+                    if (pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted && !_pipeRestarted) {
+                        _pipeRestarted = true;
+                        const restartAt = videoEl.currentTime;
+                        console.warn(`[AML MV buf:recover] pipe dead + buf stalled at ct=${restartAt.toFixed(2)}s — restarting pipe`);
+                        pipeCtrl = new AbortController();
+                        _startVideoPipe(`${videoUrl}?t=${restartAt.toFixed(3)}`);
+                    }
                     // Abort if stalled too long — Chrome MSE resets decoder after ~60s idle,
                     // causing SB error on the next append. 45s gives a clean restart margin.
                     if (Date.now() - _bufWaitStart > 45000) {
@@ -3728,8 +3738,14 @@ async function startMVPipeline() {
             pipeCtrl = new AbortController();
             prev.abort();
             const sig = pipeCtrl.signal;
-            await _waitVidIdle();
-            if (videoSb.buffered.length > 0) { videoSb.remove(0, Infinity); await _waitVidIdle(); }
+            // Chrome can fire a SB error event synchronously on the abort above (or when
+            // we seek to an unbuffered position while a remove is in flight). Swallow it
+            // here so the seek always completes even if the SourceBuffer glitched.
+            try { await _waitVidIdle(); } catch (_) {}
+            if (videoSb.buffered.length > 0) {
+                videoSb.remove(0, Infinity);
+                try { await _waitVidIdle(); } catch (_) {}
+            }
             if (sig.aborted || ms.readyState !== 'open') return;
             videoSb.timestampOffset = 0;
             console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s — re-fetching from engine`);
