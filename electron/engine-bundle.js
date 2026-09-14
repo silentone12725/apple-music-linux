@@ -2961,8 +2961,9 @@
       if (!signal.aborted && ms.readyState === "open") ms.endOfStream();
     };
     const _startVideoPipe = (url = videoUrl) => {
-      runVideoPipe(url, pipeCtrl.signal).catch(async (e) => {
-        const aborted = pipeCtrl.signal.aborted;
+      const mySignal = pipeCtrl.signal;
+      runVideoPipe(url, mySignal).catch(async (e) => {
+        const aborted = mySignal.aborted;
         console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
         if (!aborted && _decodeRetryCount < 3 && e.message.includes("veCode=3")) {
           _decodeRetryCount++;
