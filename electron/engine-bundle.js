@@ -6706,6 +6706,9 @@
           }
           const startWithId = _normalizeStartId(desc);
           if (startWithId) {
+            if (desc?.startWith?.type === "music-videos" || desc?.url?.includes("/music-video/")) {
+              _itemTypes.set(startWithId, "music-videos");
+            }
             return _aacOwnedGoto([startWithId], startWithId, "startWith");
           }
           if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);

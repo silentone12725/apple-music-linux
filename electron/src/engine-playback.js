@@ -7484,6 +7484,14 @@ async function setup() {
                 // "i.XXXX") fall through to MK.
                 const startWithId = _normalizeStartId(desc);
                 if (startWithId) {
+                    // If the descriptor reveals this is a music video, register it so
+                    // _isVideoId() returns true when _amlGoto runs — without this,
+                    // play buttons on MV rows in search results produce catalogId=not-found
+                    // and the ID never gets into _itemTypes, causing _amlGoto to treat
+                    // the MV as a song and open the wrong session type.
+                    if (desc?.startWith?.type === 'music-videos' || desc?.url?.includes('/music-video/')) {
+                        _itemTypes.set(startWithId, 'music-videos');
+                    }
                     // Single-item container. The NPIDF handler syncs MK's live queue into
                     // the active container on every track load, so the rest of the context
                     // fills itself in without an extra fetch here.
