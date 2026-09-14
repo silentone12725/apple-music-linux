@@ -3408,6 +3408,7 @@
           return;
         }
         videoSb.timestampOffset = 0;
+        _ignoreSeekUntil = Date.now() + 8e3;
         console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s \u2014 re-fetching from engine`);
         if (seekSec < (_durationSec || 1e9) - 1) {
           runVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`, sig).catch((e) => {
@@ -3433,6 +3434,7 @@
     };
     const onVideoPlaying = () => {
       _hideSeekSnap();
+      _ignoreSeekUntil = 0;
       nativeVidEl?.dispatchEvent(new Event("playing", { bubbles: false }));
       getMKAudio()?.dispatchEvent(new Event("playing", { bubbles: false }));
       if (_videoStalled) {

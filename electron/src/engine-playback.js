@@ -3774,6 +3774,12 @@ async function startMVPipeline() {
             }
             if (sig.aborted || ms.readyState !== 'open') { _hideSeekSnap(); return; }
             videoSb.timestampOffset = 0;
+            // Suppress seeking events while the new pipe warms up. Chrome fires additional
+            // 'seeking' events after the buffer is cleared at an unbuffered position —
+            // without this guard _mvVideoSeek re-enters, aborts the new pipe before it
+            // delivers any frames, and we loop at 0 lead forever. The window covers
+            // FFmpeg startup (~1-2s) + initial buffering. Cleared in onVideoPlaying.
+            _ignoreSeekUntil = Date.now() + 8000;
             console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s — re-fetching from engine`);
             if (seekSec < (_durationSec || 1e9) - 1) {
                 runVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`, sig)
@@ -3793,7 +3799,8 @@ async function startMVPipeline() {
         mkAudio.play().catch(() => {});
     };
     const onVideoPlaying = () => {
-        _hideSeekSnap(); // new frames decoded — remove the freeze-frame overlay
+        _hideSeekSnap();       // new frames decoded — remove the freeze-frame overlay
+        _ignoreSeekUntil = 0; // re-enable seeks now that the new stream is rendering
         nativeVidEl?.dispatchEvent(new Event('playing', { bubbles: false }));
         getMKAudio()?.dispatchEvent(new Event('playing', { bubbles: false }));
         if (_videoStalled) {
