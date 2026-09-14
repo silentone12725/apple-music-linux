@@ -1844,22 +1844,23 @@
     if (nativeVidInVc && nativeVidInVc !== nativeVidEl) {
       nativeVidInVc.style.setProperty("display", "none", "important");
     }
-    const mvPlay = () => {
-      mkAudio.play().catch(() => {
-      });
-    };
+    const mvPlay = () => _wcVideo ? mkAudio.play().catch(() => {
+    }) : _iframePlay.call(myVid).then(() => mkAudio.play().catch(() => {
+    })).catch(() => {
+    });
     const mvPause = () => {
+      if (!_wcVideo) myVid.pause();
       mkAudio.pause();
     };
     const togglePlayPause = () => {
-      if (mkAudio.paused) mvPlay();
+      if (_wcVideo ? mkAudio.paused : myVid.paused) mvPlay();
       else mvPause();
     };
     if (nativeVidEl) {
       nativeVidEl.play = function() {
-        console.log(`[AML MV-WC] nativeVidEl.play() intercepted \u2192 mkAudio.paused=${mkAudio?.paused} _avStarted=${_avStarted}`);
+        console.log(`[AML MV] nativeVidEl.play() intercepted \u2192 myVid.paused=${myVid?.paused} _bufPaused=${_bufPaused} _avStarted=${_avStarted}`);
         if (!_avStarted) return Promise.resolve();
-        if (mkAudio?.paused) mvPlay();
+        if (_wcVideo ? mkAudio?.paused : myVid?.paused) mvPlay();
         return Promise.resolve();
       };
     }
@@ -2213,17 +2214,25 @@
       rangeInput.addEventListener("input", () => {
         const t = parseFloat(rangeInput.value);
         if (!isNaN(t)) {
-          const max = parseFloat(rangeInput.max) || 1;
-          const pct = _fillPct(Math.min(1, Math.max(0, t / max))).toFixed(2) + "%";
-          rangeInput.style.setProperty("--progress", pct);
-          rangeInput.style.setProperty("--width", pct);
+          if (_wcVideo) {
+            const max = parseFloat(rangeInput.max) || 1;
+            const pct = _fillPct(Math.min(1, Math.max(0, t / max))).toFixed(2) + "%";
+            rangeInput.style.setProperty("--progress", pct);
+            rangeInput.style.setProperty("--width", pct);
+          } else {
+            myVid.currentTime = t;
+            mkAudio.currentTime = t;
+            _updateProgress();
+          }
         }
         _showControls();
       }, true);
       const _commitScrub = () => {
         _userScrubbing = false;
-        const t = parseFloat(rangeInput.value);
-        if (!isNaN(t)) mkAudio.currentTime = t;
+        if (_wcVideo) {
+          const t = parseFloat(rangeInput.value);
+          if (!isNaN(t)) mkAudio.currentTime = t;
+        }
       };
       const _cancelScrub = () => {
         _userScrubbing = false;
@@ -2272,7 +2281,7 @@
       togglePlayPause();
       _showControls();
     }, true);
-    const _playStateEl = mkAudio;
+    const _playStateEl = _wcVideo ? mkAudio : myVid;
     const _syncPlayIcon = () => {
       _mvPlayBtn.innerHTML = _playStateEl.paused ? _svgPlay : _svgPause;
       _mvPlayBtn.setAttribute("aria-label", _playStateEl.paused ? "Play" : "Pause");
@@ -2281,10 +2290,15 @@
     _playStateEl.addEventListener("pause", _syncPlayIcon);
     _playStateEl.addEventListener("playing", _syncPlayIcon);
     _syncPlayIcon();
-    const _mvCurTime = () => mkAudio.currentTime || 0;
+    const _mvCurTime = () => (_wcVideo ? mkAudio.currentTime : myVid.currentTime) || 0;
     const _mvSeekTo = (sec) => {
-      const dur = mkAudio.duration || _durationSec || 1e9;
-      mkAudio.currentTime = Math.max(0, Math.min(dur, sec));
+      if (_wcVideo) {
+        const dur = mkAudio.duration || _durationSec || 1e9;
+        mkAudio.currentTime = Math.max(0, Math.min(dur, sec));
+      } else {
+        myVid.currentTime = Math.max(0, Math.min(myVid.duration || 1e9, sec));
+        mkAudio.currentTime = myVid.currentTime;
+      }
     };
     const _skipFwd = avp?.querySelector("amp-playback-controls-skip-forward") ?? avp?.querySelector('[aria-label*="forward" i]') ?? avp?.querySelector('[aria-label*="10" i]');
     const _insertTarget = playCtrl ?? _skipFwd;
@@ -3367,11 +3381,6 @@
       _mvVideoSeek(videoEl.currentTime).catch(() => {
       });
     });
-    mkAudio.addEventListener("seeking", () => {
-      if (_wcVideo || !_avStarted || _mvVidSeeking) return;
-      const t = mkAudio.currentTime;
-      if (Math.abs(myVid.currentTime - t) > 0.15) myVid.currentTime = t;
-    });
     const onVideoPlay = () => {
       console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)}`);
       if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
@@ -3594,7 +3603,7 @@
       _playStateEl.removeEventListener("play", _syncPlayIcon);
       _playStateEl.removeEventListener("pause", _syncPlayIcon);
       _playStateEl.removeEventListener("playing", _syncPlayIcon);
-      myVid.removeEventListener("volumechange", _syncVolSlider);
+      mkAudio.removeEventListener("volumechange", _syncVolSlider);
       Function.prototype.call = _origFnCall;
       Function.prototype.apply = _origFnApply;
       _mvGateOpen = true;

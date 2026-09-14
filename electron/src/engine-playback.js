@@ -2100,20 +2100,20 @@ async function startMVPipeline() {
         nativeVidInVc.style.setProperty('display', 'none', 'important');
     }
 
-    // WC: myVid is an empty shell — canvas renders video, mkAudio is the master clock.
-    const mvPlay  = () => { mkAudio.play().catch(() => {}); };
-    const mvPause = () => { mkAudio.pause(); };
-    const togglePlayPause = () => { if (mkAudio.paused) mvPlay(); else mvPause(); };
+    const mvPlay  = () => _wcVideo
+        ? mkAudio.play().catch(() => {})
+        : _iframePlay.call(myVid).then(() => mkAudio.play().catch(() => {})).catch(() => {});
+    const mvPause = () => { if (!_wcVideo) myVid.pause(); mkAudio.pause(); };
+    const togglePlayPause = () => { if (_wcVideo ? mkAudio.paused : myVid.paused) mvPlay(); else mvPause(); };
 
     // When Apple Music's center play overlay (or any MK code) calls nativeVidEl.play()
     // on resume, forward it to myVid. nativeVidEl is opacity:0 and never actually plays,
     // so without this intercept myVid stays paused → unrecoverable black screen.
     if (nativeVidEl) {
-        // WC: mkAudio is the clock; forward resume to it (never to the empty myVid).
         nativeVidEl.play = function() {
-            console.log(`[AML MV-WC] nativeVidEl.play() intercepted → mkAudio.paused=${mkAudio?.paused} _avStarted=${_avStarted}`);
+            console.log(`[AML MV] nativeVidEl.play() intercepted → myVid.paused=${myVid?.paused} _bufPaused=${_bufPaused} _avStarted=${_avStarted}`);
             if (!_avStarted) return Promise.resolve();
-            if (mkAudio?.paused) mvPlay();
+            if (_wcVideo ? mkAudio?.paused : myVid?.paused) mvPlay();
             return Promise.resolve();
         };
     }
@@ -2522,28 +2522,34 @@ async function startMVPipeline() {
         rangeInput.addEventListener('input', () => {
             const t = parseFloat(rangeInput.value);
             if (!isNaN(t)) {
-                // WC: update CSS position only during drag — do NOT touch mkAudio.currentTime
-                // yet. Committing the seek on every pixel would churn the decoder/ES fetch.
-                // _updateProgress() is suppressed during _userScrubbing so it won't snap
-                // the thumb back to the clock position while dragging.
-                const max = parseFloat(rangeInput.max) || 1;
-                const pct = _fillPct(Math.min(1, Math.max(0, t / max))).toFixed(2) + '%';
-                rangeInput.style.setProperty('--progress', pct);
-                rangeInput.style.setProperty('--width',    pct);
+                if (_wcVideo) {
+                    // WC: update CSS only during drag — commit seek on mouseup to avoid churning decoder
+                    const max = parseFloat(rangeInput.max) || 1;
+                    const pct = _fillPct(Math.min(1, Math.max(0, t / max))).toFixed(2) + '%';
+                    rangeInput.style.setProperty('--progress', pct);
+                    rangeInput.style.setProperty('--width',    pct);
+                } else {
+                    // MSE: live-seek both elements; _updateProgress() redraws CSS
+                    myVid.currentTime = t; mkAudio.currentTime = t;
+                    _updateProgress();
+                }
             }
             _showControls();
         }, true);
         const _commitScrub = () => {
             _userScrubbing = false;
-            const t = parseFloat(rangeInput.value);
-            if (!isNaN(t)) mkAudio.currentTime = t; // triggers onWcSeek → ES restart if needed
+            if (_wcVideo) {
+                const t = parseFloat(rangeInput.value);
+                if (!isNaN(t)) mkAudio.currentTime = t; // triggers onWcSeek → ES restart
+            }
+            // MSE: input handler already sought; nothing extra needed
         };
-        const _cancelScrub = () => { _userScrubbing = false; }; // cancelled drag — don't seek
+        const _cancelScrub = () => { _userScrubbing = false; };
         rangeInput.addEventListener('mouseup',     _commitScrub, true);
         rangeInput.addEventListener('touchend',    _commitScrub, true);
         rangeInput.addEventListener('change',      _commitScrub, true); // keyboard adjust / programmatic
         rangeInput.addEventListener('pointercancel', _cancelScrub, true);
-        // MSE: duration is on myVid (video element). WC: mkAudio carries duration (myVid has none).
+        // MSE: duration lives on myVid. WC: mkAudio carries duration (myVid is empty).
         const _durEl = _wcVideo ? mkAudio : myVid;
         const _setRangeMax = () => {
             if (_durEl.duration && isFinite(_durEl.duration)) rangeInput.max = String(_durEl.duration);
@@ -2577,8 +2583,8 @@ async function startMVPipeline() {
     _mvPlayBtn.addEventListener('mouseleave', () => { _mvPlayBtn.style.background = 'none'; });
     _mvPlayBtn.addEventListener('click', (e) => { e.stopImmediatePropagation(); togglePlayPause(); _showControls(); }, true);
 
-    // WC: mkAudio is the real clock; myVid never plays.
-    const _playStateEl = mkAudio;
+    // MSE: myVid is the master clock. WC: mkAudio is the clock.
+    const _playStateEl = _wcVideo ? mkAudio : myVid;
     const _syncPlayIcon = () => {
         _mvPlayBtn.innerHTML = _playStateEl.paused ? _svgPlay : _svgPause;
         _mvPlayBtn.setAttribute('aria-label', _playStateEl.paused ? 'Play' : 'Pause');
@@ -2588,11 +2594,15 @@ async function startMVPipeline() {
     _playStateEl.addEventListener('playing', _syncPlayIcon);
     _syncPlayIcon();
 
-    // WC: mkAudio is the clock; myVid is empty.
-    const _mvCurTime = () => mkAudio.currentTime || 0;
+    const _mvCurTime = () => (_wcVideo ? mkAudio.currentTime : myVid.currentTime) || 0;
     const _mvSeekTo = (sec) => {
-        const dur = (mkAudio.duration || _durationSec) || 1e9;
-        mkAudio.currentTime = Math.max(0, Math.min(dur, sec));
+        if (_wcVideo) {
+            const dur = (mkAudio.duration || _durationSec) || 1e9;
+            mkAudio.currentTime = Math.max(0, Math.min(dur, sec));
+        } else {
+            myVid.currentTime = Math.max(0, Math.min(myVid.duration || 1e9, sec));
+            mkAudio.currentTime = myVid.currentTime;
+        }
     };
 
     // Inject between the skip-back and skip-forward controls, or after playCtrl.
@@ -3735,14 +3745,6 @@ async function startMVPipeline() {
         if (Date.now() < _ignoreSeekUntil) return;
         _mvVideoSeek(videoEl.currentTime).catch(() => {});
     });
-    // Propagate all external seeks (scrubber, skip, keyboard, _mvSeekTo) to videoEl.
-    // mkAudio.currentTime is always set first; setting videoEl.currentTime fires
-    // videoEl.seeking → _mvVideoSeek which re-fetches from the engine.
-    mkAudio.addEventListener('seeking', () => {
-        if (_wcVideo || !_avStarted || _mvVidSeeking) return;
-        const t = mkAudio.currentTime;
-        if (Math.abs(myVid.currentTime - t) > 0.15) myVid.currentTime = t;
-    });
     const onVideoPlay  = () => {
         console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)}`);
         if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
@@ -3928,7 +3930,7 @@ async function startMVPipeline() {
         _playStateEl.removeEventListener('play',    _syncPlayIcon);
         _playStateEl.removeEventListener('pause',   _syncPlayIcon);
         _playStateEl.removeEventListener('playing', _syncPlayIcon);
-        myVid.removeEventListener('volumechange', _syncVolSlider);
+        mkAudio.removeEventListener('volumechange', _syncVolSlider);
         Function.prototype.call  = _origFnCall;
         Function.prototype.apply = _origFnApply;
         _mvGateOpen = true; // restore for next session
