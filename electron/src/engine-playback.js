@@ -2899,6 +2899,11 @@ async function startMVPipeline() {
                     if (pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted && !_pipeRestarted) {
                         _pipeRestarted = true;
                         const restartAt = videoEl.currentTime;
+                        // Guard against Chrome's internal 'seeking' events (fired because the
+                        // buffer is empty at currentTime) re-entering _mvVideoSeek and aborting
+                        // our recovery pipe before it can fill the buffer — same guard that
+                        // _mvVideoSeek itself sets before starting its pipe. Cleared by onVideoPlaying.
+                        _ignoreSeekUntil = Date.now() + 8000;
                         console.warn(`[AML MV buf:recover] pipe dead + buf stalled at ct=${restartAt.toFixed(2)}s — restarting pipe`);
                         pipeCtrl = new AbortController();
                         _startVideoPipe(`${videoUrl}?t=${restartAt.toFixed(3)}`);
@@ -2940,7 +2945,15 @@ async function startMVPipeline() {
                     console.warn(`[AML MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s → pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length-1).toFixed(2)}` : 'empty'}`);
                 } else {
                     if (lead >= BUF_HIGH) _pipeRestarted = false; // healthy again — re-arm recovery
-                    console.debug(`[AML MV buf:ok] lead=${lead.toFixed(2)}s`);
+                    // videoEl should never be paused here (_bufPaused is false). If it is,
+                    // the _bufPaused resume called play() but it didn't stick (e.g. Chrome
+                    // fired a waiting event before the first frame decoded). Force play again.
+                    if (videoEl.paused) {
+                        console.warn(`[AML MV buf:stuck] videoEl paused with lead=${lead.toFixed(2)}s — retrying play`);
+                        _iframePlay.call(videoEl).catch(() => {});
+                    } else {
+                        console.debug(`[AML MV buf:ok] lead=${lead.toFixed(2)}s`);
+                    }
                 }
             }
         }, BUF_POLL_MS);
