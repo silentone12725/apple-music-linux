@@ -3731,12 +3731,34 @@ async function startMVPipeline() {
     // ── MSE video seek / event handlers ─────────────────────────────────────────
     let _mvVidSeeking = false;
     let _ignoreSeekUntil = 0;
+    // Freeze-frame overlay: captures the last video frame before the buffer is
+    // cleared on a seek, so the user sees a frozen frame instead of black while
+    // FFmpeg remuxes from the new position. Removed on first timeupdate after
+    // the new stream delivers frames (readyState >= HAVE_CURRENT_DATA).
+    let _seekSnapCanvas = null;
+    const _showSeekSnap = () => {
+        if (videoEl.readyState < 2 || videoEl.videoWidth === 0) return;
+        if (_seekSnapCanvas) { try { _seekSnapCanvas.remove(); } catch (_) {} }
+        const c = document.createElement('canvas');
+        c.width  = videoEl.videoWidth;
+        c.height = videoEl.videoHeight;
+        c.getContext('2d').drawImage(videoEl, 0, 0);
+        c.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;z-index:3;pointer-events:none;';
+        mvContainer.appendChild(c);
+        _seekSnapCanvas = c;
+    };
+    const _hideSeekSnap = () => {
+        if (!_seekSnapCanvas) return;
+        try { _seekSnapCanvas.remove(); } catch (_) {}
+        _seekSnapCanvas = null;
+    };
     const _mvVideoSeek = async (seekSec) => {
         if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
         for (let i = 0; i < videoSb.buffered.length; i++) {
             if (seekSec >= videoSb.buffered.start(i) - 1.0 && seekSec <= videoSb.buffered.end(i) + 1.0) return;
         }
         _mvVidSeeking = true;
+        _showSeekSnap(); // freeze last frame before clearing the buffer
         try {
             const prev = pipeCtrl;
             pipeCtrl = new AbortController();
@@ -3750,7 +3772,7 @@ async function startMVPipeline() {
                 videoSb.remove(0, Infinity);
                 try { await _waitVidIdle(); } catch (_) {}
             }
-            if (sig.aborted || ms.readyState !== 'open') return;
+            if (sig.aborted || ms.readyState !== 'open') { _hideSeekSnap(); return; }
             videoSb.timestampOffset = 0;
             console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s — re-fetching from engine`);
             if (seekSec < (_durationSec || 1e9) - 1) {
@@ -3771,6 +3793,7 @@ async function startMVPipeline() {
         mkAudio.play().catch(() => {});
     };
     const onVideoPlaying = () => {
+        _hideSeekSnap(); // new frames decoded — remove the freeze-frame overlay
         nativeVidEl?.dispatchEvent(new Event('playing', { bubbles: false }));
         getMKAudio()?.dispatchEvent(new Event('playing', { bubbles: false }));
         if (_videoStalled) {
@@ -3897,6 +3920,7 @@ async function startMVPipeline() {
         console.log(`[AML MV-V] cleanup gen=${_mvGen} curGen=${_generation} reason=${_abortReason}`);
         // WC teardown (decoder, canvas, ES fetch, render loop).
         if (_wcCleanup) { try { _wcCleanup(); } catch (_) {} _wcCleanup = null; }
+        _hideSeekSnap(); // remove any lingering freeze-frame overlay
         _activeMvControls = null;
         // Always clear the load() shadow so the next handleTrackChange or MK queue
         // advance isn't blocked. Harmless if already deleted; re-set by handleTrackChange.
