@@ -2543,8 +2543,8 @@ async function startMVPipeline() {
         rangeInput.addEventListener('touchend',    _commitScrub, true);
         rangeInput.addEventListener('change',      _commitScrub, true); // keyboard adjust / programmatic
         rangeInput.addEventListener('pointercancel', _cancelScrub, true);
-        // WC: mkAudio carries duration (myVid has none).
-        const _durEl = mkAudio;
+        // MSE: duration is on myVid (video element). WC: mkAudio carries duration (myVid has none).
+        const _durEl = _wcVideo ? mkAudio : myVid;
         const _setRangeMax = () => {
             if (_durEl.duration && isFinite(_durEl.duration)) rangeInput.max = String(_durEl.duration);
             else if (_durationSec > 0) rangeInput.max = String(_durationSec);
@@ -2757,19 +2757,26 @@ async function startMVPipeline() {
 
     const _updateProgress = () => {
         if (!rangeInput) return;
-        // During WC drag the input handler owns --progress/--width from the slider
-        // position — overwriting from the audio clock would snap the thumb back.
+        // During drag the input handler owns --progress/--width — overwriting from
+        // the clock would snap the thumb back.
         if (_userScrubbing) return;
-        const t   = mkAudio.currentTime;
+        // MSE: track position from videoEl (audio can drift during buffer-waits).
+        const t   = _wcVideo ? mkAudio.currentTime : myVid.currentTime;
         const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute('max')) || 1;
         rangeInput.value = String(t);
         const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
         const pct  = _fillPct(frac).toFixed(2) + '%';
         rangeInput.style.setProperty('--progress', pct);
         rangeInput.style.setProperty('--width',    pct);
-        // Buffer bar = furthest decoded video frame (no SourceBuffer in WC mode).
         if (max > 0) {
-            const bFrac = Math.min(1, Math.max(0, _wcBufferedSec / max));
+            let bFrac = 0;
+            if (_wcVideo) {
+                bFrac = Math.min(1, Math.max(0, _wcBufferedSec / max));
+            } else {
+                const vBuf = videoSb?.buffered;
+                if (vBuf && vBuf.length > 0)
+                    bFrac = Math.min(1, Math.max(0, vBuf.end(vBuf.length - 1) / max));
+            }
             rangeInput.style.setProperty('--aml-buffer', _fillPct(bFrac).toFixed(2) + '%');
         }
         if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
@@ -2926,9 +2933,26 @@ async function startMVPipeline() {
         mvContainer.style.removeProperty('pointer-events');
         mvContainer.style.removeProperty('cursor');
         if (exitBtn) exitBtn.style.removeProperty('pointer-events');
-        _mvGateOpen = true; // unblock play/seek
-        // WC: canvas render loop follows mkAudio.currentTime; just start audio.
-        _iframePlay.call(mkAudio).catch(e => console.warn('[AML MV-WC] audio play rejected:', e.message));
+        _mvGateOpen = true; // unblock play/seek now that both streams are ready
+
+        if (_wcVideo) {
+            _iframePlay.call(mkAudio).catch(e => console.warn('[AML MV-WC] audio play rejected:', e.message));
+            return;
+        }
+
+        // MSE: sync video time to audio (audio loads faster), then play videoEl.
+        // Guard: only seek video to audio position when the video buffer already covers
+        // that position. On retry, audio is at mid-track but fresh video buffer starts
+        // at 0 — seeking video to t=13 on an empty buffer causes immediate stall.
+        const audCt = mkAudio.currentTime;
+        const vidCt = videoEl.currentTime;
+        const vidBufEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : 0;
+        const canSyncToAudio = Math.abs(vidCt - audCt) > 0.05 && audCt <= vidBufEnd + 1.0;
+        console.log(`[AML MV buf:gate] A/V gate open audio=${audCt.toFixed(2)} video=${vidCt.toFixed(2)} vidBufEnd=${vidBufEnd.toFixed(2)} canSyncToAudio=${canSyncToAudio}`);
+        if (canSyncToAudio) videoEl.currentTime = audCt;
+        // onVideoPlay fires on the 'play' event and calls mkAudio.play()
+        _iframePlay.call(videoEl).catch(e => console.warn('[AML MV] av-gate play rejected:', e.message));
+        _startDynBuf();
     };
 
     mkAudio.addEventListener('canplay', () => { _audioCanPlay = true; tryStart(); }, { once: true });
@@ -3682,6 +3706,8 @@ async function startMVPipeline() {
     else _startVideoPipe();
 
     // ── MSE video seek / event handlers ─────────────────────────────────────────
+    let _mvVidSeeking = false;
+    let _ignoreSeekUntil = 0;
     const _mvVideoSeek = async (seekSec) => {
         if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
         for (let i = 0; i < videoSb.buffered.length; i++) {
@@ -3708,6 +3734,14 @@ async function startMVPipeline() {
         if (_wcVideo) return; // WebCodecs handles seeks via mkAudio 'seeking' (onWcSeek)
         if (Date.now() < _ignoreSeekUntil) return;
         _mvVideoSeek(videoEl.currentTime).catch(() => {});
+    });
+    // Propagate all external seeks (scrubber, skip, keyboard, _mvSeekTo) to videoEl.
+    // mkAudio.currentTime is always set first; setting videoEl.currentTime fires
+    // videoEl.seeking → _mvVideoSeek which re-fetches from the engine.
+    mkAudio.addEventListener('seeking', () => {
+        if (_wcVideo || !_avStarted || _mvVidSeeking) return;
+        const t = mkAudio.currentTime;
+        if (Math.abs(myVid.currentTime - t) > 0.15) myVid.currentTime = t;
     });
     const onVideoPlay  = () => {
         console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)}`);
