@@ -140,7 +140,8 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 			samples, err := frag.GetFullSamples(trex)
 			pendingMoof = nil
 			if err != nil {
-				continue // skip an unreadable fragment rather than tearing down
+				fmt.Printf("[video-es] skipping unreadable fragment: %v\n", err)
+				continue
 			}
 			for i := range samples {
 				s := &samples[i]
