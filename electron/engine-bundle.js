@@ -3613,6 +3613,15 @@
       if (mkAudio.muted) mkAudio.muted = false;
       _audioPipeCtrl.abort();
       mkAudio.pause();
+      if (_abortReason === "exit-button") {
+        try {
+          delete mkAudio.play;
+        } catch (_) {
+        }
+        _proxyInstalled = false;
+        _msePaused = false;
+        setPlayState(PLAY_STATE.IDLE, "mv:exit");
+      }
       nativeVidEl?.dispatchEvent(new Event("pause", { bubbles: false }));
       if (myVid.parentNode) myVid.parentNode.removeChild(myVid);
       mvContainer.removeEventListener("mousemove", _showControls);
@@ -6469,8 +6478,8 @@
       );
       if (!_vlcMode && _dbgPlaySel) {
         console.log("[AML AAC-GATE] click caught vlc=" + _vlcMode + " sel=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 30) || "?"));
-        if (_dbgPlaySel?.dataset?.testid === "click-action" && !!e.target?.closest?.('[class*="vertical-video"]')) {
-          console.log("[AML AAC-GATE] MV banner/link click \u2014 skipping interceptor, allowing navigation");
+        if (_dbgPlaySel?.dataset?.testid === "click-action" && (_dbgPlaySel?.href?.includes("/music-video/") || !!e.target?.closest?.('[class*="vertical-video"]'))) {
+          console.log("[AML AAC-GATE] MV click-action \u2014 skipping interceptor, allowing navigation");
           return;
         }
         if (_allowCDNTransition) return;
@@ -6752,8 +6761,8 @@
       }
       if (_vlcMode && _dbgPlaySel) {
         console.log("[AML VLC-GATE] click caught vlc=" + _vlcMode + " saved=" + !!_mkApiSaved + " sel=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 30) || "?"));
-        if (_dbgPlaySel?.dataset?.testid === "click-action" && !!e.target?.closest?.('[class*="vertical-video"]')) {
-          console.log("[AML VLC-GATE] MV banner/link click \u2014 skipping interceptor, allowing navigation");
+        if (_dbgPlaySel?.dataset?.testid === "click-action" && (_dbgPlaySel?.href?.includes("/music-video/") || !!e.target?.closest?.('[class*="vertical-video"]'))) {
+          console.log("[AML VLC-GATE] MV click-action \u2014 skipping interceptor, allowing navigation");
           return;
         }
         if (_mkApiSaved) return;
