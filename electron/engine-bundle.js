@@ -2553,6 +2553,7 @@
             if (pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted && !_pipeRestarted) {
               _pipeRestarted = true;
               const restartAt = videoEl.currentTime;
+              _ignoreSeekUntil = Date.now() + 8e3;
               console.warn(`[AML MV buf:recover] pipe dead + buf stalled at ct=${restartAt.toFixed(2)}s \u2014 restarting pipe`);
               pipeCtrl = new AbortController();
               _startVideoPipe(`${videoUrl}?t=${restartAt.toFixed(3)}`);
@@ -2586,7 +2587,13 @@
             console.warn(`[AML MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s \u2192 pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length - 1).toFixed(2)}` : "empty"}`);
           } else {
             if (lead >= BUF_HIGH) _pipeRestarted = false;
-            console.debug(`[AML MV buf:ok] lead=${lead.toFixed(2)}s`);
+            if (videoEl.paused) {
+              console.warn(`[AML MV buf:stuck] videoEl paused with lead=${lead.toFixed(2)}s \u2014 retrying play`);
+              _iframePlay.call(videoEl).catch(() => {
+              });
+            } else {
+              console.debug(`[AML MV buf:ok] lead=${lead.toFixed(2)}s`);
+            }
           }
         }
       }, BUF_POLL_MS);
