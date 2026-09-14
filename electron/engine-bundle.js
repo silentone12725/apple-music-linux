@@ -2232,7 +2232,7 @@
       rangeInput.addEventListener("touchend", _commitScrub, true);
       rangeInput.addEventListener("change", _commitScrub, true);
       rangeInput.addEventListener("pointercancel", _cancelScrub, true);
-      const _durEl = mkAudio;
+      const _durEl = _wcVideo ? mkAudio : myVid;
       const _setRangeMax = () => {
         if (_durEl.duration && isFinite(_durEl.duration)) rangeInput.max = String(_durEl.duration);
         else if (_durationSec > 0) rangeInput.max = String(_durationSec);
@@ -2446,7 +2446,7 @@
     const _updateProgress = () => {
       if (!rangeInput) return;
       if (_userScrubbing) return;
-      const t = mkAudio.currentTime;
+      const t = _wcVideo ? mkAudio.currentTime : myVid.currentTime;
       const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute("max")) || 1;
       rangeInput.value = String(t);
       const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
@@ -2454,7 +2454,14 @@
       rangeInput.style.setProperty("--progress", pct);
       rangeInput.style.setProperty("--width", pct);
       if (max > 0) {
-        const bFrac = Math.min(1, Math.max(0, _wcBufferedSec / max));
+        let bFrac = 0;
+        if (_wcVideo) {
+          bFrac = Math.min(1, Math.max(0, _wcBufferedSec / max));
+        } else {
+          const vBuf = videoSb?.buffered;
+          if (vBuf && vBuf.length > 0)
+            bFrac = Math.min(1, Math.max(0, vBuf.end(vBuf.length - 1) / max));
+        }
         rangeInput.style.setProperty("--aml-buffer", _fillPct(bFrac).toFixed(2) + "%");
       }
       if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
@@ -2570,7 +2577,18 @@
       mvContainer.style.removeProperty("cursor");
       if (exitBtn) exitBtn.style.removeProperty("pointer-events");
       _mvGateOpen = true;
-      _iframePlay.call(mkAudio).catch((e) => console.warn("[AML MV-WC] audio play rejected:", e.message));
+      if (_wcVideo) {
+        _iframePlay.call(mkAudio).catch((e) => console.warn("[AML MV-WC] audio play rejected:", e.message));
+        return;
+      }
+      const audCt = mkAudio.currentTime;
+      const vidCt = videoEl.currentTime;
+      const vidBufEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : 0;
+      const canSyncToAudio = Math.abs(vidCt - audCt) > 0.05 && audCt <= vidBufEnd + 1;
+      console.log(`[AML MV buf:gate] A/V gate open audio=${audCt.toFixed(2)} video=${vidCt.toFixed(2)} vidBufEnd=${vidBufEnd.toFixed(2)} canSyncToAudio=${canSyncToAudio}`);
+      if (canSyncToAudio) videoEl.currentTime = audCt;
+      _iframePlay.call(videoEl).catch((e) => console.warn("[AML MV] av-gate play rejected:", e.message));
+      _startDynBuf();
     };
     mkAudio.addEventListener("canplay", () => {
       _audioCanPlay = true;
@@ -3313,6 +3331,8 @@
     };
     if (_wcVideo) _setupWebCodecsVideo();
     else _startVideoPipe();
+    let _mvVidSeeking = false;
+    let _ignoreSeekUntil = 0;
     const _mvVideoSeek = async (seekSec) => {
       if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== "open") return;
       for (let i = 0; i < videoSb.buffered.length; i++) {
@@ -3346,6 +3366,11 @@
       if (Date.now() < _ignoreSeekUntil) return;
       _mvVideoSeek(videoEl.currentTime).catch(() => {
       });
+    });
+    mkAudio.addEventListener("seeking", () => {
+      if (_wcVideo || !_avStarted || _mvVidSeeking) return;
+      const t = mkAudio.currentTime;
+      if (Math.abs(myVid.currentTime - t) > 0.15) myVid.currentTime = t;
     });
     const onVideoPlay = () => {
       console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)}`);
