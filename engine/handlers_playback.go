@@ -514,6 +514,88 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 	}, "video/mp4")
 }
 
+// handlePlaybackVideoNativeInfo reports whether a session's video is committed to
+// the mv-dl cache and, if so, its absolute on-disk path and size. The Electron
+// aml-video:// handler uses this to serve a cached file DIRECTLY via
+// createReadStream (proper 206 byte-range seeking) instead of proxying byte
+// ranges through electronNet.fetch, which mangles Range semantics for <video>
+// and yields MEDIA_ERR_SRC_NOT_SUPPORTED. Uncached sessions fall back to the
+// streaming proxy.
+func (s *APIServer) handlePlaybackVideoNativeInfo(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, ok := s.pm.GetSession(id)
+	if !ok {
+		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
+	const qualifier = "mv-dl"
+	if path, ok := s.diskCache.Path(sess.AssetID, qualifier); ok {
+		size := int64(0)
+		if fi, err := os.Stat(path); err == nil {
+			size = fi.Size()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cached": true, "path": path, "size": size})
+		return
+	}
+	// Not cached — start the faststart build (idempotent) so the client can poll
+	// this endpoint and show a loading state until "cached" flips true.
+	go s.prepareMVFaststart(id, sess.AssetID, float64(sess.DurationMs)/1000.0)
+	_, preparing := mvPreparing.Load(sess.AssetID)
+	writeJSON(w, http.StatusOK, map[string]any{"cached": false, "preparing": preparing})
+}
+
+// handlePlaybackVideoNative serves a video session as a progressively-downloaded
+// disk-cached fMP4 for use with a plain <video src> element (no MSE, no
+// SourceBuffer, no CHUNK_DEMUXER_ERROR possible).
+//
+// First play: streams FFmpeg-remuxed fMP4 to the client while downloading to
+// disk in the background (BeginStreamingPut model from ALAC). The browser plays
+// as bytes arrive; seeks within the buffered range work natively. Seeks beyond
+// the download head return 416 so the client knows to wait or limit the scrubber.
+//
+// Replay (committed cache): http.ServeContent with Accept-Ranges — full random-
+// access seeking anywhere in the file, instant.
+//
+// Range requests during active download: served via NewReaderAt(offset) which
+// blocks until the requested offset is available, then streams from there.
+// Offsets beyond Written() return 416 immediately.
+func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess, ok := s.pm.GetSession(id)
+	if !ok {
+		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
+	if !sess.Capabilities.Video {
+		http.Error(w, "no video stream in this session", http.StatusNotFound)
+		return
+	}
+
+	assetID := sess.AssetID
+	const qualifier = "mv-dl"
+	log.Printf("%s GET id=%s assetID=%q Range=%q", tagVideo("[video-dl]"), id, assetID, r.Header.Get("Range"))
+
+	// Serve the committed faststart cache. Chrome's <video> file demuxer needs a
+	// complete, non-fragmented MP4 (moov with a full sample table). We build that
+	// asynchronously (prepareMVFaststart) because faststart requires the whole
+	// file before the moov can be written — so playback is download-then-serve,
+	// not progressive. Normally the Electron aml-video:// handler serves the file
+	// directly (proper 206 byte-range seeking) once video-dl-info reports cached;
+	// this endpoint is the fallback / trigger.
+	if f, ok := s.diskCache.Get(assetID, qualifier); ok {
+		defer f.Close()
+		log.Printf("%s cache hit assetID=%s Range=%q", tagOK("[video-dl]"), assetID, r.Header.Get("Range"))
+		w.Header().Set("Content-Type", "video/mp4")
+		http.ServeContent(w, r, "", time.Time{}, f)
+		return
+	}
+
+	// Not cached yet — kick off the faststart build and tell the client to wait.
+	go s.prepareMVFaststart(id, assetID, float64(sess.DurationMs)/1000.0)
+	w.Header().Set("Retry-After", "1")
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"preparing": true, "assetId": assetID})
+}
+
 // handlePlaybackVideoRaw streams the raw decrypted multi-track fMP4 for a
 // video session — before FFmpeg remux. Useful for pipeline debugging with
 // ffprobe to check that the decrypt stage is producing valid output.
@@ -613,6 +695,14 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 
 func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// If this session's MV faststart file was written under "caching disabled",
+	// delete it now — it existed only to serve this playback.
+	if sess, ok := s.pm.GetSession(id); ok {
+		if _, ephemeral := mvEphemeral.LoadAndDelete(sess.AssetID); ephemeral {
+			s.diskCache.Remove(sess.AssetID, "mv-dl")
+			log.Printf("%s ephemeral mv-dl removed assetID=%s (caching disabled)", tagInfo("[video-dl]"), sess.AssetID)
+		}
+	}
 	s.pm.Release(id)
 	s.events.emit("playback.deleted", map[string]string{"sessionId": id})
 	w.WriteHeader(http.StatusNoContent)
@@ -651,7 +741,7 @@ var (
 // of 0. Pass the actual segment start for seeks (so the client's currentTime lands
 // inside the buffered range, matching ServeMVDecFrom) and 0 for full plays (whose
 // cached output must start at 0 to stay consistent with the fragment index).
-func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io.Writer, tsOffsetSec float64) error {
+func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io.Writer, tsOffsetSec float64, durationSec ...float64) error {
 	ffmpegOnce.Do(func() {
 		ffmpegPath, _ = exec.LookPath("ffmpeg")
 		if ffmpegPath == "" {
@@ -674,6 +764,12 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 		// Re-anchor make_zero's 0-based output back onto the real timeline so a
 		// seek's fragments carry their true presentation times.
 		args = append(args, "-output_ts_offset", strconv.FormatFloat(tsOffsetSec, 'f', 6, 64))
+	}
+	if len(durationSec) > 0 && durationSec[0] > 0 {
+		// Tell FFmpeg the total duration so it writes a valid mvhd duration into the
+		// moov box. Without this, empty_moov produces duration=0 and the browser's
+		// <video> element shows an indeterminate seek bar.
+		args = append(args, "-t", strconv.FormatFloat(durationSec[0], 'f', 3, 64))
 	}
 	args = append(args, "-f", "mp4", "pipe:1")
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
@@ -725,6 +821,115 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 	}
 	return nil
 }
+
+// transcodeVideoFaststart remuxes the decrypted fMP4 into a NON-fragmented,
+// faststart MP4 written to outPath (a real seekable file — faststart's moov
+// relocation needs a seekable output, so this cannot stream to a pipe). Unlike
+// transcodeVideoForMSE's empty_moov fragmented output, this produces a complete
+// moov with a full sample table, which is what Chrome's <video src> file demuxer
+// requires — an empty_moov fragmented file fails with MEDIA_ERR_SRC_NOT_SUPPORTED.
+func transcodeVideoFaststart(ctx context.Context, src func(io.Writer) error, outPath string, durationSec float64) error {
+	ffmpegOnce.Do(func() {
+		ffmpegPath, _ = exec.LookPath("ffmpeg")
+	})
+	if ffmpegPath == "" {
+		return fmt.Errorf("ffmpeg not found")
+	}
+	pr, pw := io.Pipe()
+	args := []string{
+		"-loglevel", "warning",
+		"-i", "pipe:0",
+		"-map", "0:v:0", // first video stream only
+		"-c:v", "copy", // preserve avc1.640028; no re-encode
+		"-movflags", "+faststart", // moov at front, full sample table (seekable file)
+	}
+	if durationSec > 0 {
+		args = append(args, "-t", strconv.FormatFloat(durationSec, 'f', 3, 64))
+	}
+	args = append(args, "-y", "-f", "mp4", outPath)
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd.Stdin = pr
+
+	stderrR, stderrW, _ := os.Pipe()
+	cmd.Stderr = stderrW
+
+	srcErrCh := make(chan error, 1)
+	go func() {
+		err := src(pw)
+		pw.CloseWithError(err)
+		srcErrCh <- err
+	}()
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		sc := bufio.NewScanner(stderrR)
+		for sc.Scan() {
+			log.Printf("[ffmpeg-video-fs] %s", sc.Text())
+		}
+	}()
+
+	runErr := cmd.Run()
+	stderrW.Close()
+	<-stderrDone
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if runErr != nil {
+		return fmt.Errorf("ffmpeg faststart remux: %w", runErr)
+	}
+	if srcErr := <-srcErrCh; srcErr != nil {
+		return fmt.Errorf("video source: %w", srcErr)
+	}
+	return nil
+}
+
+// mvPreparing tracks assetIDs whose faststart cache is being built, so the
+// info endpoint can report "preparing" and the handler avoids duplicate jobs.
+var mvPreparing sync.Map // assetID → struct{}
+
+// prepareMVFaststart builds the faststart MP4 cache for a video session in the
+// background (download → decrypt → faststart remux → commit). Guarded by
+// diskCache.BeginPut's in-flight lock so only one job per asset runs.
+func (s *APIServer) prepareMVFaststart(id, assetID string, durationSec float64) {
+	const qualifier = "mv-dl"
+	pw, _ := s.diskCache.BeginPut(assetID, qualifier)
+	if pw == nil {
+		return // another goroutine is already preparing this asset
+	}
+	mvPreparing.Store(assetID, struct{}{})
+	tmpPath := pw.File.Name()
+	pw.File.Close() // ffmpeg writes the path itself; keep the in-flight lock via pw
+
+	log.Printf("%s prepare faststart start assetID=%s dur=%.1fs", tagVideo("[video-dl]"), assetID, durationSec)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	err := transcodeVideoFaststart(ctx, func(dst io.Writer) error {
+		return s.pm.Stream(ctx, id, pipeline.KindVideo, dst)
+	}, tmpPath, durationSec)
+	mvPreparing.Delete(assetID)
+	if err != nil {
+		log.Printf("%s prepare faststart FAILED assetID=%s: %v", tagErr("[video-dl]"), assetID, err)
+		pw.Discard()
+		return
+	}
+	if err := pw.Commit(); err != nil {
+		log.Printf("%s prepare faststart commit FAILED assetID=%s: %v", tagErr("[video-dl]"), assetID, err)
+		return
+	}
+	// When MV caching is disabled in settings, the file must still exist on disk
+	// (native <video src> plays FROM it), but it must not persist. Mark it
+	// ephemeral so it's deleted when the session is released (track change / exit).
+	if !aacstream.MVCacheEnabled() {
+		mvEphemeral.Store(assetID, struct{}{})
+	}
+	if fi, e := os.Stat(func() string { p, _ := s.diskCache.Path(assetID, qualifier); return p }()); e == nil {
+		log.Printf("%s prepare faststart DONE assetID=%s size=%d ephemeral=%v", tagOK("[video-dl]"), assetID, fi.Size(), !aacstream.MVCacheEnabled())
+	}
+}
+
+// mvEphemeral holds assetIDs whose mv-dl faststart file was written under
+// "caching disabled" — deleted on session release so nothing persists.
+var mvEphemeral sync.Map // assetID → struct{}
 
 // streamMedia runs fn into a firstByteWriter so that:
 //   - If fn produces no bytes and returns an error, the client receives a

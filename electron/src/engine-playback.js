@@ -23,6 +23,10 @@ if (window.__amlEngineInjected) throw new Error('[AML] double-injection guard');
 window.__amlEngineInjected = true;
 
 const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
+// HTTPS origin for MV <video src> (engine serves TLS on port+1). A real HTTPS
+// origin avoids the mixed-content block AND the custom-protocol seek bug
+// (electron#38749) → Chrome's native byte-range seeking works.
+const ENGINE_HTTPS = ENGINE.replace(/^http:\/\/(127\.0\.0\.1|localhost):(\d+)/, (_, host, port) => `https://${host}:${Number(port) + 1}`);
 const _AML_DEBUG = !!(window.amlBridge?.isDev) || localStorage.getItem('_AML_DEBUG') === '1';
 
 // ── Last.fm API credentials (hardcoded — no UI entry needed) ──────────────────
@@ -1830,6 +1834,10 @@ async function startMVPipeline() {
     const mkAudio = document.createElement('audio');
     mkAudio.style.display = 'none';
     document.body.appendChild(mkAudio);
+    mkAudio.addEventListener('play',    () => console.log(`[AML MV-A] mkAudio play event ct=${mkAudio.currentTime.toFixed(2)} muted=${mkAudio.muted} vol=${mkAudio.volume}`));
+    mkAudio.addEventListener('playing', () => console.log(`[AML MV-A] mkAudio playing event ct=${mkAudio.currentTime.toFixed(2)}`));
+    mkAudio.addEventListener('pause',   () => console.log(`[AML MV-A] mkAudio pause event ct=${mkAudio.currentTime.toFixed(2)}`));
+    mkAudio.addEventListener('error',   () => console.error(`[AML MV-A] mkAudio error code=${mkAudio.error?.code} msg=${mkAudio.error?.message}`));
 
     // ── Video MSE: started early so browser buffers video frames during container poll ──
     // `let` not `const`: retry path re-creates ms/msBlobUrl/videoSb when Chrome ends the MS
@@ -1937,10 +1945,15 @@ async function startMVPipeline() {
     // /video fetch + buffer monitor + tryStart's video-element play) is gated off.
     // WebCodecs is the primary MV video backend (CBCS → DemuxFMP4ToES → VideoDecoder).
     // This eliminates CHUNK_DEMUXER_ERROR_APPEND_FAILED on Apple Music's B-frame H.264 content.
-    const _wcVideo = true;
+    // Native video path: <video src=/video-dl> — progressive disk-cached download.
+    // Chrome's native H.264 pipeline; no MSE, no SourceBuffer, no CHUNK_DEMUXER_ERROR.
+    // Seeks within downloaded portion are instant (browser Range request from cache).
+    // Set false to fall back to the MSE path below.
+    const _nativeVideo = true;
+    const _wcVideo = false;
     // Experimental: mp4box.js MSE path — re-segments raw fMP4 in-browser with B-frame-safe
     // timestamps, then feeds to MSE SourceBuffer. Requires window.MP4Box (mp4box-bundle.js).
-    // Set true to test; _wcVideo must be false for this path to be reached.
+    // Set true to test; _wcVideo and _nativeVideo must be false for this path to be reached.
     const _mp4Video = false;
     let _wcCleanup = null; // set by _setupWebCodecsVideo; called from cleanup()
     // Furthest VIDEO position (sec) decoded/available in the WC pipeline — drives the
@@ -1950,7 +1963,7 @@ async function startMVPipeline() {
     // Native video dimensions from the decoded canvas (myVid is empty in WC mode).
     // Written by _setupWebCodecsVideo on first frame; read by _resizeScrim.
     let _wcVW = 0, _wcVH = 0;
-    console.log(`[AML MV] video backend = ${_wcVideo ? 'webcodecs' : 'mse'}`);
+    console.log('%c[AML MV]%c video backend = %c%s', 'color:#bf5af2;font-weight:bold', 'color:inherit', 'color:#30d158;font-weight:bold', _nativeVideo ? 'native-dl' : _wcVideo ? 'webcodecs' : 'mse');
     // Suppress CDN-buffering events from nativeVidEl that cause MK loading-indicator blinking.
     // nativeVidEl keeps loading from Apple CDN in the background; its waiting/stalled/suspend
     // events propagate to MK's state machine and toggle the loading spinner continuously.
@@ -1968,6 +1981,24 @@ async function startMVPipeline() {
     const _subDiv = document.createElement('div');
     _subDiv.style.cssText = 'position:absolute;bottom:10%;left:5%;right:5%;text-align:center;z-index:20;pointer-events:none;font-family:-apple-system,SF Pro Text,system-ui,sans-serif;transition:bottom 0.25s ease;';
     mvContainer.appendChild(_subDiv);
+
+    if (!document.getElementById('_mvBufSpinStyle')) {
+        const s = document.createElement('style');
+        s.id = '_mvBufSpinStyle';
+        s.textContent = '@keyframes _mvBufSpin{from{transform:translate(-50%,-50%) rotate(0deg)}to{transform:translate(-50%,-50%) rotate(360deg)}}';
+        document.head.appendChild(s);
+    }
+    const _bufSpinner = document.createElement('div');
+    _bufSpinner.style.cssText = [
+        'position:absolute;top:50%;left:50%',
+        'transform:translate(-50%,-50%)',
+        'width:44px;height:44px;border-radius:50%',
+        'border:3px solid rgba(255,255,255,0.25)',
+        'border-top-color:rgba(255,255,255,0.9)',
+        'animation:_mvBufSpin 0.75s linear infinite',
+        'pointer-events:none;z-index:3;display:none',
+    ].join(';');
+    mvContainer.appendChild(_bufSpinner);
     // _ccEnabled: follows native CC button. Default true — show if tracks exist.
     // Chromium extracts EIA-608 CC from the H.264 MSE stream and surfaces them as
     // TextTrack objects on myVid. We render them ourselves (mode='hidden') so cues
@@ -2103,10 +2134,16 @@ async function startMVPipeline() {
         nativeVidInVc.style.setProperty('display', 'none', 'important');
     }
 
-    const mvPlay  = () => _wcVideo
-        ? mkAudio.play().catch(() => {})
-        : _iframePlay.call(myVid).then(() => mkAudio.play().catch(() => {})).catch(() => {});
-    const mvPause = () => { if (!_wcVideo) myVid.pause(); mkAudio.pause(); };
+    const mvPlay  = () => {
+        _userPaused = false;
+        if (_wcVideo) return _iframePlay.call(mkAudio).catch(() => {});
+        return _iframePlay.call(myVid).then(() => _iframePlay.call(mkAudio).catch(() => {})).catch(() => {});
+    };
+    const mvPause = () => {
+        _userPaused = true;
+        if (!_wcVideo) myVid.pause();
+        mkAudio.pause();
+    };
     const togglePlayPause = () => { if (_wcVideo ? mkAudio.paused : myVid.paused) mvPlay(); else mvPause(); };
 
     // When Apple Music's center play overlay (or any MK code) calls nativeVidEl.play()
@@ -2118,6 +2155,10 @@ async function startMVPipeline() {
             if (!_avStarted) return Promise.resolve();
             if (_wcVideo ? mkAudio?.paused : myVid?.paused) mvPlay();
             return Promise.resolve();
+        };
+        nativeVidEl.pause = function() {
+            console.log(`[AML MV] nativeVidEl.pause() intercepted → forwarding to mvPause`);
+            if (_avStarted) mvPause();
         };
     }
 
@@ -2525,8 +2566,10 @@ async function startMVPipeline() {
         rangeInput.addEventListener('input', () => {
             const t = parseFloat(rangeInput.value);
             if (!isNaN(t)) {
-                if (_wcVideo) {
-                    // WC: update CSS only during drag — commit seek on mouseup to avoid churning decoder
+                if (_wcVideo || _nativeVideo) {
+                    // WC / native-dl: update CSS only during drag; commit the seek on
+                    // release. Live-seeking on every drag tick cancels the in-flight
+                    // byte-range read repeatedly → PIPELINE_ERROR_READ (code=2).
                     const max = parseFloat(rangeInput.max) || 1;
                     const pct = _fillPct(Math.min(1, Math.max(0, t / max))).toFixed(2) + '%';
                     rangeInput.style.setProperty('--progress', pct);
@@ -2539,11 +2582,23 @@ async function startMVPipeline() {
             }
             _showControls();
         }, true);
+        let _lastCommit = -1;
         const _commitScrub = () => {
             _userScrubbing = false;
+            const t = parseFloat(rangeInput.value);
+            if (isNaN(t)) return;
+            // A single click fires both mouseup AND change → dedupe so we don't seek
+            // to the same spot twice; the second set aborts Chrome's in-flight
+            // range request mid-seek → PIPELINE_ERROR_READ.
+            if (Math.abs(t - _lastCommit) < 0.25) return;
+            _lastCommit = t;
             if (_wcVideo) {
-                const t = parseFloat(rangeInput.value);
-                if (!isNaN(t)) mkAudio.currentTime = t; // triggers onWcSeek → ES restart
+                mkAudio.currentTime = t; // triggers onWcSeek → ES restart
+            } else if (_nativeVideo) {
+                // One clean seek on release: video is master, audio follows. Chrome
+                // issues a single bytes=OFFSET- range request that serves and resumes.
+                console.log(`[AML MV native] commit seek → ${t.toFixed(2)}s`);
+                myVid.currentTime = t; mkAudio.currentTime = t;
             }
             // MSE: input handler already sought; nothing extra needed
         };
@@ -2785,6 +2840,11 @@ async function startMVPipeline() {
             let bFrac = 0;
             if (_wcVideo) {
                 bFrac = Math.min(1, Math.max(0, _wcBufferedSec / max));
+            } else if (_nativeVideo) {
+                // Native <video src>: read the element's own buffered ranges.
+                const nBuf = myVid.buffered;
+                if (nBuf && nBuf.length > 0)
+                    bFrac = Math.min(1, Math.max(0, nBuf.end(nBuf.length - 1) / max));
             } else {
                 const vBuf = videoSb?.buffered;
                 if (vBuf && vBuf.length > 0)
@@ -2864,6 +2924,7 @@ async function startMVPipeline() {
 
     let _dynBufTimer  = null;
     let _bufPaused    = false; // true while hidden-paused for buffering
+    let _userPaused   = false; // true when user intentionally paused (suppresses stuck-recovery)
     let _bufWaitStart = 0;    // Date.now() when buf:LOW triggered, for timeout detection
 
     const _getVidLead = () => {
@@ -2876,6 +2937,7 @@ async function startMVPipeline() {
     };
 
     const _startDynBuf = () => {
+        if (_nativeVideo) return; // Chrome manages buffering; no SourceBuffer to monitor
         if (_dynBufTimer) return;
         _dynBufTimer = setInterval(() => {
             if (!_avStarted || _abortCtrl?.signal.aborted) { clearInterval(_dynBufTimer); _dynBufTimer = null; return; }
@@ -2886,16 +2948,56 @@ async function startMVPipeline() {
             if (_bufPaused) {
                 if (lead >= BUF_HIGH) {
                     _bufPaused = false;
+                    _bufSpinner.style.display = 'none';
+                    if (_userPaused) {
+                        // User paused while buffering — buffer is healthy now but honour the pause.
+                        mkAudio.muted = false; // unmute audio so volume is restored, but keep paused
+                        console.log(`[AML MV buf:resume-held] lead=${lead.toFixed(2)}s — user paused, not auto-resuming`);
+                    } else {
                     _mvGateOpen = _avStarted; // unblock seeks when buffer recovers
                     mkAudio.currentTime = videoEl.currentTime; // re-anchor while still muted
                     mkAudio.muted = false;
                     _iframePlay.call(videoEl).catch(() => {}); // onVideoPlay → mkAudio.play()
                     console.log(`[AML MV buf:resume] lead=${lead.toFixed(2)}s ct=${videoEl.currentTime.toFixed(2)}`);
+                    }
                 } else {
                     // Re-enforce pause if Chrome auto-resumed (MSE 'play' event race).
                     if (!videoEl.paused) {
                         console.warn('[AML MV buf:waiting] video escaped pause — re-pausing');
                         videoEl.pause();
+                    }
+                    // Gap-snap: after a seek, the first buffered segment may start slightly
+                    // ahead of currentTime (segment boundary misalignment). _getVidLead()
+                    // returns 0 when ct is outside all buffered ranges, so buf:waiting
+                    // never exits. Snap ct to the nearest ahead range to close the gap.
+                    if (lead === 0) {
+                        const ct = videoEl.currentTime;
+                        let snapped = false;
+                        for (let i = 0; i < videoEl.buffered.length; i++) {
+                            const s = videoEl.buffered.start(i);
+                            if (s > ct && s - ct < 15) {
+                                console.log(`[AML MV buf:gap-snap] ct=${ct.toFixed(2)} → ${s.toFixed(2)} (gap=${(s-ct).toFixed(2)}s)`);
+                                videoEl.currentTime = s;
+                                snapped = true;
+                                break;
+                            }
+                        }
+                        // Ahead-snap: ct is beyond the buffer end entirely (not a gap within
+                        // the buffer — there is nothing ahead to snap to). This happens when
+                        // the engine's one-segment-back lands the data before the seek point.
+                        // The active pipe will grow the buffer forward to ct, but if it takes
+                        // more than 8s the pipe is likely stalled or sending from the wrong
+                        // position — re-seek to force it to fetch from ct directly.
+                        // Resetting _bufWaitStart on fire throttles this to once per 8s
+                        // (prevents 500ms spam) and gives the retry a fresh 45s timeout window.
+                        if (!snapped && videoEl.buffered.length > 0) {
+                            const bufEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+                            if (ct > bufEnd && ct - bufEnd < 30 && Date.now() - _bufWaitStart > 8000) {
+                                console.warn(`[AML MV buf:ahead-snap] ct=${ct.toFixed(2)} ahead of bufEnd=${bufEnd.toFixed(2)} — re-seeking`);
+                                _bufWaitStart = Date.now(); // throttle: won't fire again for 8s
+                                _mvVideoSeek(ct).catch(() => {});
+                            }
+                        }
                     }
                     // Dead-pipe recovery: if the fetch pipe died (its signal aborted) while
                     // _bufPaused is true, the normal deadlock-recovery branch below (which
@@ -2942,6 +3044,7 @@ async function startMVPipeline() {
             } else {
                 if (lead < BUF_LOW && !videoEl.paused) {
                     _bufPaused = true;
+                    _bufSpinner.style.display = 'block';
                     _mvGateOpen = false; // block seeks during buffer stall
                     _bufWaitStart = Date.now();
                     videoEl.pause();      // onVideoPause suppressed via _bufPaused guard
@@ -2952,7 +3055,7 @@ async function startMVPipeline() {
                     // videoEl should never be paused here (_bufPaused is false). If it is,
                     // the _bufPaused resume called play() but it didn't stick (e.g. Chrome
                     // fired a waiting event before the first frame decoded). Force play again.
-                    if (videoEl.paused) {
+                    if (videoEl.paused && !_userPaused) {
                         console.warn(`[AML MV buf:stuck] videoEl paused with lead=${lead.toFixed(2)}s — retrying play`);
                         _iframePlay.call(videoEl).catch(() => {});
                     } else {
@@ -2971,8 +3074,8 @@ async function startMVPipeline() {
         if (exitBtn) exitBtn.style.removeProperty('pointer-events');
         _mvGateOpen = true; // unblock play/seek now that both streams are ready
 
-        if (_wcVideo) {
-            _iframePlay.call(mkAudio).catch(e => console.warn('[AML MV-WC] audio play rejected:', e.message));
+        if (_wcVideo || _nativeVideo) {
+            _iframePlay.call(mkAudio).catch(e => console.warn('[AML MV] audio play rejected:', e.message));
             return;
         }
 
@@ -3181,7 +3284,7 @@ async function startMVPipeline() {
     // In WebCodecs mode we never append MSE video, so skip creating the SourceBuffer
     // (also avoids addSourceBuffer throwing for HEVC that VideoDecoder could handle).
     // Only gated-off code dereferences videoSb, so null is safe here.
-    let videoSb = (_wcVideo || _mp4Video) ? null : ms.addSourceBuffer(videoMime);
+    let videoSb = (_wcVideo || _mp4Video || _nativeVideo) ? null : ms.addSourceBuffer(videoMime);
 
     const videoEl = myVid;
     let pipeCtrl = new AbortController();
@@ -3381,6 +3484,10 @@ async function startMVPipeline() {
                 // to start from that position so the bad segment is never re-served.
                 if (!aborted && _decodeRetryCount < 3 && e.message.includes('veCode=3')) {
                     _decodeRetryCount++;
+                    // Reset the stall-timeout clock so the 45s buf:timeout doesn't fire
+                    // while the retry is in progress — it fires from _bufWaitStart which
+                    // was set at the original buf:LOW, not at the retry start.
+                    _bufWaitStart = Date.now();
                     const ct = videoEl.currentTime;
                     const badEnd = videoSb.buffered.length > 0
                         ? videoSb.buffered.end(videoSb.buffered.length - 1)
@@ -3477,7 +3584,7 @@ async function startMVPipeline() {
         if (!document.getElementById('_wcSpinStyle')) {
             const s = document.createElement('style');
             s.id = '_wcSpinStyle';
-            s.textContent = '@keyframes _wcSpin{to{transform:translate(-50%,-50%) rotate(360deg)}}';
+            s.textContent = '@keyframes _wcSpin{from{transform:translate(-50%,-50%) rotate(0deg)}to{transform:translate(-50%,-50%) rotate(360deg)}}';
             document.head.appendChild(s);
         }
         const _wcSpinner = document.createElement('div');
@@ -3549,7 +3656,7 @@ async function startMVPipeline() {
                     _wcStalled = false;
                     _msePaused = false; // clear stall-induced pause before play proxy sees it
                     _wcSpinner.style.display = 'none';
-                    mkAudio.play().catch(() => {});
+                    _iframePlay.call(mkAudio).catch(() => {});
                     _wcDispatchPlaying();
                     console.log(`[AML MV-WC] rebuffered — resuming audio ct=${mkAudio.currentTime.toFixed(2)} queued=${queue.length}`);
                 }
@@ -3602,7 +3709,7 @@ async function startMVPipeline() {
 
             let buf = new Uint8Array(0);
             const td = new TextDecoder();
-            let state = 'magic', codec = '';
+            let state = 'magic', codec = '', waitingForKeyframe = true;
             const drain = () => {
                 for (;;) {
                     if (state === 'magic') {
@@ -3619,6 +3726,7 @@ async function startMVPipeline() {
                         const avcC = buf.slice(2, 2 + l); buf = buf.slice(2 + l); state = 'samples';
                         try { myDec.configure({ codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: 'no-preference' }); }
                         catch (e) { console.error(`[AML MV-WC] configure failed: ${e.message}`); fetchCtrl.abort(); return; }
+                        waitingForKeyframe = true;
                         console.log(`[AML MV-WC] configured codec=${codec} avcC=${avcC.length}B`);
                     } else { // samples
                         if (buf.length < 17) return;
@@ -3634,6 +3742,8 @@ async function startMVPipeline() {
                         const tUs = Number(dv.getBigInt64(1));
                         const durUs = dv.getUint32(9);
                         const data = buf.slice(17, 17 + len); buf = buf.slice(17 + len);
+                        if (!key && waitingForKeyframe) continue; // drop delta frames until first IDR
+                        waitingForKeyframe = false;
                         try { myDec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: tUs, duration: durUs, data })); }
                         catch (e) { console.error(`[AML MV-WC] decode() threw: ${e.message}`); }
                     }
@@ -3753,61 +3863,146 @@ async function startMVPipeline() {
     // Requires window.MP4Box (injected via mp4box-bundle.js from main.mjs).
     // Falls back to WebCodecs if MP4Box is not available.
     const _setupMP4BoxVideo = () => {
-        const MP4Box = window.MP4Box;
-        if (!MP4Box) {
-            console.warn('[AML MV-MP4] MP4Box not loaded — falling back to WebCodecs');
+        // /video-raw serves an already-fragmented fMP4 (ftyp+moov then moof+mdat pairs).
+        // We parse box boundaries manually: ftyp+moov → MSE init segment, each moof+mdat
+        // pair → media segment. We also extract timescale (from mdhd) and the first
+        // fragment's TFDT to set timestampOffset, aligning video to audio (t=0).
+        console.log('[AML MV-MP4] starting direct fMP4→MSE path');
+
+        if (!MediaSource.isTypeSupported(videoMime)) {
+            console.error('[AML MV-MP4] codec not supported:', videoMime, '— falling back to WebCodecs');
             _setupWebCodecsVideo();
             return;
         }
-        console.log('[AML MV-MP4] starting mp4box MSE path');
 
-        const mp4file = MP4Box.createFile();
-        let videoTrackId = null;
-        let mp4Sb = null;
-        let offset = 0;
         const fetchCtrl = new AbortController();
+        const mp4Sb = ms.addSourceBuffer(videoMime);
+        videoSb = mp4Sb; // expose to gate/monitor code that reads videoSb.buffered
+        mp4Sb.mode = 'segments';
 
-        mp4file.onError = (e) => console.error('[AML MV-MP4] mp4box error:', e);
+        let pending = new Uint8Array(0);
+        let initDone = false;
+        let initBuf = new Uint8Array(0);
+        let pendingMoof = null;
+        let timescale = 90000;
+        let tsOffsetSet = false;
 
-        mp4file.onReady = (info) => {
-            const track = info.videoTracks[0];
-            if (!track) { console.error('[AML MV-MP4] no video track'); return; }
-            videoTrackId = track.id;
-            const mime = `video/mp4; codecs="${track.codec}"`;
+        const cat = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a); r.set(b, a.length); return r; };
+        const toAB = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+        const u32 = (b, i) => (b[i]<<24|b[i+1]<<16|b[i+2]<<8|b[i+3])>>>0;
 
-            if (!MediaSource.isTypeSupported(mime)) {
-                console.error('[AML MV-MP4] codec not supported:', mime, '— falling back to WebCodecs');
-                mp4file.stop(); fetchCtrl.abort();
-                _setupWebCodecsVideo();
-                return;
+        // Non-recursive flat search: find the first box of the given 4-char type
+        // within the immediate children of the passed byte range (no recursion into children).
+        const findBox = (buf, type) => {
+            const t0=type.charCodeAt(0), t1=type.charCodeAt(1), t2=type.charCodeAt(2), t3=type.charCodeAt(3);
+            for (let i = 0; i + 8 <= buf.length;) {
+                const sz = u32(buf, i); if (sz < 8) break;
+                if (buf[i+4]===t0 && buf[i+5]===t1 && buf[i+6]===t2 && buf[i+7]===t3) return buf.subarray(i, i+sz);
+                i += sz;
             }
-
-            mp4Sb = ms.addSourceBuffer(mime);
-            mp4Sb.mode = 'segments';
-
-            mp4file.setSegmentOptions(videoTrackId, mp4Sb, { nbSamples: 200 });
-
-            const initSegs = mp4file.initializeSegmentation();
-            for (const seg of initSegs) {
-                if (seg.id === videoTrackId) mp4Sb.appendBuffer(seg.buffer);
-            }
-            mp4file.start();
+            return null;
         };
 
-        mp4file.onSegment = (id, user, buffer, sampleNum, last) => {
-            const doAppend = () => {
-                if (user.updating) { user.addEventListener('updateend', doAppend, {once: true}); return; }
-                try { user.appendBuffer(buffer); } catch(e) { console.warn('[AML MV-MP4] append:', e.message); }
-                mp4file.releaseUsedSamples(id, sampleNum);
-                if (last) {
-                    user.addEventListener('updateend', () => {
-                        if (!user.updating && ms.readyState === 'open') {
-                            try { ms.endOfStream(); } catch(_) {}
-                        }
-                    }, {once: true});
-                }
+        // Parse timescale from mdhd by following the fixed path moov→trak→mdia→mdhd.
+        // Flat search at each level avoids false matches inside leaf-box payloads (e.g. avcC).
+        const moovTimescale = (moovBox) => {
+            const trak = findBox(moovBox.subarray(8), 'trak');
+            if (!trak) return 90000;
+            const mdia = findBox(trak.subarray(8), 'mdia');
+            if (!mdia) return 90000;
+            const mdhd = findBox(mdia.subarray(8), 'mdhd');
+            if (!mdhd || mdhd.length < 24) return 90000;
+            // mdhd: size(4) type(4) version(1) flags(3) | v0: ctime(4)+mtime(4)+timescale@20 | v1: ctime(8)+mtime(8)+timescale@28
+            const off = mdhd[8] === 1 ? 28 : 20;
+            return mdhd.length >= off + 4 ? u32(mdhd, off) : 90000;
+        };
+
+        // Parse baseMediaDecodeTime from moof→traf→tfdt.
+        const moofTFDT = (moofBox) => {
+            const traf = findBox(moofBox.subarray(8), 'traf');
+            if (!traf) return 0;
+            const tfdt = findBox(traf.subarray(8), 'tfdt');
+            if (!tfdt || tfdt.length < 16) return 0;
+            if (tfdt[8] === 1 && tfdt.length >= 20) return u32(tfdt, 12) * 4294967296 + u32(tfdt, 16);
+            return u32(tfdt, 12);
+        };
+
+        let _segN = 0;
+        const _logBuf = (label) => {
+            if (!mp4Sb || !mp4Sb.buffered || mp4Sb.buffered.length === 0) {
+                console.log(`[AML MV-MP4] ${label} buf=(empty) tsOff=${mp4Sb?.timestampOffset?.toFixed(3)}`);
+                return;
+            }
+            const b = mp4Sb.buffered;
+            const ranges = Array.from({length: b.length}, (_, i) => `${b.start(i).toFixed(2)}-${b.end(i).toFixed(2)}`).join(' ');
+            console.log(`[AML MV-MP4] ${label} buf=[${ranges}] tsOff=${mp4Sb.timestampOffset.toFixed(3)}`);
+        };
+
+        // Append ab to mp4Sb once it is not updating. beforeAppend() runs just before
+        // appendBuffer — used to set timestampOffset while the buffer is guaranteed idle.
+        const appendWhenReady = (ab, beforeAppend) => {
+            const try_ = () => {
+                if (mp4Sb.updating) { mp4Sb.addEventListener('updateend', try_, {once: true}); return; }
+                if (beforeAppend) beforeAppend();
+                try {
+                    mp4Sb.appendBuffer(ab);
+                    mp4Sb.addEventListener('updateend', () => _logBuf(`seg#${_segN}`), {once: true});
+                } catch(e) { console.warn('[AML MV-MP4] append:', e.message); }
             };
-            doAppend();
+            try_();
+        };
+
+        const drain = () => {
+            for (;;) {
+                if (pending.length < 8) return;
+                const size = u32(pending, 0);
+                if (size < 8 || pending.length < size) return;
+                const type = String.fromCharCode(pending[4], pending[5], pending[6], pending[7]);
+                const box = pending.slice(0, size);
+                pending = pending.slice(size);
+
+                if (!initDone) {
+                    initBuf = cat(initBuf, box);
+                    if (type === 'moov') {
+                        initDone = true;
+                        timescale = moovTimescale(box);
+                        // Raw mdhd bytes — walk path so we see what findBox actually found
+                        const trak = findBox(box.subarray(8), 'trak');
+                        const mdia = trak ? findBox(trak.subarray(8), 'mdia') : null;
+                        const mdhd = mdia ? findBox(mdia.subarray(8), 'mdhd') : null;
+                        const hex = (arr, n) => arr ? Array.from(arr.subarray(0, Math.min(n, arr.length))).map(v => v.toString(16).padStart(2,'0')).join(' ') : 'null';
+                        console.log(`[AML MV-MP4] MOOV raw: size=${box.length}B trak=${trak?.length} mdia=${mdia?.length} mdhd=${mdhd?.length}`);
+                        console.log(`[AML MV-MP4] mdhd hex: ${hex(mdhd, mdhd?.length || 0)}`);
+                        console.log(`[AML MV-MP4] init ${initBuf.length}B timescale=${timescale}`);
+                        _segN = 0;
+                        appendWhenReady(toAB(initBuf));
+                    }
+                } else if (type === 'moof') {
+                    pendingMoof = box;
+                } else if (type === 'mdat' && pendingMoof) {
+                    const moofBox = pendingMoof;
+                    pendingMoof = null;
+                    _segN++;
+                    const seg = toAB(cat(moofBox, box));
+                    if (!tsOffsetSet) {
+                        tsOffsetSet = true;
+                        const tfdt = moofTFDT(moofBox);
+                        const traf = findBox(moofBox.subarray(8), 'traf');
+                        const tfdtBox = traf ? findBox(traf.subarray(8), 'tfdt') : null;
+                        const hex = (arr, n) => arr ? Array.from(arr.subarray(0, Math.min(n, arr.length))).map(v => v.toString(16).padStart(2,'0')).join(' ') : 'null';
+                        console.log(`[AML MV-MP4] MOOF#1 raw: moofSize=${moofBox.length} traf=${traf?.length} tfdt=${tfdtBox?.length}`);
+                        console.log(`[AML MV-MP4] tfdt hex: ${hex(tfdtBox, tfdtBox?.length || 0)}`);
+                        appendWhenReady(seg, () => {
+                            const offset = -(tfdt / timescale);
+                            mp4Sb.timestampOffset = offset;
+                            console.log(`[AML MV-MP4] seg#1 TFDT=${tfdt} timescale=${timescale} → tsOff=${offset.toFixed(3)}s`);
+                        });
+                    } else {
+                        appendWhenReady(seg);
+                    }
+                }
+                // sidx, styp, free, etc. — skip silently
+            }
         };
 
         fetch(`${ENGINE}/api/v1/playback/${_sessionId}/video-raw`, {signal: fetchCtrl.signal})
@@ -3818,22 +4013,164 @@ async function startMVPipeline() {
                     for (;;) {
                         const {done, value} = await reader.read();
                         if (done) break;
-                        const buf = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
-                        buf.fileStart = offset;
-                        offset += buf.byteLength;
-                        mp4file.appendBuffer(buf);
+                        pending = pending.length ? cat(pending, value) : value;
+                        drain();
                     }
-                    mp4file.flush();
+                    mp4Sb.addEventListener('updateend', () => {
+                        if (!mp4Sb.updating && ms.readyState === 'open') {
+                            try { ms.endOfStream(); } catch(_) {}
+                        }
+                    }, {once: true});
                 } catch(e) {
                     if (e.name !== 'AbortError') console.error('[AML MV-MP4] read:', e.message);
                 }
             })
             .catch(e => { if (e.name !== 'AbortError') console.error('[AML MV-MP4] fetch:', e.message); });
 
-        _wcCleanup = () => { fetchCtrl.abort(); mp4file.stop(); };
+        _wcCleanup = () => fetchCtrl.abort();
     };
 
-    if (_mp4Video) _setupMP4BoxVideo();
+    // Native video: <video src=/video-dl> — progressive cached download, Chrome native pipeline.
+    // No MSE, no SourceBuffer, no CHUNK_DEMUXER_ERROR. Audio stays on MSE (mkAudio).
+    // Video is synced to the audio clock via timeupdate + seeked events.
+    const _setupNativeVideo = () => {
+        // aml-video:// is a privileged Electron protocol registered in main.mjs that
+        // serves the engine's on-disk faststart MP4 cache directly (proper 206
+        // byte-range seeking). Native <video src> needs a COMPLETE, non-fragmented
+        // MP4 (moov with a full sample table), so the engine builds the faststart
+        // cache asynchronously — this is download-then-serve, not progressive. We
+        // poll video-dl-info until it reports cached, showing a loading animation,
+        // then assign the src.
+        const enginePath = `/api/v1/playback/${_sessionId}/video-dl`;
+        const dlUrl = `${ENGINE_HTTPS}${enginePath}`;       // https://127.0.0.1:PORT/…/video-dl
+        const infoUrl = `${ENGINE_HTTPS}${enginePath}-info`;
+
+        // Reuse the shared buffering spinner (same as the MSE/WebCodecs paths) for
+        // the download-then-serve wait; the native amp-playback-controls-progress
+        // scrubber provides the buffer/progress bar, same as the other paths.
+        _bufSpinner.style.display = 'block';
+
+        // ── Self-contained handler set (ISOLATED from the MSE/WebCodecs paths) ──
+        // Native is excluded from the shared `if (!_wcVideo)` handler block below,
+        // so nothing here collides with MSE's SourceBuffer/pipe logic and vice
+        // versa. Everything the native path needs is wired right here.
+
+        // Lifecycle logging — keeps failures diagnosable instead of just code=N.
+        const _NET = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
+        const _RS  = ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'];
+        const _nlog = (ev) => console.log(`%c[AML MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : '-'}`, 'color:#bf5af2;font-weight:bold', 'color:inherit');
+        ['loadstart', 'durationchange', 'loadedmetadata', 'loadeddata', 'canplaythrough', 'stalled', 'emptied', 'abort'].forEach(ev => myVid.addEventListener(ev, () => _nlog(ev)));
+
+        // Fatal error → advance track. Native has NO MSE pipe to restart, so any
+        // hard error (code 2/3/4) is terminal; log and move on.
+        myVid.addEventListener('error', () => {
+            const e = myVid.error;
+            console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ''}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc} — advancing track`, 'color:#ff453a;font-weight:bold', 'color:inherit');
+            _abortMV(`video-error-${e?.code ?? '?'}`);
+            _amlNextRef?.().catch(() => {});
+            setTimeout(() => exitBtn?.click(), 200);
+        });
+
+        // The video plays the complete local file and is the MASTER clock; audio
+        // follows it. NEVER seek the video from audio drift — a video seek cancels
+        // the in-flight file read, starving the forward buffer (→ underflow →
+        // PIPELINE_ERROR_READ, the death spiral). Instead nudge the (cheap-to-seek)
+        // MSE audio to the video, debounced so occasional drift doesn't glitch it.
+        // User seeks go through _mvSeekTo, which already moves myVid first.
+        let _lastNudge = 0;
+        myVid.addEventListener('timeupdate', () => {
+            if (!_avStarted) return;
+            const drift = mkAudio.currentTime - myVid.currentTime;
+            const now = performance.now();
+            if (Math.abs(drift) > 0.35 && now - _lastNudge > 500) {
+                _lastNudge = now;
+                mkAudio.currentTime = myVid.currentTime;
+            }
+        });
+
+        // Play/pause mirroring (both directions; guarded so they don't ping-pong).
+        // Also forward play/pause/playing to nativeVidEl + the MK audio element so
+        // Apple Music's own UI (scrubber, spinner) leaves its "loading" blink state —
+        // AM derives that from its native player, which we don't drive directly.
+        const _dispatchNative = (type) => {
+            nativeVidEl?.dispatchEvent(new Event(type, { bubbles: false }));
+            const mka = getMKAudio();
+            if (mka && mka !== mkAudio) mka.dispatchEvent(new Event(type, { bubbles: false }));
+        };
+        mkAudio.addEventListener('play',  () => { if (myVid.paused) _iframePlay.call(myVid).catch(() => {}); });
+        mkAudio.addEventListener('pause', () => { if (!myVid.paused) myVid.pause(); });
+        myVid.addEventListener('play',    () => { if (mkAudio.paused) _iframePlay.call(mkAudio).catch(() => {}); _dispatchNative('playing'); });
+        myVid.addEventListener('pause',   () => { if (!mkAudio.paused) mkAudio.pause(); _dispatchNative('pause'); });
+
+        // Buffer stall: mute audio + show spinner; recover on 'playing'.
+        myVid.addEventListener('waiting', () => {
+            _nlog('waiting');
+            if (_avStarted && !_videoStalled && !_bufPaused) {
+                _videoStalled = true;
+                _mvGateOpen = false;
+                mkAudio.muted = true;
+                _bufSpinner.style.display = 'block';
+            }
+        });
+        myVid.addEventListener('playing', () => {
+            _nlog('playing');
+            _dispatchNative('playing'); // clear AM's loading/blink state
+            if (_videoStalled) {
+                _videoStalled = false;
+                _mvGateOpen = _avStarted;
+                _bufSpinner.style.display = 'none';
+                if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.05) mkAudio.currentTime = myVid.currentTime;
+                mkAudio.muted = false;
+            }
+        });
+
+        // Native Chrome seek completed → keep audio aligned to the video.
+        myVid.addEventListener('seeked', () => {
+            _nlog('seeked');
+            if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.3) mkAudio.currentTime = myVid.currentTime;
+        });
+
+        // Track end → advance.
+        myVid.addEventListener('ended', () => {
+            if (_abortCtrl?.signal.aborted) return;
+            console.log(`[AML MV native] ended ct=${myVid.currentTime.toFixed(2)} → next`);
+            _abortMV('track-ended');
+            _amlNextRef?.().catch(() => {});
+            setTimeout(() => exitBtn?.click(), 200);
+        });
+
+        myVid.addEventListener('canplay', () => {
+            _nlog('canplay');
+            _bufSpinner.style.display = 'none';
+            _dispatchNative('canplay'); // tell AM the media is ready → stop loading blink
+            _videoCanPlay = true;
+            tryStart();
+        }, { once: true });
+
+        // Poll the engine until the faststart cache is committed, then load it.
+        let _polls = 0;
+        const _beginPlayback = () => {
+            console.log('%c[AML MV native]%c cache ready → src=%s', 'color:#bf5af2;font-weight:bold', 'color:inherit', dlUrl);
+            myVid.src = dlUrl;
+            try { myVid.load(); } catch (e) { console.error(`[AML MV native] load() threw: ${e.message}`); }
+        };
+        const _poll = async () => {
+            if (_generation !== _mvGen) return; // track changed — abandon
+            _polls++;
+            try {
+                const info = await fetch(infoUrl).then(r => r.json());
+                if (info && info.cached) { _beginPlayback(); return; }
+                if (_polls === 1 || _polls % 6 === 0) console.log(`%c[AML MV native]%c preparing… poll#${_polls}`, 'color:#bf5af2;font-weight:bold', 'color:inherit');
+            } catch (e) {
+                console.warn(`[AML MV native] info poll err: ${e.message}`);
+            }
+            setTimeout(_poll, 500);
+        };
+        _poll();
+    };
+
+    if (_nativeVideo) _setupNativeVideo();
+    else if (_mp4Video) _setupMP4BoxVideo();
     else if (_wcVideo) _setupWebCodecsVideo();
     else _startVideoPipe();
 
@@ -3864,11 +4201,19 @@ async function startMVPipeline() {
     const _mvVideoSeek = async (seekSec) => {
         if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
         for (let i = 0; i < videoSb.buffered.length; i++) {
-            if (seekSec >= videoSb.buffered.start(i) - 1.0 && seekSec <= videoSb.buffered.end(i) + 1.0) return;
+            // Only skip the seek if seekSec is INSIDE the buffered range (with a small
+            // before-start tolerance for rounding). The previous +1.0 end tolerance caused
+            // _mvVideoSeek(85) to return early when bufEnd=84.16 (85 ≤ 85.16), even though
+            // the video was stalled and lead=0 because ct was outside the range.
+            if (seekSec >= videoSb.buffered.start(i) - 0.5 && seekSec < videoSb.buffered.end(i)) return;
         }
         _mvVidSeeking = true;
         _showSeekSnap(); // freeze last frame before clearing the buffer
         try {
+            // Abort any active MP4Box fetch (it has its own fetchCtrl, not pipeCtrl).
+            // Without this, two pipes write to the same SourceBuffer simultaneously,
+            // causing CHUNK_DEMUXER_ERROR when their appends interleave.
+            if (typeof _wcCleanup === 'function') { try { _wcCleanup(); } catch (_) {} _wcCleanup = null; }
             const prev = pipeCtrl;
             pipeCtrl = new AbortController();
             prev.abort();
@@ -3891,21 +4236,28 @@ async function startMVPipeline() {
             _ignoreSeekUntil = Date.now() + 8000;
             console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s — re-fetching from engine`);
             if (seekSec < (_durationSec || 1e9) - 1) {
-                runVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`, sig)
-                    .catch(e => { if (!sig.aborted) console.error('[AML MV] video resume error:', e); });
+                // Route through _startVideoPipe (not runVideoPipe directly) so
+                // CHUNK_DEMUXER_ERROR_APPEND_FAILED after a seek triggers the
+                // full veCode=3 retry: rebuild MediaSource, seek ct+0.5, restart.
+                _startVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`);
             }
         } finally { _mvVidSeeking = false; }
     };
     videoEl.addEventListener('seeking', () => {
-        if (_wcVideo) return; // WebCodecs handles seeks via mkAudio 'seeking' (onWcSeek)
+        if (_wcVideo) return;      // WebCodecs handles seeks via mkAudio 'seeking' (onWcSeek)
+        if (_nativeVideo) return;  // native <video src> seeks natively via byte-range —
+                                   // must NOT trigger the MSE _startVideoPipe re-fetch,
+                                   // which cancels the native file read → PIPELINE_ERROR_READ.
         if (Date.now() < _ignoreSeekUntil) return;
         _mvVideoSeek(videoEl.currentTime).catch(() => {});
     });
     const onVideoPlay  = () => {
-        console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)}`);
+        console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
         if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
             mkAudio.currentTime = videoEl.currentTime;
-        mkAudio.play().catch(() => {});
+        _iframePlay.call(mkAudio)
+            .then(() => console.log('[AML MV-A] mkAudio.play() resolved'))
+            .catch(e => console.warn('[AML MV-A] mkAudio.play() rejected:', e.message));
     };
     const onVideoPlaying = () => {
         _hideSeekSnap();       // new frames decoded — remove the freeze-frame overlay
@@ -3915,6 +4267,7 @@ async function startMVPipeline() {
         if (_videoStalled) {
             _videoStalled = false;
             _mvGateOpen = _avStarted;
+            _bufSpinner.style.display = 'none'; // hide buffering spinner on resume
             const drift = mkAudio.currentTime - videoEl.currentTime;
             if (Math.abs(drift) > 0.05) {
                 console.log(`[AML MV buf:sync] stall recovery drift=${drift.toFixed(2)}s, snapping audio ct=${videoEl.currentTime.toFixed(2)}`);
@@ -3970,11 +4323,15 @@ async function startMVPipeline() {
             _videoStalled = true;
             _mvGateOpen = false;
             mkAudio.muted = true;
+            _bufSpinner.style.display = 'block'; // show buffering spinner during stall
             console.warn(`[AML MV buf:stall] audio muted during video stall ct=${mkAudio.currentTime.toFixed(2)}`);
         }
     };
 
-    if (!_wcVideo) {
+    // MSE + mp4box paths only. Native (_nativeVideo) wires its own fully isolated
+    // handler set inside _setupNativeVideo; WebCodecs (_wcVideo) drives from the
+    // audio clock. This keeps each backend's event handling from colliding.
+    if (!_wcVideo && !_nativeVideo) {
         videoEl.addEventListener('play',    onVideoPlay);
         videoEl.addEventListener('playing', onVideoPlaying);
         videoEl.addEventListener('pause',   onVideoPause);
@@ -4102,6 +4459,8 @@ async function startMVPipeline() {
         Function.prototype.call  = _origFnCall;
         Function.prototype.apply = _origFnApply;
         _mvGateOpen = true; // restore for next session
+        _bufSpinner.style.display = 'none';
+        if (_bufSpinner.parentNode) _bufSpinner.parentNode.removeChild(_bufSpinner);
         // Subtitle cleanup
         if (_subDiv.parentNode) _subDiv.parentNode.removeChild(_subDiv);
         for (let i = 0; i < myVid.textTracks.length; i++)

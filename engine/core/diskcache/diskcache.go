@@ -173,6 +173,13 @@ func (pw *PutWriter) Discard() {
 	pw.cache.inFlight.Delete(pw.key)
 }
 
+// Remove deletes a single committed cache entry (no-op if absent). Used for
+// ephemeral entries that must not persist (e.g. MV faststart files when caching
+// is disabled in settings).
+func (c *Cache) Remove(assetID, qualifier string) {
+	os.Remove(filepath.Join(c.dir, c.filename(assetID, qualifier)))
+}
+
 // Stats returns the total size in bytes and file count of committed cache entries.
 func (c *Cache) Stats() (totalBytes int64, count int) {
 	entries, _ := os.ReadDir(c.dir)
