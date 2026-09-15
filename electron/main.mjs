@@ -861,6 +861,10 @@ function createWindow() {
     const cacheCode   = existsSync(cachePath)  ? readFileSync(cachePath,  'utf8') : '';
     const enginePath  = _resBundle('engine-bundle.js');
     const engineCode  = existsSync(enginePath) ? readFileSync(enginePath, 'utf8') : '';
+    // mp4box.js — optional; injected before engine so window.MP4Box is available.
+    // Only loaded if the bundle exists (not shipped by default — opt-in for mp4box MSE path).
+    const mp4boxPath  = _resBundle('mp4box-bundle.js');
+    const mp4boxCode  = existsSync(mp4boxPath) ? readFileSync(mp4boxPath, 'utf8') : '';
 
     // ── Early CSS via insertCSS — fires before first paint, no preload risk ──
     // webContents.insertCSS() is Electron's dedicated API for injecting CSS
@@ -1237,6 +1241,8 @@ function createWindow() {
             sseCode    ? `try{${sseCode}}catch(e){console.error('[AML sse]',e.message)}`    : '',
             visionCode ? `try{${visionCode}}catch(e){console.error('[AML vision]',e.message)}` : '',
             cacheCode  ? `try{${cacheCode}}catch(e){console.error('[AML cache]',e.name,e.message,e.stack)}`  : '',
+            // mp4box before engine so window.MP4Box is set when _setupMP4BoxVideo runs.
+            mp4boxCode ? `try{${mp4boxCode};window.MP4Box=_amlMP4BoxMod.exports;}catch(e){console.error('[AML mp4box]',e.message)}` : '',
             engineCode ? `try{${engineCode}}catch(e){console.error('[AML engine]',e.name,e.message,e.stack)}` : '',
         ].filter(Boolean).join(';');
 
