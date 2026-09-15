@@ -1,5 +1,5 @@
 import * as electronMain from 'electron/main';
-const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage } = electronMain;
+const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, net: electronNet } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
@@ -10,7 +10,7 @@ process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, readdirSync } from 'fs';
+import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, createReadStream, readdirSync } from 'fs';
 import { readFile as readFileAsync, writeFile as writeFileAsync } from 'fs/promises';
 import os from 'os';
 import net from 'net';
@@ -1242,7 +1242,7 @@ function createWindow() {
             visionCode ? `try{${visionCode}}catch(e){console.error('[AML vision]',e.message)}` : '',
             cacheCode  ? `try{${cacheCode}}catch(e){console.error('[AML cache]',e.name,e.message,e.stack)}`  : '',
             // mp4box before engine so window.MP4Box is set when _setupMP4BoxVideo runs.
-            mp4boxCode ? `try{${mp4boxCode};window.MP4Box=_amlMP4BoxMod.exports;}catch(e){console.error('[AML mp4box]',e.message)}` : '',
+            mp4boxCode ? `try{${mp4boxCode};window.MP4Box=_amlMP4BoxMod;}catch(e){console.error('[AML mp4box]',e.message)}` : '',
             engineCode ? `try{${engineCode}}catch(e){console.error('[AML engine]',e.name,e.message,e.stack)}` : '',
         ].filter(Boolean).join(';');
 
@@ -2314,6 +2314,109 @@ function createTray() {
     });
 }
 
+// Register before app.ready — required by Electron's privileged scheme API.
+// aml-video:// proxies to the local engine over http://127.0.0.1:ENGINE_PORT,
+// bypassing Chrome's mixed-content auto-upgrade which blocks <video src="http://...">
+// on HTTPS pages even for loopback addresses.
+protocol.registerSchemesAsPrivileged([{
+    scheme: 'aml-video',
+    privileges: { secure: true, supportFetchAPI: true, stream: true, bypassCSP: true, corsEnabled: true },
+}]);
+
+// Resolved faststart cache path per video-dl pathname, so range requests skip the
+// engine info round-trip. Entries are session-scoped URLs; harmless to let grow.
+const _mvPathCache = new Map();
+
+// Serve a local media file with proper Range → 206 handling for <video>.
+// Parses `bytes=a-b` / `bytes=a-` / `bytes=-n`, slices with createReadStream, and
+// returns 206 + Content-Range + Accept-Ranges (200 for no Range, 416 unsatisfiable).
+// This is the seekable-media contract Chrome's <video> requires; proxying ranges
+// through electronNet.fetch does not satisfy it (→ MEDIA_ERR_SRC_NOT_SUPPORTED).
+function serveLocalMediaRange(filePath, rangeHeader, method = 'GET') {
+    let size;
+    try {
+        size = statSync(filePath).size;
+    } catch (e) {
+        console.error(`[aml-video] serveLocal 404 path=${filePath} err=${e.message}`);
+        return new Response('media not found', { status: 404 });
+    }
+    const base = { 'Accept-Ranges': 'bytes', 'Content-Type': 'video/mp4', 'Cache-Control': 'no-store' };
+    const isHead = (method || 'GET').toUpperCase() === 'HEAD';
+
+    // Parse a single byte range; ignore multi-range (comma) — RFC 7233 permits 200.
+    let start, end;
+    const m = rangeHeader && !rangeHeader.includes(',') && /^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/i.exec(rangeHeader);
+    if (m && !(m[1] === '' && m[2] === '')) {
+        if (size <= 0) {
+            console.warn(`[aml-video] serveLocal 416 (empty file) range=${rangeHeader} size=${size}`);
+            return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${size}` } });
+        }
+        if (m[1] === '') {
+            const suffix = Math.min(Number(m[2]), size);
+            start = size - suffix; end = size - 1;
+            if (suffix <= 0) start = -1;
+        } else {
+            start = Number(m[1]);
+            end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1);
+        }
+        if (start < 0 || start >= size || start > end) {
+            console.warn(`[aml-video] serveLocal 416 unsatisfiable range=${rangeHeader} start=${start} end=${end} size=${size}`);
+            return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${size}` } });
+        }
+    }
+
+    // Build a web ReadableStream from a bounded file read with explicit cancel
+    // handling. Chrome aborts range requests constantly while seeking; if that
+    // abort surfaces as an unhandled stream error the demuxer reports
+    // PIPELINE_ERROR_READ (code=2). cancel() quietly destroys the fs stream, and
+    // 'error' is logged rather than thrown.
+    // Pull-based bridge: read the next chunk only when Chrome asks for more (paused
+    // mode). Flowing-mode pause()/resume() wedges — the forward buffer stops
+    // refilling past ~30s, the video underflows, audio races ahead, and the sync
+    // logic forces a seek into unbuffered bytes → PIPELINE_ERROR_READ. Pull-based
+    // backpressure tracks Chrome's demand exactly, so the buffer keeps refilling.
+    const fileWebStream = (opts, tag) => {
+        const ns = createReadStream(filePath, { highWaterMark: 1 << 20, ...opts });
+        let ended = false, errored = null;
+        ns.on('end', () => { ended = true; });
+        ns.on('error', (err) => { errored = err; console.warn(`[aml-video] ${tag} read error: ${err.message}`); });
+        return new ReadableStream({
+            async pull(controller) {
+                for (;;) {
+                    if (errored) { controller.error(errored); return; }
+                    const chunk = ns.read();
+                    if (chunk) { controller.enqueue(new Uint8Array(chunk)); return; }
+                    if (ended) { controller.close(); return; }
+                    await new Promise((res) => {
+                        const done = () => { ns.off('readable', done); ns.off('end', done); ns.off('error', done); res(); };
+                        ns.once('readable', done);
+                        ns.once('end', done);
+                        ns.once('error', done);
+                    });
+                }
+            },
+            cancel(reason) {
+                console.log(`[aml-video] ${tag} cancelled (client abort/seek): ${reason ?? ''}`);
+                ns.destroy();
+            },
+        });
+    };
+
+    if (start === undefined) {
+        // No usable Range → full file (200).
+        const headers = { ...base, 'Content-Length': String(size) };
+        console.log(`[aml-video] serveLocal 200 full method=${method} size=${size} rangeHdr=${rangeHeader || '(none)'}`);
+        if (isHead || size === 0) return new Response(null, { status: 200, headers });
+        return new Response(fileWebStream({}, '200'), { status: 200, headers });
+    }
+
+    const length = end - start + 1;
+    const headers = { ...base, 'Content-Length': String(length), 'Content-Range': `bytes ${start}-${end}/${size}` };
+    console.log(`[aml-video] serveLocal 206 method=${method} bytes ${start}-${end}/${size} len=${length}`);
+    if (isHead) return new Response(null, { status: 206, headers });
+    return new Response(fileWebStream({ start, end }, `206 ${start}-${end}`), { status: 206, headers });
+}
+
 app.whenReady().then(() => {
     // Defer MPRIS init by 1.5 s — Electron's D-Bus socket access isn't
     // reliable the instant app is ready; a short delay avoids the EPIPE
@@ -2327,6 +2430,65 @@ app.whenReady().then(() => {
 
     const s = session.fromPartition('persist:apple-music');
     s.setPermissionRequestHandler((wc, perm, cb) => cb(true));
+
+    // Trust the engine's self-signed loopback cert so <video src="https://127.0.0.1:PORT/…">
+    // loads. This lets MV video use a real HTTPS origin → Chrome's native, reliable
+    // byte-range seeking (the custom aml-video:// protocol has a Chromium seek bug on
+    // Linux, electron#38749). Scoped strictly to 127.0.0.1: every other host falls
+    // through to Chromium's default verification (return -3).
+    s.setCertificateVerifyProc((request, callback) => {
+        if (request.hostname === '127.0.0.1') { callback(0); return; } // trust loopback engine
+        callback(-3); // use Chromium's default verification for everything else
+    });
+
+    // Proxy aml-video://localhost/<path> → http://127.0.0.1:ENGINE_PORT/<path>.
+    // Must be registered on the Apple Music session (not defaultSession) since the
+    // BrowserWindow uses persist:apple-music. Range headers pass through so the
+    // browser's native byte-range seeking works on cached video replays.
+    s.protocol.handle('aml-video', async (request) => {
+        try {
+            const u = new URL(request.url);
+            const engineUrl = `http://127.0.0.1:${ENGINE_PORT}${u.pathname}${u.search}`;
+
+            // For a committed cache file, serve it DIRECTLY from disk with proper
+            // Range → 206 handling. Proxying byte ranges through electronNet.fetch
+            // mangles Range semantics for <video> (Chrome reports
+            // MEDIA_ERR_SRC_NOT_SUPPORTED, code=4) — the engine's 206 does not
+            // survive the fetch round-trip. Reading the local file ourselves is the
+            // known-good pattern for seekable media over a custom protocol.
+            const reqRange = request.headers.get('range');
+            if (u.pathname.endsWith('/video-dl')) {
+                // Once we know the on-disk faststart path for this session, cache it
+                // and serve every subsequent range request straight from disk — no
+                // per-request info round-trip to the engine (that latency starves
+                // Chrome's buffer during seeking → stalls → PIPELINE_ERROR_READ).
+                let cachedPath = _mvPathCache.get(u.pathname);
+                if (!cachedPath) {
+                    const info = await electronNet.fetch(engineUrl + '-info')
+                        .then(r => r.ok ? r.json() : null).catch(e => { console.error(`[aml-video] info fetch err=${e.message}`); return null; });
+                    if (info && info.cached && info.path) {
+                        cachedPath = info.path;
+                        _mvPathCache.set(u.pathname, cachedPath);
+                        console.log(`[aml-video] resolved path for ${u.pathname} → ${cachedPath}`);
+                    } else {
+                        console.log(`[aml-video] not cached yet (preparing) → 503`);
+                    }
+                }
+                if (cachedPath) {
+                    return serveLocalMediaRange(cachedPath, reqRange, request.method);
+                }
+                // Not cached yet → fall through to the streaming proxy (returns 503).
+            }
+
+            const headers = {};
+            for (const [k, v] of request.headers) headers[k] = v;
+            const upstream = await electronNet.fetch(engineUrl, { method: request.method, headers });
+            console.log(`[aml-video] proxy upstream status=${upstream.status} ct=${upstream.headers.get('content-type')} cl=${upstream.headers.get('content-length')} cr=${upstream.headers.get('content-range')}`);
+            return upstream;
+        } catch (e) {
+            return new Response(`engine proxy error: ${e.message}`, { status: 502 });
+        }
+    });
 
     // 1 GB disk cache — Apple Music loads ~80 MB of JS/CSS/fonts per session;
     // images from mzstatic.com add up fast. A larger cache means fewer network

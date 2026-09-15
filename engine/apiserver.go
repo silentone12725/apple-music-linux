@@ -404,6 +404,7 @@ func (cb *circuitBreaker) State() string {
 // APIServer is the long-running HTTP daemon started by --api <port>.
 type APIServer struct {
 	srv         *http.Server
+	tlsSrv      *http.Server // HTTPS listener on port+1 for <video src> byte-range seeking
 	port        int
 	pm          *playback.Manager
 	em          *export.Manager
@@ -618,6 +619,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("POST /api/v1/playback", cors(s.handleCreatePlayback))
 	mux.HandleFunc("GET /api/v1/playback/{id}/audio", cors(s.handlePlaybackAudio))
 	mux.HandleFunc("GET /api/v1/playback/{id}/video", cors(s.handlePlaybackVideo))
+	mux.HandleFunc("GET /api/v1/playback/{id}/video-dl", cors(s.handlePlaybackVideoNative))
+	mux.HandleFunc("GET /api/v1/playback/{id}/video-dl-info", cors(s.handlePlaybackVideoNativeInfo))
 	mux.HandleFunc("GET /api/v1/playback/{id}/video-raw", cors(s.handlePlaybackVideoRaw))
 	mux.HandleFunc("GET /api/v1/playback/{id}/video-es", cors(s.handlePlaybackVideoES))
 	mux.HandleFunc("POST /api/v1/playback/{id}/precache", cors(s.handlePlaybackPrecache))
@@ -760,6 +763,23 @@ func (s *APIServer) Start() error {
 
 	slog.Info("Apple Music API ready", "addr", fmt.Sprintf("http://127.0.0.1:%d", s.port))
 	go s.srv.Serve(l) //nolint:errcheck
+
+	// HTTPS listener on port+1 (same handler). <video src> for MV points here:
+	// Chrome blocks plain http:// media on the https:// Apple Music page (mixed
+	// content), and the custom aml-video:// protocol has a Chromium seek bug on
+	// Linux (electron#38749). A real HTTPS origin uses Chrome's native, reliable
+	// byte-range seeking. Electron trusts this loopback cert via
+	// session.setCertificateVerifyProc. Best-effort: if TLS setup fails, MV video
+	// simply won't have the HTTPS transport (audio/other endpoints unaffected).
+	if tlsCfg, err := loopbackTLSConfig(); err != nil {
+		slog.Warn("loopback TLS setup failed; MV HTTPS transport disabled", "err", err)
+	} else if ltls, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port+1)); err != nil {
+		slog.Warn("loopback TLS listen failed; MV HTTPS transport disabled", "err", err)
+	} else {
+		s.tlsSrv = &http.Server{Handler: s.srv.Handler, ReadHeaderTimeout: 10 * time.Second, TLSConfig: tlsCfg}
+		slog.Info("Apple Music API (TLS) ready", "addr", fmt.Sprintf("https://127.0.0.1:%d", s.port+1))
+		go s.tlsSrv.ServeTLS(ltls, "", "") //nolint:errcheck
+	}
 	return nil
 }
 
@@ -776,6 +796,9 @@ func (s *APIServer) Stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s.srv.Shutdown(ctx) //nolint:errcheck
+	if s.tlsSrv != nil {
+		s.tlsSrv.Shutdown(ctx) //nolint:errcheck
+	}
 	// Release the session lock last, after the wrapper is fully stopped.
 	s.sessionLock.Release()
 	s.sessionLock = nil

@@ -294,6 +294,13 @@ func (m *Media) URLsFrom(startSec float64) (urls []string, actualStart float64) 
 	if idx >= len(m.SegmentURLs) {
 		idx = max(0, len(m.SegmentURLs)-1)
 	}
+	// Step back one segment so the TFDT offset (segment boundary vs. HLS timestamp
+	// discrepancy) does not push the first decoded frame past seekSec. One segment
+	// of overlap also gives the decoder keyframe context before the target point.
+	if idx > 0 {
+		idx--
+		cumulative -= m.SegmentDurations[idx]
+	}
 	out := make([]string, 0, 1+(len(m.SegmentURLs)-idx))
 	if m.InitURL != "" {
 		out = append(out, m.InitURL)

@@ -82,6 +82,7 @@
   if (window.__amlEngineInjected) throw new Error("[AML] double-injection guard");
   window.__amlEngineInjected = true;
   var ENGINE = window._amlEngineURL || "http://127.0.0.1:20025";
+  var ENGINE_HTTPS = ENGINE.replace(/^http:\/\/(127\.0\.0\.1|localhost):(\d+)/, (_, host, port) => `https://${host}:${Number(port) + 1}`);
   var _AML_DEBUG = !!window.amlBridge?.isDev || localStorage.getItem("_AML_DEBUG") === "1";
   var LASTFM_API_KEY = "de5f164dcf024dc00e0aab05ba464d17";
   var LASTFM_API_SECRET = "c03db782a5d29db42da06edcbf76d89a";
@@ -1662,6 +1663,10 @@
     const mkAudio = document.createElement("audio");
     mkAudio.style.display = "none";
     document.body.appendChild(mkAudio);
+    mkAudio.addEventListener("play", () => console.log(`[AML MV-A] mkAudio play event ct=${mkAudio.currentTime.toFixed(2)} muted=${mkAudio.muted} vol=${mkAudio.volume}`));
+    mkAudio.addEventListener("playing", () => console.log(`[AML MV-A] mkAudio playing event ct=${mkAudio.currentTime.toFixed(2)}`));
+    mkAudio.addEventListener("pause", () => console.log(`[AML MV-A] mkAudio pause event ct=${mkAudio.currentTime.toFixed(2)}`));
+    mkAudio.addEventListener("error", () => console.error(`[AML MV-A] mkAudio error code=${mkAudio.error?.code} msg=${mkAudio.error?.message}`));
     let ms = new MediaSource();
     let msBlobUrl = URL.createObjectURL(ms);
     myVid.src = msBlobUrl;
@@ -1722,12 +1727,13 @@
     myVid.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;";
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
-    const _wcVideo = true;
+    const _nativeVideo = true;
+    const _wcVideo = false;
     const _mp4Video = false;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
     let _wcVW = 0, _wcVH = 0;
-    console.log(`[AML MV] video backend = ${_wcVideo ? "webcodecs" : "mse"}`);
+    console.log("%c[AML MV]%c video backend = %c%s", "color:#bf5af2;font-weight:bold", "color:inherit", "color:#30d158;font-weight:bold", _nativeVideo ? "native-dl" : _wcVideo ? "webcodecs" : "mse");
     const _nativeVidStopEvt = (e) => e.stopImmediatePropagation();
     if (nativeVidEl) {
       ["waiting", "stalled", "suspend"].forEach(
@@ -1737,6 +1743,23 @@
     const _subDiv = document.createElement("div");
     _subDiv.style.cssText = "position:absolute;bottom:10%;left:5%;right:5%;text-align:center;z-index:20;pointer-events:none;font-family:-apple-system,SF Pro Text,system-ui,sans-serif;transition:bottom 0.25s ease;";
     mvContainer.appendChild(_subDiv);
+    if (!document.getElementById("_mvBufSpinStyle")) {
+      const s = document.createElement("style");
+      s.id = "_mvBufSpinStyle";
+      s.textContent = "@keyframes _mvBufSpin{from{transform:translate(-50%,-50%) rotate(0deg)}to{transform:translate(-50%,-50%) rotate(360deg)}}";
+      document.head.appendChild(s);
+    }
+    const _bufSpinner = document.createElement("div");
+    _bufSpinner.style.cssText = [
+      "position:absolute;top:50%;left:50%",
+      "transform:translate(-50%,-50%)",
+      "width:44px;height:44px;border-radius:50%",
+      "border:3px solid rgba(255,255,255,0.25)",
+      "border-top-color:rgba(255,255,255,0.9)",
+      "animation:_mvBufSpin 0.75s linear infinite",
+      "pointer-events:none;z-index:3;display:none"
+    ].join(";");
+    mvContainer.appendChild(_bufSpinner);
     let _ccEnabled = true;
     const _renderSubs = () => {
       if (!_ccEnabled) {
@@ -1845,11 +1868,16 @@
     if (nativeVidInVc && nativeVidInVc !== nativeVidEl) {
       nativeVidInVc.style.setProperty("display", "none", "important");
     }
-    const mvPlay = () => _wcVideo ? mkAudio.play().catch(() => {
-    }) : _iframePlay.call(myVid).then(() => mkAudio.play().catch(() => {
-    })).catch(() => {
-    });
+    const mvPlay = () => {
+      _userPaused = false;
+      if (_wcVideo) return _iframePlay.call(mkAudio).catch(() => {
+      });
+      return _iframePlay.call(myVid).then(() => _iframePlay.call(mkAudio).catch(() => {
+      })).catch(() => {
+      });
+    };
     const mvPause = () => {
+      _userPaused = true;
       if (!_wcVideo) myVid.pause();
       mkAudio.pause();
     };
@@ -1863,6 +1891,10 @@
         if (!_avStarted) return Promise.resolve();
         if (_wcVideo ? mkAudio?.paused : myVid?.paused) mvPlay();
         return Promise.resolve();
+      };
+      nativeVidEl.pause = function() {
+        console.log(`[AML MV] nativeVidEl.pause() intercepted \u2192 forwarding to mvPause`);
+        if (_avStarted) mvPause();
       };
     }
     const toggleFullscreen = () => {
@@ -2215,7 +2247,7 @@
       rangeInput.addEventListener("input", () => {
         const t = parseFloat(rangeInput.value);
         if (!isNaN(t)) {
-          if (_wcVideo) {
+          if (_wcVideo || _nativeVideo) {
             const max = parseFloat(rangeInput.max) || 1;
             const pct = _fillPct(Math.min(1, Math.max(0, t / max))).toFixed(2) + "%";
             rangeInput.style.setProperty("--progress", pct);
@@ -2228,11 +2260,19 @@
         }
         _showControls();
       }, true);
+      let _lastCommit = -1;
       const _commitScrub = () => {
         _userScrubbing = false;
+        const t = parseFloat(rangeInput.value);
+        if (isNaN(t)) return;
+        if (Math.abs(t - _lastCommit) < 0.25) return;
+        _lastCommit = t;
         if (_wcVideo) {
-          const t = parseFloat(rangeInput.value);
-          if (!isNaN(t)) mkAudio.currentTime = t;
+          mkAudio.currentTime = t;
+        } else if (_nativeVideo) {
+          console.log(`[AML MV native] commit seek \u2192 ${t.toFixed(2)}s`);
+          myVid.currentTime = t;
+          mkAudio.currentTime = t;
         }
       };
       const _cancelScrub = () => {
@@ -2472,6 +2512,10 @@
         let bFrac = 0;
         if (_wcVideo) {
           bFrac = Math.min(1, Math.max(0, _wcBufferedSec / max));
+        } else if (_nativeVideo) {
+          const nBuf = myVid.buffered;
+          if (nBuf && nBuf.length > 0)
+            bFrac = Math.min(1, Math.max(0, nBuf.end(nBuf.length - 1) / max));
         } else {
           const vBuf = videoSb?.buffered;
           if (vBuf && vBuf.length > 0)
@@ -2518,6 +2562,7 @@
     const BUF_HIGH = 10;
     let _dynBufTimer = null;
     let _bufPaused = false;
+    let _userPaused = false;
     let _bufWaitStart = 0;
     const _getVidLead = () => {
       const ct = videoEl.currentTime;
@@ -2528,6 +2573,7 @@
       return 0;
     };
     const _startDynBuf = () => {
+      if (_nativeVideo) return;
       if (_dynBufTimer) return;
       _dynBufTimer = setInterval(() => {
         if (!_avStarted || _abortCtrl?.signal.aborted) {
@@ -2540,16 +2586,44 @@
         if (_bufPaused) {
           if (lead >= BUF_HIGH) {
             _bufPaused = false;
-            _mvGateOpen = _avStarted;
-            mkAudio.currentTime = videoEl.currentTime;
-            mkAudio.muted = false;
-            _iframePlay.call(videoEl).catch(() => {
-            });
-            console.log(`[AML MV buf:resume] lead=${lead.toFixed(2)}s ct=${videoEl.currentTime.toFixed(2)}`);
+            _bufSpinner.style.display = "none";
+            if (_userPaused) {
+              mkAudio.muted = false;
+              console.log(`[AML MV buf:resume-held] lead=${lead.toFixed(2)}s \u2014 user paused, not auto-resuming`);
+            } else {
+              _mvGateOpen = _avStarted;
+              mkAudio.currentTime = videoEl.currentTime;
+              mkAudio.muted = false;
+              _iframePlay.call(videoEl).catch(() => {
+              });
+              console.log(`[AML MV buf:resume] lead=${lead.toFixed(2)}s ct=${videoEl.currentTime.toFixed(2)}`);
+            }
           } else {
             if (!videoEl.paused) {
               console.warn("[AML MV buf:waiting] video escaped pause \u2014 re-pausing");
               videoEl.pause();
+            }
+            if (lead === 0) {
+              const ct = videoEl.currentTime;
+              let snapped = false;
+              for (let i = 0; i < videoEl.buffered.length; i++) {
+                const s = videoEl.buffered.start(i);
+                if (s > ct && s - ct < 15) {
+                  console.log(`[AML MV buf:gap-snap] ct=${ct.toFixed(2)} \u2192 ${s.toFixed(2)} (gap=${(s - ct).toFixed(2)}s)`);
+                  videoEl.currentTime = s;
+                  snapped = true;
+                  break;
+                }
+              }
+              if (!snapped && videoEl.buffered.length > 0) {
+                const bufEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+                if (ct > bufEnd && ct - bufEnd < 30 && Date.now() - _bufWaitStart > 8e3) {
+                  console.warn(`[AML MV buf:ahead-snap] ct=${ct.toFixed(2)} ahead of bufEnd=${bufEnd.toFixed(2)} \u2014 re-seeking`);
+                  _bufWaitStart = Date.now();
+                  _mvVideoSeek(ct).catch(() => {
+                  });
+                }
+              }
             }
             if (pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted && !_pipeRestarted) {
               _pipeRestarted = true;
@@ -2581,6 +2655,7 @@
         } else {
           if (lead < BUF_LOW && !videoEl.paused) {
             _bufPaused = true;
+            _bufSpinner.style.display = "block";
             _mvGateOpen = false;
             _bufWaitStart = Date.now();
             videoEl.pause();
@@ -2588,7 +2663,7 @@
             console.warn(`[AML MV buf:LOW] lead=${lead.toFixed(2)}s < ${BUF_LOW}s \u2192 pausing. ct=${videoEl.currentTime.toFixed(2)} buffered=${videoEl.buffered?.length ? `${videoEl.buffered.start(0).toFixed(2)}-${videoEl.buffered.end(videoEl.buffered.length - 1).toFixed(2)}` : "empty"}`);
           } else {
             if (lead >= BUF_HIGH) _pipeRestarted = false;
-            if (videoEl.paused) {
+            if (videoEl.paused && !_userPaused) {
               console.warn(`[AML MV buf:stuck] videoEl paused with lead=${lead.toFixed(2)}s \u2014 retrying play`);
               _iframePlay.call(videoEl).catch(() => {
               });
@@ -2606,8 +2681,8 @@
       mvContainer.style.removeProperty("cursor");
       if (exitBtn) exitBtn.style.removeProperty("pointer-events");
       _mvGateOpen = true;
-      if (_wcVideo) {
-        _iframePlay.call(mkAudio).catch((e) => console.warn("[AML MV-WC] audio play rejected:", e.message));
+      if (_wcVideo || _nativeVideo) {
+        _iframePlay.call(mkAudio).catch((e) => console.warn("[AML MV] audio play rejected:", e.message));
         return;
       }
       const audCt = mkAudio.currentTime;
@@ -2823,7 +2898,7 @@
       return;
     }
     console.log(`[AML MV] video codec="${videoCodecStr}"`);
-    let videoSb = _wcVideo || _mp4Video ? null : ms.addSourceBuffer(videoMime);
+    let videoSb = _wcVideo || _mp4Video || _nativeVideo ? null : ms.addSourceBuffer(videoMime);
     const videoEl = myVid;
     let pipeCtrl = new AbortController();
     let _pipeRestarted = false;
@@ -2975,6 +3050,7 @@
         console.log(`[AML MV-pipe] catch err="${e.message}" pipeAborted=${aborted} ct=${videoEl.currentTime?.toFixed(2)} readyState=${videoEl.readyState}`);
         if (!aborted && _decodeRetryCount < 3 && e.message.includes("veCode=3")) {
           _decodeRetryCount++;
+          _bufWaitStart = Date.now();
           const ct = videoEl.currentTime;
           const badEnd = videoSb.buffered.length > 0 ? videoSb.buffered.end(videoSb.buffered.length - 1) : ct;
           const skipTo = _decodeRetryCount === 1 ? ct + 0.5 : Math.max(ct + 0.5, badEnd + 3);
@@ -3043,7 +3119,7 @@
       if (!document.getElementById("_wcSpinStyle")) {
         const s = document.createElement("style");
         s.id = "_wcSpinStyle";
-        s.textContent = "@keyframes _wcSpin{to{transform:translate(-50%,-50%) rotate(360deg)}}";
+        s.textContent = "@keyframes _wcSpin{from{transform:translate(-50%,-50%) rotate(0deg)}to{transform:translate(-50%,-50%) rotate(360deg)}}";
         document.head.appendChild(s);
       }
       const _wcSpinner = document.createElement("div");
@@ -3105,7 +3181,7 @@
             _wcStalled = false;
             _msePaused = false;
             _wcSpinner.style.display = "none";
-            mkAudio.play().catch(() => {
+            _iframePlay.call(mkAudio).catch(() => {
             });
             _wcDispatchPlaying();
             console.log(`[AML MV-WC] rebuffered \u2014 resuming audio ct=${mkAudio.currentTime.toFixed(2)} queued=${queue.length}`);
@@ -3163,7 +3239,7 @@
         });
         let buf = new Uint8Array(0);
         const td = new TextDecoder();
-        let state = "magic", codec = "";
+        let state = "magic", codec = "", waitingForKeyframe = true;
         const drain = () => {
           for (; ; ) {
             if (state === "magic") {
@@ -3196,6 +3272,7 @@
                 fetchCtrl.abort();
                 return;
               }
+              waitingForKeyframe = true;
               console.log(`[AML MV-WC] configured codec=${codec} avcC=${avcC.length}B`);
             } else {
               if (buf.length < 17) return;
@@ -3208,6 +3285,8 @@
               const durUs = dv.getUint32(9);
               const data = buf.slice(17, 17 + len);
               buf = buf.slice(17 + len);
+              if (!key && waitingForKeyframe) continue;
+              waitingForKeyframe = false;
               try {
                 myDec.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: tUs, duration: durUs, data }));
               } catch (e) {
@@ -3360,67 +3439,132 @@
       }
     };
     const _setupMP4BoxVideo = () => {
-      const MP4Box = window.MP4Box;
-      if (!MP4Box) {
-        console.warn("[AML MV-MP4] MP4Box not loaded \u2014 falling back to WebCodecs");
+      console.log("[AML MV-MP4] starting direct fMP4\u2192MSE path");
+      if (!MediaSource.isTypeSupported(videoMime)) {
+        console.error("[AML MV-MP4] codec not supported:", videoMime, "\u2014 falling back to WebCodecs");
         _setupWebCodecsVideo();
         return;
       }
-      console.log("[AML MV-MP4] starting mp4box MSE path");
-      const mp4file = MP4Box.createFile();
-      let videoTrackId = null;
-      let mp4Sb = null;
-      let offset = 0;
       const fetchCtrl = new AbortController();
-      mp4file.onError = (e) => console.error("[AML MV-MP4] mp4box error:", e);
-      mp4file.onReady = (info) => {
-        const track = info.videoTracks[0];
-        if (!track) {
-          console.error("[AML MV-MP4] no video track");
-          return;
-        }
-        videoTrackId = track.id;
-        const mime = `video/mp4; codecs="${track.codec}"`;
-        if (!MediaSource.isTypeSupported(mime)) {
-          console.error("[AML MV-MP4] codec not supported:", mime, "\u2014 falling back to WebCodecs");
-          mp4file.stop();
-          fetchCtrl.abort();
-          _setupWebCodecsVideo();
-          return;
-        }
-        mp4Sb = ms.addSourceBuffer(mime);
-        mp4Sb.mode = "segments";
-        mp4file.setSegmentOptions(videoTrackId, mp4Sb, { nbSamples: 200 });
-        const initSegs = mp4file.initializeSegmentation();
-        for (const seg of initSegs) {
-          if (seg.id === videoTrackId) mp4Sb.appendBuffer(seg.buffer);
-        }
-        mp4file.start();
+      const mp4Sb = ms.addSourceBuffer(videoMime);
+      videoSb = mp4Sb;
+      mp4Sb.mode = "segments";
+      let pending = new Uint8Array(0);
+      let initDone = false;
+      let initBuf = new Uint8Array(0);
+      let pendingMoof = null;
+      let timescale = 9e4;
+      let tsOffsetSet = false;
+      const cat = (a, b) => {
+        const r = new Uint8Array(a.length + b.length);
+        r.set(a);
+        r.set(b, a.length);
+        return r;
       };
-      mp4file.onSegment = (id, user, buffer, sampleNum, last) => {
-        const doAppend = () => {
-          if (user.updating) {
-            user.addEventListener("updateend", doAppend, { once: true });
+      const toAB = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+      const u32 = (b, i) => (b[i] << 24 | b[i + 1] << 16 | b[i + 2] << 8 | b[i + 3]) >>> 0;
+      const findBox = (buf, type) => {
+        const t0 = type.charCodeAt(0), t1 = type.charCodeAt(1), t2 = type.charCodeAt(2), t3 = type.charCodeAt(3);
+        for (let i = 0; i + 8 <= buf.length; ) {
+          const sz = u32(buf, i);
+          if (sz < 8) break;
+          if (buf[i + 4] === t0 && buf[i + 5] === t1 && buf[i + 6] === t2 && buf[i + 7] === t3) return buf.subarray(i, i + sz);
+          i += sz;
+        }
+        return null;
+      };
+      const moovTimescale = (moovBox) => {
+        const trak = findBox(moovBox.subarray(8), "trak");
+        if (!trak) return 9e4;
+        const mdia = findBox(trak.subarray(8), "mdia");
+        if (!mdia) return 9e4;
+        const mdhd = findBox(mdia.subarray(8), "mdhd");
+        if (!mdhd || mdhd.length < 24) return 9e4;
+        const off = mdhd[8] === 1 ? 28 : 20;
+        return mdhd.length >= off + 4 ? u32(mdhd, off) : 9e4;
+      };
+      const moofTFDT = (moofBox) => {
+        const traf = findBox(moofBox.subarray(8), "traf");
+        if (!traf) return 0;
+        const tfdt = findBox(traf.subarray(8), "tfdt");
+        if (!tfdt || tfdt.length < 16) return 0;
+        if (tfdt[8] === 1 && tfdt.length >= 20) return u32(tfdt, 12) * 4294967296 + u32(tfdt, 16);
+        return u32(tfdt, 12);
+      };
+      let _segN = 0;
+      const _logBuf = (label) => {
+        if (!mp4Sb || !mp4Sb.buffered || mp4Sb.buffered.length === 0) {
+          console.log(`[AML MV-MP4] ${label} buf=(empty) tsOff=${mp4Sb?.timestampOffset?.toFixed(3)}`);
+          return;
+        }
+        const b = mp4Sb.buffered;
+        const ranges = Array.from({ length: b.length }, (_, i) => `${b.start(i).toFixed(2)}-${b.end(i).toFixed(2)}`).join(" ");
+        console.log(`[AML MV-MP4] ${label} buf=[${ranges}] tsOff=${mp4Sb.timestampOffset.toFixed(3)}`);
+      };
+      const appendWhenReady = (ab, beforeAppend) => {
+        const try_ = () => {
+          if (mp4Sb.updating) {
+            mp4Sb.addEventListener("updateend", try_, { once: true });
             return;
           }
+          if (beforeAppend) beforeAppend();
           try {
-            user.appendBuffer(buffer);
+            mp4Sb.appendBuffer(ab);
+            mp4Sb.addEventListener("updateend", () => _logBuf(`seg#${_segN}`), { once: true });
           } catch (e) {
             console.warn("[AML MV-MP4] append:", e.message);
           }
-          mp4file.releaseUsedSamples(id, sampleNum);
-          if (last) {
-            user.addEventListener("updateend", () => {
-              if (!user.updating && ms.readyState === "open") {
-                try {
-                  ms.endOfStream();
-                } catch (_) {
-                }
-              }
-            }, { once: true });
-          }
         };
-        doAppend();
+        try_();
+      };
+      const drain = () => {
+        for (; ; ) {
+          if (pending.length < 8) return;
+          const size = u32(pending, 0);
+          if (size < 8 || pending.length < size) return;
+          const type = String.fromCharCode(pending[4], pending[5], pending[6], pending[7]);
+          const box = pending.slice(0, size);
+          pending = pending.slice(size);
+          if (!initDone) {
+            initBuf = cat(initBuf, box);
+            if (type === "moov") {
+              initDone = true;
+              timescale = moovTimescale(box);
+              const trak = findBox(box.subarray(8), "trak");
+              const mdia = trak ? findBox(trak.subarray(8), "mdia") : null;
+              const mdhd = mdia ? findBox(mdia.subarray(8), "mdhd") : null;
+              const hex = (arr, n) => arr ? Array.from(arr.subarray(0, Math.min(n, arr.length))).map((v) => v.toString(16).padStart(2, "0")).join(" ") : "null";
+              console.log(`[AML MV-MP4] MOOV raw: size=${box.length}B trak=${trak?.length} mdia=${mdia?.length} mdhd=${mdhd?.length}`);
+              console.log(`[AML MV-MP4] mdhd hex: ${hex(mdhd, mdhd?.length || 0)}`);
+              console.log(`[AML MV-MP4] init ${initBuf.length}B timescale=${timescale}`);
+              _segN = 0;
+              appendWhenReady(toAB(initBuf));
+            }
+          } else if (type === "moof") {
+            pendingMoof = box;
+          } else if (type === "mdat" && pendingMoof) {
+            const moofBox = pendingMoof;
+            pendingMoof = null;
+            _segN++;
+            const seg = toAB(cat(moofBox, box));
+            if (!tsOffsetSet) {
+              tsOffsetSet = true;
+              const tfdt = moofTFDT(moofBox);
+              const traf = findBox(moofBox.subarray(8), "traf");
+              const tfdtBox = traf ? findBox(traf.subarray(8), "tfdt") : null;
+              const hex = (arr, n) => arr ? Array.from(arr.subarray(0, Math.min(n, arr.length))).map((v) => v.toString(16).padStart(2, "0")).join(" ") : "null";
+              console.log(`[AML MV-MP4] MOOF#1 raw: moofSize=${moofBox.length} traf=${traf?.length} tfdt=${tfdtBox?.length}`);
+              console.log(`[AML MV-MP4] tfdt hex: ${hex(tfdtBox, tfdtBox?.length || 0)}`);
+              appendWhenReady(seg, () => {
+                const offset = -(tfdt / timescale);
+                mp4Sb.timestampOffset = offset;
+                console.log(`[AML MV-MP4] seg#1 TFDT=${tfdt} timescale=${timescale} \u2192 tsOff=${offset.toFixed(3)}s`);
+              });
+            } else {
+              appendWhenReady(seg);
+            }
+          }
+        }
       };
       fetch(`${ENGINE}/api/v1/playback/${_sessionId}/video-raw`, { signal: fetchCtrl.signal }).then(async (resp) => {
         if (!resp.ok) {
@@ -3432,24 +3576,141 @@
           for (; ; ) {
             const { done, value } = await reader.read();
             if (done) break;
-            const buf = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
-            buf.fileStart = offset;
-            offset += buf.byteLength;
-            mp4file.appendBuffer(buf);
+            pending = pending.length ? cat(pending, value) : value;
+            drain();
           }
-          mp4file.flush();
+          mp4Sb.addEventListener("updateend", () => {
+            if (!mp4Sb.updating && ms.readyState === "open") {
+              try {
+                ms.endOfStream();
+              } catch (_) {
+              }
+            }
+          }, { once: true });
         } catch (e) {
           if (e.name !== "AbortError") console.error("[AML MV-MP4] read:", e.message);
         }
       }).catch((e) => {
         if (e.name !== "AbortError") console.error("[AML MV-MP4] fetch:", e.message);
       });
-      _wcCleanup = () => {
-        fetchCtrl.abort();
-        mp4file.stop();
-      };
+      _wcCleanup = () => fetchCtrl.abort();
     };
-    if (_mp4Video) _setupMP4BoxVideo();
+    const _setupNativeVideo = () => {
+      const enginePath = `/api/v1/playback/${_sessionId}/video-dl`;
+      const dlUrl = `${ENGINE_HTTPS}${enginePath}`;
+      const infoUrl = `${ENGINE_HTTPS}${enginePath}-info`;
+      _bufSpinner.style.display = "block";
+      const _NET = ["EMPTY", "IDLE", "LOADING", "NO_SOURCE"];
+      const _RS = ["HAVE_NOTHING", "HAVE_METADATA", "HAVE_CURRENT_DATA", "HAVE_FUTURE_DATA", "HAVE_ENOUGH_DATA"];
+      const _nlog = (ev) => console.log(`%c[AML MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : "-"}`, "color:#bf5af2;font-weight:bold", "color:inherit");
+      ["loadstart", "durationchange", "loadedmetadata", "loadeddata", "canplaythrough", "stalled", "emptied", "abort"].forEach((ev) => myVid.addEventListener(ev, () => _nlog(ev)));
+      myVid.addEventListener("error", () => {
+        const e = myVid.error;
+        console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ""}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc} \u2014 advancing track`, "color:#ff453a;font-weight:bold", "color:inherit");
+        _abortMV(`video-error-${e?.code ?? "?"}`);
+        _amlNextRef?.().catch(() => {
+        });
+        setTimeout(() => exitBtn?.click(), 200);
+      });
+      let _lastNudge = 0;
+      myVid.addEventListener("timeupdate", () => {
+        if (!_avStarted) return;
+        const drift = mkAudio.currentTime - myVid.currentTime;
+        const now = performance.now();
+        if (Math.abs(drift) > 0.35 && now - _lastNudge > 500) {
+          _lastNudge = now;
+          mkAudio.currentTime = myVid.currentTime;
+        }
+      });
+      const _dispatchNative = (type) => {
+        nativeVidEl?.dispatchEvent(new Event(type, { bubbles: false }));
+        const mka = getMKAudio();
+        if (mka && mka !== mkAudio) mka.dispatchEvent(new Event(type, { bubbles: false }));
+      };
+      mkAudio.addEventListener("play", () => {
+        if (myVid.paused) _iframePlay.call(myVid).catch(() => {
+        });
+      });
+      mkAudio.addEventListener("pause", () => {
+        if (!myVid.paused) myVid.pause();
+      });
+      myVid.addEventListener("play", () => {
+        if (mkAudio.paused) _iframePlay.call(mkAudio).catch(() => {
+        });
+        _dispatchNative("playing");
+      });
+      myVid.addEventListener("pause", () => {
+        if (!mkAudio.paused) mkAudio.pause();
+        _dispatchNative("pause");
+      });
+      myVid.addEventListener("waiting", () => {
+        _nlog("waiting");
+        if (_avStarted && !_videoStalled && !_bufPaused) {
+          _videoStalled = true;
+          _mvGateOpen = false;
+          mkAudio.muted = true;
+          _bufSpinner.style.display = "block";
+        }
+      });
+      myVid.addEventListener("playing", () => {
+        _nlog("playing");
+        _dispatchNative("playing");
+        if (_videoStalled) {
+          _videoStalled = false;
+          _mvGateOpen = _avStarted;
+          _bufSpinner.style.display = "none";
+          if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.05) mkAudio.currentTime = myVid.currentTime;
+          mkAudio.muted = false;
+        }
+      });
+      myVid.addEventListener("seeked", () => {
+        _nlog("seeked");
+        if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.3) mkAudio.currentTime = myVid.currentTime;
+      });
+      myVid.addEventListener("ended", () => {
+        if (_abortCtrl?.signal.aborted) return;
+        console.log(`[AML MV native] ended ct=${myVid.currentTime.toFixed(2)} \u2192 next`);
+        _abortMV("track-ended");
+        _amlNextRef?.().catch(() => {
+        });
+        setTimeout(() => exitBtn?.click(), 200);
+      });
+      myVid.addEventListener("canplay", () => {
+        _nlog("canplay");
+        _bufSpinner.style.display = "none";
+        _dispatchNative("canplay");
+        _videoCanPlay = true;
+        tryStart();
+      }, { once: true });
+      let _polls = 0;
+      const _beginPlayback = () => {
+        console.log("%c[AML MV native]%c cache ready \u2192 src=%s", "color:#bf5af2;font-weight:bold", "color:inherit", dlUrl);
+        myVid.src = dlUrl;
+        try {
+          myVid.load();
+        } catch (e) {
+          console.error(`[AML MV native] load() threw: ${e.message}`);
+        }
+      };
+      const _poll = async () => {
+        if (_generation !== _mvGen) return;
+        _polls++;
+        try {
+          const info = await fetch(infoUrl).then((r) => r.json());
+          if (info && info.cached) {
+            _beginPlayback();
+            return;
+          }
+          if (_polls === 1 || _polls % 6 === 0) console.log(`%c[AML MV native]%c preparing\u2026 poll#${_polls}`, "color:#bf5af2;font-weight:bold", "color:inherit");
+        } catch (e) {
+          console.warn(`[AML MV native] info poll err: ${e.message}`);
+        }
+        setTimeout(_poll, 500);
+      };
+      _poll();
+    };
+    if (_nativeVideo) _setupNativeVideo();
+    else if (_mp4Video) _setupMP4BoxVideo();
     else if (_wcVideo) _setupWebCodecsVideo();
     else _startVideoPipe();
     let _mvVidSeeking = false;
@@ -3482,11 +3743,18 @@
     const _mvVideoSeek = async (seekSec) => {
       if (_mvVidSeeking || pipeCtrl.signal.aborted || ms.readyState !== "open") return;
       for (let i = 0; i < videoSb.buffered.length; i++) {
-        if (seekSec >= videoSb.buffered.start(i) - 1 && seekSec <= videoSb.buffered.end(i) + 1) return;
+        if (seekSec >= videoSb.buffered.start(i) - 0.5 && seekSec < videoSb.buffered.end(i)) return;
       }
       _mvVidSeeking = true;
       _showSeekSnap();
       try {
+        if (typeof _wcCleanup === "function") {
+          try {
+            _wcCleanup();
+          } catch (_) {
+          }
+          _wcCleanup = null;
+        }
         const prev = pipeCtrl;
         pipeCtrl = new AbortController();
         prev.abort();
@@ -3510,9 +3778,7 @@
         _ignoreSeekUntil = Date.now() + 8e3;
         console.log(`[AML MV-V] seek to ${seekSec.toFixed(1)}s \u2014 re-fetching from engine`);
         if (seekSec < (_durationSec || 1e9) - 1) {
-          runVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`, sig).catch((e) => {
-            if (!sig.aborted) console.error("[AML MV] video resume error:", e);
-          });
+          _startVideoPipe(`${videoUrl}?t=${seekSec.toFixed(3)}`);
         }
       } finally {
         _mvVidSeeking = false;
@@ -3520,16 +3786,16 @@
     };
     videoEl.addEventListener("seeking", () => {
       if (_wcVideo) return;
+      if (_nativeVideo) return;
       if (Date.now() < _ignoreSeekUntil) return;
       _mvVideoSeek(videoEl.currentTime).catch(() => {
       });
     });
     const onVideoPlay = () => {
-      console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)}`);
+      console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
       if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
         mkAudio.currentTime = videoEl.currentTime;
-      mkAudio.play().catch(() => {
-      });
+      _iframePlay.call(mkAudio).then(() => console.log("[AML MV-A] mkAudio.play() resolved")).catch((e) => console.warn("[AML MV-A] mkAudio.play() rejected:", e.message));
     };
     const onVideoPlaying = () => {
       _hideSeekSnap();
@@ -3539,6 +3805,7 @@
       if (_videoStalled) {
         _videoStalled = false;
         _mvGateOpen = _avStarted;
+        _bufSpinner.style.display = "none";
         const drift = mkAudio.currentTime - videoEl.currentTime;
         if (Math.abs(drift) > 0.05) {
           console.log(`[AML MV buf:sync] stall recovery drift=${drift.toFixed(2)}s, snapping audio ct=${videoEl.currentTime.toFixed(2)}`);
@@ -3605,10 +3872,11 @@
         _videoStalled = true;
         _mvGateOpen = false;
         mkAudio.muted = true;
+        _bufSpinner.style.display = "block";
         console.warn(`[AML MV buf:stall] audio muted during video stall ct=${mkAudio.currentTime.toFixed(2)}`);
       }
     };
-    if (!_wcVideo) {
+    if (!_wcVideo && !_nativeVideo) {
       videoEl.addEventListener("play", onVideoPlay);
       videoEl.addEventListener("playing", onVideoPlaying);
       videoEl.addEventListener("pause", onVideoPause);
@@ -3762,6 +4030,8 @@
       Function.prototype.call = _origFnCall;
       Function.prototype.apply = _origFnApply;
       _mvGateOpen = true;
+      _bufSpinner.style.display = "none";
+      if (_bufSpinner.parentNode) _bufSpinner.parentNode.removeChild(_bufSpinner);
       if (_subDiv.parentNode) _subDiv.parentNode.removeChild(_subDiv);
       for (let i = 0; i < myVid.textTracks.length; i++)
         myVid.textTracks[i].removeEventListener("cuechange", _renderSubs);
