@@ -69,6 +69,7 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 	if vtrak == nil || vtrak.Mdia.Mdhd == nil {
 		return errors.New("videoes: no video track")
 	}
+	videoTrackID := vtrak.Tkhd.TrackID
 	timescale := uint64(vtrak.Mdia.Mdhd.Timescale)
 	if timescale == 0 {
 		return errors.New("videoes: zero timescale")
@@ -90,9 +91,12 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 	codec := fmt.Sprintf("avc1.%02x%02x%02x", cfg[1], cfg[2], cfg[3])
 
 	// Default sample params (durations/flags) come from trex when trun omits them.
+	// Use the trex for the video track specifically so multi-track input is handled correctly.
 	var trex *mp4.TrexBox
 	if moov.Mvex != nil {
-		if moov.Mvex.Trex != nil {
+		if tx, ok := moov.Mvex.GetTrex(videoTrackID); ok {
+			trex = tx
+		} else if moov.Mvex.Trex != nil {
 			trex = moov.Mvex.Trex
 		} else if len(moov.Mvex.Trexs) > 0 {
 			trex = moov.Mvex.Trexs[0]
@@ -131,6 +135,20 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 
 		switch b := box.(type) {
 		case *mp4.MoofBox:
+			// For multi-track fMP4 input (e.g. raw CBCS-decrypted stream with audio+video+subtitle
+			// trafs), keep only the video traf so GetFullSamples returns only video access units.
+			if len(b.Trafs) > 1 {
+				var videoTrafs []*mp4.TrafBox
+				for _, traf := range b.Trafs {
+					if traf.Tfhd != nil && traf.Tfhd.TrackID == videoTrackID {
+						videoTrafs = append(videoTrafs, traf)
+					}
+				}
+				if len(videoTrafs) > 0 {
+					b.Trafs = videoTrafs
+					b.Traf = videoTrafs[0]
+				}
+			}
 			pendingMoof = b
 		case *mp4.MdatBox:
 			if pendingMoof == nil {

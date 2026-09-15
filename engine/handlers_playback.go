@@ -555,16 +555,6 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
 		seekSec = v
 	}
-	// Anchor seek output onto the real timeline (same as /video) so the ES access
-	// units carry true presentation times the renderer can sync to the audio clock.
-	var tsOffset float64
-	if seekSec > 0 {
-		if actual, ok := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok {
-			tsOffset = actual
-		} else {
-			tsOffset = seekSec
-		}
-	}
 	assetID := sess.AssetID
 	log.Printf("[video-es] GET id=%s assetID=%q seekSec=%.2f decExists=%v", id, assetID, seekSec, aacstream.MVDecExists(assetID, sess.MVMaxHeight))
 
@@ -601,22 +591,23 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// FFmpeg fallback: single-track remux → pipe → mp4ff demux → ES to client.
-	videoSrc := func(dst io.Writer) error {
-		if seekSec > 0 {
-			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, dst)
-			return err
-		}
-		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
-	}
+	// Direct path: CBCS-decrypted multi-track fMP4 → DemuxFMP4ToES (no FFmpeg, no MSE).
+	// DemuxFMP4ToES filters to the video track, handling B-frame PTS via CompositionTimeOffset.
+	// This eliminates CHUNK_DEMUXER_ERROR_APPEND_FAILED which occurs on the MSE path with
+	// Apple Music's B-frame H.264 content.
 	pr, pw := io.Pipe()
 	go func() {
-		err := transcodeVideoForMSE(r.Context(), videoSrc, pw, tsOffset)
+		var err error
+		if seekSec > 0 {
+			_, err = s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, pw)
+		} else {
+			err = s.pm.Stream(r.Context(), id, pipeline.KindVideo, pw)
+		}
 		pw.CloseWithError(err)
 	}()
 	esHeaders()
 	if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
-		log.Printf("[video-es] demux error id=%s: %v", id, err)
+		log.Printf("[video-es] direct demux error id=%s: %v", id, err)
 	}
 }
 
