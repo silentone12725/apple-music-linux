@@ -1723,6 +1723,7 @@
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
     const _wcVideo = true;
+    const _mp4Video = false;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
     let _wcVW = 0, _wcVH = 0;
@@ -2799,7 +2800,7 @@
     const rawVideoCodec = _videoCodec || "";
     const videoCodecStr = rawVideoCodec.split(",").map((c) => c.trim()).find((c) => /^(avc1|hvc1|hev1|vp09|av01)/.test(c)) ?? "avc1.640028";
     const videoMime = `video/mp4; codecs="${videoCodecStr}"`;
-    if (!_wcVideo && !MediaSource.isTypeSupported(videoMime)) {
+    if (!_wcVideo && !_mp4Video && !MediaSource.isTypeSupported(videoMime)) {
       console.error(`[AML MV] video codec not supported: ${videoMime} \u2014 skipping track`);
       _audioPipeCtrl.abort();
       mkAudio.pause();
@@ -2822,7 +2823,7 @@
       return;
     }
     console.log(`[AML MV] video codec="${videoCodecStr}"`);
-    let videoSb = _wcVideo ? null : ms.addSourceBuffer(videoMime);
+    let videoSb = _wcVideo || _mp4Video ? null : ms.addSourceBuffer(videoMime);
     const videoEl = myVid;
     let pipeCtrl = new AbortController();
     let _pipeRestarted = false;
@@ -3358,7 +3359,98 @@
         mkAudio.muted = m;
       }
     };
-    if (_wcVideo) _setupWebCodecsVideo();
+    const _setupMP4BoxVideo = () => {
+      const MP4Box = window.MP4Box;
+      if (!MP4Box) {
+        console.warn("[AML MV-MP4] MP4Box not loaded \u2014 falling back to WebCodecs");
+        _setupWebCodecsVideo();
+        return;
+      }
+      console.log("[AML MV-MP4] starting mp4box MSE path");
+      const mp4file = MP4Box.createFile();
+      let videoTrackId = null;
+      let mp4Sb = null;
+      let offset = 0;
+      const fetchCtrl = new AbortController();
+      mp4file.onError = (e) => console.error("[AML MV-MP4] mp4box error:", e);
+      mp4file.onReady = (info) => {
+        const track = info.videoTracks[0];
+        if (!track) {
+          console.error("[AML MV-MP4] no video track");
+          return;
+        }
+        videoTrackId = track.id;
+        const mime = `video/mp4; codecs="${track.codec}"`;
+        if (!MediaSource.isTypeSupported(mime)) {
+          console.error("[AML MV-MP4] codec not supported:", mime, "\u2014 falling back to WebCodecs");
+          mp4file.stop();
+          fetchCtrl.abort();
+          _setupWebCodecsVideo();
+          return;
+        }
+        mp4Sb = ms.addSourceBuffer(mime);
+        mp4Sb.mode = "segments";
+        mp4file.setSegmentOptions(videoTrackId, mp4Sb, { nbSamples: 200 });
+        const initSegs = mp4file.initializeSegmentation();
+        for (const seg of initSegs) {
+          if (seg.id === videoTrackId) mp4Sb.appendBuffer(seg.buffer);
+        }
+        mp4file.start();
+      };
+      mp4file.onSegment = (id, user, buffer, sampleNum, last) => {
+        const doAppend = () => {
+          if (user.updating) {
+            user.addEventListener("updateend", doAppend, { once: true });
+            return;
+          }
+          try {
+            user.appendBuffer(buffer);
+          } catch (e) {
+            console.warn("[AML MV-MP4] append:", e.message);
+          }
+          mp4file.releaseUsedSamples(id, sampleNum);
+          if (last) {
+            user.addEventListener("updateend", () => {
+              if (!user.updating && ms.readyState === "open") {
+                try {
+                  ms.endOfStream();
+                } catch (_) {
+                }
+              }
+            }, { once: true });
+          }
+        };
+        doAppend();
+      };
+      fetch(`${ENGINE}/api/v1/playback/${_sessionId}/video-raw`, { signal: fetchCtrl.signal }).then(async (resp) => {
+        if (!resp.ok) {
+          console.error("[AML MV-MP4] fetch", resp.status);
+          return;
+        }
+        const reader = resp.body.getReader();
+        try {
+          for (; ; ) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const buf = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+            buf.fileStart = offset;
+            offset += buf.byteLength;
+            mp4file.appendBuffer(buf);
+          }
+          mp4file.flush();
+        } catch (e) {
+          if (e.name !== "AbortError") console.error("[AML MV-MP4] read:", e.message);
+        }
+      }).catch((e) => {
+        if (e.name !== "AbortError") console.error("[AML MV-MP4] fetch:", e.message);
+      });
+      _wcCleanup = () => {
+        fetchCtrl.abort();
+        mp4file.stop();
+      };
+    };
+    if (_mp4Video) _setupMP4BoxVideo();
+    else if (_wcVideo) _setupWebCodecsVideo();
     else _startVideoPipe();
     let _mvVidSeeking = false;
     let _ignoreSeekUntil = 0;

@@ -18,7 +18,8 @@
   "desktopName": "apple-music-linux.desktop",
   "devDependencies": {
     "electron": "^43.1.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "mp4box": "^2.4.1"
   },
   "build": {
     "appId": "com.apple.android.music",
