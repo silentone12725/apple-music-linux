@@ -1935,9 +1935,9 @@ async function startMVPipeline() {
     // The MSE video block still runs its DECLARATIONS (pipeCtrl, videoSb, onVideo*
     // handlers) so the shared cleanup() resolves them; only its active work (the
     // /video fetch + buffer monitor + tryStart's video-element play) is gated off.
-    // MSE is the primary MV video backend; WebCodecs runs as a shadow decoder with
-    // hardening patches. Set _wcVideo=true to force WebCodecs-only mode.
-    const _wcVideo = false;
+    // WebCodecs is the primary MV video backend (CBCS → DemuxFMP4ToES → VideoDecoder).
+    // This eliminates CHUNK_DEMUXER_ERROR_APPEND_FAILED on Apple Music's B-frame H.264 content.
+    const _wcVideo = true;
     let _wcCleanup = null; // set by _setupWebCodecsVideo; called from cleanup()
     // Furthest VIDEO position (sec) decoded/available in the WC pipeline — drives the
     // native buffer bar in WC mode (there is no video SourceBuffer to read). Reset to

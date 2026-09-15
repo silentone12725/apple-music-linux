@@ -1722,7 +1722,7 @@
     myVid.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;";
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
-    const _wcVideo = false;
+    const _wcVideo = true;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
     let _wcVW = 0, _wcVH = 0;
