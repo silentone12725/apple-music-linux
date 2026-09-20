@@ -120,6 +120,105 @@ func TestVideoES_DemuxRoundTrip(t *testing.T) {
 	t.Log("VERDICT: DemuxFMP4ToES emits correct header (codec/avcC) + per-sample keyframe/PTS/data — WebCodecs-ready ES.")
 }
 
+func TestAvcHasIDR(t *testing.T) {
+	mk := func(nals ...[]byte) []byte {
+		var b []byte
+		for _, n := range nals {
+			var l [4]byte
+			binary.BigEndian.PutUint32(l[:], uint32(len(n)))
+			b = append(b, l[:]...)
+			b = append(b, n...)
+		}
+		return b
+	}
+	idr := []byte{0x65, 0x88, 0x84}   // nal_unit_type 5 = IDR slice
+	nonIDR := []byte{0x41, 0x9a, 0x00} // type 1 = non-IDR slice
+	sps := []byte{0x67, 0x64, 0x00}    // type 7 = SPS
+	cases := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{"sps+idr", mk(sps, idr), true},
+		{"lone idr", mk(idr), true},
+		{"only non-idr", mk(nonIDR, nonIDR), false},
+		{"empty", nil, false},
+		{"truncated length runs past buffer", []byte{0x00, 0x00, 0x00, 0xFF, 0x65}, false},
+		{"zero length nal", []byte{0x00, 0x00, 0x00, 0x00}, false},
+	}
+	for _, c := range cases {
+		if got := avcHasIDR(c.data, 4); got != c.want {
+			t.Errorf("%s: avcHasIDR = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestVideoES_IDRFallbackWhenSyncFlagsMissing reproduces the Apple CBCS direct-path
+// bug: the container marks every sample non-sync (IsSync() false), but the first
+// access unit contains an IDR slice. Without the NAL fallback the renderer drops
+// every sample waiting for a keyframe and never decodes. The demuxer must flag the
+// IDR sample as a keyframe from its NAL type.
+func TestVideoES_IDRFallbackWhenSyncFlagsMissing(t *testing.T) {
+	const timescale = 90000
+	sps := []byte{0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x40, 0x78, 0x02, 0x27, 0xe5, 0x84,
+		0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c, 0x60, 0xc9, 0x20}
+	pps := []byte{0x68, 0xe9, 0x7b, 0x2c, 0x8b}
+	init := mp4.CreateEmptyInit()
+	init.AddEmptyTrack(timescale, "video", "und")
+	if err := init.Moov.Trak.SetAVCDescriptor("avc1", [][]byte{sps}, [][]byte{pps}, true); err != nil {
+		t.Fatalf("SetAVCDescriptor: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := init.Encode(&buf); err != nil {
+		t.Fatalf("init encode: %v", err)
+	}
+	mkAVCC := func(payload []byte) []byte {
+		b := make([]byte, 4+len(payload))
+		binary.BigEndian.PutUint32(b[:4], uint32(len(payload)))
+		copy(b[4:], payload)
+		return b
+	}
+	// Sample 0 carries an IDR slice (type 5) but is flagged non-sync — the exact
+	// shape that broke the direct CBCS path.
+	sampleData := [][]byte{
+		mkAVCC([]byte{0x65, 0x11, 0x22, 0x33}), // IDR, but flagged non-sync below
+		mkAVCC([]byte{0x41, 0x44, 0x55}),
+	}
+	frag, err := mp4.CreateFragment(1, 1)
+	if err != nil {
+		t.Fatalf("create fragment: %v", err)
+	}
+	nonSync := mp4.SampleFlags{SampleIsNonSync: true, SampleDependsOn: 1}.Encode()
+	for i, d := range sampleData {
+		frag.AddFullSample(mp4.FullSample{
+			Sample:     mp4.Sample{Flags: nonSync, Dur: 3000, Size: uint32(len(d))},
+			DecodeTime: uint64(i * 3000),
+			Data:       d,
+		})
+	}
+	if err := frag.Encode(&buf); err != nil {
+		t.Fatalf("frag encode: %v", err)
+	}
+
+	var es bytes.Buffer
+	if err := DemuxFMP4ToES(context.Background(), &buf, &es); err != nil {
+		t.Fatalf("DemuxFMP4ToES: %v", err)
+	}
+	r := bytes.NewReader(es.Bytes())
+	magic := make([]byte, 4)
+	io.ReadFull(r, magic)
+	readLP16(t, r) // codec
+	readLP16(t, r) // avcC
+	var hdr [17]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		t.Fatalf("sample 0 header: %v", err)
+	}
+	if hdr[0]&1 != 1 {
+		t.Fatal("sample 0 (IDR, non-sync flag) not flagged keyframe — NAL fallback failed; renderer would never start decoding")
+	}
+	t.Log("VERDICT: IDR access unit flagged keyframe via NAL fallback despite non-sync container flags.")
+}
+
 func readLP16(t *testing.T, r io.Reader) []byte {
 	t.Helper()
 	var l [2]byte

@@ -90,6 +90,13 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 	// codec string from the config record: [1]=profile [2]=compat [3]=level.
 	codec := fmt.Sprintf("avc1.%02x%02x%02x", cfg[1], cfg[2], cfg[3])
 
+	// NAL length prefix size from avcC[4] (lengthSizeMinusOne, low 2 bits) — needed
+	// to scan access units for IDR slices as a keyframe fallback (see below).
+	nalLenSize := 4
+	if len(cfg) > 4 {
+		nalLenSize = int(cfg[4]&0x03) + 1
+	}
+
 	// Default sample params (durations/flags) come from trex when trun omits them.
 	// Use the trex for the video track specifically so multi-track input is handled correctly.
 	var trex *mp4.TrexBox
@@ -169,7 +176,14 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 				}
 				ptsUs := int64(uint64(pts) * 1_000_000 / timescale)
 				durUs := uint32(uint64(s.Dur) * 1_000_000 / timescale)
-				if err := writeESSample(bw, s.IsSync(), ptsUs, durUs, s.Data); err != nil {
+				// Keyframe = container sync flag OR an IDR slice in the access unit.
+				// Apple's CBCS-decrypted fMP4 on the direct path does not set the
+				// sample_is_non_sync_sample flags mp4ff's IsSync() reads, so IsSync()
+				// is false for every sample and the renderer's ES parser (which drops
+				// deltas until the first key) never starts decoding. Scanning for a
+				// NAL type-5 slice recovers the keyframe regardless of container flags.
+				key := s.IsSync() || avcHasIDR(s.Data, nalLenSize)
+				if err := writeESSample(bw, key, ptsUs, durUs, s.Data); err != nil {
 					return err
 				}
 			}
@@ -202,6 +216,31 @@ func writeLenPrefixed16(w io.Writer, p []byte) error {
 	}
 	_, err := w.Write(p)
 	return err
+}
+
+// avcHasIDR reports whether an AVCC (length-prefixed) access unit contains a
+// coded slice of an IDR picture (NAL unit type 5) — i.e. a keyframe. Used as a
+// fallback when container sync-sample flags are unreliable. nalLenSize is the
+// NAL length prefix width from avcC (1..4, normally 4).
+func avcHasIDR(data []byte, nalLenSize int) bool {
+	if nalLenSize < 1 || nalLenSize > 4 {
+		nalLenSize = 4
+	}
+	for i := 0; i+nalLenSize <= len(data); {
+		n := 0
+		for k := 0; k < nalLenSize; k++ {
+			n = n<<8 | int(data[i+k])
+		}
+		i += nalLenSize
+		if n <= 0 || i+n > len(data) {
+			break
+		}
+		if data[i]&0x1F == 5 { // nal_unit_type 5 = IDR slice
+			return true
+		}
+		i += n
+	}
+	return false
 }
 
 func writeESSample(w io.Writer, key bool, ptsUs int64, durUs uint32, data []byte) error {
