@@ -569,6 +569,7 @@
   var _streamComplete = false;
   var _chunkCache = null;
   var _msePaused = false;
+  var _wcStallPaused = false;
   var _activeMvControls = null;
   var _prevMs = null;
   var _prevSb = null;
@@ -662,7 +663,7 @@
         });
         return p2;
       }
-      if (_msePaused) return new Promise(() => {
+      if (_msePaused || _wcStallPaused) return new Promise(() => {
       });
       if (!_sessionId) {
         if (!_directPlayAdamId) {
@@ -3011,13 +3012,56 @@
       let fetchCtrl = null;
       let raf = 0;
       let firstFrame = false;
-      let _wcStalled = false;
       let _wcRebuffering = false;
       let _wcDecErrCount = 0;
       let _wcRebufStart = 0;
       const queue = [];
       const QUEUE_MAX = 24;
+      const MAX_DECODE_QUEUE = QUEUE_MAX;
+      const DECODE_AHEAD_SEC = 5;
       const aborted = () => _abortCtrl?.signal.aborted;
+      let gen = 0;
+      let currentSeekSec = 0;
+      let wcFramesOpened = 0, wcFramesClosed = 0, wcObsoletePaints = 0, wcObsoleteState = 0;
+      const closeWcFrame = (f) => {
+        if (!f) return;
+        wcFramesClosed++;
+        try {
+          f.close();
+        } catch (_) {
+        }
+      };
+      const driftSamples = [];
+      const DRIFT_WINDOW = 10;
+      const addDrift = (d) => {
+        driftSamples.push(d);
+        if (driftSamples.length > DRIFT_WINDOW) driftSamples.shift();
+      };
+      const medianDrift = () => {
+        if (!driftSamples.length) return 0;
+        const s = [...driftSamples].sort((a, b) => a - b);
+        return s[Math.floor(s.length / 2)];
+      };
+      let lastCt = null;
+      let _metricN = 0;
+      window._wcFrameStats = () => ({ opened: wcFramesOpened, closed: wcFramesClosed, outstanding: wcFramesOpened - wcFramesClosed });
+      window._wcStats = () => ({
+        gen,
+        outstanding: wcFramesOpened - wcFramesClosed,
+        obsoletePaints: wcObsoletePaints,
+        obsoleteState: wcObsoleteState,
+        medianDriftMs: +(medianDrift() * 1e3).toFixed(1),
+        bufferedSec: +(_wcBufferedSec || 0).toFixed(2),
+        queued: queue.length
+      });
+      let wakeProducer = null;
+      const wakeProd = () => {
+        const w = wakeProducer;
+        if (w) {
+          wakeProducer = null;
+          w();
+        }
+      };
       const _wcDispatchWaiting = () => {
         nativeVidEl?.dispatchEvent(new Event("waiting", { bubbles: false }));
         getMKAudio()?.dispatchEvent(new Event("waiting", { bubbles: false }));
@@ -3028,62 +3072,69 @@
       };
       const render = () => {
         if (aborted()) return;
-        const nowUs = mkAudio.currentTime * 1e6;
-        let drew = false;
+        const ct = mkAudio.currentTime;
+        const clockRegressed = lastCt != null && ct + 1e-3 < lastCt;
+        const clockFrozen = lastCt != null && Math.abs(ct - lastCt) < 5e-4 && !mkAudio.paused && !_wcRebuffering;
+        const clockUsable = !(clockRegressed || clockFrozen);
+        lastCt = ct;
+        const nowUs = ct * 1e6;
         while (queue.length && queue[0].tUs <= nowUs) {
           const f = queue.shift();
           if (queue.length && queue[0].tUs <= nowUs) {
-            f.frame.close();
+            closeWcFrame(f.frame);
             continue;
           }
+          if (f.g !== gen) wcObsoletePaints++;
           if (canvas.width !== f.frame.displayWidth) {
             canvas.width = f.frame.displayWidth;
             canvas.height = f.frame.displayHeight;
           }
           cctx.drawImage(f.frame, 0, 0, canvas.width, canvas.height);
-          f.frame.close();
-          drew = true;
+          if (clockUsable) addDrift(f.tUs / 1e6 - ct);
+          closeWcFrame(f.frame);
         }
+        wakeProd();
         if (firstFrame && !_wcRebuffering) {
-          if (!_wcStalled && !_msePaused && queue.length === 0 && !mkAudio.paused) {
-            _wcStalled = true;
+          if (!_wcStallPaused && !_msePaused && queue.length === 0 && !mkAudio.paused) {
+            _wcStallPaused = true;
             mkAudio.pause();
             _wcSpinner.style.display = "block";
             _wcDispatchWaiting();
-            console.log(`[AML MV-WC] video underrun \u2014 stalling audio ct=${mkAudio.currentTime.toFixed(2)}`);
-          } else if (_wcStalled && queue.length > 0) {
-            _wcStalled = false;
-            _msePaused = false;
+            console.log(`[AML MV-WC] video underrun \u2014 stalling audio ct=${ct.toFixed(2)}`);
+          } else if (_wcStallPaused && queue.length > 0) {
+            _wcStallPaused = false;
             _wcSpinner.style.display = "none";
             _iframePlay.call(mkAudio).catch(() => {
             });
             _wcDispatchPlaying();
-            console.log(`[AML MV-WC] rebuffered \u2014 resuming audio ct=${mkAudio.currentTime.toFixed(2)} queued=${queue.length}`);
+            console.log(`[AML MV-WC] rebuffered \u2014 resuming audio ct=${ct.toFixed(2)} queued=${queue.length}`);
           }
+        }
+        if (++_metricN % 30 === 0) {
+          const dms = medianDrift() * 1e3;
+          console.log(`[wc-metric] drift=${dms.toFixed(1)}ms buffered=${(_wcBufferedSec || 0).toFixed(2)} q=${queue.length} gen=${gen} outstanding=${wcFramesOpened - wcFramesClosed}`);
         }
         if (_wcRebuffering && _wcRebufStart > 0 && Date.now() - _wcRebufStart > 8e3) {
-          console.warn(`[AML MV-WC] hang timeout ${((Date.now() - _wcRebufStart) / 1e3).toFixed(1)}s \u2014 restarting ct=${mkAudio.currentTime.toFixed(2)}`);
+          console.warn(`[AML MV-WC] hang timeout ${((Date.now() - _wcRebufStart) / 1e3).toFixed(1)}s \u2014 restarting ct=${ct.toFixed(2)}`);
           _wcRebufStart = 0;
-          try {
-            fetchCtrl?.abort();
-          } catch (_) {
-          }
-          clearTimeout(_wcSeekTimer);
-          _wcSeekTimer = setTimeout(_commitWcSeek, 50);
+          requestRestart("hang");
         }
-        void drew;
         raf = requestAnimationFrame(render);
       };
       const start = async (seekSec = 0) => {
+        const myGen = gen;
         fetchCtrl = new AbortController();
         const sig = fetchCtrl.signal;
+        const live = () => myGen === gen && !sig.aborted && !aborted();
         const myDec = dec = new VideoDecoder({
           output: (frame) => {
-            if (aborted() || sig.aborted) {
-              frame.close();
+            wcFramesOpened++;
+            if (!live()) {
+              if (myGen !== gen) wcObsoleteState++;
+              closeWcFrame(frame);
               return;
             }
-            queue.push({ frame, tUs: frame.timestamp });
+            queue.push({ frame, tUs: frame.timestamp, g: myGen });
             const fSec = frame.timestamp / 1e6;
             if (fSec > _wcBufferedSec) _wcBufferedSec = fSec;
             _wcRebuffering = false;
@@ -3099,23 +3150,18 @@
             }
           },
           error: (e) => {
+            if (myGen !== gen) return;
             console.error(`[AML MV-WC] decode error (attempt ${_wcDecErrCount + 1}/3): ${e.message}`);
-            if (_wcDecErrCount++ < 3 && !aborted() && !sig.aborted) {
-              console.warn(`[AML MV-WC] restarting after decode error ct=${mkAudio.currentTime.toFixed(2)}`);
-              try {
-                fetchCtrl?.abort();
-              } catch (_) {
-              }
-              clearTimeout(_wcSeekTimer);
-              _wcSeekTimer = setTimeout(_commitWcSeek, 100);
-            }
+            if (_wcDecErrCount++ < 3 && live()) requestRestart("decode-error");
           }
         });
+        myDec.addEventListener("dequeue", wakeProd);
         let buf = new Uint8Array(0);
         const td = new TextDecoder();
         let state = "magic", codec = "", waitingForKeyframe = true;
         const drain = () => {
           for (; ; ) {
+            if (myGen !== gen) return;
             if (state === "magic") {
               if (buf.length < 4) return;
               if (td.decode(buf.slice(0, 4)) !== "AME1") {
@@ -3153,7 +3199,9 @@
               const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
               const len = dv.getUint32(13);
               if (buf.length < 17 + len) return;
-              if (myDec.decodeQueueSize >= QUEUE_MAX) return;
+              if (myDec.decodeQueueSize >= MAX_DECODE_QUEUE) return;
+              const lead = queue.length ? queue[queue.length - 1].tUs / 1e6 - mkAudio.currentTime : 0;
+              if (lead >= DECODE_AHEAD_SEC) return;
               const key = (buf[0] & 1) === 1;
               const tUs = Number(dv.getBigInt64(1));
               const durUs = dv.getUint32(9);
@@ -3169,71 +3217,87 @@
             }
           }
         };
-        console.log(`[AML MV-WC] start seekSec=${seekSec.toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)}`);
+        console.log(`[AML MV-WC] start gen=${myGen} seekSec=${seekSec.toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)}`);
         try {
           const esUrl = `${videoUrl}-es${seekSec > 0 ? `?t=${seekSec.toFixed(3)}` : ""}`;
           const resp = await fetch(esUrl, { signal: sig });
+          if (!live()) {
+            resp.body?.cancel().catch(() => {
+            });
+            return;
+          }
           if (!resp.ok) {
             console.error(`[AML MV-WC] /video-es ${resp.status} seekSec=${seekSec.toFixed(2)}`);
             return;
           }
-          console.log(`[AML MV-WC] /video-es ok ct=${mkAudio.currentTime.toFixed(2)}`);
+          console.log(`[AML MV-WC] /video-es ok gen=${myGen} ct=${mkAudio.currentTime.toFixed(2)}`);
           const reader = resp.body.getReader();
-          let chunkN = 0, bpLogged = false;
+          let chunkN = 0, done = false;
           for (; ; ) {
-            while (!aborted() && !sig.aborted) {
-              drain();
-              const lastUs = queue.length ? queue[queue.length - 1].tUs : 0;
-              if (lastUs - mkAudio.currentTime * 1e6 < 5e6 && myDec.decodeQueueSize < 60) {
-                bpLogged = false;
-                break;
-              }
-              if (!bpLogged) {
-                console.log(`[AML MV-WC] backpressure lastSec=${(lastUs / 1e6).toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)} decQ=${myDec.decodeQueueSize} queued=${queue.length}`);
-                bpLogged = true;
-              }
-              await new Promise((r) => setTimeout(r, 30));
+            if (!live()) break;
+            drain();
+            if (!live()) break;
+            const full = myDec.decodeQueueSize >= MAX_DECODE_QUEUE;
+            const ahead = queue.length ? queue[queue.length - 1].tUs / 1e6 - mkAudio.currentTime >= DECODE_AHEAD_SEC : false;
+            if (full || ahead) {
+              await new Promise((res) => {
+                wakeProducer = res;
+              });
+              continue;
             }
-            if (aborted() || sig.aborted) break;
-            const { done, value } = await reader.read();
-            if (done) {
-              console.log(`[AML MV-WC] stream done chunk#${chunkN} queued=${queue.length} ct=${mkAudio.currentTime.toFixed(2)}`);
-              break;
+            if (done) break;
+            const r = await reader.read();
+            if (r.done) {
+              console.log(`[AML MV-WC] stream done gen=${myGen} chunk#${chunkN} queued=${queue.length}`);
+              done = true;
+              continue;
             }
-            if (aborted() || sig.aborted) break;
+            if (!live()) break;
             chunkN++;
             if (chunkN <= 5 || chunkN % 100 === 0)
-              console.log(`[AML MV-WC] chunk#${chunkN} size=${value.byteLength} buf=${buf.length} decQ=${myDec.decodeQueueSize} queued=${queue.length} ct=${mkAudio.currentTime.toFixed(2)}`);
-            const nb = new Uint8Array(buf.length + value.length);
+              console.log(`[AML MV-WC] chunk#${chunkN} size=${r.value.byteLength} buf=${buf.length} decQ=${myDec.decodeQueueSize} queued=${queue.length} ct=${mkAudio.currentTime.toFixed(2)}`);
+            const nb = new Uint8Array(buf.length + r.value.length);
             nb.set(buf);
-            nb.set(value, buf.length);
+            nb.set(r.value, buf.length);
             buf = nb;
-            drain();
           }
-          if (myDec && myDec.state === "configured") await myDec.flush().catch(() => {
+          if (myGen === gen && myDec.state === "configured") await myDec.flush().catch(() => {
           });
         } catch (e) {
-          if (!sig.aborted && !aborted()) console.error(`[AML MV-WC] stream error: ${e.message}`);
+          if (live()) console.error(`[AML MV-WC] stream error: ${e.message}`);
         }
       };
       let _wcSeekTimer = null;
-      const _commitWcSeek = () => {
-        _wcSeekTimer = null;
+      const requestRestart = (reason, seekSec = currentSeekSec) => {
+        gen++;
+        try {
+          fetchCtrl?.abort();
+        } catch (_) {
+        }
+        wakeProd();
+        clearTimeout(_wcSeekTimer);
+        _wcSeekTimer = setTimeout(() => {
+          _wcSeekTimer = null;
+          _commitWcSeek(seekSec, reason);
+        }, 50);
+      };
+      const _commitWcSeek = (seekSec, reason) => {
         if (aborted()) return;
-        const t = mkAudio.currentTime;
-        console.log(`[AML MV-WC] seek: closing decoder, clearing queue, restarting from ${t.toFixed(2)}s queued=${queue.length}`);
+        const t = typeof seekSec === "number" ? seekSec : mkAudio.currentTime;
+        currentSeekSec = t;
+        console.log(`[AML MV-WC] commit restart (${reason}) gen=${gen} \u2192 ${t.toFixed(2)}s queued=${queue.length}`);
+        gen++;
         try {
           if (dec && dec.state !== "closed") dec.close();
         } catch (_) {
         }
-        while (queue.length) queue.shift().frame.close();
+        while (queue.length) closeWcFrame(queue.shift().frame);
         firstFrame = _avStarted;
-        _wcStalled = false;
+        _wcStallPaused = false;
         _wcRebuffering = true;
         _wcRebufStart = Date.now();
         _wcDecErrCount = 0;
         _wcBufferedSec = t;
-        console.log(`[AML MV-WC] seek committed \u2192 ${t.toFixed(2)}s`);
         start(t).catch(() => {
         });
       };
@@ -3242,16 +3306,12 @@
         const t = mkAudio.currentTime;
         const qFirst = queue.length ? queue[0].tUs / 1e6 : -1;
         if (qFirst >= 0 && t >= qFirst - 0.5 && t <= _wcBufferedSec + 1) return;
-        try {
-          fetchCtrl?.abort();
-        } catch (_) {
-        }
-        clearTimeout(_wcSeekTimer);
-        _wcSeekTimer = setTimeout(_commitWcSeek, 50);
+        requestRestart("seek", t);
       };
       mkAudio.addEventListener("seeking", onWcSeek);
       _wcCleanup = () => {
-        _wcStalled = false;
+        gen++;
+        _wcStallPaused = false;
         _wcRebuffering = false;
         try {
           mkAudio.removeEventListener("seeking", onWcSeek);
@@ -3262,13 +3322,9 @@
           fetchCtrl?.abort();
         } catch (_) {
         }
+        wakeProd();
         if (raf) cancelAnimationFrame(raf);
-        while (queue.length) {
-          try {
-            queue.shift().frame.close();
-          } catch (_) {
-          }
-        }
+        while (queue.length) closeWcFrame(queue.shift().frame);
         try {
           if (dec && dec.state !== "closed") dec.close();
         } catch (_) {
@@ -3279,6 +3335,11 @@
         }
         try {
           _wcSpinner.remove();
+        } catch (_) {
+        }
+        try {
+          delete window._wcFrameStats;
+          delete window._wcStats;
         } catch (_) {
         }
       };
