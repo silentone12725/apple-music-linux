@@ -67,20 +67,23 @@ function _storeFlush() {
 // ── Chromium flags ──────────────────────────────────────────────────────────
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 app.commandLine.appendSwitch('enable-features',
-    'UseOzonePlatform,WaylandWindowDecorations');
+    'UseOzonePlatform,WaylandWindowDecorations,' +
+    // Hardware H.264 decode for MV video. MV runs on the native <video src> path
+    // (and optionally WebCodecs), never MSE video — so the Chrome 138 VA-API→
+    // FFmpeg mid-stream fallback that surfaced as CHUNK_DEMUXER_ERROR on MSE
+    // cannot occur here (no ChunkDemuxer). MSE carries only AAC audio, which a
+    // video decoder never touches. Cuts RAM+CPU vs software decode.
+    'VaapiVideoDecoder,VaapiVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxGL');
+// Linux blocklists VA-API decode on many driver/compositor combos; without this
+// the enable-features above is silently ignored.
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
 // MediaSessionService: Chromium's built-in MPRIS implementation runs on the
 // same D-Bus session bus. When it tears down (e.g. on navigation), it disrupts
 // the dbus-next socket that mpris-service owns → EPIPE on every property write.
 // AudioServiceOutOfProcess: keep audio in-process so PulseAudio stream identity
 // matches the desktop name we set.
 app.commandLine.appendSwitch('disable-features',
-    'ExplicitSync,MediaSessionService,AudioServiceOutOfProcess,' +
-    // Chrome 138 Linux regression: VA-API hardware decoder falls back mid-stream to
-    // FFmpegVideoDecoder for H.264 High/Main profile, causing a decode pipeline
-    // discontinuity that MSE surfaces as CHUNK_DEMUXER_ERROR_APPEND_FAILED.
-    // Disabling the VA-API decoder path forces a consistent software decode from the
-    // start, eliminating the non-deterministic fallback race.
-    'VaapiVideoDecoder,VaapiVideoEncoder');
+    'ExplicitSync,MediaSessionService,AudioServiceOutOfProcess');
 app.setDesktopName('apple-music-linux.desktop');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 // Music player: allow audio.play() without a live user gesture. Without this,
@@ -2249,13 +2252,18 @@ function createTray() {
 
     const sendPlayback = (cmd) => win?.webContents.send('mpris:cmd', cmd);
 
+    // Toggle on visibility alone. Clicking the tray moves focus off the window
+    // first (and isFocused() is unreliable on Wayland/KDE), so gating hide on
+    // isFocused() made the hide branch unreachable — it always raised instead.
+    const toggleWindow = () => {
+        if (!win) return;
+        if (win.isVisible()) { win.hide(); } else { win.show(); win.focus(); }
+    };
+
     const buildTrayMenu = () => Menu.buildFromTemplate([
         {
             label: 'Show/Hide Window',
-            click: () => {
-                if (!win) return;
-                if (win.isVisible() && win.isFocused()) { win.hide(); } else { win.show(); win.focus(); }
-            },
+            click: toggleWindow,
         },
         { type: 'separator' },
         {
@@ -2306,12 +2314,12 @@ function createTray() {
     // Rebuild menu on each right-click so Show/Hide label is current.
     tray.on('right-click', () => tray.setContextMenu(buildTrayMenu()));
 
-    // Left-click toggles the window.
-    tray.on('click', () => {
-        if (!win) return;
-        if (win.isVisible() && win.isFocused()) { win.hide(); }
-        else { win.show(); win.focus(); }
-    });
+    // Left-click toggles the window. (Note: many Linux tray hosts —
+    // StatusNotifierItem on KDE/GNOME — do not deliver 'click' at all and only
+    // open the context menu; the "Show/Hide Window" menu item is the reliable
+    // path there. double-click is delivered by some DEs, so wire it too.)
+    tray.on('click', toggleWindow);
+    tray.on('double-click', toggleWindow);
 }
 
 // Register before app.ready — required by Electron's privileged scheme API.
@@ -2490,14 +2498,15 @@ app.whenReady().then(() => {
         }
     });
 
-    // 1 GB disk cache — Apple Music loads ~80 MB of JS/CSS/fonts per session;
-    // images from mzstatic.com add up fast. A larger cache means fewer network
-    // round-trips on repeat visits. The flag must be set before the session
-    // allocates its cache, so we set it on app.commandLine (takes effect on
-    // next launch) AND rely on the header overrides below for this session.
+    // 256 MB disk cache — Apple Music loads ~80 MB of JS/CSS/fonts per session
+    // plus mzstatic.com artwork; 256 MB caches a full session's assets with room
+    // to spare while keeping Chromium's in-memory cache index (which scales with
+    // the cap) small. Larger gave diminishing returns and inflated memory. The
+    // flag must be set before the session allocates its cache, so we set it on
+    // app.commandLine (takes effect on next launch).
     s.getCacheSize().then(size =>
         console.log('[AML] Cache size:', Math.round(size / 1024 / 1024) + ' MB'));
-    app.commandLine.appendSwitch('disk-cache-size', String(1024 * 1024 * 1024));
+    app.commandLine.appendSwitch('disk-cache-size', String(256 * 1024 * 1024));
 
     // ── Response header overrides ─────────────────────────────────────────────
     // Two jobs in one hook (single hook per session):
