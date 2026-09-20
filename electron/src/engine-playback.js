@@ -835,92 +835,6 @@ function getMKAudio() {
     return document.getElementById('apple-music-player') || document.querySelector('audio') || null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// WebCodecs MV video SPIKE (dev-only, manually invoked, zero-risk to the MSE path).
-//
-// Proves whether routing MV video through our own demuxer (engine /video-es) +
-// Chromium's WebCodecs VideoDecoder avoids code=3 (CHUNK_DEMUXER_ERROR). It does
-// NOT touch startMVPipeline — call it from DevTools while an MV session exists:
-//     _amlTestWebCodecs()            // uses the current session
-//     _amlTestWebCodecs('843309075-sessionId')
-// It decodes the session's video into an overlay canvas and logs decoded/error
-// counts. errors===0 means WebCodecs handled samples MSE would have rejected.
-// _amlWCTestStop() removes the canvas and aborts the fetch.
-window._amlTestWebCodecs = async function (sessionId) {
-    sessionId = sessionId || _sessionId;
-    if (!sessionId) { console.error('[WC-TEST] no active session id — start an MV first'); return; }
-    if (typeof VideoDecoder === 'undefined') { console.error('[WC-TEST] WebCodecs not available in this runtime'); return; }
-    const url = `${ENGINE}/api/v1/playback/${sessionId}/video-es`;
-    console.log(`[WC-TEST] start session=${sessionId} url=${url}`);
-
-    const cv = document.createElement('canvas');
-    cv.style.cssText = 'position:fixed;top:20px;right:20px;width:480px;height:auto;z-index:2147483647;background:#000;border:2px solid #0f0;box-shadow:0 8px 40px rgba(0,0,0,.6);';
-    document.body.appendChild(cv);
-    const ctx = cv.getContext('2d');
-    const ctrl = new AbortController();
-    let decoded = 0, drawn = 0, errors = 0, samples = 0;
-
-    const dec = new VideoDecoder({
-        output: (frame) => {
-            decoded++;
-            try { if (cv.width !== frame.displayWidth) { cv.width = frame.displayWidth; cv.height = frame.displayHeight; } ctx.drawImage(frame, 0, 0); drawn++; } catch (_) {}
-            frame.close();
-            if (decoded % 30 === 0) console.log(`[WC-TEST] decoded=${decoded} drawn=${drawn} samples=${samples} errors=${errors}`);
-        },
-        error: (e) => { errors++; console.error(`[WC-TEST] decoder error #${errors}: ${e.message}`); },
-    });
-
-    window._amlWCTestStop = () => { try { ctrl.abort(); } catch (_) {} try { dec.close(); } catch (_) {} cv.remove(); console.log('[WC-TEST] stopped'); };
-
-    let buf = new Uint8Array(0);
-    const append = (c) => { const b = new Uint8Array(buf.length + c.length); b.set(buf); b.set(c, buf.length); buf = b; };
-    const take = (n) => { const p = buf.slice(0, n); buf = buf.slice(n); return p; };
-    const u16 = () => new DataView(buf.buffer, buf.byteOffset, buf.length).getUint16(0);
-    let state = 'magic', codec = '';
-    const td = new TextDecoder();
-    const parse = () => {
-        for (;;) {
-            if (state === 'magic') {
-                if (buf.length < 4) return;
-                if (td.decode(take(4)) !== 'AME1') { console.error('[WC-TEST] bad magic'); ctrl.abort(); return; }
-                state = 'codec';
-            } else if (state === 'codec') {
-                if (buf.length < 2) return; const l = u16(); if (buf.length < 2 + l) return;
-                take(2); codec = td.decode(take(l)); state = 'avcc';
-            } else if (state === 'avcc') {
-                if (buf.length < 2) return; const l = u16(); if (buf.length < 2 + l) return;
-                take(2); const avcC = take(l);
-                dec.configure({ codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: 'no-preference' });
-                console.log(`[WC-TEST] configured codec=${codec} avcC=${avcC.length}B`);
-                state = 'samples';
-            } else { // samples
-                if (buf.length < 17) return;
-                const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
-                const len = dv.getUint32(13);
-                if (buf.length < 17 + len) return;
-                const key = (buf[0] & 1) === 1;
-                const ptsUs = Number(dv.getBigInt64(1));
-                const durUs = dv.getUint32(9);
-                take(17); const data = take(len); samples++;
-                try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ptsUs, duration: durUs, data })); }
-                catch (e) { errors++; console.error(`[WC-TEST] decode() threw: ${e.message}`); }
-            }
-        }
-    };
-
-    try {
-        const resp = await fetch(url, { signal: ctrl.signal });
-        if (!resp.ok) { console.error(`[WC-TEST] fetch ${resp.status}`); cv.remove(); return; }
-        const reader = resp.body.getReader();
-        for (;;) { const { done, value } = await reader.read(); if (done) break; append(value); parse(); }
-        await dec.flush().catch(() => {});
-        console.log(`[WC-TEST] DONE samples=${samples} decoded=${decoded} drawn=${drawn} errors=${errors} — ${errors === 0 ? '✅ no decode errors (code=3-class avoided)' : '⚠️ decode errors occurred'}`);
-    } catch (e) {
-        if (!ctrl.signal.aborted) console.error(`[WC-TEST] stream error: ${e.message}`);
-    }
-};
-// ─────────────────────────────────────────────────────────────────────────────
-
 // Current playback position in ms for MPRIS. VLC (ALAC) tracks it in _vlcPosMs
 // via the poll; MSE (AAC) has no poll, so read the <audio> element directly.
 // Without this, MPRIS position was frozen at 0 for every AAC track (all four
@@ -1066,6 +980,10 @@ let _mvGateOpen  = true;   // false while MV A/V gate is pending; blocks play/se
 // Held at module scope so a quality change can call it without depending on the
 // declaration order inside the pipeline function.
 let _mvResetScrubberRef = null;
+// Native-dl seek handler, set by _setupNativeVideo. Progressive fMP4 can't be
+// seeked past its buffered range via myVid.currentTime (myVid.duration only spans
+// what's streamed), so seeks route here to re-stream from the real target via ?t=.
+let _nativeSeekRef = null;
 
 // CSS injected into any amp-playback-controls-progress shadow root to show a
 // YouTube-style buffer indicator on the seek track (uses --aml-buffer CSS var).
@@ -2594,11 +2512,12 @@ async function startMVPipeline() {
             _lastCommit = t;
             if (_wcVideo) {
                 mkAudio.currentTime = t; // triggers onWcSeek → ES restart
-            } else if (_nativeVideo) {
-                // One clean seek on release: video is master, audio follows. Chrome
-                // issues a single bytes=OFFSET- range request that serves and resumes.
+            } else if (_nativeVideo && _nativeSeekRef) {
+                // Real target from the scrubber (max = _durationSec). Route to the
+                // native seek handler — do NOT set myVid.currentTime directly, it
+                // clamps to the progressive stream's short buffered duration.
                 console.log(`[AML MV native] commit seek → ${t.toFixed(2)}s`);
-                myVid.currentTime = t; mkAudio.currentTime = t;
+                _nativeSeekRef(t);
             }
             // MSE: input handler already sought; nothing extra needed
         };
@@ -2610,6 +2529,11 @@ async function startMVPipeline() {
         // MSE: duration lives on myVid. WC: mkAudio carries duration (myVid is empty).
         const _durEl = _wcVideo ? mkAudio : myVid;
         const _setRangeMax = () => {
+            // Native progressive fMP4: myVid.duration GROWS as fragments append
+            // (empty_moov has no total-duration box), so it can't drive the scrubber.
+            // Use the authoritative MK track duration instead — exactly like the ALAC
+            // path, which scrubs against _durationSec, not a media element.
+            if (_nativeVideo && _durationSec > 0) { rangeInput.max = String(_durationSec); return; }
             if (_durEl.duration && isFinite(_durEl.duration)) rangeInput.max = String(_durEl.duration);
             else if (_durationSec > 0) rangeInput.max = String(_durationSec);
         };
@@ -2657,6 +2581,10 @@ async function startMVPipeline() {
         if (_wcVideo) {
             const dur = (mkAudio.duration || _durationSec) || 1e9;
             mkAudio.currentTime = Math.max(0, Math.min(dur, sec));
+        } else if (_nativeVideo && _nativeSeekRef) {
+            // Progressive fMP4: don't clamp to myVid.duration (only the buffered
+            // span) — route to the native seek handler with the real target.
+            _nativeSeekRef(Math.max(0, Math.min(_durationSec || 1e9, sec)));
         } else {
             myVid.currentTime = Math.max(0, Math.min(myVid.duration || 1e9, sec));
             mkAudio.currentTime = myVid.currentTime;
@@ -3813,8 +3741,6 @@ async function startMVPipeline() {
             if (aborted()) return;
             const t = mkAudio.currentTime;
             // Only skip restart if the seek target is within the still-queued frame range.
-            // Rendered frames are closed and gone — unlike MSE's SourceBuffer which keeps
-            // data regardless of render position, backward seeks always need a full restart.
             const qFirst = queue.length ? queue[0].tUs / 1e6 : -1;
             if (qFirst >= 0 && t >= qFirst - 0.5 && t <= _wcBufferedSec + 1.0) return;
             try { fetchCtrl?.abort(); } catch (_) {}
@@ -3845,7 +3771,7 @@ async function startMVPipeline() {
         pause:  mvPause,
         seekTo: _mvSeekTo,
         get currentTime() { return (_wcVideo ? mkAudio.currentTime : myVid.currentTime) || 0; },
-        get duration()    { return (_wcVideo ? mkAudio.duration : myVid.duration) || _durationSec || 0; },
+        get duration()    { if (_nativeVideo) return _durationSec || myVid.duration || 0; return (_wcVideo ? mkAudio.duration : myVid.duration) || _durationSec || 0; },
         get paused()      { return _wcVideo ? mkAudio.paused : myVid.paused; },
         get volume()      { return mkAudio.volume; },
         set volume(v)     { mkAudio.volume = v; },
@@ -4043,7 +3969,6 @@ async function startMVPipeline() {
         // then assign the src.
         const enginePath = `/api/v1/playback/${_sessionId}/video-dl`;
         const dlUrl = `${ENGINE_HTTPS}${enginePath}`;       // https://127.0.0.1:PORT/…/video-dl
-        const infoUrl = `${ENGINE_HTTPS}${enginePath}-info`;
 
         // Reuse the shared buffering spinner (same as the MSE/WebCodecs paths) for
         // the download-then-serve wait; the native amp-playback-controls-progress
@@ -4059,7 +3984,9 @@ async function startMVPipeline() {
         const _NET = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
         const _RS  = ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'];
         const _nlog = (ev) => console.log(`%c[AML MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : '-'}`, 'color:#bf5af2;font-weight:bold', 'color:inherit');
-        ['loadstart', 'durationchange', 'loadedmetadata', 'loadeddata', 'canplaythrough', 'stalled', 'emptied', 'abort'].forEach(ev => myVid.addEventListener(ev, () => _nlog(ev)));
+        // NB: 'durationchange' intentionally omitted — a progressive fMP4's duration
+        // grows on every appended fragment, which would flood the console.
+        ['loadstart', 'loadedmetadata', 'loadeddata', 'canplaythrough', 'stalled', 'emptied', 'abort'].forEach(ev => myVid.addEventListener(ev, () => _nlog(ev)));
 
         // Fatal error → advance track. Native has NO MSE pipe to restart, so any
         // hard error (code 2/3/4) is terminal; log and move on.
@@ -4124,8 +4051,41 @@ async function startMVPipeline() {
             }
         });
 
+        // Progressive seek handler (called with a REAL target in [0, _durationSec]).
+        // If the target is inside the current stream's buffered range, seek natively
+        // (instant). Otherwise re-point src to ?t=<sec>: the engine re-streams a fresh
+        // fragmented MP4 whose fragments are timeline-anchored at ~sec (tsOffset), so
+        // playback resumes at the target — the only way to reach an unbuffered point,
+        // since myVid.duration only spans what's been streamed.
+        let _reseeking = false;
+        const _nativeSeek = (target) => {
+            target = Math.max(0, Math.min(_durationSec || target, target));
+            for (let i = 0; i < myVid.buffered.length; i++) {
+                if (target >= myVid.buffered.start(i) && target <= myVid.buffered.end(i)) {
+                    try { myVid.currentTime = target; } catch (_) {}
+                    try { mkAudio.currentTime = target; } catch (_) {}
+                    return; // within buffer → instant native seek
+                }
+            }
+            console.log(`%c[AML MV native]%c re-stream from ${target.toFixed(2)}s`, 'color:#bf5af2;font-weight:bold', 'color:#f4a100');
+            _reseeking = true;
+            _bufSpinner.style.display = 'block';
+            try { mkAudio.currentTime = target; } catch (_) {}
+            myVid.src = `${dlUrl}?t=${target.toFixed(3)}`;
+            try { myVid.load(); } catch (_) {}
+            myVid.addEventListener('loadedmetadata', () => {
+                // Fragments are anchored at ~target; nudge if Chrome landed elsewhere.
+                try { if (Math.abs(myVid.currentTime - target) > 1) myVid.currentTime = target; } catch (_) {}
+                _reseeking = false;
+                _bufSpinner.style.display = 'none';
+                _iframePlay.call(myVid).catch(() => {});
+            }, { once: true });
+        };
+        _nativeSeekRef = _nativeSeek;
+
         // Native Chrome seek completed → keep audio aligned to the video.
         myVid.addEventListener('seeked', () => {
+            if (_reseeking) return;
             _nlog('seeked');
             if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.3) mkAudio.currentTime = myVid.currentTime;
         });
@@ -4147,26 +4107,12 @@ async function startMVPipeline() {
             tryStart();
         }, { once: true });
 
-        // Poll the engine until the faststart cache is committed, then load it.
-        let _polls = 0;
-        const _beginPlayback = () => {
-            console.log('%c[AML MV native]%c cache ready → src=%s', 'color:#bf5af2;font-weight:bold', 'color:inherit', dlUrl);
-            myVid.src = dlUrl;
-            try { myVid.load(); } catch (e) { console.error(`[AML MV native] load() threw: ${e.message}`); }
-        };
-        const _poll = async () => {
-            if (_generation !== _mvGen) return; // track changed — abandon
-            _polls++;
-            try {
-                const info = await fetch(infoUrl).then(r => r.json());
-                if (info && info.cached) { _beginPlayback(); return; }
-                if (_polls === 1 || _polls % 6 === 0) console.log(`%c[AML MV native]%c preparing… poll#${_polls}`, 'color:#bf5af2;font-weight:bold', 'color:inherit');
-            } catch (e) {
-                console.warn(`[AML MV native] info poll err: ${e.message}`);
-            }
-            setTimeout(_poll, 500);
-        };
-        _poll();
+        // Progressive: assign the src immediately. The engine streams a fragmented
+        // MP4 over HTTPS as it transcodes (fast startup — plays as bytes arrive, no
+        // full-file pre-cache/poll). Seek-ahead re-points src to ?t=<sec>.
+        console.log('%c[AML MV native]%c src=%s (progressive)', 'color:#bf5af2;font-weight:bold', 'color:inherit', dlUrl);
+        myVid.src = dlUrl;
+        try { myVid.load(); } catch (e) { console.error(`[AML MV native] load() threw: ${e.message}`); }
     };
 
     if (_nativeVideo) _setupNativeVideo();
@@ -4440,6 +4386,7 @@ async function startMVPipeline() {
         // Only clear the shared ref if it still points at THIS pipeline — a newer
         // pipeline may already have installed its own during a fast quality change.
         if (_mvResetScrubberRef === _resetScrubberToLoading) _mvResetScrubberRef = null;
+        _nativeSeekRef = null; // drop native-dl seek handler for this session
         // Restore avpi / avpEl / vcDiv expansions.
         cleanupVideoContainerStyles();
         mvContainer.style.removeProperty('cursor');
