@@ -584,6 +584,7 @@ let _ourSeekTarget    = -Infinity;
 let _streamComplete   = false;
 let _chunkCache       = null;
 let _msePaused        = false; // true while user has manually paused in MSE mode
+let _wcStallPaused    = false; // true while the WebCodecs path has paused audio for a video underrun (distinct from user/MSE pause — neither may clear the other)
 // Active WC MV control surface — set while a WebCodecs MV session is live so that
 // global interceptors (mk.play/pause, mk.seekToTime, MPRIS) drive the right clock.
 let _activeMvControls = null;
@@ -725,8 +726,10 @@ function installPlayProxy(mkAudio) {
             return p;
         }
         // MSE mode: if the user explicitly paused, block MK's internal play()
-        // retries from overriding the manual pause state.
-        if (_msePaused) return new Promise(() => {});
+        // retries from overriding the manual pause state. _wcStallPaused blocks the
+        // same retries during a WebCodecs video underrun — kept distinct so a WC
+        // stall and a user pause can never clear or overwrite each other.
+        if (_msePaused || _wcStallPaused) return new Promise(() => {});
         if (!_sessionId) {
             if (!_directPlayAdamId) {
                 // Session not open yet — push a resolver so the 'playing' event
@@ -3531,13 +3534,48 @@ async function startMVPipeline() {
         let fetchCtrl = null;
         let raf = 0;
         let firstFrame = false;
-        let _wcStalled = false;     // true while audio is paused waiting for video frames
-        let _wcRebuffering = false; // true during the seek→first-decoded-frame gap (suppresses stall)
+        let _wcRebuffering = false; // true during the seek→first-decoded-frame gap (suppresses stall); also the "seeking" indicator for the clock guard
         let _wcDecErrCount = 0;     // decode error retry counter; reset on seek/restart
         let _wcRebufStart = 0;      // Date.now() when _wcRebuffering was last set true
-        const queue = [];              // {frame, tUs} in display order (VideoDecoder reorders B-frames)
-        const QUEUE_MAX = 24;          // ~1s at 24fps of decoded frames held before backpressure
+        const queue = [];              // {frame, tUs, g} in display order (VideoDecoder reorders B-frames); g = producing generation
+        const QUEUE_MAX = 24;          // encoded frames in flight before backpressure
+        const MAX_DECODE_QUEUE = QUEUE_MAX;
+        const DECODE_AHEAD_SEC = 5;    // cap decoded-frame lead over the clock (memory bound, esp. during a stall)
         const aborted = () => _abortCtrl?.signal.aborted;
+
+        // ── Concurrency: generation epoch ──────────────────────────────────────
+        // Every start() captures myGen; every async continuation (decoder output,
+        // drain, buffer/state writes, restart) is inert unless myGen === gen.
+        // requestRestart() bumps gen BEFORE scheduling, so a superseded coroutine
+        // dies immediately, not 50ms later. Single owner-of-truth for the pipeline.
+        let gen = 0;
+        let currentSeekSec = 0;     // last committed seek target; default for requestRestart
+
+        // ── Frame ownership + leak accounting ──────────────────────────────────
+        // Invariant: every VideoFrame is either owned by `queue` or closed exactly
+        // once via closeWcFrame before leaving the function. _wcFrameStats().outstanding
+        // must return to 0 after a seek storm + teardown.
+        let wcFramesOpened = 0, wcFramesClosed = 0, wcObsoletePaints = 0, wcObsoleteState = 0;
+        const closeWcFrame = (f) => { if (!f) return; wcFramesClosed++; try { f.close(); } catch (_) {} };
+
+        // ── Drift telemetry (median, not mean — one bad PTS shouldn't swing it) ──
+        const driftSamples = []; const DRIFT_WINDOW = 10;
+        const addDrift = (d) => { driftSamples.push(d); if (driftSamples.length > DRIFT_WINDOW) driftSamples.shift(); };
+        const medianDrift = () => { if (!driftSamples.length) return 0; const s = [...driftSamples].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+        let lastCt = null;          // audio-clock monotonic guard
+        let _metricN = 0;
+
+        window._wcFrameStats = () => ({ opened: wcFramesOpened, closed: wcFramesClosed, outstanding: wcFramesOpened - wcFramesClosed });
+        window._wcStats = () => ({
+            gen, outstanding: wcFramesOpened - wcFramesClosed, obsoletePaints: wcObsoletePaints,
+            obsoleteState: wcObsoleteState, medianDriftMs: +(medianDrift() * 1000).toFixed(1),
+            bufferedSec: +(_wcBufferedSec || 0).toFixed(2), queued: queue.length,
+        });
+
+        // Producer wake: shared resolver woken by the current decoder's 'dequeue'
+        // (encoded-queue room) and by render() advancing the clock (decoded-lead room).
+        let wakeProducer = null;
+        const wakeProd = () => { const w = wakeProducer; if (w) { wakeProducer = null; w(); } };
 
         // A/V sync dispatch helpers — mirror what the MSE path fires so MK's loading
         // spinner and MPRIS state track the WC underrun/recovery the same way.
@@ -3551,67 +3589,79 @@ async function startMVPipeline() {
         };
 
         // Render loop: draw the newest frame whose PTS has been reached by the audio
-        // clock, closing anything older. Runs off rAF.
-        // A/V sync gate: if the decoded-frame queue runs dry during playback, pause
-        // audio (so A and V stay locked) and show MK's buffering spinner; resume when
-        // frames are available again.
+        // clock, closing anything older. Runs off rAF. Audio (mkAudio.currentTime) is
+        // the master; the newest-frame/PTS selector is the least-invasive soft A/V
+        // correction (drop stale / hold ahead). No playbackRate manipulation.
         const render = () => {
             if (aborted()) return;
-            const nowUs = mkAudio.currentTime * 1e6;
-            let drew = false;
+            const ct = mkAudio.currentTime;
+
+            // Audio-clock monotonic guard: a regressed or briefly-frozen clock (buffering /
+            // state transitions) is not an error, but drift correction must be skipped that
+            // tick so we don't mis-drop frames against a stale reading.
+            const clockRegressed = lastCt != null && ct + 0.001 < lastCt;
+            const clockFrozen    = lastCt != null && Math.abs(ct - lastCt) < 0.0005 && !mkAudio.paused && !_wcRebuffering;
+            const clockUsable    = !(clockRegressed || clockFrozen);
+            lastCt = ct;
+
+            const nowUs = ct * 1e6;
             while (queue.length && queue[0].tUs <= nowUs) {
                 const f = queue.shift();
-                if (queue.length && queue[0].tUs <= nowUs) { f.frame.close(); continue; } // stale — skip
+                if (queue.length && queue[0].tUs <= nowUs) { closeWcFrame(f.frame); continue; } // stale — skip
+                if (f.g !== gen) wcObsoletePaints++; // instrumentation: must stay 0
                 if (canvas.width !== f.frame.displayWidth) { canvas.width = f.frame.displayWidth; canvas.height = f.frame.displayHeight; }
                 cctx.drawImage(f.frame, 0, 0, canvas.width, canvas.height);
-                f.frame.close();
-                drew = true;
+                if (clockUsable) addDrift(f.tUs / 1e6 - ct); // telemetry only in Phase 1
+                closeWcFrame(f.frame);
             }
+            wakeProd(); // clock advanced → decoded-lead room may have freed up
 
             // A/V sync: stall audio when video underruns; resume when it catches up.
-            // Skip during _wcRebuffering (seek gap before first post-seek frame arrives).
-            // _msePaused guards the stall trigger only — NOT the rebuffer, because
-            // mkAudio.pause() inside the stall path sets _msePaused=true (via the
-            // override at installPlayProxy time) and we must still be able to resume.
+            // Skip during _wcRebuffering (seek gap). _wcStallPaused is a WC-only flag —
+            // distinct from user/MSE _msePaused; neither clears the other.
             if (firstFrame && !_wcRebuffering) {
-                if (!_wcStalled && !_msePaused && queue.length === 0 && !mkAudio.paused) {
-                    _wcStalled = true;
+                if (!_wcStallPaused && !_msePaused && queue.length === 0 && !mkAudio.paused) {
+                    _wcStallPaused = true;
                     mkAudio.pause();
                     _wcSpinner.style.display = 'block';
                     _wcDispatchWaiting();
-                    console.log(`[AML MV-WC] video underrun — stalling audio ct=${mkAudio.currentTime.toFixed(2)}`);
-                } else if (_wcStalled && queue.length > 0) {
-                    _wcStalled = false;
-                    _msePaused = false; // clear stall-induced pause before play proxy sees it
+                    console.log(`[AML MV-WC] video underrun — stalling audio ct=${ct.toFixed(2)}`);
+                } else if (_wcStallPaused && queue.length > 0) {
+                    _wcStallPaused = false;
                     _wcSpinner.style.display = 'none';
                     _iframePlay.call(mkAudio).catch(() => {});
                     _wcDispatchPlaying();
-                    console.log(`[AML MV-WC] rebuffered — resuming audio ct=${mkAudio.currentTime.toFixed(2)} queued=${queue.length}`);
+                    console.log(`[AML MV-WC] rebuffered — resuming audio ct=${ct.toFixed(2)} queued=${queue.length}`);
                 }
             }
 
-            // Hang detection: if _wcRebuffering has been stuck for >8s the engine
-            // stream is hung (pipe error, no keyframe from server). Abort and restart.
-            if (_wcRebuffering && _wcRebufStart > 0 && Date.now() - _wcRebufStart > 8000) {
-                console.warn(`[AML MV-WC] hang timeout ${((Date.now() - _wcRebufStart) / 1000).toFixed(1)}s — restarting ct=${mkAudio.currentTime.toFixed(2)}`);
-                _wcRebufStart = 0; // prevent re-trigger until next seek/restart
-                try { fetchCtrl?.abort(); } catch (_) {}
-                clearTimeout(_wcSeekTimer);
-                _wcSeekTimer = setTimeout(_commitWcSeek, 50);
+            // Drift instrumentation (Phase 1: measure only; no correction beyond the
+            // frame selector above). A sustained >250ms median is logged for the harness.
+            if (++_metricN % 30 === 0) {
+                const dms = medianDrift() * 1000;
+                console.log(`[wc-metric] drift=${dms.toFixed(1)}ms buffered=${(_wcBufferedSec || 0).toFixed(2)} q=${queue.length} gen=${gen} outstanding=${wcFramesOpened - wcFramesClosed}`);
             }
-            void drew;
+
+            // Hang detection: if the seek→first-frame gap is stuck >8s the stream is
+            // hung (pipe error, no keyframe). Route through the single restart funnel.
+            if (_wcRebuffering && _wcRebufStart > 0 && Date.now() - _wcRebufStart > 8000) {
+                console.warn(`[AML MV-WC] hang timeout ${((Date.now() - _wcRebufStart) / 1000).toFixed(1)}s — restarting ct=${ct.toFixed(2)}`);
+                _wcRebufStart = 0; // prevent re-trigger until the restart re-arms it
+                requestRestart('hang');
+            }
             raf = requestAnimationFrame(render);
         };
 
         const start = async (seekSec = 0) => {
+            const myGen = gen;                 // capture epoch; every continuation checks myGen === gen
             fetchCtrl = new AbortController();
             const sig = fetchCtrl.signal;
-            // myDec is local so this coroutine's cleanup (flush, decodeQueueSize checks)
-            // always targets ITS decoder — not a newer one created by a concurrent seek.
+            const live = () => myGen === gen && !sig.aborted && !aborted();
             const myDec = dec = new VideoDecoder({
                 output: (frame) => {
-                    if (aborted() || sig.aborted) { frame.close(); return; }
-                    queue.push({ frame, tUs: frame.timestamp });
+                    wcFramesOpened++;
+                    if (!live()) { if (myGen !== gen) wcObsoleteState++; closeWcFrame(frame); return; }
+                    queue.push({ frame, tUs: frame.timestamp, g: myGen });
                     const fSec = frame.timestamp / 1e6;
                     if (fSec > _wcBufferedSec) _wcBufferedSec = fSec; // drives the buffer bar
                     _wcRebuffering = false; // first frame after seek commit clears the gap guard
@@ -3619,27 +3669,28 @@ async function startMVPipeline() {
                         firstFrame = true; _videoCanPlay = true;
                         _wcVW = frame.displayWidth; _wcVH = frame.displayHeight;
                         console.log(`[AML MV-WC] first frame decoded ${_wcVW}x${_wcVH} — opening A/V gate`);
-                        _resizeScrim(); // fit scrim to actual video frame now that dimensions are known
+                        _resizeScrim();
                         tryStart();
                         if (!raf) raf = requestAnimationFrame(render);
                     }
                 },
                 error: (e) => {
+                    if (myGen !== gen) return; // superseded decoder erroring during teardown — ignore
                     console.error(`[AML MV-WC] decode error (attempt ${_wcDecErrCount + 1}/3): ${e.message}`);
-                    if (_wcDecErrCount++ < 3 && !aborted() && !sig.aborted) {
-                        console.warn(`[AML MV-WC] restarting after decode error ct=${mkAudio.currentTime.toFixed(2)}`);
-                        try { fetchCtrl?.abort(); } catch (_) {}
-                        clearTimeout(_wcSeekTimer);
-                        _wcSeekTimer = setTimeout(_commitWcSeek, 100);
-                    }
+                    if (_wcDecErrCount++ < 3 && live()) requestRestart('decode-error');
                 },
             });
+            myDec.addEventListener('dequeue', wakeProd); // encoded-queue room freed → wake producer
 
             let buf = new Uint8Array(0);
             const td = new TextDecoder();
             let state = 'magic', codec = '', waitingForKeyframe = true;
+            // drain(): parse ES and feed the decoder while there is encoded-queue room
+            // AND we're not decoded too far ahead of the clock. Bounded producer — no
+            // hot-path timer; the fetch loop awaits wakeProd() when a cap is hit.
             const drain = () => {
                 for (;;) {
+                    if (myGen !== gen) return; // superseded — stop parsing/decoding
                     if (state === 'magic') {
                         if (buf.length < 4) return;
                         if (td.decode(buf.slice(0, 4)) !== 'AME1') { console.error('[AML MV-WC] bad ES magic'); fetchCtrl.abort(); return; }
@@ -3661,11 +3712,10 @@ async function startMVPipeline() {
                         const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
                         const len = dv.getUint32(13);
                         if (buf.length < 17 + len) return;
-                        // Backpressure: check BEFORE consuming the record. If we advanced
-                        // buf and then returned, this access unit would be silently dropped.
-                        // Returning here leaves the full record in buf; the fetch-level while
-                        // loop calls drain() again once the decoder has free capacity.
-                        if (myDec.decodeQueueSize >= QUEUE_MAX) return;
+                        // Backpressure gates — check BEFORE consuming the record so it isn't dropped.
+                        if (myDec.decodeQueueSize >= MAX_DECODE_QUEUE) return;
+                        const lead = queue.length ? queue[queue.length - 1].tUs / 1e6 - mkAudio.currentTime : 0;
+                        if (lead >= DECODE_AHEAD_SEC) return;
                         const key = (buf[0] & 1) === 1;
                         const tUs = Number(dv.getBigInt64(1));
                         const durUs = dv.getUint32(9);
@@ -3678,88 +3728,89 @@ async function startMVPipeline() {
                 }
             };
 
-            console.log(`[AML MV-WC] start seekSec=${seekSec.toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)}`);
+            console.log(`[AML MV-WC] start gen=${myGen} seekSec=${seekSec.toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)}`);
             try {
                 const esUrl = `${videoUrl}-es${seekSec > 0 ? `?t=${seekSec.toFixed(3)}` : ''}`;
                 const resp = await fetch(esUrl, { signal: sig });
+                if (!live()) { resp.body?.cancel().catch(() => {}); return; }
                 if (!resp.ok) { console.error(`[AML MV-WC] /video-es ${resp.status} seekSec=${seekSec.toFixed(2)}`); return; }
-                console.log(`[AML MV-WC] /video-es ok ct=${mkAudio.currentTime.toFixed(2)}`);
+                console.log(`[AML MV-WC] /video-es ok gen=${myGen} ct=${mkAudio.currentTime.toFixed(2)}`);
                 const reader = resp.body.getReader();
-                let chunkN = 0, bpLogged = false;
+                let chunkN = 0, done = false;
                 for (;;) {
-                    // Backpressure: cap decode-ahead to ~5s / 60 frames. Also drain any
-                    // samples left in buf by drain() due to decodeQueueSize overflow.
-                    while (!aborted() && !sig.aborted) {
-                        drain(); // retry buf samples that were skipped due to backpressure
-                        const lastUs = queue.length ? queue[queue.length - 1].tUs : 0;
-                        if ((lastUs - mkAudio.currentTime * 1e6) < 5e6 && myDec.decodeQueueSize < 60) { bpLogged = false; break; }
-                        if (!bpLogged) { console.log(`[AML MV-WC] backpressure lastSec=${(lastUs/1e6).toFixed(2)} ct=${mkAudio.currentTime.toFixed(2)} decQ=${myDec.decodeQueueSize} queued=${queue.length}`); bpLogged = true; }
-                        await new Promise(r => setTimeout(r, 30));
-                    }
-                    if (aborted() || sig.aborted) break;
-                    const { done, value } = await reader.read();
-                    if (done) { console.log(`[AML MV-WC] stream done chunk#${chunkN} queued=${queue.length} ct=${mkAudio.currentTime.toFixed(2)}`); break; }
-                    if (aborted() || sig.aborted) break;
+                    if (!live()) break;
+                    drain();
+                    if (!live()) break;
+                    const full  = myDec.decodeQueueSize >= MAX_DECODE_QUEUE;
+                    const ahead = queue.length ? (queue[queue.length - 1].tUs / 1e6 - mkAudio.currentTime) >= DECODE_AHEAD_SEC : false;
+                    if (full || ahead) { await new Promise(res => { wakeProducer = res; }); continue; } // event-driven wait (dequeue / clock advance)
+                    if (done) break;                    // stream exhausted and caught up
+                    const r = await reader.read();
+                    if (r.done) { console.log(`[AML MV-WC] stream done gen=${myGen} chunk#${chunkN} queued=${queue.length}`); done = true; continue; }
+                    if (!live()) break;
                     chunkN++;
                     if (chunkN <= 5 || chunkN % 100 === 0)
-                        console.log(`[AML MV-WC] chunk#${chunkN} size=${value.byteLength} buf=${buf.length} decQ=${myDec.decodeQueueSize} queued=${queue.length} ct=${mkAudio.currentTime.toFixed(2)}`);
-                    const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
-                    drain();
+                        console.log(`[AML MV-WC] chunk#${chunkN} size=${r.value.byteLength} buf=${buf.length} decQ=${myDec.decodeQueueSize} queued=${queue.length} ct=${mkAudio.currentTime.toFixed(2)}`);
+                    const nb = new Uint8Array(buf.length + r.value.length); nb.set(buf); nb.set(r.value, buf.length); buf = nb;
                 }
-                if (myDec && myDec.state === 'configured') await myDec.flush().catch(() => {});
+                if (myGen === gen && myDec.state === 'configured') await myDec.flush().catch(() => {});
             } catch (e) {
-                if (!sig.aborted && !aborted()) console.error(`[AML MV-WC] stream error: ${e.message}`);
+                if (live()) console.error(`[AML MV-WC] stream error: ${e.message}`);
             }
         };
 
-        // Seek: mkAudio drives the clock; restart the video ES only when the seek
-        // target falls outside the still-queued frame range (mirrors MSE's buffered
-        // TimeRanges guard). Rendered frames are closed, so backward seeks always
-        // restart; forward seeks within the queued window skip the restart entirely.
+        // ── Single restart funnel ──────────────────────────────────────────────
+        // The ONLY path to _commitWcSeek. Bumps gen first (superseded coroutine dead
+        // immediately), aborts the in-flight fetch to unblock its await, and debounces
+        // the actual decoder swap. user-seek, decode-error and hang all route here.
         let _wcSeekTimer = null;
-        const _commitWcSeek = () => {
-            _wcSeekTimer = null;
+        const requestRestart = (reason, seekSec = currentSeekSec) => {
+            gen++;                              // invalidate the old generation NOW
+            try { fetchCtrl?.abort(); } catch (_) {}
+            wakeProd();                         // release any producer parked on wakeProducer
+            clearTimeout(_wcSeekTimer);
+            _wcSeekTimer = setTimeout(() => { _wcSeekTimer = null; _commitWcSeek(seekSec, reason); }, 50);
+        };
+        const _commitWcSeek = (seekSec, reason) => {
             if (aborted()) return;
-            const t = mkAudio.currentTime;
-            console.log(`[AML MV-WC] seek: closing decoder, clearing queue, restarting from ${t.toFixed(2)}s queued=${queue.length}`);
+            const t = (typeof seekSec === 'number') ? seekSec : mkAudio.currentTime;
+            currentSeekSec = t;
+            console.log(`[AML MV-WC] commit restart (${reason}) gen=${gen} → ${t.toFixed(2)}s queued=${queue.length}`);
+            gen++;                              // extra guard: invalidate before replacing the decoder
             try { if (dec && dec.state !== 'closed') dec.close(); } catch (_) {}
-            while (queue.length) queue.shift().frame.close();
-            // Preserve gate state: if A/V gate already opened, keep firstFrame=true so
-            // the first-frame output callback does NOT re-open it (RAF is already running).
-            // If gate has not opened yet (seek before first frame), reset to false so the
-            // first decoded frame after this restart can still call tryStart().
-            firstFrame = _avStarted;
-            _wcStalled = false;     // clear any active underrun stall
-            _wcRebuffering = true;  // block stall detection until first post-seek frame
-            _wcRebufStart = Date.now(); // arm hang timeout
-            _wcDecErrCount = 0;     // reset decode error retry counter for fresh stream
+            while (queue.length) closeWcFrame(queue.shift().frame); // decoder.close() does NOT close frames already handed to output
+            firstFrame = _avStarted;            // keep gate open if A/V already started; else let first post-restart frame re-open it
+            _wcStallPaused = false;             // clear any active WC stall
+            _wcRebuffering = true;              // suppress stall detection until first post-restart frame
+            _wcRebufStart = Date.now();         // arm hang timeout
+            _wcDecErrCount = 0;
             _wcBufferedSec = t;
-            console.log(`[AML MV-WC] seek committed → ${t.toFixed(2)}s`);
             start(t).catch(() => {});
         };
         const onWcSeek = () => {
             if (aborted()) return;
             const t = mkAudio.currentTime;
-            // Only skip restart if the seek target is within the still-queued frame range.
+            // Skip restart if the target is within the still-queued frame range.
             const qFirst = queue.length ? queue[0].tUs / 1e6 : -1;
             if (qFirst >= 0 && t >= qFirst - 0.5 && t <= _wcBufferedSec + 1.0) return;
-            try { fetchCtrl?.abort(); } catch (_) {}
-            clearTimeout(_wcSeekTimer);
-            _wcSeekTimer = setTimeout(_commitWcSeek, 50);
+            requestRestart('seek', t);
         };
         mkAudio.addEventListener('seeking', onWcSeek);
 
         _wcCleanup = () => {
-            _wcStalled = false;
+            gen++;                              // kill any live coroutine
+            _wcStallPaused = false;
             _wcRebuffering = false;
             try { mkAudio.removeEventListener('seeking', onWcSeek); } catch (_) {}
             clearTimeout(_wcSeekTimer);
             try { fetchCtrl?.abort(); } catch (_) {}
+            wakeProd();
             if (raf) cancelAnimationFrame(raf);
-            while (queue.length) { try { queue.shift().frame.close(); } catch (_) {} }
+            while (queue.length) closeWcFrame(queue.shift().frame);
             try { if (dec && dec.state !== 'closed') dec.close(); } catch (_) {}
             try { canvas.remove(); } catch (_) {}
             try { _wcSpinner.remove(); } catch (_) {}
+            try { delete window._wcFrameStats; delete window._wcStats; } catch (_) {}
         };
 
         _wcRebuffering = true; _wcRebufStart = Date.now(); // arm hang timeout for initial play
