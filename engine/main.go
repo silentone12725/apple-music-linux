@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
+	"time"
 
 	"engine/utils/aacstream"
 	"engine/utils/config"
@@ -34,6 +36,17 @@ func loadConfig() error {
 }
 
 func main() {
+	// Return transient heap spikes (full-track ALAC decrypt buffers, MV cache
+	// commits) to the OS. Go's GC reclaims them but retains the pages by default,
+	// so the engine's RSS ratchets up and never falls. FreeOSMemory hands them
+	// back. Purely additive — it only releases memory the GC already freed, so it
+	// cannot OOM or throttle any playback path (ALAC/VLC included).
+	go func() {
+		for range time.Tick(2 * time.Minute) {
+			debug.FreeOSMemory()
+		}
+	}()
+
 	if err := loadConfig(); err != nil {
 		log.Printf("load config failed (%v); using defaults", err)
 		Config.Storefront = "us"
