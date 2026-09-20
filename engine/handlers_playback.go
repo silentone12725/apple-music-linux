@@ -572,28 +572,38 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 	}
 
 	assetID := sess.AssetID
-	const qualifier = "mv-dl"
-	log.Printf("%s GET id=%s assetID=%q Range=%q", tagVideo("[video-dl]"), id, assetID, r.Header.Get("Range"))
-
-	// Serve the committed faststart cache. Chrome's <video> file demuxer needs a
-	// complete, non-fragmented MP4 (moov with a full sample table). We build that
-	// asynchronously (prepareMVFaststart) because faststart requires the whole
-	// file before the moov can be written — so playback is download-then-serve,
-	// not progressive. Normally the Electron aml-video:// handler serves the file
-	// directly (proper 206 byte-range seeking) once video-dl-info reports cached;
-	// this endpoint is the fallback / trigger.
-	if f, ok := s.diskCache.Get(assetID, qualifier); ok {
-		defer f.Close()
-		log.Printf("%s cache hit assetID=%s Range=%q", tagOK("[video-dl]"), assetID, r.Header.Get("Range"))
-		w.Header().Set("Content-Type", "video/mp4")
-		http.ServeContent(w, r, "", time.Time{}, f)
-		return
+	var seekSec float64
+	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
+		seekSec = v
 	}
+	log.Printf("%s GET id=%s assetID=%q t=%.2f (progressive fMP4)", tagVideo("[video-dl]"), id, assetID, seekSec)
 
-	// Not cached yet — kick off the faststart build and tell the client to wait.
-	go s.prepareMVFaststart(id, assetID, float64(sess.DurationMs)/1000.0)
-	w.Header().Set("Retry-After", "1")
-	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"preparing": true, "assetId": assetID})
+	// Progressive fragmented MP4 stream over HTTPS — fast startup (plays as it
+	// transcodes, no full-file pre-cache), served to a native <video src>. The
+	// real HTTPS transport sidesteps the custom-protocol seek bug (electron#38749)
+	// that made the fragmented format fail before. `?t=` re-streams from a seek
+	// point; tsOffset re-anchors make_zero's 0-based output onto the real timeline
+	// so the client's currentTime lands inside the buffered range. durationSec
+	// writes a valid mvhd duration into empty_moov so the scrubber shows total time.
+	videoSrc := func(dst io.Writer) error {
+		if seekSec > 0 {
+			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, dst)
+			return err
+		}
+		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
+	}
+	var tsOffset float64
+	if seekSec > 0 {
+		if actual, ok := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok {
+			tsOffset = actual
+		} else {
+			tsOffset = seekSec
+		}
+	}
+	durationSec := float64(sess.DurationMs) / 1000.0
+	streamMediaCoalesced(w, r, func(dst io.Writer) error {
+		return transcodeVideoForMSE(r.Context(), videoSrc, dst, tsOffset, durationSec)
+	}, "video/mp4")
 }
 
 // handlePlaybackVideoRaw streams the raw decrypted multi-track fMP4 for a

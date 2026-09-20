@@ -751,138 +751,6 @@
   function getMKAudio() {
     return document.getElementById("apple-music-player") || document.querySelector("audio") || null;
   }
-  window._amlTestWebCodecs = async function(sessionId) {
-    sessionId = sessionId || _sessionId;
-    if (!sessionId) {
-      console.error("[WC-TEST] no active session id \u2014 start an MV first");
-      return;
-    }
-    if (typeof VideoDecoder === "undefined") {
-      console.error("[WC-TEST] WebCodecs not available in this runtime");
-      return;
-    }
-    const url = `${ENGINE}/api/v1/playback/${sessionId}/video-es`;
-    console.log(`[WC-TEST] start session=${sessionId} url=${url}`);
-    const cv = document.createElement("canvas");
-    cv.style.cssText = "position:fixed;top:20px;right:20px;width:480px;height:auto;z-index:2147483647;background:#000;border:2px solid #0f0;box-shadow:0 8px 40px rgba(0,0,0,.6);";
-    document.body.appendChild(cv);
-    const ctx = cv.getContext("2d");
-    const ctrl = new AbortController();
-    let decoded = 0, drawn = 0, errors = 0, samples = 0;
-    const dec = new VideoDecoder({
-      output: (frame) => {
-        decoded++;
-        try {
-          if (cv.width !== frame.displayWidth) {
-            cv.width = frame.displayWidth;
-            cv.height = frame.displayHeight;
-          }
-          ctx.drawImage(frame, 0, 0);
-          drawn++;
-        } catch (_) {
-        }
-        frame.close();
-        if (decoded % 30 === 0) console.log(`[WC-TEST] decoded=${decoded} drawn=${drawn} samples=${samples} errors=${errors}`);
-      },
-      error: (e) => {
-        errors++;
-        console.error(`[WC-TEST] decoder error #${errors}: ${e.message}`);
-      }
-    });
-    window._amlWCTestStop = () => {
-      try {
-        ctrl.abort();
-      } catch (_) {
-      }
-      try {
-        dec.close();
-      } catch (_) {
-      }
-      cv.remove();
-      console.log("[WC-TEST] stopped");
-    };
-    let buf = new Uint8Array(0);
-    const append = (c) => {
-      const b = new Uint8Array(buf.length + c.length);
-      b.set(buf);
-      b.set(c, buf.length);
-      buf = b;
-    };
-    const take = (n) => {
-      const p = buf.slice(0, n);
-      buf = buf.slice(n);
-      return p;
-    };
-    const u16 = () => new DataView(buf.buffer, buf.byteOffset, buf.length).getUint16(0);
-    let state = "magic", codec = "";
-    const td = new TextDecoder();
-    const parse = () => {
-      for (; ; ) {
-        if (state === "magic") {
-          if (buf.length < 4) return;
-          if (td.decode(take(4)) !== "AME1") {
-            console.error("[WC-TEST] bad magic");
-            ctrl.abort();
-            return;
-          }
-          state = "codec";
-        } else if (state === "codec") {
-          if (buf.length < 2) return;
-          const l = u16();
-          if (buf.length < 2 + l) return;
-          take(2);
-          codec = td.decode(take(l));
-          state = "avcc";
-        } else if (state === "avcc") {
-          if (buf.length < 2) return;
-          const l = u16();
-          if (buf.length < 2 + l) return;
-          take(2);
-          const avcC = take(l);
-          dec.configure({ codec, description: avcC, optimizeForLatency: true, hardwareAcceleration: "no-preference" });
-          console.log(`[WC-TEST] configured codec=${codec} avcC=${avcC.length}B`);
-          state = "samples";
-        } else {
-          if (buf.length < 17) return;
-          const dv = new DataView(buf.buffer, buf.byteOffset, buf.length);
-          const len = dv.getUint32(13);
-          if (buf.length < 17 + len) return;
-          const key = (buf[0] & 1) === 1;
-          const ptsUs = Number(dv.getBigInt64(1));
-          const durUs = dv.getUint32(9);
-          take(17);
-          const data = take(len);
-          samples++;
-          try {
-            dec.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: ptsUs, duration: durUs, data }));
-          } catch (e) {
-            errors++;
-            console.error(`[WC-TEST] decode() threw: ${e.message}`);
-          }
-        }
-      }
-    };
-    try {
-      const resp = await fetch(url, { signal: ctrl.signal });
-      if (!resp.ok) {
-        console.error(`[WC-TEST] fetch ${resp.status}`);
-        cv.remove();
-        return;
-      }
-      const reader = resp.body.getReader();
-      for (; ; ) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        append(value);
-        parse();
-      }
-      await dec.flush().catch(() => {
-      });
-      console.log(`[WC-TEST] DONE samples=${samples} decoded=${decoded} drawn=${drawn} errors=${errors} \u2014 ${errors === 0 ? "\u2705 no decode errors (code=3-class avoided)" : "\u26A0\uFE0F decode errors occurred"}`);
-    } catch (e) {
-      if (!ctrl.signal.aborted) console.error(`[WC-TEST] stream error: ${e.message}`);
-    }
-  };
   function _mprisPosMs() {
     if (_vlcMode) return _vlcPosMs;
     if (_activeMvControls) return Math.round(_activeMvControls.currentTime * 1e3);
@@ -956,6 +824,7 @@
   var _videoCodec = null;
   var _mvGateOpen = true;
   var _mvResetScrubberRef = null;
+  var _nativeSeekRef = null;
   var _BUF_BAR_CSS = [
     "#playback-progress::-webkit-slider-runnable-track,",
     "input[type=range]::-webkit-slider-runnable-track{",
@@ -2269,10 +2138,9 @@
         _lastCommit = t;
         if (_wcVideo) {
           mkAudio.currentTime = t;
-        } else if (_nativeVideo) {
+        } else if (_nativeVideo && _nativeSeekRef) {
           console.log(`[AML MV native] commit seek \u2192 ${t.toFixed(2)}s`);
-          myVid.currentTime = t;
-          mkAudio.currentTime = t;
+          _nativeSeekRef(t);
         }
       };
       const _cancelScrub = () => {
@@ -2284,6 +2152,10 @@
       rangeInput.addEventListener("pointercancel", _cancelScrub, true);
       const _durEl = _wcVideo ? mkAudio : myVid;
       const _setRangeMax = () => {
+        if (_nativeVideo && _durationSec > 0) {
+          rangeInput.max = String(_durationSec);
+          return;
+        }
         if (_durEl.duration && isFinite(_durEl.duration)) rangeInput.max = String(_durEl.duration);
         else if (_durationSec > 0) rangeInput.max = String(_durationSec);
       };
@@ -2336,6 +2208,8 @@
       if (_wcVideo) {
         const dur = mkAudio.duration || _durationSec || 1e9;
         mkAudio.currentTime = Math.max(0, Math.min(dur, sec));
+      } else if (_nativeVideo && _nativeSeekRef) {
+        _nativeSeekRef(Math.max(0, Math.min(_durationSec || 1e9, sec)));
       } else {
         myVid.currentTime = Math.max(0, Math.min(myVid.duration || 1e9, sec));
         mkAudio.currentTime = myVid.currentTime;
@@ -3420,6 +3294,7 @@
         return (_wcVideo ? mkAudio.currentTime : myVid.currentTime) || 0;
       },
       get duration() {
+        if (_nativeVideo) return _durationSec || myVid.duration || 0;
         return (_wcVideo ? mkAudio.duration : myVid.duration) || _durationSec || 0;
       },
       get paused() {
@@ -3598,12 +3473,11 @@
     const _setupNativeVideo = () => {
       const enginePath = `/api/v1/playback/${_sessionId}/video-dl`;
       const dlUrl = `${ENGINE_HTTPS}${enginePath}`;
-      const infoUrl = `${ENGINE_HTTPS}${enginePath}-info`;
       _bufSpinner.style.display = "block";
       const _NET = ["EMPTY", "IDLE", "LOADING", "NO_SOURCE"];
       const _RS = ["HAVE_NOTHING", "HAVE_METADATA", "HAVE_CURRENT_DATA", "HAVE_FUTURE_DATA", "HAVE_ENOUGH_DATA"];
       const _nlog = (ev) => console.log(`%c[AML MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : "-"}`, "color:#bf5af2;font-weight:bold", "color:inherit");
-      ["loadstart", "durationchange", "loadedmetadata", "loadeddata", "canplaythrough", "stalled", "emptied", "abort"].forEach((ev) => myVid.addEventListener(ev, () => _nlog(ev)));
+      ["loadstart", "loadedmetadata", "loadeddata", "canplaythrough", "stalled", "emptied", "abort"].forEach((ev) => myVid.addEventListener(ev, () => _nlog(ev)));
       myVid.addEventListener("error", () => {
         const e = myVid.error;
         console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ""}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc} \u2014 advancing track`, "color:#ff453a;font-weight:bold", "color:inherit");
@@ -3663,7 +3537,48 @@
           mkAudio.muted = false;
         }
       });
+      let _reseeking = false;
+      const _nativeSeek = (target) => {
+        target = Math.max(0, Math.min(_durationSec || target, target));
+        for (let i = 0; i < myVid.buffered.length; i++) {
+          if (target >= myVid.buffered.start(i) && target <= myVid.buffered.end(i)) {
+            try {
+              myVid.currentTime = target;
+            } catch (_) {
+            }
+            try {
+              mkAudio.currentTime = target;
+            } catch (_) {
+            }
+            return;
+          }
+        }
+        console.log(`%c[AML MV native]%c re-stream from ${target.toFixed(2)}s`, "color:#bf5af2;font-weight:bold", "color:#f4a100");
+        _reseeking = true;
+        _bufSpinner.style.display = "block";
+        try {
+          mkAudio.currentTime = target;
+        } catch (_) {
+        }
+        myVid.src = `${dlUrl}?t=${target.toFixed(3)}`;
+        try {
+          myVid.load();
+        } catch (_) {
+        }
+        myVid.addEventListener("loadedmetadata", () => {
+          try {
+            if (Math.abs(myVid.currentTime - target) > 1) myVid.currentTime = target;
+          } catch (_) {
+          }
+          _reseeking = false;
+          _bufSpinner.style.display = "none";
+          _iframePlay.call(myVid).catch(() => {
+          });
+        }, { once: true });
+      };
+      _nativeSeekRef = _nativeSeek;
       myVid.addEventListener("seeked", () => {
+        if (_reseeking) return;
         _nlog("seeked");
         if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.3) mkAudio.currentTime = myVid.currentTime;
       });
@@ -3682,32 +3597,13 @@
         _videoCanPlay = true;
         tryStart();
       }, { once: true });
-      let _polls = 0;
-      const _beginPlayback = () => {
-        console.log("%c[AML MV native]%c cache ready \u2192 src=%s", "color:#bf5af2;font-weight:bold", "color:inherit", dlUrl);
-        myVid.src = dlUrl;
-        try {
-          myVid.load();
-        } catch (e) {
-          console.error(`[AML MV native] load() threw: ${e.message}`);
-        }
-      };
-      const _poll = async () => {
-        if (_generation !== _mvGen) return;
-        _polls++;
-        try {
-          const info = await fetch(infoUrl).then((r) => r.json());
-          if (info && info.cached) {
-            _beginPlayback();
-            return;
-          }
-          if (_polls === 1 || _polls % 6 === 0) console.log(`%c[AML MV native]%c preparing\u2026 poll#${_polls}`, "color:#bf5af2;font-weight:bold", "color:inherit");
-        } catch (e) {
-          console.warn(`[AML MV native] info poll err: ${e.message}`);
-        }
-        setTimeout(_poll, 500);
-      };
-      _poll();
+      console.log("%c[AML MV native]%c src=%s (progressive)", "color:#bf5af2;font-weight:bold", "color:inherit", dlUrl);
+      myVid.src = dlUrl;
+      try {
+        myVid.load();
+      } catch (e) {
+        console.error(`[AML MV native] load() threw: ${e.message}`);
+      }
     };
     if (_nativeVideo) _setupNativeVideo();
     else if (_mp4Video) _setupMP4BoxVideo();
@@ -4012,6 +3908,7 @@
       clearInterval(_seekSyncInterval);
       _thumbResizeObs?.disconnect();
       if (_mvResetScrubberRef === _resetScrubberToLoading) _mvResetScrubberRef = null;
+      _nativeSeekRef = null;
       cleanupVideoContainerStyles();
       mvContainer.style.removeProperty("cursor");
       if (nativeVidInVc) nativeVidInVc.style.removeProperty("display");
