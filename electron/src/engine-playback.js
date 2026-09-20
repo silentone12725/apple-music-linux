@@ -585,6 +585,7 @@ let _streamComplete   = false;
 let _chunkCache       = null;
 let _msePaused        = false; // true while user has manually paused in MSE mode
 let _wcStallPaused    = false; // true while the WebCodecs path has paused audio for a video underrun (distinct from user/MSE pause — neither may clear the other)
+let _wcAudioHold      = false; // true while the WebCodecs path is waiting for its first decoded frame — audio start is deferred so A/V begin together (video decode via /video-es can lag audio-ready by seconds)
 // Active WC MV control surface — set while a WebCodecs MV session is live so that
 // global interceptors (mk.play/pause, mk.seekToTime, MPRIS) drive the right clock.
 let _activeMvControls = null;
@@ -730,6 +731,17 @@ function installPlayProxy(mkAudio) {
         // same retries during a WebCodecs video underrun — kept distinct so a WC
         // stall and a user pause can never clear or overwrite each other.
         if (_msePaused || _wcStallPaused) return new Promise(() => {});
+        // WebCodecs startup: defer audio until the first decoded video frame so A/V
+        // begin together (video via /video-es can lag audio-ready by seconds).
+        // Settle MK's state machine (synthetic 'playing' resolves the promise it
+        // awaits) and show a buffering indicator, but do NOT start native audio —
+        // tryStart() starts it (via _iframePlay) once the first frame arrives.
+        if (_wcAudioHold) {
+            const p = new Promise(resolve => _resolvers.push(resolve));
+            mkAudio.dispatchEvent(new Event('playing'));
+            mkAudio.dispatchEvent(new Event('waiting'));
+            return p;
+        }
         if (!_sessionId) {
             if (!_directPlayAdamId) {
                 // Session not open yet — push a resolver so the 'playing' event
@@ -3504,6 +3516,12 @@ async function startMVPipeline() {
     // entirely → code=3 cannot occur; a bad access unit surfaces on the decoder's
     // error callback and is skipped instead of tearing down the pipeline.
     const _setupWebCodecsVideo = () => {
+        // Hold audio until the first decoded frame so A/V start together. Pause any
+        // audio MusicKit may have already started (native pause bypasses the play
+        // proxy so it doesn't register as a user/MSE pause); the proxy defers all
+        // further play() calls while _wcAudioHold is set.
+        _wcAudioHold = true;
+        try { HTMLMediaElement.prototype.pause.call(mkAudio); } catch (_) {}
         const canvas = document.createElement('canvas');
         canvas.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;z-index:2;pointer-events:none;background:#000;';
         mvContainer.insertAdjacentElement('afterbegin', canvas);
@@ -3667,6 +3685,7 @@ async function startMVPipeline() {
                     _wcRebuffering = false; // first frame after seek commit clears the gap guard
                     if (!firstFrame) {
                         firstFrame = true; _videoCanPlay = true;
+                        _wcAudioHold = false; // video ready — release the audio hold; tryStart starts both
                         _wcVW = frame.displayWidth; _wcVH = frame.displayHeight;
                         console.log(`[AML MV-WC] first frame decoded ${_wcVW}x${_wcVH} — opening A/V gate`);
                         _resizeScrim();
@@ -3800,6 +3819,7 @@ async function startMVPipeline() {
         _wcCleanup = () => {
             gen++;                              // kill any live coroutine
             _wcStallPaused = false;
+            _wcAudioHold = false;
             _wcRebuffering = false;
             try { mkAudio.removeEventListener('seeking', onWcSeek); } catch (_) {}
             clearTimeout(_wcSeekTimer);

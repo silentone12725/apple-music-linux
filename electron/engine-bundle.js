@@ -570,6 +570,7 @@
   var _chunkCache = null;
   var _msePaused = false;
   var _wcStallPaused = false;
+  var _wcAudioHold = false;
   var _activeMvControls = null;
   var _prevMs = null;
   var _prevSb = null;
@@ -665,6 +666,12 @@
       }
       if (_msePaused || _wcStallPaused) return new Promise(() => {
       });
+      if (_wcAudioHold) {
+        const p2 = new Promise((resolve) => _resolvers.push(resolve));
+        mkAudio.dispatchEvent(new Event("playing"));
+        mkAudio.dispatchEvent(new Event("waiting"));
+        return p2;
+      }
       if (!_sessionId) {
         if (!_directPlayAdamId) {
           return new Promise((resolve) => _resolvers.push(resolve));
@@ -2986,6 +2993,11 @@
       });
     };
     const _setupWebCodecsVideo = () => {
+      _wcAudioHold = true;
+      try {
+        HTMLMediaElement.prototype.pause.call(mkAudio);
+      } catch (_) {
+      }
       const canvas = document.createElement("canvas");
       canvas.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;z-index:2;pointer-events:none;background:#000;";
       mvContainer.insertAdjacentElement("afterbegin", canvas);
@@ -3141,6 +3153,7 @@
             if (!firstFrame) {
               firstFrame = true;
               _videoCanPlay = true;
+              _wcAudioHold = false;
               _wcVW = frame.displayWidth;
               _wcVH = frame.displayHeight;
               console.log(`[AML MV-WC] first frame decoded ${_wcVW}x${_wcVH} \u2014 opening A/V gate`);
@@ -3312,6 +3325,7 @@
       _wcCleanup = () => {
         gen++;
         _wcStallPaused = false;
+        _wcAudioHold = false;
         _wcRebuffering = false;
         try {
           mkAudio.removeEventListener("seeking", onWcSeek);
