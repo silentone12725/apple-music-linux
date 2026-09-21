@@ -176,10 +176,10 @@ func (ix *mvDecIndexer) feed(p []byte) {
 // startBox is called once a box header is fully read. Returns false if the
 // indexer disabled itself.
 func (ix *mvDecIndexer) startBox(size int64, typ string) bool {
-	if ix.dbgBoxN < 24 {
-		ix.dbgBoxN++
-		log.Printf("[mv-idx] box off=%d type=%q size=%d", ix.boxStart, typ, size)
-	}
+	// if ix.dbgBoxN < 24 {
+	// 	ix.dbgBoxN++
+	// 	log.Printf("[mv-idx] box off=%d type=%q size=%d", ix.boxStart, typ, size)
+	// }
 	// size==0 means "to EOF" (a trailing mdat); nothing more to index.
 	if size == 0 {
 		log.Printf("[mv-idx] disabled: box %q size=0 (to-EOF) at off=%d", typ, ix.boxStart)
@@ -254,7 +254,7 @@ func (ix *mvDecIndexer) finishBox() {
 			ix.videoTrackID = vTrackID
 			ix.mu.Unlock()
 		}
-		log.Printf("[mv-idx] moov nTraks=%d vTrackID=%d vTimescale=%d", len(b.Traks), vTrackID, vTimescale)
+		// log.Printf("[mv-idx] moov nTraks=%d vTrackID=%d vTimescale=%d", len(b.Traks), vTrackID, vTimescale)
 	case *mp4.MoofBox:
 		if ix.timescale == 0 {
 			if ix.dbgN < 8 {
@@ -301,12 +301,12 @@ func (ix *mvDecIndexer) finishBox() {
 			ix.frags[n-1].End = ix.boxStart
 		}
 		ix.frags = append(ix.frags, MVFragEntry{T: t, Off: ix.boxStart})
-		n := len(ix.frags)
 		ix.mu.Unlock()
-		if ix.dbgN < 8 {
-			ix.dbgN++
-			log.Printf("[mv-idx] frag#%d T=%.3f off=%d (tfdt=%d ts=%d)", n, t, ix.boxStart, vtraf.Tfdt.BaseMediaDecodeTime(), ix.timescale)
-		}
+		// if ix.dbgN < 8 {
+		// 	ix.dbgN++
+		// 	n := len(ix.frags)
+		// 	log.Printf("[mv-idx] frag#%d T=%.3f off=%d (tfdt=%d ts=%d)", n, t, ix.boxStart, vtraf.Tfdt.BaseMediaDecodeTime(), ix.timescale)
+		// }
 	}
 }
 

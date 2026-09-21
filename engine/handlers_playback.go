@@ -19,11 +19,90 @@ import (
 	"sync"
 	"time"
 
+	"engine/core/diskcache"
 	"engine/core/pipeline"
 	"engine/core/playback"
 	"engine/core/prefetch"
 	"engine/utils/aacstream"
 )
+
+// ── MV WebCodecs growing-file seek (ALAC-style) ──────────────────────────────
+//
+// The direct /video-es path streams the decrypted MV fMP4 once into a growing
+// ephemeral cache file while serving the renderer, and builds a live time→byte
+// fragment index. Seeks into already-downloaded media are served from the file
+// (no Apple CDN re-download); only seeks past the download head fall back to the
+// network. The producer is owned by the MV SESSION (not the HTTP request), so it
+// keeps filling the file across seek requests and stops on session release.
+
+type mvGrowingState struct {
+	spw       *diskcache.StreamingPutWriter
+	ix        *aacstream.MVLiveIndex
+	cancel    context.CancelFunc
+	done      chan struct{} // closed after the producer goroutine exits (Commit/Discard done)
+	assetID   string
+	qualifier string
+}
+
+var (
+	mvGrowing   sync.Map   // sessionID → *mvGrowingState
+	mvGrowingMu sync.Mutex // serializes producer creation (one BeginStreamingPut per session)
+)
+
+// getOrStartMVGrowing returns the session's growing-file producer, starting it on
+// first use with a session-lifetime context. Returns nil if a streaming put can't
+// be opened (caller then uses the stateless network fallback).
+func (s *APIServer) getOrStartMVGrowing(id, assetID, qualifier string) *mvGrowingState {
+	if v, ok := mvGrowing.Load(id); ok {
+		return v.(*mvGrowingState)
+	}
+	mvGrowingMu.Lock()
+	defer mvGrowingMu.Unlock()
+	if v, ok := mvGrowing.Load(id); ok { // double-check under lock
+		return v.(*mvGrowingState)
+	}
+	spw, err := s.diskCache.BeginStreamingPut(assetID, qualifier)
+	if err != nil || spw == nil {
+		return nil
+	}
+	ix := aacstream.NewMVLiveIndex()
+	pctx, cancel := context.WithCancel(context.Background()) // detached from any HTTP request
+	st := &mvGrowingState{spw: spw, ix: ix, cancel: cancel, done: make(chan struct{}), assetID: assetID, qualifier: qualifier}
+	mvGrowing.Store(id, st)
+	go func() {
+		// Single whole-track stream to the growing file; the live index records
+		// fragment (time → byte). Producer outlives individual HTTP requests.
+		defer close(st.done) // signal teardown that the writer is fully done
+		err := s.pm.Stream(pctx, id, pipeline.KindVideo, io.MultiWriter(spw, ix))
+		if err != nil {
+			spw.Discard()
+		} else {
+			spw.Commit()
+		}
+	}()
+	log.Printf("%s producer started id=%s assetID=%s q=%s", tagVideo("[mv-es]"), id, assetID, qualifier)
+	return st
+}
+
+// stopMVGrowing cancels a session's growing-file producer and removes the scratch
+// file. The mv-es file is a per-session seek scratch (persistent MV caching, when
+// enabled, is the dec-cache's separate job), so it is always removed on release.
+func (s *APIServer) stopMVGrowing(id string) {
+	if v, ok := mvGrowing.LoadAndDelete(id); ok {
+		st := v.(*mvGrowingState)
+		st.cancel()
+		// Wait for the producer to fully exit (Discard/Commit done) before removing
+		// the scratch file, so Remove() never races an active writer. Bounded so a
+		// stuck producer can't hang session teardown.
+		select {
+		case <-st.done:
+		case <-time.After(5 * time.Second):
+			log.Printf("%s producer stop timed out id=%s (removing anyway)", tagWarn("[mv-es]"), id)
+		}
+		s.diskCache.Remove(st.assetID, st.qualifier)
+		log.Printf("%s producer stopped + scratch removed id=%s assetID=%s", tagInfo("[mv-es]"), id, st.assetID)
+	}
+}
 
 // parseRangeStart extracts the start offset from an HTTP Range header value.
 // Handles "bytes=X-" and "bytes=X-Y". Returns 0 for unrecognised formats.
@@ -683,28 +762,88 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Direct path: CBCS-decrypted multi-track fMP4 → DemuxFMP4ToES (no FFmpeg, no MSE).
-	// DemuxFMP4ToES filters to the video track, handling B-frame PTS via CompositionTimeOffset.
-	// This eliminates CHUNK_DEMUXER_ERROR_APPEND_FAILED which occurs on the MSE path with
-	// Apple Music's B-frame H.264 content.
-	pr, pw := io.Pipe()
-	go func() {
-		var err error
-		if seekSec > 0 {
-			_, err = s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, pw)
-		} else {
-			err = s.pm.Stream(r.Context(), id, pipeline.KindVideo, pw)
+	// Direct path (uncached): stream once into a growing ephemeral file while
+	// serving, so seeks into downloaded media are served from the file with no
+	// Apple CDN re-download. Falls back to a stateless network stream if a
+	// streaming put can't be opened.
+	qualifier := fmt.Sprintf("mv-es-%d", sess.MVMaxHeight)
+	st := s.getOrStartMVGrowing(id, assetID, qualifier)
+	if st == nil {
+		// Fallback: stateless direct stream (no growing file available).
+		pr, pw := io.Pipe()
+		go func() {
+			var err error
+			if seekSec > 0 {
+				_, err = s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, pw)
+			} else {
+				err = s.pm.Stream(r.Context(), id, pipeline.KindVideo, pw)
+			}
+			pw.CloseWithError(err)
+		}()
+		esHeaders()
+		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+			log.Printf("[video-es] direct demux error id=%s: %v", id, err)
 		}
-		pw.CloseWithError(err)
-	}()
+		return
+	}
+
 	esHeaders()
-	if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
-		log.Printf("[video-es] direct demux error id=%s: %v", id, err)
+
+	// Seek: serve from the growing file when the covering fragment is fully
+	// downloaded (End > 0 && End <= Written); else fall back to the network.
+	if seekSec > 0 {
+		frag, ok := st.ix.Lookup(seekSec)
+		initSize, iok := st.ix.InitSize()
+		// log.Printf("%s lookup seek=%.3f ok=%v fragT=%.3f off=%d end=%d initOK=%v initSize=%d written=%d",
+		// 	tagInfo("[mv-es-seek]"), seekSec, ok, frag.T, frag.Off, frag.End, iok, initSize, st.spw.Written())
+		if ok {
+			if iok && frag.End > 0 && frag.End <= st.spw.Written() {
+				// log.Printf("%s seek=%.3f source=growing-file off=%d end=%d written=%d",
+				// 	tagOK("[mv-es-seek]"), seekSec, frag.Off, frag.End, st.spw.Written())
+				initRaw := st.spw.NewReaderAt(0)
+				defer initRaw.Close()
+				fragR := st.spw.NewReaderAt(frag.Off)
+				defer fragR.Close()
+				// init segment (ftyp+moov, bounded) then the fragment onward (grows,
+				// so playback continues from the seek point without re-streaming).
+				combined := io.MultiReader(io.LimitReader(initRaw, initSize), fragR)
+				if err := aacstream.DemuxFMP4ToES(r.Context(), combined, w); err != nil && r.Context().Err() == nil {
+					log.Printf("[video-es] growing-file seek demux error id=%s: %v", id, err)
+				}
+				return
+			}
+		}
+		// Beyond the download head (or index not ready): network fallback. The
+		// renderer's seek-hold shows a clean buffer for this case.
+		// log.Printf("%s seek=%.3f source=network written=%d (beyond head/index not ready)",
+		// 	tagWarn("[mv-es-seek]"), seekSec, st.spw.Written())
+		pr, pw := io.Pipe()
+		go func() {
+			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, pw)
+			pw.CloseWithError(err)
+		}()
+		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+			log.Printf("[video-es] network seek demux error id=%s: %v", id, err)
+		}
+		return
+	}
+
+	// First play: stream ES from the growing file (byte 0), which fills as the
+	// session-owned producer downloads. tsOffset stays 0 — fragments carry real
+	// PTS and the renderer's audio clock is the real timeline.
+	log.Printf("%s cache=streaming id=%s written=%d", tagVideo("[mv-es]"), id, st.spw.Written())
+	rd := st.spw.NewReader()
+	defer rd.Close()
+	if err := aacstream.DemuxFMP4ToES(r.Context(), rd, w); err != nil && r.Context().Err() == nil {
+		log.Printf("[video-es] growing-file demux error id=%s: %v", id, err)
 	}
 }
 
 func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Stop the MV WebCodecs growing-file producer (if any) and remove its scratch
+	// file. Done before Release so the detached producer is cancelled first.
+	s.stopMVGrowing(id)
 	// If this session's MV faststart file was written under "caching disabled",
 	// delete it now — it existed only to serve this playback.
 	if sess, ok := s.pm.GetSession(id); ok {

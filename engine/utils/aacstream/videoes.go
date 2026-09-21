@@ -32,6 +32,8 @@ import (
 
 const esMagic = "AME1"
 
+// var dbgSampleN int // limits [video-es-raw] sample logging (diagnostic)
+
 // DemuxFMP4ToES reads a single-track H.264 fragmented MP4 from r (the FFmpeg
 // video remux output) and writes the elementary-stream framing above to w.
 func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
@@ -175,6 +177,10 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 					pts = 0
 				}
 				ptsUs := int64(uint64(pts) * 1_000_000 / timescale)
+				// if dbgSampleN < 4 {
+				// 	dbgSampleN++
+				// 	log.Printf("[video-es-raw] sample#%d pts=%d ptsUs=%d dur=%d ts=%d", dbgSampleN, pts, ptsUs, s.Dur, timescale)
+				// }
 				durUs := uint32(uint64(s.Dur) * 1_000_000 / timescale)
 				// Keyframe = container sync flag OR an IDR slice in the access unit.
 				// Apple's CBCS-decrypted fMP4 on the direct path does not set the

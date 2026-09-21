@@ -2774,6 +2774,9 @@ async function startMVPipeline() {
         // During drag the input handler owns --progress/--width — overwriting from
         // the clock would snap the thumb back.
         if (_userScrubbing) return;
+        // During a WC seek hold, mkAudio is paused so its currentTime is frozen.
+        // Skipping the update avoids triggering CSS transitions on every poll tick.
+        if (_wcStallPaused && _wcVideo) return;
         // MSE: track position from videoEl (audio can drift during buffer-waits).
         const t   = _wcVideo ? mkAudio.currentTime : myVid.currentTime;
         const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute('max')) || 1;
@@ -3690,7 +3693,7 @@ async function startMVPipeline() {
                 output: (frame) => {
                     wcFramesOpened++;
                     if (!live()) { if (myGen !== gen) wcObsoleteState++; closeWcFrame(frame); return; }
-                    if (wcFramesOpened <= 4) console.log(`[wc-raw] frame#${wcFramesOpened} ts=${frame.timestamp} tsSec=${(frame.timestamp/1e6).toFixed(3)} mkAudio.ct=${mkAudio.currentTime.toFixed(3)} gen=${myGen}`);
+                    // if (wcFramesOpened <= 4) console.log(`[wc-raw] frame#${wcFramesOpened} ts=${frame.timestamp} tsSec=${(frame.timestamp/1e6).toFixed(3)} mkAudio.ct=${mkAudio.currentTime.toFixed(3)} gen=${myGen}`);
                     // Hard ceiling: if the render queue somehow overgrows (render loop
                     // starved), drop the oldest frame so memory stays bounded.
                     while (queue.length >= MAX_RENDER_QUEUE) { closeWcFrame(queue.shift().frame); _wcDiscarded++; }
