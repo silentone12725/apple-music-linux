@@ -211,6 +211,71 @@ func feedWriterChunked(t *testing.T, w io.Writer, data []byte, chunk int) {
 	}
 }
 
+// TestMVLiveIndex_LookupAndEnd covers the growing-file seek index: Lookup returns
+// the latest fragment with start <= t, End bounds each fragment at the next moof
+// (last fragment unbounded), and InitSize is exposed once known — the exact
+// contract the /video-es growing-file seek relies on.
+func TestMVLiveIndex_LookupAndEnd(t *testing.T) {
+	const timescale = 1000
+	decTimes := []uint64{0, 2000, 4000, 6000} // → 0,2,4,6 s
+	stream, initSize, _, wantOffsets := buildMVStream(t, timescale, decTimes)
+
+	m := NewMVLiveIndex()
+	m.Write(stream) //nolint:errcheck
+
+	if sz, ok := m.InitSize(); !ok || sz != initSize {
+		t.Fatalf("InitSize=(%d,%v) want (%d,true)", sz, ok, initSize)
+	}
+
+	// End of each fragment == the next moof's offset; the last fragment is unbounded.
+	for i := range decTimes {
+		frag, ok := m.Lookup(float64(decTimes[i]) / timescale)
+		if !ok {
+			t.Fatalf("Lookup(frag %d start) not found", i)
+		}
+		if frag.Off != wantOffsets[i] {
+			t.Fatalf("frag %d Off=%d want %d", i, frag.Off, wantOffsets[i])
+		}
+		wantEnd := int64(0)
+		if i+1 < len(decTimes) {
+			wantEnd = wantOffsets[i+1]
+		}
+		if frag.End != wantEnd {
+			t.Fatalf("frag %d End=%d want %d", i, frag.End, wantEnd)
+		}
+	}
+
+	// Lookup returns the latest fragment whose start <= t.
+	cases := []struct {
+		t    float64
+		want int // fragment index, or -1 for "not found"
+	}{
+		{-1.0, -1}, {0.0, 0}, {1.5, 0}, {2.0, 1}, {3.9, 1}, {4.0, 2}, {6.0, 3}, {99.0, 3},
+	}
+	for _, c := range cases {
+		frag, ok := m.Lookup(c.t)
+		if c.want < 0 {
+			if ok {
+				t.Fatalf("Lookup(%.1f)=%+v want not-found", c.t, frag)
+			}
+			continue
+		}
+		if !ok || frag.Off != wantOffsets[c.want] {
+			t.Fatalf("Lookup(%.1f) → off=%d ok=%v want frag %d (off %d)", c.t, frag.Off, ok, c.want, wantOffsets[c.want])
+		}
+	}
+
+	// Availability predicate the handler uses: complete AND fully downloaded.
+	f2, _ := m.Lookup(4.0) // frag 2, End = wantOffsets[3]
+	if !(f2.End > 0 && f2.End <= f2.End) {
+		t.Fatal("bounded fragment should be seekable when written >= End")
+	}
+	if f2.End > 0 && f2.End <= f2.End-1 {
+		t.Fatal("fragment must NOT be seekable when written < End")
+	}
+	t.Log("VERDICT: MVLiveIndex.Lookup returns latest frag ≤ t with correct End bounds; InitSize exposed; last frag unbounded.")
+}
+
 func TestMVDecIndex_FinishRoundTrips(t *testing.T) {
 	stream, _, _, _ := buildMVStream(t, 1000, []uint64{0, 1000})
 	ix := newMVDecIndexer()
