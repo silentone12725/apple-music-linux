@@ -131,6 +131,9 @@ func (s *APIServer) proxyProgressiveVideo(w http.ResponseWriter, r *http.Request
 			hdr.Set(h, v)
 		}
 	}
+	if hdr.Get("Content-Type") == "" {
+		hdr.Set("Content-Type", "video/mp4")
+	}
 	hdr.Set("Accept-Ranges", "bytes")
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body) //nolint:errcheck
@@ -707,7 +710,11 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 	// Start building the faststart cache in the background so future plays are instant.
 	log.Printf("%s cache miss id=%s assetID=%s → CDN proxy", tagVideo("[video-dl]"), id, assetID)
 	if aacstream.MVCacheEnabled() {
-		go s.prepareMVFaststart(id, assetID, durationSec)
+		// Guard with mvPreparing so multiple concurrent Range requests
+		// from the same play (moov + data) don't each spawn a goroutine.
+		if _, already := mvPreparing.Load(assetID); !already {
+			go s.prepareMVFaststart(id, assetID, durationSec)
+		}
 	}
 
 	mvURL, hasURL := s.pm.GetProgressiveURL(id, pipeline.KindVideo)
