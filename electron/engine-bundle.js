@@ -2381,6 +2381,7 @@
     const _updateProgress = () => {
       if (!rangeInput) return;
       if (_userScrubbing) return;
+      if (_wcStallPaused && _wcVideo) return;
       const t = _wcVideo ? mkAudio.currentTime : myVid.currentTime;
       const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute("max")) || 1;
       rangeInput.value = String(t);
@@ -3149,7 +3150,6 @@
               closeWcFrame(frame);
               return;
             }
-            if (wcFramesOpened <= 4) console.log(`[wc-raw] frame#${wcFramesOpened} ts=${frame.timestamp} tsSec=${(frame.timestamp / 1e6).toFixed(3)} mkAudio.ct=${mkAudio.currentTime.toFixed(3)} gen=${myGen}`);
             while (queue.length >= MAX_RENDER_QUEUE) {
               closeWcFrame(queue.shift().frame);
               _wcDiscarded++;
