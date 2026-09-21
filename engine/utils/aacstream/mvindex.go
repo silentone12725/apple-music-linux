@@ -379,6 +379,31 @@ func (m *MVLiveIndex) Write(p []byte) (int, error) { m.ix.feed(p); return len(p)
 // before serving it from the growing file.
 func (m *MVLiveIndex) Lookup(t float64) (MVFragEntry, bool) { return m.ix.lookup(t) }
 
+// LookupComplete returns the latest fragment that is both at or before t AND
+// fully written to the growing file (End > 0 && End <= written). If the exact
+// fragment covering t is not yet complete, it falls back to an earlier complete
+// one. This guarantees the returned fragment's bytes are already on disk so the
+// growing reader delivers the first chunk immediately, preventing the 8 s hang
+// timeout from firing during a seek.
+func (m *MVLiveIndex) LookupComplete(t float64, written int64) (MVFragEntry, bool) {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	best := -1
+	for i := range m.ix.frags {
+		f := &m.ix.frags[i]
+		if f.T > t {
+			break
+		}
+		if f.End > 0 && f.End <= written {
+			best = i
+		}
+	}
+	if best < 0 {
+		return MVFragEntry{}, false
+	}
+	return m.ix.frags[best], true
+}
+
 // InitSize returns the init-segment byte size (ftyp+moov) once known.
 func (m *MVLiveIndex) InitSize() (int64, bool) { return m.ix.initSizeLive() }
 

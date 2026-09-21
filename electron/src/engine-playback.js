@@ -2774,9 +2774,20 @@ async function startMVPipeline() {
         // During drag the input handler owns --progress/--width — overwriting from
         // the clock would snap the thumb back.
         if (_userScrubbing) return;
-        // During a WC seek hold, mkAudio is paused so its currentTime is frozen.
-        // Skipping the update avoids triggering CSS transitions on every poll tick.
-        if (_wcStallPaused && _wcVideo) return;
+        // During a WC seek hold, mkAudio is paused — its currentTime is frozen at
+        // the seek target. Actively freeze the scrubber here instead of returning
+        // early: AML's own RAF-based scrubber loop runs between our poll ticks and
+        // would animate the scrubber forward as if playing. Setting the same frozen
+        // value on every poll tick is idempotent and overrides AML's updates.
+        if (_wcStallPaused && _wcVideo) {
+            const t   = mkAudio.currentTime;
+            const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute('max')) || 1;
+            rangeInput.value = String(t);
+            const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
+            rangeInput.style.setProperty('--progress', _fillPct(frac).toFixed(2) + '%');
+            if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
+            return;
+        }
         // MSE: track position from videoEl (audio can drift during buffer-waits).
         const t   = _wcVideo ? mkAudio.currentTime : myVid.currentTime;
         const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute('max')) || 1;
