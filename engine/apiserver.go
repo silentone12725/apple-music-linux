@@ -638,6 +638,9 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("GET /api/v1/playback/{id}/video-dl-info", cors(s.handlePlaybackVideoNativeInfo))
 	mux.HandleFunc("GET /api/v1/playback/{id}/video-raw", cors(s.handlePlaybackVideoRaw))
 	mux.HandleFunc("GET /api/v1/playback/{id}/video-es", cors(s.handlePlaybackVideoES))
+	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/init", cors(s.handlePlaybackVsegInit))
+	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/seg/{n}", cors(s.handlePlaybackVsegSeg))
+	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/manifest", cors(s.handlePlaybackVsegManifest))
 	mux.HandleFunc("POST /api/v1/playback/{id}/precache", cors(s.handlePlaybackPrecache))
 	mux.HandleFunc("DELETE /api/v1/playback/{id}", cors(s.handleDeletePlayback))
 

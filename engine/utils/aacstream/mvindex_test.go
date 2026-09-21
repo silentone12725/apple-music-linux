@@ -341,3 +341,119 @@ func TestMVDecIndex_FinishRoundTrips(t *testing.T) {
 	}
 	t.Log("VERDICT: finish() writes a valid JSON sidecar that reads back.")
 }
+
+// TestMVLiveIndex_FragByIndex verifies FragByIndex readiness logic:
+// fragment is ready only when End != 0 && End <= written.
+func TestMVLiveIndex_FragByIndex(t *testing.T) {
+	const timescale = 1000
+	decTimes := []uint64{0, 1000, 2000, 3000}
+	stream, initSize, _, wantOffsets := buildMVStream(t, timescale, decTimes)
+	totalLen := int64(len(stream))
+
+	idx := NewMVLiveIndex()
+	idx.Write(stream) // feed all bytes at once
+
+	// After a full feed the indexer has all fragments. The last fragment has End==0
+	// because no subsequent moof arrived. Finalize it.
+	idx.Finalize(totalLen)
+
+	// n < 0 → false
+	if _, ok := idx.FragByIndex(-1, totalLen); ok {
+		t.Error("FragByIndex(-1): expected false, got true")
+	}
+	// n == FragCount() → false
+	n := idx.FragCount()
+	if _, ok := idx.FragByIndex(n, totalLen); ok {
+		t.Errorf("FragByIndex(%d == FragCount): expected false, got true", n)
+	}
+	// Fragment 0 should be at initSize offset
+	f0, ok := idx.FragByIndex(0, totalLen)
+	if !ok {
+		t.Fatal("FragByIndex(0, totalLen): expected true, got false")
+	}
+	if f0.Off != wantOffsets[0] {
+		t.Errorf("frag[0].Off=%d want %d", f0.Off, wantOffsets[0])
+	}
+	if f0.Off < initSize {
+		t.Errorf("frag[0].Off=%d < initSize=%d", f0.Off, initSize)
+	}
+	// Fragment not yet fully written: written < End → false
+	f1, ok1 := idx.FragByIndex(1, totalLen)
+	if !ok1 {
+		t.Fatal("FragByIndex(1, totalLen): expected true, got false")
+	}
+	if _, ok := idx.FragByIndex(1, f1.End-1); ok {
+		t.Error("FragByIndex(1, End-1): expected false (not yet written), got true")
+	}
+}
+
+// TestMVLiveIndex_InitSize verifies InitSize is 0 before any bytes and
+// correct once the first moof is seen.
+func TestMVLiveIndex_InitSize(t *testing.T) {
+	const timescale = 1000
+	decTimes := []uint64{0, 1000}
+	stream, wantInitSize, _, _ := buildMVStream(t, timescale, decTimes)
+
+	idx := NewMVLiveIndex()
+	if sz, ok := idx.InitSize(); ok || sz != 0 {
+		t.Errorf("before feed: InitSize=%d ok=%v; want 0,false", sz, ok)
+	}
+	idx.Write(stream)
+	sz, ok := idx.InitSize()
+	if !ok {
+		t.Fatal("after full feed: InitSize not ready")
+	}
+	if sz != wantInitSize {
+		t.Errorf("InitSize=%d want %d", sz, wantInitSize)
+	}
+}
+
+// TestMVLiveIndex_FinalFragment verifies Finalize sets the last fragment's End.
+func TestMVLiveIndex_FinalFragment(t *testing.T) {
+	const timescale = 1000
+	decTimes := []uint64{0, 1000, 2000}
+	stream, _, _, _ := buildMVStream(t, timescale, decTimes)
+	totalLen := int64(len(stream))
+
+	idx := NewMVLiveIndex()
+	idx.Write(stream)
+
+	last := idx.FragCount() - 1
+	// Before Finalize: last fragment End == 0 → not ready
+	if _, ok := idx.FragByIndex(last, totalLen); ok {
+		t.Error("before Finalize: last fragment should not be ready")
+	}
+	// Finalize with totalLen
+	idx.Finalize(totalLen)
+	// After Finalize: ready
+	f, ok := idx.FragByIndex(last, totalLen)
+	if !ok {
+		t.Fatal("after Finalize: last fragment should be ready")
+	}
+	if f.End != totalLen {
+		t.Errorf("frag[last].End=%d want %d", f.End, totalLen)
+	}
+	// written < totalLen → still not ready
+	if _, ok := idx.FragByIndex(last, totalLen-1); ok {
+		t.Error("written < End: last fragment should not be ready")
+	}
+}
+
+// TestMVLiveIndex_FragByIndex_OutOfRange verifies all out-of-range indices
+// return (zero, false) without panicking.
+func TestMVLiveIndex_FragByIndex_OutOfRange(t *testing.T) {
+	const timescale = 1000
+	decTimes := []uint64{0, 1000}
+	stream, _, _, _ := buildMVStream(t, timescale, decTimes)
+
+	idx := NewMVLiveIndex()
+	idx.Write(stream)
+	idx.Finalize(int64(len(stream)))
+
+	n := idx.FragCount()
+	for _, bad := range []int{-1, -100, n, n + 1, n + 100} {
+		if _, ok := idx.FragByIndex(bad, int64(len(stream))); ok {
+			t.Errorf("FragByIndex(%d): expected false, got true", bad)
+		}
+	}
+}
