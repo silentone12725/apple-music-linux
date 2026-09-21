@@ -309,6 +309,14 @@ func (p *Player) Resume() {
 	C.libvlc_media_player_set_pause(p.mp, 0)
 }
 
+// SetRate adjusts the playback rate (1.0 = normal, 0.99 = 1% slow, 1.01 = 1% fast).
+// Used for gradual drift correction instead of hard SetTime seeks.
+func (p *Player) SetRate(rate float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	C.libvlc_media_player_set_rate(p.mp, C.float(rate))
+}
+
 // SetVolume sets the audio volume. vol is 0–200 (100 = 100%).
 func (p *Player) SetVolume(vol int) {
 	if vol < 0 {

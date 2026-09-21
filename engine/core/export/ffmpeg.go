@@ -14,6 +14,17 @@ func lookFFmpeg(p string) error {
 	return nil
 }
 
+// sanitizeMeta strips control characters that could break FFmpeg -metadata
+// key=value argument parsing (newlines allow injecting additional arguments).
+func sanitizeMeta(v string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\x00' {
+			return ' '
+		}
+		return r
+	}, v)
+}
+
 // findVLC returns the first VLC binary found on PATH: tries the explicit path,
 // then "cvlc" (headless), then "vlc".
 func findVLC(explicit string) (string, bool) {
@@ -34,8 +45,10 @@ func findVLC(explicit string) (string, bool) {
 // The output FLAC has correct audio data but STREAMINFO.total_samples=0
 // (VLC streaming mode); tagFLAC re-encodes it to fix that.
 func runVLCToFLAC(vlcPath, src, dst string) error {
+	// Escape VLC sout special characters in the dst path.
+	// '}' closes the option block; ':' and '#' are sout module separators.
 	sout := fmt.Sprintf("#transcode{acodec=flac,channels=2}:std{access=file,mux=raw,dst=%s}",
-		strings.ReplaceAll(dst, "}", "\\}"))
+		strings.NewReplacer("}", "\\}", ":", "\\:", "#", "\\#").Replace(dst))
 	cmd := exec.Command(vlcPath,
 		"--intf", "dummy",
 		"--no-video",
@@ -100,16 +113,16 @@ func tagFLAC(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 	args = append(args, "-map_metadata", "-1")
 
 	if meta.Title != "" {
-		args = append(args, "-metadata", "title="+meta.Title)
+		args = append(args, "-metadata", "title="+sanitizeMeta(meta.Title))
 	}
 	if meta.ArtistName != "" {
-		args = append(args, "-metadata", "artist="+meta.ArtistName)
+		args = append(args, "-metadata", "artist="+sanitizeMeta(meta.ArtistName))
 	}
 	if meta.AlbumArtist != "" {
-		args = append(args, "-metadata", "album_artist="+meta.AlbumArtist)
+		args = append(args, "-metadata", "album_artist="+sanitizeMeta(meta.AlbumArtist))
 	}
 	if meta.AlbumName != "" {
-		args = append(args, "-metadata", "album="+meta.AlbumName)
+		args = append(args, "-metadata", "album="+sanitizeMeta(meta.AlbumName))
 	}
 	if meta.TrackNumber > 0 {
 		track := fmt.Sprintf("%d", meta.TrackNumber)
@@ -126,25 +139,25 @@ func tagFLAC(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 		args = append(args, "-metadata", "disc="+disc)
 	}
 	if meta.ReleaseDate != "" {
-		args = append(args, "-metadata", "date="+meta.ReleaseDate)
+		args = append(args, "-metadata", "date="+sanitizeMeta(meta.ReleaseDate))
 	}
 	if meta.Genre != "" {
-		args = append(args, "-metadata", "genre="+meta.Genre)
+		args = append(args, "-metadata", "genre="+sanitizeMeta(meta.Genre))
 	}
 	if meta.Composer != "" {
-		args = append(args, "-metadata", "composer="+meta.Composer)
+		args = append(args, "-metadata", "composer="+sanitizeMeta(meta.Composer))
 	}
 	if meta.Copyright != "" {
-		args = append(args, "-metadata", "copyright="+meta.Copyright)
+		args = append(args, "-metadata", "copyright="+sanitizeMeta(meta.Copyright))
 	}
 	if meta.RecordLabel != "" {
-		args = append(args, "-metadata", "publisher="+meta.RecordLabel)
+		args = append(args, "-metadata", "publisher="+sanitizeMeta(meta.RecordLabel))
 	}
 	if meta.Isrc != "" {
-		args = append(args, "-metadata", "isrc="+meta.Isrc)
+		args = append(args, "-metadata", "isrc="+sanitizeMeta(meta.Isrc))
 	}
 	if meta.UPC != "" {
-		args = append(args, "-metadata", "barcode="+meta.UPC)
+		args = append(args, "-metadata", "barcode="+sanitizeMeta(meta.UPC))
 	}
 
 	args = append(args, "-f", "flac", "-y", dst)

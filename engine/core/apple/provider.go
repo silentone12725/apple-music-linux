@@ -38,6 +38,18 @@ import (
 // cancellation still works before the 30s deadline.
 var webplaybackClient = &http.Client{Timeout: 30 * time.Second}
 
+// progressiveCDNClient forwards byte-range requests to Apple CDN for progressive
+// video playback.  No hard Timeout (streams can run for hours); only
+// ResponseHeaderTimeout so a stalled TLS handshake doesn't park a goroutine
+// forever.  The caller's request context handles client-disconnect cancellation.
+var progressiveCDNClient = &http.Client{
+	Transport: &http.Transport{
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
+
 // AssetFlavor identifies the DRM family and bitrate of a webplayback asset.
 // The naming convention is "<id>:<enc><bitrate>" where enc is:
 //   - ctrp = CTR/Widevine (data:;base64 key format — wrapper server compatible)
@@ -462,7 +474,7 @@ func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, token
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap for API JSON
 }
 
 // webplaybackURL returns the HLS master playlist URL for a music video.
@@ -563,7 +575,7 @@ func (p *appleMusicProvider) fetchSubDownload(ctx context.Context, adamID, token
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap for API JSON
 	if err != nil {
 		return nil, err
 	}
@@ -665,7 +677,7 @@ func (s *progressiveVideoSource) Stream(ctx context.Context, w io.Writer) error 
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := progressiveCDNClient.Do(req)
 	if err != nil {
 		return err
 	}

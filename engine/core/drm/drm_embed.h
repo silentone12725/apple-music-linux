@@ -18,6 +18,7 @@ typedef struct {
     const char *decrypt_port;  /* --decrypt-port, e.g. "10020"            */
     const char *m3u8_port;     /* --m3u8-port,    e.g. "20020"            */
     const char *account_port;  /* --account-port, e.g. "30020"            */
+    const char *mv_port;       /* --mv-port,      e.g. "40020"            */
     const char *device_info;   /* 9-field device identifier string         */
     const char *login;         /* "email:password" or NULL for session reuse */
     int         code_from_file;  /* non-zero → pass --code-from-file       */

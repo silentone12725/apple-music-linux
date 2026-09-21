@@ -73,6 +73,32 @@ var artworkClient = &http.Client{
 	},
 }
 
+// cdnClient is used for proxying long-lived video Range requests to Apple CDN.
+// No hard Timeout (video streams can take hours); ResponseHeaderTimeout bounds
+// stalled connections at the TLS/header phase without cutting off active streams.
+// The caller's request context (r.Context()) handles client-disconnect cancellation.
+var cdnClient = &http.Client{
+	Transport: &http.Transport{
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:          20,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   4,
+	},
+}
+
+// drmAccountAdapter adapts *drm.DRMManager to apple.AccountTokenSource so the
+// apple package stays decoupled from the drm package's concrete types.
+type drmAccountAdapter struct{ dm *drm.DRMManager }
+
+func (a *drmAccountAdapter) GetMusicToken(ctx context.Context) (devToken, musicToken string, err error) {
+	info, err := a.dm.GetAccount(ctx)
+	return info.DevToken, info.MusicToken, err
+}
+
+func (a *drmAccountAdapter) GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, error) {
+	return a.dm.GetProgressiveMVURL(ctx, adamID)
+}
+
 // ── Request / response types ──────────────────────────────────────────────────
 
 // PlaybackRequest is the POST /api/v1/playback request body.
@@ -445,6 +471,7 @@ type ServerConfig struct {
 	UseEmbeddedBackend bool
 	DecryptM3u8Port    string
 	GetM3u8Port        string
+	GetMVPort          string
 }
 
 // NewAPIServer wires all routes.
@@ -501,9 +528,9 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	preferred, fallbackName := drm.ResolveBackendPolicy(
 		drmBinaryPath != "", cfg.BackendPreferred, cfg.BackendFallback, cfg.UseEmbeddedBackend)
 	s.backendName = preferred
-	drmBackend := buildDRMBackend(preferred, drmBinaryPath, cfg.DecryptM3u8Port, cfg.GetM3u8Port)
+	drmBackend := buildDRMBackend(preferred, drmBinaryPath, cfg.DecryptM3u8Port, cfg.GetM3u8Port, cfg.GetMVPort)
 	if fallbackName != "" && fallbackName != preferred {
-		if fb := buildDRMBackend(fallbackName, drmBinaryPath, cfg.DecryptM3u8Port, cfg.GetM3u8Port); fb != nil && drmBackend != nil {
+		if fb := buildDRMBackend(fallbackName, drmBinaryPath, cfg.DecryptM3u8Port, cfg.GetM3u8Port, cfg.GetMVPort); fb != nil && drmBackend != nil {
 			composite := drm.NewFallbackBackend(drmBackend, preferred, fb, fallbackName)
 			drmBackend = composite
 			if sel, ok := composite.(drm.BackendSelection); ok {
@@ -549,7 +576,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// PlaybackManager receives DRMManager as the CBCSDialer for ALAC/Atmos.
 	// DRMManager.DialCBCS auto-starts the drm binary if a session exists, then
 	// opens a TCP connection for the FairPlay wire protocol.
-	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(s.dm))
+	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(s.dm, &drmAccountAdapter{s.dm}))
 
 	// Prefetch scheduler — credentials are resolved lazily at Submit time
 	// so token rotations are picked up automatically.
@@ -813,13 +840,14 @@ func (s *APIServer) Stop() {
 // buildDRMBackend constructs a single backend by name. Both backends share the
 // same transport addresses; EmbeddedBackend needs the drm directory, while
 // ProcessBackend execs the drm-rootless binary at drmBinaryPath.
-func buildDRMBackend(name, drmBinaryPath, decryptAddr, m3u8Addr string) drm.DRMBackend {
+func buildDRMBackend(name, drmBinaryPath, decryptAddr, m3u8Addr, mvAddr string) drm.DRMBackend {
 	if name == "embedded" {
 		return drm.NewEmbeddedBackend(drm.EmbedConfig{
 			WrapperDir:  filepath.Dir(drmBinaryPath),
 			OmitBaseDir: true,
 			DecryptAddr: decryptAddr,
 			M3U8Addr:    m3u8Addr,
+			MVAddr:      mvAddr,
 		})
 	}
 	return drm.NewProcessBackend(drm.ProcessConfig{
@@ -827,6 +855,7 @@ func buildDRMBackend(name, drmBinaryPath, decryptAddr, m3u8Addr string) drm.DRMB
 		OmitBaseDir: true, // drm-rootless resolves BaseDir relative to its cwd; absolute path breaks anisette init
 		DecryptAddr: decryptAddr,
 		M3U8Addr:    m3u8Addr,
+		MVAddr:      mvAddr,
 	})
 }
 

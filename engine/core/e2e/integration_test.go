@@ -157,7 +157,7 @@ func streamTrack(t *testing.T, mgr *playback.Manager, adamID, storefront string,
 func TestIntegration_ALAC(t *testing.T) {
 	adamID, token, mut, sf, cbcsAddr := integrationCreds(t)
 
-	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr)))
+	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr), nil))
 	res := streamTrack(t, mgr, adamID, sf, playback.OpenRequest{
 		AssetID:    adamID,
 		Storefront: sf,
@@ -195,7 +195,7 @@ func TestIntegration_ALAC(t *testing.T) {
 func TestIntegration_AAC(t *testing.T) {
 	adamID, token, mut, sf, cbcsAddr := integrationCreds(t)
 
-	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr)))
+	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr), nil))
 	res := streamTrack(t, mgr, adamID, sf, playback.OpenRequest{
 		AssetID:    adamID,
 		Storefront: sf,
@@ -233,7 +233,7 @@ func TestIntegration_Atmos(t *testing.T) {
 		t.Skip("AM_TEST_ATMOS_ID not set")
 	}
 
-	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr)))
+	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr), nil))
 	res := streamTrack(t, mgr, atmosID, sf, playback.OpenRequest{
 		AssetID:    atmosID,
 		Storefront: sf,
@@ -270,7 +270,7 @@ func TestIntegration_ConcurrentSessions(t *testing.T) {
 	adamID, token, mut, sf, cbcsAddr := integrationCreds(t)
 
 	// Reference run first (sequential, single session).
-	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr)))
+	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr), nil))
 	ref := streamTrack(t, mgr, adamID, sf, playback.OpenRequest{
 		AssetID: adamID, Storefront: sf, Token: token, MUT: mut, Lossless: true,
 	})
@@ -287,7 +287,7 @@ func TestIntegration_ConcurrentSessions(t *testing.T) {
 	ch := make(chan result, N)
 	for i := range N {
 		go func(i int) {
-			m := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr)))
+			m := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr), nil))
 			r := streamTrack(t, m, adamID, sf, playback.OpenRequest{
 				AssetID: adamID, Storefront: sf, Token: token, MUT: mut, Lossless: true,
 			})
@@ -333,7 +333,7 @@ func TestIntegration_ConcurrentSessions(t *testing.T) {
 func TestIntegration_CancelMidStream(t *testing.T) {
 	adamID, token, mut, sf, cbcsAddr := integrationCreds(t)
 
-	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr)))
+	mgr := playback.NewWithProvider(apple.NewProviderWithCBCS(fairplay.DialerFromAddr(cbcsAddr), nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 

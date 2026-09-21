@@ -125,6 +125,10 @@ func (b *mockBackend) GetAccount(ctx context.Context) (drm.AccountInfo, error) {
 	return info, err
 }
 
+func (b *mockBackend) GetProgressiveMVURL(_ context.Context, _ uint64) (string, error) {
+	return "", errors.New("mock: GetProgressiveMVURL not implemented")
+}
+
 func (b *mockBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	return nil, errors.New("mock: DialCBCS not implemented")
 }

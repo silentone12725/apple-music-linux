@@ -581,7 +581,7 @@ func fetchWithHeaders(ctx context.Context, rawURL string, headers map[string]str
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, rawURL)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap for HLS playlist
 }
 
 // OpenMasterAuth is like OpenMaster but adds Apple Music auth headers.
