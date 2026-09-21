@@ -73,18 +73,6 @@ var artworkClient = &http.Client{
 	},
 }
 
-// cdnClient is used for proxying long-lived video Range requests to Apple CDN.
-// No hard Timeout (video streams can take hours); ResponseHeaderTimeout bounds
-// stalled connections at the TLS/header phase without cutting off active streams.
-// The caller's request context (r.Context()) handles client-disconnect cancellation.
-var cdnClient = &http.Client{
-	Transport: &http.Transport{
-		ResponseHeaderTimeout: 30 * time.Second,
-		MaxIdleConns:          20,
-		IdleConnTimeout:       90 * time.Second,
-		MaxIdleConnsPerHost:   4,
-	},
-}
 
 // drmAccountAdapter adapts *drm.DRMManager to apple.AccountTokenSource so the
 // apple package stays decoupled from the drm package's concrete types.

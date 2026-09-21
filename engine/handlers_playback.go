@@ -104,40 +104,6 @@ func (s *APIServer) stopMVGrowing(id string) {
 	}
 }
 
-// proxyProgressiveVideo forwards the browser's Range request to the Apple CDN
-// URL and pipes the response back verbatim. Chrome handles moov discovery and
-// all seeking natively — the same pattern Android's ExoPlayer uses for mvod.
-func (s *APIServer) proxyProgressiveVideo(w http.ResponseWriter, r *http.Request, mvURL string) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, mvURL, nil)
-	if err != nil {
-		http.Error(w, "proxy: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	if rng := r.Header.Get("Range"); rng != "" {
-		req.Header.Set("Range", rng)
-	}
-	resp, err := cdnClient.Do(req)
-	if err != nil {
-		if r.Context().Err() != nil {
-			return // client disconnected
-		}
-		http.Error(w, "proxy: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	hdr := w.Header()
-	for _, h := range []string{"Content-Type", "Content-Length", "Content-Range", "Last-Modified", "ETag"} {
-		if v := resp.Header.Get(h); v != "" {
-			hdr.Set(h, v)
-		}
-	}
-	if hdr.Get("Content-Type") == "" {
-		hdr.Set("Content-Type", "video/mp4")
-	}
-	hdr.Set("Accept-Ranges", "bytes")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body) //nolint:errcheck
-}
 
 // parseRangeStart extracts the start offset from an HTTP Range header value.
 // Handles "bytes=X-" and "bytes=X-Y". Returns 0 for unrecognised formats.
@@ -704,28 +670,16 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// ── Slow path: Range proxy to Apple CDN ───────────────────────────────────
-	// Forward the browser's Range header directly to mvod.itunes.apple.com.
-	// Chrome handles moov discovery, byte-range seeking, and buffering natively.
-	// Start building the faststart cache in the background so future plays are instant.
-	log.Printf("%s cache miss id=%s assetID=%s → CDN proxy", tagVideo("[video-dl]"), id, assetID)
-	// Always start the faststart build regardless of caching setting — the
-	// native <video src> path depends on it for EC-3 audio recovery (CDN files
-	// often carry EC-3 which Chrome on Linux cannot decode; the faststart remux
-	// uses -map 0:v:0 so the cached file is video-only, no crash).
-	// When caching is disabled the file is marked ephemeral and deleted on
-	// session release; the cache still exists for the duration of this session.
+	// ── Slow path: faststart not ready ────────────────────────────────────────
+	// The decrypted faststart MP4 is still being built from the HLS CBCS stream.
+	// Return 503 so the frontend can show a spinner and poll /video-dl-info.
+	// Do not serve the raw CDN URL — those files carry iTunes FairPlay (drmi/drms)
+	// which Chrome on Linux cannot decrypt.
+	log.Printf("%s cache miss id=%s assetID=%s → 503 (building)", tagVideo("[video-dl]"), id, assetID)
 	if _, already := mvPreparing.Load(assetID); !already {
 		go s.prepareMVFaststart(id, assetID, durationSec)
 	}
-
-	mvURL, hasURL := s.pm.GetProgressiveURL(id, pipeline.KindVideo)
-	if !hasURL {
-		http.Error(w, "no progressive URL for this video session", http.StatusNotFound)
-		return
-	}
-	log.Printf("%s CDN url=%s", tagVideo("[video-dl]"), mvURL)
-	s.proxyProgressiveVideo(w, r, mvURL)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"cached": false, "preparing": true})
 }
 
 // handlePlaybackVideoRaw streams the raw decrypted multi-track fMP4 for a
