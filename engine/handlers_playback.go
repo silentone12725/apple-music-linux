@@ -798,19 +798,43 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 		// 	tagInfo("[mv-es-seek]"), seekSec, ok, frag.T, frag.Off, frag.End, iok, initSize, st.spw.Written())
 		if ok {
 			if iok && frag.End > 0 && frag.End <= st.spw.Written() {
-				// log.Printf("%s seek=%.3f source=growing-file off=%d end=%d written=%d",
-				// 	tagOK("[mv-es-seek]"), seekSec, frag.Off, frag.End, st.spw.Written())
-				initRaw := st.spw.NewReaderAt(0)
-				defer initRaw.Close()
-				fragR := st.spw.NewReaderAt(frag.Off)
-				defer fragR.Close()
-				// init segment (ftyp+moov, bounded) then the fragment onward (grows,
-				// so playback continues from the seek point without re-streaming).
-				combined := io.MultiReader(io.LimitReader(initRaw, initSize), fragR)
-				if err := aacstream.DemuxFMP4ToES(r.Context(), combined, w); err != nil && r.Context().Err() == nil {
-					log.Printf("[video-es] growing-file seek demux error id=%s: %v", id, err)
+				// Check whether the producer has finished (spw.Commit() called). After
+				// commit the .tmp file is renamed away, so spw.NewReaderAt() would fail
+				// with "file already closed". In that case open the committed file from
+				// the disk cache directly — the full fMP4 is on disk and any seek is valid.
+				producerDone := false
+				select {
+				case <-st.done:
+					producerDone = true
+				default:
 				}
-				return
+				if producerDone {
+					if f, ok2 := s.diskCache.Get(st.assetID, st.qualifier); ok2 {
+						defer f.Close()
+						totalWritten := st.spw.Written()
+						combined := io.MultiReader(
+							io.NewSectionReader(f, 0, initSize),
+							io.NewSectionReader(f, frag.Off, totalWritten-frag.Off),
+						)
+						if err := aacstream.DemuxFMP4ToES(r.Context(), combined, w); err != nil && r.Context().Err() == nil {
+							log.Printf("[video-es] committed seek demux error id=%s: %v", id, err)
+						}
+						return
+					}
+					// Committed file not readable (evicted?); fall through to network.
+				} else {
+					initRaw := st.spw.NewReaderAt(0)
+					defer initRaw.Close()
+					fragR := st.spw.NewReaderAt(frag.Off)
+					defer fragR.Close()
+					// init segment (ftyp+moov, bounded) then the fragment onward (grows,
+					// so playback continues from the seek point without re-streaming).
+					combined := io.MultiReader(io.LimitReader(initRaw, initSize), fragR)
+					if err := aacstream.DemuxFMP4ToES(r.Context(), combined, w); err != nil && r.Context().Err() == nil {
+						log.Printf("[video-es] growing-file seek demux error id=%s: %v", id, err)
+					}
+					return
+				}
 			}
 		}
 		// Beyond the download head (or index not ready): network fallback. The

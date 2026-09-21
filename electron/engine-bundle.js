@@ -2388,7 +2388,7 @@
       const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
       const pct = _fillPct(frac).toFixed(2) + "%";
       rangeInput.style.setProperty("--progress", pct);
-      rangeInput.style.setProperty("--width", pct);
+      if (!_wcVideo && !_nativeVideo) rangeInput.style.setProperty("--width", pct);
       if (max > 0) {
         let bFrac = 0;
         if (_wcVideo) {

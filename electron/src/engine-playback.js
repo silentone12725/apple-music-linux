@@ -2784,7 +2784,10 @@ async function startMVPipeline() {
         const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
         const pct  = _fillPct(frac).toFixed(2) + '%';
         rangeInput.style.setProperty('--progress', pct);
-        rangeInput.style.setProperty('--width',    pct);
+        // WC/native: the native range thumb (driven by rangeInput.value above) is the
+        // visual indicator. Setting --width also moves AML's CSS thumb element, producing
+        // a second thumb. Only set --width for MSE where we want AML's custom thumb.
+        if (!_wcVideo && !_nativeVideo) rangeInput.style.setProperty('--width', pct);
         if (max > 0) {
             let bFrac = 0;
             if (_wcVideo) {
