@@ -27,16 +27,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"sync"
 
 	"github.com/itouakirai/mp4ff/mp4"
 )
 
 // MVFragEntry is one indexed fragment: its presentation start time and the
-// plaintext byte offset of its moof box.
+// plaintext byte offset of its moof box. End is the plaintext offset one past the
+// fragment (== the next moof's Off), so [Off,End) is the complete moof+mdat. End
+// is 0 for the most recent (still-open) fragment until the next moof arrives.
 type MVFragEntry struct {
-	T   float64 `json:"t"`   // start time, seconds
-	Off int64   `json:"off"` // plaintext byte offset of the moof
+	T   float64 `json:"t"`             // start time, seconds
+	Off int64   `json:"off"`           // plaintext byte offset of the moof
+	End int64   `json:"end,omitempty"` // plaintext offset one past the fragment (next moof's Off); 0 if unbounded
 }
 
 // MVDecIndex is the sidecar written next to a completed dec-cache file.
@@ -56,6 +61,12 @@ const (
 // records fragment offsets/times. Feed it the exact plaintext bytes written to
 // the cache; call finish() to persist the index.
 type mvDecIndexer struct {
+	// mu guards the fields read concurrently by the live seek path (frags,
+	// initSize/initSet, timescale). The dec-cache write path is single-threaded so
+	// the lock is uncontended there; the growing-file path feeds from the producer
+	// goroutine while seek requests call lookup()/initSizeLive() concurrently.
+	mu sync.RWMutex
+
 	disabled bool
 
 	pos      int64 // running total of plaintext bytes fed
@@ -69,10 +80,17 @@ type mvDecIndexer struct {
 	collect   bool   // buffer this box's body (moov/moof) for decoding
 	body      []byte // buffered full box (header+body) when collect
 
-	timescale uint64
-	initSize  int64
-	initSet   bool
-	frags     []MVFragEntry
+	timescale    uint64
+	videoTrackID uint32 // track to index times from (raw input is multi-track: audio+video+subs)
+	initSize     int64
+	initSet      bool
+	frags        []MVFragEntry
+	// Apple MV fMP4 tfdt encodes absolute media time (first fragment ≈10s, not 0s).
+	// We normalize to a 0-based timeline so Lookup() uses the same clock as mkAudio.currentTime.
+	baseTime    float64
+	baseTimeSet bool
+	dbgN        int // limits per-fragment/skip diagnostic logging
+	dbgBoxN     int // limits per-box scanner diagnostic logging
 }
 
 func newMVDecIndexer() *mvDecIndexer {
@@ -135,6 +153,7 @@ func (ix *mvDecIndexer) feed(p []byte) {
 		if ix.collect {
 			ix.body = append(ix.body, p[:take]...)
 			if len(ix.body) > mvIdxMaxCollectSize {
+				log.Printf("[mv-idx] disabled: %s box body exceeded %dB (misread size?)", ix.boxType, mvIdxMaxCollectSize)
 				ix.disabled = true
 				return
 			}
@@ -157,13 +176,19 @@ func (ix *mvDecIndexer) feed(p []byte) {
 // startBox is called once a box header is fully read. Returns false if the
 // indexer disabled itself.
 func (ix *mvDecIndexer) startBox(size int64, typ string) bool {
+	if ix.dbgBoxN < 24 {
+		ix.dbgBoxN++
+		log.Printf("[mv-idx] box off=%d type=%q size=%d", ix.boxStart, typ, size)
+	}
 	// size==0 means "to EOF" (a trailing mdat); nothing more to index.
 	if size == 0 {
+		log.Printf("[mv-idx] disabled: box %q size=0 (to-EOF) at off=%d", typ, ix.boxStart)
 		ix.disabled = true
 		return false
 	}
 	hdrLen := int64(len(ix.hdr))
 	if size < hdrLen || size > mvIdxMaxBoxSize {
+		log.Printf("[mv-idx] disabled: box %q bad size=%d at off=%d", typ, size, ix.boxStart)
 		ix.disabled = true
 		return false
 	}
@@ -175,8 +200,10 @@ func (ix *mvDecIndexer) startBox(size int64, typ string) bool {
 	}
 	// First moof marks the end of the init segment.
 	if typ == "moof" && !ix.initSet {
+		ix.mu.Lock()
 		ix.initSize = ix.boxStart
 		ix.initSet = true
+		ix.mu.Unlock()
 	}
 	return true
 }
@@ -188,26 +215,98 @@ func (ix *mvDecIndexer) finishBox() {
 	}
 	box, err := mp4.DecodeBox(0, bytes.NewReader(ix.body))
 	if err != nil || box == nil {
+		if ix.dbgN < 8 {
+			ix.dbgN++
+			log.Printf("[mv-idx] DecodeBox(%s, %dB) failed: %v", ix.boxType, len(ix.body), err)
+		}
 		return // skip this box; keep indexing others
 	}
 	switch b := box.(type) {
 	case *mp4.MoovBox:
+		// Index times from the VIDEO track: the raw CBCS input is multi-track
+		// (audio+video+subs), so the first trak/traf is often audio with a
+		// different timescale — using it yields wrong fragment times. Mirror
+		// DemuxFMP4ToES's video-track selection.
+		var vTrackID uint32
+		var vTimescale uint64
 		for _, trak := range b.Traks {
-			if trak.Mdia != nil && trak.Mdia.Mdhd != nil && trak.Mdia.Mdhd.Timescale > 0 {
-				ix.timescale = uint64(trak.Mdia.Mdhd.Timescale)
+			if trak.Mdia != nil && trak.Mdia.Hdlr != nil && trak.Mdia.Hdlr.HandlerType == "vide" &&
+				trak.Mdia.Mdhd != nil && trak.Mdia.Mdhd.Timescale > 0 {
+				vTrackID = trak.Tkhd.TrackID
+				vTimescale = uint64(trak.Mdia.Mdhd.Timescale)
 				break
 			}
 		}
+		if vTimescale == 0 { // single-track / no handler: fall back to first track with a timescale
+			for _, trak := range b.Traks {
+				if trak.Mdia != nil && trak.Mdia.Mdhd != nil && trak.Mdia.Mdhd.Timescale > 0 {
+					vTimescale = uint64(trak.Mdia.Mdhd.Timescale)
+					if trak.Tkhd != nil {
+						vTrackID = trak.Tkhd.TrackID
+					}
+					break
+				}
+			}
+		}
+		if vTimescale > 0 {
+			ix.mu.Lock()
+			ix.timescale = vTimescale
+			ix.videoTrackID = vTrackID
+			ix.mu.Unlock()
+		}
+		log.Printf("[mv-idx] moov nTraks=%d vTrackID=%d vTimescale=%d", len(b.Traks), vTrackID, vTimescale)
 	case *mp4.MoofBox:
-		if ix.timescale == 0 || b.Traf == nil || b.Traf.Tfdt == nil {
+		if ix.timescale == 0 {
+			if ix.dbgN < 8 {
+				ix.dbgN++
+				log.Printf("[mv-idx] moof skipped: timescale==0 (moov not indexed)")
+			}
+			return
+		}
+		// Pick the video traf (by track ID) from a multi-track moof; fall back to
+		// the first traf for single-track input.
+		var vtraf *mp4.TrafBox
+		for _, traf := range b.Trafs {
+			if traf.Tfhd != nil && ix.videoTrackID != 0 && traf.Tfhd.TrackID == ix.videoTrackID {
+				vtraf = traf
+				break
+			}
+		}
+		if vtraf == nil {
+			vtraf = b.Traf
+		}
+		if vtraf == nil || vtraf.Tfdt == nil {
+			if ix.dbgN < 8 {
+				ix.dbgN++
+				log.Printf("[mv-idx] moof skipped: nTrafs=%d vtraf=%v tfdt=%v", len(b.Trafs), vtraf != nil, vtraf != nil && vtraf.Tfdt != nil)
+			}
 			return
 		}
 		if len(ix.frags) >= mvIdxMaxFrags {
 			ix.disabled = true
 			return
 		}
-		t := float64(b.Traf.Tfdt.BaseMediaDecodeTime()) / float64(ix.timescale)
+		t := float64(vtraf.Tfdt.BaseMediaDecodeTime()) / float64(ix.timescale)
+		// Normalize to 0-based: Apple's raw tfdt encodes absolute media time (first
+		// fragment ≈10s). Subtract the first fragment's time so the index matches
+		// mkAudio.currentTime which is 0-based.
+		if !ix.baseTimeSet {
+			ix.baseTime = t
+			ix.baseTimeSet = true
+		}
+		t -= ix.baseTime
+		ix.mu.Lock()
+		// This moof begins where the previous fragment ends: bound the prior entry.
+		if n := len(ix.frags); n > 0 {
+			ix.frags[n-1].End = ix.boxStart
+		}
 		ix.frags = append(ix.frags, MVFragEntry{T: t, Off: ix.boxStart})
+		n := len(ix.frags)
+		ix.mu.Unlock()
+		if ix.dbgN < 8 {
+			ix.dbgN++
+			log.Printf("[mv-idx] frag#%d T=%.3f off=%d (tfdt=%d ts=%d)", n, t, ix.boxStart, vtraf.Tfdt.BaseMediaDecodeTime(), ix.timescale)
+		}
 	}
 }
 
@@ -229,6 +328,59 @@ func (ix *mvDecIndexer) finish(decPath string) {
 	}
 	_ = os.Rename(tmp, decPath+".idx") // atomic; best-effort
 }
+
+// lookup returns the latest fragment whose start time is <= t, as a value copy
+// (never a pointer into frags — the writer may reallocate it). ok is false if no
+// fragment at/before t exists yet.
+func (ix *mvDecIndexer) lookup(t float64) (MVFragEntry, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	best := -1
+	for i := range ix.frags {
+		if ix.frags[i].T <= t {
+			best = i
+		} else {
+			break // frags are in ascending decode-time order
+		}
+	}
+	if best < 0 {
+		return MVFragEntry{}, false
+	}
+	return ix.frags[best], true
+}
+
+// initSizeLive returns the init-segment size (ftyp+moov) once the first moof has
+// been seen, else (0,false).
+func (ix *mvDecIndexer) initSizeLive() (int64, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	if !ix.initSet {
+		return 0, false
+	}
+	return ix.initSize, true
+}
+
+// MVLiveIndex is a concurrency-safe, incrementally-fed fragment index for the
+// growing-file /video-es path. It is an io.Writer so it can sit in an
+// io.MultiWriter beside the growing cache file; Lookup/InitSize are safe to call
+// from other goroutines while it is being fed.
+type MVLiveIndex struct{ ix *mvDecIndexer }
+
+// NewMVLiveIndex creates an empty live fragment index.
+func NewMVLiveIndex() *MVLiveIndex { return &MVLiveIndex{ix: newMVDecIndexer()} }
+
+// Write feeds plaintext fMP4 bytes to the indexer. It never errors and never
+// blocks (best-effort; disables itself on any anomaly), so it is safe to place in
+// an io.MultiWriter beside the growing cache file.
+func (m *MVLiveIndex) Write(p []byte) (int, error) { m.ix.feed(p); return len(p), nil }
+
+// Lookup returns the latest fragment whose start <= t. Callers must still verify
+// the fragment is complete and available (frag.End > 0 && frag.End <= bytesWritten)
+// before serving it from the growing file.
+func (m *MVLiveIndex) Lookup(t float64) (MVFragEntry, bool) { return m.ix.lookup(t) }
+
+// InitSize returns the init-segment byte size (ftyp+moov) once known.
+func (m *MVLiveIndex) InitSize() (int64, bool) { return m.ix.initSizeLive() }
 
 // ReadMVDecIndex loads the sidecar index for a dec-cache file, or (nil,false) if
 // none exists / is unreadable.

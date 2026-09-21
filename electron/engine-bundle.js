@@ -1604,8 +1604,8 @@
     myVid.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;";
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
-    const _nativeVideo = true;
-    const _wcVideo = false;
+    const _nativeVideo = false;
+    const _wcVideo = true;
     const _mp4Video = false;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
@@ -3031,6 +3031,8 @@
       const QUEUE_MAX = 24;
       const MAX_DECODE_QUEUE = QUEUE_MAX;
       const DECODE_AHEAD_SEC = 5;
+      const MAX_RENDER_QUEUE = 600;
+      let _wcDiscarded = 0;
       const aborted = () => _abortCtrl?.signal.aborted;
       let gen = 0;
       let currentSeekSec = 0;
@@ -3056,6 +3058,7 @@
       };
       let lastCt = null;
       let _metricN = 0;
+      const _queueLengthMs = () => queue.length >= 2 ? Math.max(0, (queue[queue.length - 1].tUs - queue[0].tUs) / 1e3) : 0;
       window._wcFrameStats = () => ({ opened: wcFramesOpened, closed: wcFramesClosed, outstanding: wcFramesOpened - wcFramesClosed });
       window._wcStats = () => ({
         gen,
@@ -3064,7 +3067,9 @@
         obsoleteState: wcObsoleteState,
         medianDriftMs: +(medianDrift() * 1e3).toFixed(1),
         bufferedSec: +(_wcBufferedSec || 0).toFixed(2),
-        queued: queue.length
+        queued: queue.length,
+        discarded: _wcDiscarded,
+        queueLengthMs: +_queueLengthMs().toFixed(0)
       });
       let wakeProducer = null;
       const wakeProd = () => {
@@ -3145,6 +3150,11 @@
               if (myGen !== gen) wcObsoleteState++;
               closeWcFrame(frame);
               return;
+            }
+            if (wcFramesOpened <= 4) console.log(`[wc-raw] frame#${wcFramesOpened} ts=${frame.timestamp} tsSec=${(frame.timestamp / 1e6).toFixed(3)} mkAudio.ct=${mkAudio.currentTime.toFixed(3)} gen=${myGen}`);
+            while (queue.length >= MAX_RENDER_QUEUE) {
+              closeWcFrame(queue.shift().frame);
+              _wcDiscarded++;
             }
             queue.push({ frame, tUs: frame.timestamp, g: myGen });
             const fSec = frame.timestamp / 1e6;
@@ -3306,7 +3316,16 @@
         }
         while (queue.length) closeWcFrame(queue.shift().frame);
         firstFrame = _avStarted;
-        _wcStallPaused = false;
+        if (_avStarted) {
+          _wcStallPaused = true;
+          try {
+            HTMLMediaElement.prototype.pause.call(mkAudio);
+          } catch (_) {
+          }
+          _wcSpinner.style.display = "block";
+        } else {
+          _wcStallPaused = false;
+        }
         _wcRebuffering = true;
         _wcRebufStart = Date.now();
         _wcDecErrCount = 0;
