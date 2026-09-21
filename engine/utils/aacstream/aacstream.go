@@ -177,7 +177,7 @@ func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", "", "", errors.New(resp.Status)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap for HLS playlist
 	if err != nil {
 		return "", "", "", err
 	}
@@ -267,7 +267,9 @@ var mvHTTPClient = &http.Client{
 		DisableCompression:    true,
 		ForceAttemptHTTP2:     true,
 	},
-	Timeout: 90 * time.Second,
+	// No client-level Timeout: segments can be 14MB+ at 2Mbps (~56s) or slower.
+	// ResponseHeaderTimeout guards against hung connections; body reads are bounded
+	// by the caller's context (session lifetime).
 }
 
 // licenseTransport is shared across all AcquireKey calls so TCP+TLS connections
@@ -421,7 +423,7 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 			}
 			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
-		data, err := io.ReadAll(resp.Body)
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MB cap per segment
 		resp.Body.Close()
 		if err != nil {
 			if attempt < maxRetries-1 && ctx.Err() == nil && retryBackoff(ctx, attempt) {
@@ -501,12 +503,27 @@ func streamMVSegmentDirect(ctx context.Context, url string, w io.Writer) error {
 	return fmt.Errorf("all retries exhausted")
 }
 
+// mvByteCounter wraps an io.Writer and records the total bytes written.
+// Used to measure segment 0's size for bandwidth estimation.
+type mvByteCounter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *mvByteCounter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // DownloadMVSegmentsStreaming replaces DownloadMVSegmentsParallel on the
-// streaming branch. Segment 0 is piped directly to w as bytes arrive from
-// Apple's CDN (first byte in O(RTT), not O(segment_size/bw)), while the next
-// `prefetch` segments are fetched into RAM in parallel. When segment 0 finishes
-// streaming, segment 1 is already in RAM and writes with zero wait. This matches
-// ExoPlayer's native HLS InputStream model (PlayerHttpDataSource.read → decoder).
+// streaming branch. Segment 0 is streamed at full available bandwidth with no
+// concurrent downloads competing for it. After segment 0 completes, bandwidth
+// is measured and an adaptive prefetch count is chosen (1 at 2Mbps, up to
+// `prefetch` at high bandwidth). Prefetched segments also stream: goroutines
+// open HTTP connections in parallel and send the open body as soon as headers
+// arrive (O(RTT)); the main goroutine drains each body in order via io.Copy,
+// so the growing file grows continuously — not in discrete end-of-segment jumps.
 func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer, prefetch int) error {
 	log.Printf("[dl] DownloadMVSegmentsStreaming nURLs=%d prefetch=%d firstURL=%s",
 		len(urls), prefetch, func() string {
@@ -523,22 +540,61 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	type prefetched struct {
-		data []byte
-		err  error
+	// Stream segment 0 at full bandwidth — no concurrent downloads compete.
+	// Wrap w to count bytes so we can measure bandwidth for adaptive prefetch.
+	seg0 := &mvByteCounter{w: w}
+	t0 := time.Now()
+	log.Printf("[dl] mv#0 streaming directly (no buffer)")
+	if err := streamMVSegmentDirect(ctx, urls[0], seg0); err != nil {
+		cancel()
+		return fmt.Errorf("segment 0: %w", err)
+	}
+	seg0Dur := time.Since(t0)
+
+	// Compute effectivePrefetch from measured segment-0 bandwidth.
+	// Parallel connections each get (bw/N) — at 2Mbps that's ruinous.
+	// 1 extra concurrent connection per 8Mbps keeps each connection's share ≥ 2Mbps.
+	effectivePrefetch := prefetch
+	if seg0Dur > 0 && seg0.n > 0 {
+		bwMbps := float64(seg0.n*8) / seg0Dur.Seconds() / 1e6
+		p := int(bwMbps / 8)
+		if p < 1 {
+			p = 1
+		}
+		if p > prefetch {
+			p = prefetch
+		}
+		effectivePrefetch = p
+		log.Printf("[dl] mv#0 done size=%dB elapsed=%.2fs bw=%.1fMbps → effectivePrefetch=%d",
+			seg0.n, seg0Dur.Seconds(), bwMbps, effectivePrefetch)
+	} else {
+		log.Printf("[dl] mv#0 done elapsed=%.2fs", seg0Dur.Seconds())
+	}
+
+	if len(urls) == 1 {
+		return nil
+	}
+
+	// prefetchStream holds a ready-to-drain HTTP response body for one
+	// prefetched segment. The goroutine blocks on done until the main goroutine
+	// finishes draining, then closes the body and releases its sem slot.
+	// This keeps at most `effectivePrefetch` concurrent open HTTP connections.
+	type prefetchStream struct {
+		body    io.ReadCloser // response body or cache bytes.Reader; nil on error
+		diskKey string        // for PutCachedMVSegment; empty for cache hits
+		err     error
+		done    chan struct{} // close to unblock goroutine cleanup; nil for cache hits
 	}
 
 	// ahead is a pipeline of channels, one per lookahead segment (urls[1:]).
-	// Buffer size = prefetch so the producer can queue that many ahead without
-	// blocking while segment 0 is still streaming.
-	ahead := make(chan chan prefetched, prefetch)
+	ahead := make(chan chan prefetchStream, effectivePrefetch)
 
 	go func() {
 		defer close(ahead)
-		// Semaphore limits concurrent prefetch HTTP requests to `prefetch`.
-		sem := make(chan struct{}, prefetch)
+		sem := make(chan struct{}, effectivePrefetch)
+
 		for i, url := range urls[1:] {
-			ch := make(chan prefetched, 1)
+			ch := make(chan prefetchStream, 1)
 			select {
 			case ahead <- ch:
 			case <-ctx.Done():
@@ -547,38 +603,103 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 			select {
 			case sem <- struct{}{}:
 			case <-ctx.Done():
-				ch <- prefetched{err: ctx.Err()}
+				ch <- prefetchStream{err: ctx.Err()}
 				return
 			}
-			go func(idx int, url string, ch chan prefetched) {
-				defer func() { <-sem }()
-				t0 := time.Now()
-				data, err := fetchMVSegment(ctx, url)
-				if err == nil {
-					log.Printf("[dl] mv#%d prefetch arrived size=%dB elapsed=%.2fs", idx, len(data), time.Since(t0).Seconds())
-				} else {
-					log.Printf("[dl] mv#%d prefetch error elapsed=%.2fs: %v", idx, time.Since(t0).Seconds(), err)
+
+			go func(idx int, url string, ch chan prefetchStream) {
+				diskKey := url
+				if q := strings.IndexByte(url, '?'); q >= 0 {
+					diskKey = url[:q]
 				}
-				ch <- prefetched{data, err}
+
+				// Cache hit: serve from memory; no connection to hold open.
+				if cached, ok := GetCachedMVSegment(diskKey); ok {
+					log.Printf("[dl] mv#%d prefetch cache HIT len=%d", idx, len(cached))
+					<-sem
+					ch <- prefetchStream{body: io.NopCloser(bytes.NewReader(cached))}
+					return
+				}
+
+				fetchURL, rangeHdr := url, ""
+				if k := strings.Index(url, "#bytes="); k >= 0 {
+					fetchURL = url[:k]
+					rangeHdr = "bytes=" + url[k+len("#bytes="):]
+				}
+
+				// Retry loop covers header acquisition only — no retry after
+				// body starts flowing (partial bytes already in w).
+				var (
+					resp    *http.Response
+					lastErr error
+				)
+				for attempt := 0; attempt < 3; attempt++ {
+					if ctx.Err() != nil {
+						lastErr = ctx.Err()
+						break
+					}
+					req, err := http.NewRequestWithContext(ctx, "GET", fetchURL, nil)
+					if err != nil {
+						lastErr = err
+						break
+					}
+					if rangeHdr != "" {
+						req.Header.Set("Range", rangeHdr)
+					}
+					resp, err = mvHTTPClient.Do(req)
+					if err != nil {
+						lastErr = fmt.Errorf("fetch: %w", err)
+						resp = nil
+						if !mvRetry(ctx, attempt, 3) {
+							break
+						}
+						continue
+					}
+					if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+						resp.Body.Close()
+						lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+						resp = nil
+						if !mvRetry(ctx, attempt, 3) {
+							break
+						}
+						continue
+					}
+					lastErr = nil
+					break
+				}
+
+				if lastErr != nil || resp == nil {
+					if lastErr == nil {
+						lastErr = fmt.Errorf("all retries exhausted")
+					}
+					log.Printf("[dl] mv#%d prefetch error: %v", idx, lastErr)
+					<-sem
+					ch <- prefetchStream{err: lastErr}
+					return
+				}
+
+				// Headers arrived — hand the open body to the main goroutine.
+				// Hold sem until done fires so concurrent connections stay bounded.
+				log.Printf("[dl] mv#%d prefetch headers ready", idx)
+				done := make(chan struct{})
+				ch <- prefetchStream{body: resp.Body, diskKey: diskKey, done: done}
+				select {
+				case <-done:
+				case <-ctx.Done():
+				}
+				resp.Body.Close()
+				<-sem
 			}(i+1, url, ch)
 		}
-		// Drain semaphore so all in-flight goroutines finish before close.
-		for range prefetch {
+
+		// Wait for all goroutines to release their sem slots before closing ahead.
+		for range effectivePrefetch {
 			sem <- struct{}{}
 		}
 	}()
 
-	// Stream segment 0 directly — first bytes reach MSE within O(RTT).
-	t0 := time.Now()
-	log.Printf("[dl] mv#0 streaming directly (no buffer)")
-	if err := streamMVSegmentDirect(ctx, urls[0], w); err != nil {
-		cancel()
-		return fmt.Errorf("segment 0: %w", err)
-	}
-	log.Printf("[dl] mv#0 stream done elapsed=%.2fs", time.Since(t0).Seconds())
-
-	// Drain prefetched segments in order; each is already in RAM by the time
-	// we reach it (segment 0's stream duration ≈ 1 segment download time).
+	// Drain prefetched segments in order. Each body is already open and bytes
+	// are flowing from the CDN — no wait for a full segment to buffer in RAM.
 	idx := 1
 	for ch := range ahead {
 		r := <-ch
@@ -586,11 +707,28 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 			cancel()
 			return fmt.Errorf("segment %d: %w", idx, r.err)
 		}
+
 		t1 := time.Now()
-		if _, err := w.Write(r.data); err != nil {
-			return err
+		var dst io.Writer = w
+		var cacheBuf bytes.Buffer
+		if MVCacheEnabled() && r.diskKey != "" {
+			dst = io.MultiWriter(w, &cacheBuf)
 		}
-		log.Printf("[dl] mv#%d written size=%dB write_elapsed=%.2fs", idx, len(r.data), time.Since(t1).Seconds())
+
+		n, copyErr := io.Copy(dst, r.body)
+		// Signal goroutine to close the body and release sem.
+		if r.done != nil {
+			close(r.done)
+		}
+
+		if copyErr != nil {
+			cancel()
+			return fmt.Errorf("segment %d stream: %w", idx, copyErr)
+		}
+		if MVCacheEnabled() && cacheBuf.Len() > 0 {
+			PutCachedMVSegment(r.diskKey, cacheBuf.Bytes())
+		}
+		log.Printf("[dl] mv#%d stream done size=%dB elapsed=%.2fs", idx, n, time.Since(t1).Seconds())
 		idx++
 	}
 	return nil
@@ -648,7 +786,7 @@ func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 			}
 			continue
 		}
-		data, err := io.ReadAll(resp.Body)
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MB cap per MV segment
 		resp.Body.Close()
 		if err != nil {
 			if !mvRetry(ctx, attempt, maxRetries) {
@@ -693,7 +831,7 @@ func kickMVSegmentBackground(diskKey, fetchURL, rangeHdr string) {
 			log.Printf("[mv-seg] bg-dl HTTP %d key=%s", resp.StatusCode, diskKey[len(diskKey)-20:])
 			return
 		}
-		data, err := io.ReadAll(resp.Body)
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MB cap per MV segment
 		if err != nil {
 			log.Printf("[mv-seg] bg-dl read error key=%s: %v", diskKey[len(diskKey)-20:], err)
 			return

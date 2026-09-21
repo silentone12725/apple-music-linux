@@ -49,6 +49,7 @@ type ConfigSet struct {
 	MaxMemoryLimit       int    `yaml:"max-memory-limit"`
 	DecryptM3u8Port      string `yaml:"decrypt-m3u8-port"`
 	GetM3u8Port          string `yaml:"get-m3u8-port"`
+	GetMVPort            string `yaml:"get-mv-port"`
 	// DRM binary (engine/drm package)
 	DRMBinaryPath              string        `yaml:"drm-binary-path"`      // path to drm-rootless binary
 	DRMBaseDir                 string        `yaml:"drm-base-dir"`         // mpl_db parent directory

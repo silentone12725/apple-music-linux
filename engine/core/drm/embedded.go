@@ -40,6 +40,7 @@ type EmbedConfig struct {
 	DecryptAddr    string
 	M3U8Addr       string
 	AccountAddr    string
+	MVAddr         string
 	SuppressOutput bool // redirect wrapper stdout/stderr to /dev/null
 }
 
@@ -482,6 +483,13 @@ func (b *EmbeddedBackend) accountAddr() string {
 	return processAccountAddrDefault
 }
 
+func (b *EmbeddedBackend) mvAddr() string {
+	if b.exe.MVAddr != "" {
+		return b.exe.MVAddr
+	}
+	return processMVAddrDefault
+}
+
 func (b *EmbeddedBackend) Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error) {
 	conn, err := net.DialTimeout("tcp", b.decryptAddr(), 5*time.Second)
 	if err != nil {
@@ -544,8 +552,12 @@ func (b *EmbeddedBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-func (b *EmbeddedBackend) GetAccount(_ context.Context) (AccountInfo, error) {
-	resp, err := http.Get("http://" + b.accountAddr() + "/")
+func (b *EmbeddedBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+b.accountAddr()+"/", nil)
+	if err != nil {
+		return AccountInfo{}, fmt.Errorf("drm account: %w", err)
+	}
+	resp, err := drmLocalClient.Do(req)
 	if err != nil {
 		return AccountInfo{}, fmt.Errorf("drm account: %w", err)
 	}
@@ -563,6 +575,28 @@ func (b *EmbeddedBackend) GetAccount(_ context.Context) (AccountInfo, error) {
 		DevToken:     obj.DevToken,
 		MusicToken:   obj.MusicToken,
 	}, nil
+}
+
+func (b *EmbeddedBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) (string, error) {
+	conn, err := net.DialTimeout("tcp", b.mvAddr(), 5*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("drm mv dial: %w", err)
+	}
+	defer conn.Close()
+	rw := newBufRW(conn)
+	if err := sendString(rw, fmt.Sprintf("%d", adamID)); err != nil {
+		return "", fmt.Errorf("drm mv send id: %w", err)
+	}
+	_ = rw.Flush()
+	scanner := bufio.NewScanner(conn)
+	if !scanner.Scan() {
+		return "", fmt.Errorf("drm mv: no response")
+	}
+	url := strings.TrimSpace(scanner.Text())
+	if url == "" {
+		return "", fmt.Errorf("drm mv: empty URL (adamID %d)", adamID)
+	}
+	return url, nil
 }
 
 // ── CGO config helpers ────────────────────────────────────────────────────────
@@ -603,6 +637,12 @@ func (b *EmbeddedBackend) buildCConfig(cfg BackendConfig) *C.DRMEmbedConfig {
 			c.account_port = C.CString(port)
 		}
 	}
+	if b.exe.MVAddr != "" {
+		_, port, err := net.SplitHostPort(b.exe.MVAddr)
+		if err == nil {
+			c.mv_port = C.CString(port)
+		}
+	}
 	if cfg.DeviceInfo != "" {
 		c.device_info = C.CString(cfg.DeviceInfo)
 	}
@@ -628,6 +668,7 @@ func (b *EmbeddedBackend) freeCConfig(c *C.DRMEmbedConfig) {
 	freeIfNotNil(c.decrypt_port)
 	freeIfNotNil(c.m3u8_port)
 	freeIfNotNil(c.account_port)
+	freeIfNotNil(c.mv_port)
 	freeIfNotNil(c.device_info)
 	freeIfNotNil(c.login)
 	C.free(unsafe.Pointer(c))

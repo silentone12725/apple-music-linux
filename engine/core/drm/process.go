@@ -55,10 +55,15 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// drmLocalClient is used for loopback HTTP calls to the DRM wrapper process.
+// The DRM account endpoint is on 127.0.0.1; 5s is more than enough.
+var drmLocalClient = &http.Client{Timeout: 5 * time.Second}
+
 const (
 	processDecryptAddrDefault = "127.0.0.1:10020"
 	processM3U8AddrDefault    = "127.0.0.1:20020"
 	processAccountAddrDefault = "127.0.0.1:30020"
+	processMVAddrDefault      = "127.0.0.1:40020"
 	portProbeInterval         = 5 * time.Second
 	portProbeTimeout          = 500 * time.Millisecond
 )
@@ -86,6 +91,10 @@ type ProcessConfig struct {
 	// AccountAddr is the HTTP address of the account socket.
 	// Default: "127.0.0.1:30020".
 	AccountAddr string
+
+	// MVAddr is the TCP address of the progressive MV URL socket.
+	// Default: "127.0.0.1:40020".
+	MVAddr string
 }
 
 // ProcessBackend manages the wrapper-rootless binary as a subprocess and
@@ -329,6 +338,10 @@ func (b *ProcessBackend) buildArgs(cfg BackendConfig) []string {
 	if b.exe.AccountAddr != "" {
 		_, port, _ := net.SplitHostPort(b.exe.AccountAddr)
 		args = append(args, "--account-port", port)
+	}
+	if b.exe.MVAddr != "" {
+		_, port, _ := net.SplitHostPort(b.exe.MVAddr)
+		args = append(args, "--mv-port", port)
 	}
 	if cfg.DeviceInfo != "" {
 		args = append(args, "--device-info", cfg.DeviceInfo)
@@ -748,6 +761,13 @@ func (b *ProcessBackend) accountAddr() string {
 	return processAccountAddrDefault
 }
 
+func (b *ProcessBackend) mvAddr() string {
+	if b.exe.MVAddr != "" {
+		return b.exe.MVAddr
+	}
+	return processMVAddrDefault
+}
+
 func (b *ProcessBackend) setProcessState(s ProcessState) {
 	b.mu.Lock()
 	b.state = s
@@ -885,8 +905,12 @@ func (b *ProcessBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 }
 
 // GetAccount implements DRMBackend via port 30020 HTTP.
-func (b *ProcessBackend) GetAccount(_ context.Context) (AccountInfo, error) {
-	resp, err := http.Get("http://" + b.accountAddr() + "/")
+func (b *ProcessBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+b.accountAddr()+"/", nil)
+	if err != nil {
+		return AccountInfo{}, fmt.Errorf("drm account: %w", err)
+	}
+	resp, err := drmLocalClient.Do(req)
 	if err != nil {
 		return AccountInfo{}, fmt.Errorf("drm account: %w", err)
 	}
@@ -904,6 +928,31 @@ func (b *ProcessBackend) GetAccount(_ context.Context) (AccountInfo, error) {
 		DevToken:     obj.DevToken,
 		MusicToken:   obj.MusicToken,
 	}, nil
+}
+
+// GetProgressiveMVURL implements DRMBackend via port 40020 TCP protocol.
+// The wrapper always calls get_m3u8_method_download (native Android StoreKit auth),
+// returning a progressive mvod.itunes.apple.com URL with ?accessKey= embedded.
+func (b *ProcessBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) (string, error) {
+	conn, err := net.DialTimeout("tcp", b.mvAddr(), 5*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("drm mv dial: %w", err)
+	}
+	defer conn.Close()
+	rw := newBufRW(conn)
+	if err := sendString(rw, fmt.Sprintf("%d", adamID)); err != nil {
+		return "", fmt.Errorf("drm mv send id: %w", err)
+	}
+	_ = rw.Flush()
+	scanner := bufio.NewScanner(conn)
+	if !scanner.Scan() {
+		return "", fmt.Errorf("drm mv: no response")
+	}
+	url := strings.TrimSpace(scanner.Text())
+	if url == "" {
+		return "", fmt.Errorf("drm mv: empty URL (adamID %d)", adamID)
+	}
+	return url, nil
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

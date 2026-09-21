@@ -116,7 +116,7 @@ func (s *APIServer) proxyProgressiveVideo(w http.ResponseWriter, r *http.Request
 	if rng := r.Header.Get("Range"); rng != "" {
 		req.Header.Set("Range", rng)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cdnClient.Do(req)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return // client disconnected
@@ -1023,6 +1023,7 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 	runErr := cmd.Run()
 	stderrW.Close()
 	<-stderrDone
+	stderrR.Close()
 
 	ctxErr := ctx.Err()
 	if runErr != nil {
@@ -1093,6 +1094,7 @@ func transcodeVideoFaststart(ctx context.Context, src func(io.Writer) error, out
 	runErr := cmd.Run()
 	stderrW.Close()
 	<-stderrDone
+	stderrR.Close()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}

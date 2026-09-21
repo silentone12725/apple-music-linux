@@ -465,7 +465,7 @@ func (m *Manager) execute(item *workItem) {
 	// Path traversal guard: ensure the final path is inside OutputDir.
 	cleanOut := filepath.Clean(outPath)
 	cleanDir := filepath.Clean(req.OutputDir)
-	if len(cleanOut) <= len(cleanDir) || cleanOut[:len(cleanDir)] != cleanDir || cleanOut[len(cleanDir)] != filepath.Separator {
+	if !strings.HasPrefix(cleanOut, cleanDir+string(filepath.Separator)) {
 		m.fail(job, fmt.Errorf("filename template escapes output directory"))
 		return
 	}

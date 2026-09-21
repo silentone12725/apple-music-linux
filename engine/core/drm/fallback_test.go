@@ -41,8 +41,9 @@ func (f *fakeBackend) Decrypt(context.Context, DecryptRequest) (DecryptResponse,
 
 // GetM3U8 returns this backend's name so tests can identify the active backend.
 func (f *fakeBackend) GetM3U8(context.Context, uint64) (string, error) { return f.name, nil }
-func (f *fakeBackend) GetAccount(context.Context) (AccountInfo, error) { return AccountInfo{}, nil }
-func (f *fakeBackend) DialCBCS(context.Context) (net.Conn, error)      { return nil, nil }
+func (f *fakeBackend) GetAccount(context.Context) (AccountInfo, error)             { return AccountInfo{}, nil }
+func (f *fakeBackend) GetProgressiveMVURL(context.Context, uint64) (string, error) { return "", nil }
+func (f *fakeBackend) DialCBCS(context.Context) (net.Conn, error)                 { return nil, nil }
 func (f *fakeBackend) Events() <-chan DRMEvent                         { return f.events }
 
 func activeName(t *testing.T, b DRMBackend) string {
