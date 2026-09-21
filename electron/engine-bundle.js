@@ -1607,11 +1607,12 @@
     const _nativeVideo = true;
     const _wcVideo = false;
     const _mp4Video = false;
+    const _vsegVideo = false;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
     let _wcParsedSec = 0;
     let _wcVW = 0, _wcVH = 0;
-    console.log("%c[AML MV]%c video backend = %c%s", "color:#bf5af2;font-weight:bold", "color:inherit", "color:#30d158;font-weight:bold", _nativeVideo ? "native-dl" : _wcVideo ? "webcodecs" : "mse");
+    console.log("%c[AML MV]%c video backend = %c%s", "color:#bf5af2;font-weight:bold", "color:inherit", "color:#30d158;font-weight:bold", _vsegVideo ? "vseg" : _nativeVideo ? "native-dl" : _wcVideo ? "webcodecs" : "mse");
     const _nativeVidStopEvt = (e) => e.stopImmediatePropagation();
     if (nativeVidEl) {
       ["waiting", "stalled", "suspend"].forEach(
@@ -2570,7 +2571,7 @@
       mvContainer.style.removeProperty("cursor");
       if (exitBtn) exitBtn.style.removeProperty("pointer-events");
       _mvGateOpen = true;
-      if (_wcVideo || _nativeVideo) {
+      if (_vsegVideo || _wcVideo || _nativeVideo) {
         _iframePlay.call(mkAudio).catch((e) => console.warn("[AML MV] audio play rejected:", e.message));
         return;
       }
@@ -3576,38 +3577,40 @@
     const _setupNativeVideo = () => {
       const enginePath = `/api/v1/playback/${_sessionId}/video-dl`;
       const dlUrl = `${ENGINE_HTTPS}${enginePath}`;
-      _bufSpinner.style.display = "block";
+      const infoUrl = `${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`;
       const _NET = ["EMPTY", "IDLE", "LOADING", "NO_SOURCE"];
       const _RS = ["HAVE_NOTHING", "HAVE_METADATA", "HAVE_CURRENT_DATA", "HAVE_FUTURE_DATA", "HAVE_ENOUGH_DATA"];
       const _nlog = (ev) => console.log(`%c[AML MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : "-"}`, "color:#bf5af2;font-weight:bold", "color:inherit");
       ["loadstart", "loadedmetadata", "loadeddata", "canplaythrough", "stalled", "emptied", "abort"].forEach((ev) => myVid.addEventListener(ev, () => _nlog(ev)));
+      const _startPoll = () => {
+        _bufSpinner.style.display = "block";
+        const _poll = async () => {
+          if (_abortCtrl?.signal.aborted) return;
+          try {
+            const info = await fetch(infoUrl).then((r) => r.json());
+            if (info.cached) {
+              console.log("%c[AML MV native]%c faststart ready \u2014 loading", "color:#30d158;font-weight:bold", "color:inherit");
+              _bufSpinner.style.display = "none";
+              myVid.src = "";
+              myVid.load();
+              myVid.src = dlUrl;
+              myVid.load();
+              return;
+            }
+            console.log(`%c[AML MV native]%c cache building (preparing=${info.preparing}) \u2014 retry in 2s`, "color:#ff9f0a;font-weight:bold", "color:inherit");
+          } catch (_e) {
+            console.warn("[AML MV native] poll error", _e);
+          }
+          setTimeout(_poll, 2e3);
+        };
+        setTimeout(_poll, 2e3);
+      };
       myVid.addEventListener("error", () => {
         const e = myVid.error;
         console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ""}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc}`, "color:#ff453a;font-weight:bold", "color:inherit");
-        if (e?.code === 3 && !_abortCtrl?.signal.aborted) {
-          console.log("%c[AML MV native]%c MEDIA_ERR_DECODE \u2014 waiting for audio-stripped faststart cache", "color:#ff9f0a;font-weight:bold", "color:inherit");
-          _bufSpinner.style.display = "block";
-          const _pollCache = async () => {
-            if (_abortCtrl?.signal.aborted) return;
-            try {
-              const info = await fetch(`${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`).then((r) => r.json());
-              if (info.cached) {
-                console.log("%c[AML MV native]%c faststart ready \u2014 retrying with audio-stripped cache", "color:#30d158;font-weight:bold", "color:inherit");
-                _bufSpinner.style.display = "none";
-                myVid.src = "";
-                myVid.load();
-                myVid.src = dlUrl;
-                myVid.load();
-                return;
-              }
-            } catch (_e) {
-              console.warn("[AML MV native] poll error", _e);
-            }
-            setTimeout(_pollCache, 2e3);
-          };
-          fetch(`${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`).catch(() => {
-          });
-          setTimeout(_pollCache, 2e3);
+        if ((e?.code === 2 || e?.code === 3) && !_abortCtrl?.signal.aborted) {
+          console.log("%c[AML MV native]%c transient error \u2014 polling for cache", "color:#ff9f0a;font-weight:bold", "color:inherit");
+          _startPoll();
           return;
         }
         _abortMV(`video-error-${e?.code ?? "?"}`);
@@ -3722,22 +3725,167 @@
         tryStart();
       }, { once: true });
       myVid.muted = true;
-      myVid.addEventListener("loadedmetadata", () => {
-        if (myVid.audioTracks) {
-          for (let i = 0; i < myVid.audioTracks.length; i++) {
-            myVid.audioTracks[i].enabled = false;
+      (async () => {
+        try {
+          const info = await fetch(infoUrl).then((r) => r.json());
+          if (info.cached) {
+            console.log("%c[AML MV native]%c cache hit \u2014 loading", "color:#30d158;font-weight:bold", "color:inherit");
+            _bufSpinner.style.display = "block";
+            myVid.src = dlUrl;
+            try {
+              myVid.load();
+            } catch (e) {
+              console.error(`[AML MV native] load() threw: ${e.message}`);
+            }
+            return;
+          }
+        } catch (_e) {
+          console.warn("[AML MV native] info preflight error", _e);
+        }
+        console.log("%c[AML MV native]%c cache miss \u2014 waiting for HLS decrypt + faststart", "color:#ff9f0a;font-weight:bold", "color:inherit");
+        _startPoll();
+      })();
+    };
+    const _setupVsegVideo = () => {
+      const base = `${ENGINE}/api/v1/playback/${_sessionId}/vseg`;
+      const BUFFER_AHEAD = 12;
+      const ms2 = new MediaSource();
+      myVid.src = URL.createObjectURL(ms2);
+      let sb = null;
+      let fetchGeneration = 0;
+      let loopAbort = new AbortController();
+      const stopFetchLoop = () => {
+        fetchGeneration++;
+        loopAbort.abort();
+        loopAbort = new AbortController();
+      };
+      const waitUpdateEnd = () => new Promise((resolve, reject) => {
+        if (!sb.updating) {
+          resolve();
+          return;
+        }
+        const onDone = () => {
+          sb.removeEventListener("updateend", onDone);
+          sb.removeEventListener("error", onFail);
+          resolve();
+        };
+        const onFail = (e) => {
+          sb.removeEventListener("updateend", onDone);
+          sb.removeEventListener("error", onFail);
+          reject(e);
+        };
+        sb.addEventListener("updateend", onDone);
+        sb.addEventListener("error", onFail);
+      });
+      const findSeekFragment = async (seekSec, sig) => {
+        for (let attempt = 0; attempt < 20 && !sig.aborted; attempt++) {
+          const m = await fetch(`${base}/manifest`, { signal: sig }).then((r) => r.json()).catch(() => null);
+          if (!m || sig.aborted) return 0;
+          const frags = m.frags || [];
+          let best = null;
+          for (const f of frags) {
+            if (f.t <= seekSec) best = f;
+          }
+          if (best !== null) return best.n;
+          if (m.done) return 0;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        return 0;
+      };
+      const runFetchLoop = async (startN) => {
+        const gen = fetchGeneration;
+        const sig = loopAbort.signal;
+        let nextSeg = startN;
+        try {
+          while (!sig.aborted && gen === fetchGeneration && !_abortCtrl?.signal.aborted) {
+            if (sb && sb.buffered.length > 0) {
+              const ahead = sb.buffered.end(sb.buffered.length - 1) - myVid.currentTime;
+              if (ahead > BUFFER_AHEAD) {
+                await new Promise((r2) => setTimeout(r2, 400));
+                continue;
+              }
+            }
+            const r = await fetch(`${base}/seg/${nextSeg}`, { signal: sig }).catch(() => null);
+            if (!r || sig.aborted || gen !== fetchGeneration) break;
+            if (r.status === 404) {
+              if (ms2.readyState === "open") ms2.endOfStream();
+              break;
+            }
+            if (!r.ok) {
+              console.warn(`[AML vseg] seg/${nextSeg} HTTP ${r.status}`);
+              break;
+            }
+            const data = await r.arrayBuffer();
+            if (sig.aborted || gen !== fetchGeneration) break;
+            await waitUpdateEnd();
+            if (sig.aborted || gen !== fetchGeneration) break;
+            sb.appendBuffer(data);
+            await waitUpdateEnd();
+            if (gen !== fetchGeneration) break;
+            nextSeg++;
+          }
+        } catch (e) {
+          if (e.name !== "AbortError") console.warn("[AML vseg] fetch loop error:", e);
+        }
+      };
+      ms2.addEventListener("sourceopen", async () => {
+        let codecs = "";
+        for (let i = 0; i < 10 && !codecs; i++) {
+          const m = await fetch(`${base}/manifest`).then((r) => r.json()).catch(() => null);
+          if (m?.codecs) {
+            codecs = m.codecs;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        if (!codecs) {
+          console.error("[AML vseg] no codec from manifest");
+          return;
+        }
+        sb = ms2.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
+        sb.addEventListener("error", (e) => console.error("[AML vseg] SourceBuffer error", e));
+        const initRes = await fetch(`${base}/init`).catch(() => null);
+        if (!initRes?.ok) {
+          console.error("[AML vseg] init fetch failed");
+          return;
+        }
+        const initData = await initRes.arrayBuffer();
+        sb.appendBuffer(initData);
+        await waitUpdateEnd();
+        runFetchLoop(0);
+      });
+      myVid.addEventListener("seeking", async () => {
+        if (!sb) return;
+        const seekSec = myVid.currentTime;
+        const gen = fetchGeneration + 1;
+        stopFetchLoop();
+        const sig = loopAbort.signal;
+        console.log(`[AML vseg] seek to ${seekSec.toFixed(2)}s`);
+        const startN = await findSeekFragment(seekSec, sig);
+        if (sig.aborted) return;
+        await waitUpdateEnd().catch(() => {
+        });
+        if (sig.aborted) return;
+        if (sb.buffered.length > 0) {
+          const end = sb.buffered.end(sb.buffered.length - 1);
+          if (end > 0) {
+            sb.remove(0, end + 1e-3);
+            await waitUpdateEnd().catch(() => {
+            });
           }
         }
+        if (sig.aborted) return;
+        runFetchLoop(startN);
+      });
+      myVid.addEventListener("canplay", () => {
+        _videoCanPlay = true;
+        tryStart();
+        _iframePlay.call(myVid).catch((e) => console.warn("[AML vseg] myVid play rejected:", e.message));
       }, { once: true });
-      console.log("%c[AML MV native]%c src=%s (progressive)", "color:#bf5af2;font-weight:bold", "color:inherit", dlUrl);
-      myVid.src = dlUrl;
-      try {
-        myVid.load();
-      } catch (e) {
-        console.error(`[AML MV native] load() threw: ${e.message}`);
-      }
+      console.log("[AML vseg] setup done, waiting for sourceopen");
     };
-    if (_nativeVideo) _setupNativeVideo();
+    if (_vsegVideo) _setupVsegVideo();
+    else if (_nativeVideo) _setupNativeVideo();
     else if (_mp4Video) _setupMP4BoxVideo();
     else if (_wcVideo) _setupWebCodecsVideo();
     else _startVideoPipe();

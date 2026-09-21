@@ -1888,6 +1888,9 @@ async function startMVPipeline() {
     // timestamps, then feeds to MSE SourceBuffer. Requires window.MP4Box (mp4box-bundle.js).
     // Set true to test; _wcVideo and _nativeVideo must be false for this path to be reached.
     const _mp4Video = false;
+    // Segmented CMAF path: engine re-fragments via FFmpeg, serves per-fragment fMP4 over
+    // /vseg/init + /vseg/seg/N, frontend feeds a SourceBuffer. Set true to enable.
+    const _vsegVideo = false;
     let _wcCleanup = null; // set by _setupWebCodecsVideo; called from cleanup()
     // Furthest VIDEO position (sec) decoded/available in the WC pipeline — used for
     // the seek-skip guard (queue[last] ≤ _wcBufferedSec). Reset to seek target.
@@ -1900,7 +1903,7 @@ async function startMVPipeline() {
     // Native video dimensions from the decoded canvas (myVid is empty in WC mode).
     // Written by _setupWebCodecsVideo on first frame; read by _resizeScrim.
     let _wcVW = 0, _wcVH = 0;
-    console.log('%c[AML MV]%c video backend = %c%s', 'color:#bf5af2;font-weight:bold', 'color:inherit', 'color:#30d158;font-weight:bold', _nativeVideo ? 'native-dl' : _wcVideo ? 'webcodecs' : 'mse');
+    console.log('%c[AML MV]%c video backend = %c%s', 'color:#bf5af2;font-weight:bold', 'color:inherit', 'color:#30d158;font-weight:bold', _vsegVideo ? 'vseg' : _nativeVideo ? 'native-dl' : _wcVideo ? 'webcodecs' : 'mse');
     // Suppress CDN-buffering events from nativeVidEl that cause MK loading-indicator blinking.
     // nativeVidEl keeps loading from Apple CDN in the background; its waiting/stalled/suspend
     // events propagate to MK's state machine and toggle the loading spinner continuously.
@@ -3037,7 +3040,7 @@ async function startMVPipeline() {
         if (exitBtn) exitBtn.style.removeProperty('pointer-events');
         _mvGateOpen = true; // unblock play/seek now that both streams are ready
 
-        if (_wcVideo || _nativeVideo) {
+        if (_vsegVideo || _wcVideo || _nativeVideo) {
             _iframePlay.call(mkAudio).catch(e => console.warn('[AML MV] audio play rejected:', e.message));
             return;
         }
@@ -4256,7 +4259,132 @@ async function startMVPipeline() {
         })();
     };
 
-    if (_nativeVideo) _setupNativeVideo();
+    // Segmented CMAF video path (feat/mv-vseg).
+    // Engine re-fragments via FFmpeg and serves per-fragment fMP4; this MSE feeder
+    // fetches init + seg/0, seg/1, … and feeds a SourceBuffer on myVid.
+    // On seek: polls manifest for target fragment index, drains SourceBuffer, restarts loop.
+    const _setupVsegVideo = () => {
+        const base = `${ENGINE}/api/v1/playback/${_sessionId}/vseg`;
+        const BUFFER_AHEAD = 12; // seconds to buffer ahead of playhead
+
+        const ms = new MediaSource();
+        myVid.src = URL.createObjectURL(ms);
+
+        let sb = null;
+        let fetchGeneration = 0;
+        let loopAbort = new AbortController();
+
+        const stopFetchLoop = () => { fetchGeneration++; loopAbort.abort(); loopAbort = new AbortController(); };
+
+        const waitUpdateEnd = () => new Promise((resolve, reject) => {
+            if (!sb.updating) { resolve(); return; }
+            const onDone = () => { sb.removeEventListener('updateend', onDone); sb.removeEventListener('error', onFail); resolve(); };
+            const onFail = (e) => { sb.removeEventListener('updateend', onDone); sb.removeEventListener('error', onFail); reject(e); };
+            sb.addEventListener('updateend', onDone);
+            sb.addEventListener('error', onFail);
+        });
+
+        // findSeekFragment: finds best frag index for seekSec, polling manifest if needed.
+        const findSeekFragment = async (seekSec, sig) => {
+            for (let attempt = 0; attempt < 20 && !sig.aborted; attempt++) {
+                const m = await fetch(`${base}/manifest`, { signal: sig }).then(r => r.json()).catch(() => null);
+                if (!m || sig.aborted) return 0;
+                const frags = m.frags || [];
+                // Find last frag whose t <= seekSec
+                let best = null;
+                for (const f of frags) { if (f.t <= seekSec) best = f; }
+                if (best !== null) return best.n;
+                if (m.done) return 0;
+                await new Promise(r => setTimeout(r, 200));
+            }
+            return 0;
+        };
+
+        const runFetchLoop = async (startN) => {
+            const gen = fetchGeneration;
+            const sig = loopAbort.signal;
+            let nextSeg = startN;
+            try {
+                while (!sig.aborted && gen === fetchGeneration && !_abortCtrl?.signal.aborted) {
+                    // Throttle: don't buffer too far ahead of playhead.
+                    if (sb && sb.buffered.length > 0) {
+                        const ahead = sb.buffered.end(sb.buffered.length - 1) - myVid.currentTime;
+                        if (ahead > BUFFER_AHEAD) { await new Promise(r => setTimeout(r, 400)); continue; }
+                    }
+                    const r = await fetch(`${base}/seg/${nextSeg}`, { signal: sig }).catch(() => null);
+                    if (!r || sig.aborted || gen !== fetchGeneration) break;
+                    if (r.status === 404) { if (ms.readyState === 'open') ms.endOfStream(); break; }
+                    if (!r.ok) { console.warn(`[AML vseg] seg/${nextSeg} HTTP ${r.status}`); break; }
+                    const data = await r.arrayBuffer();
+                    if (sig.aborted || gen !== fetchGeneration) break;
+                    await waitUpdateEnd();
+                    if (sig.aborted || gen !== fetchGeneration) break;
+                    sb.appendBuffer(data);
+                    await waitUpdateEnd();
+                    if (gen !== fetchGeneration) break;
+                    nextSeg++;
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') console.warn('[AML vseg] fetch loop error:', e);
+            }
+        };
+
+        ms.addEventListener('sourceopen', async () => {
+            // Fetch manifest for codec string (may need a retry if producer just started).
+            let codecs = '';
+            for (let i = 0; i < 10 && !codecs; i++) {
+                const m = await fetch(`${base}/manifest`).then(r => r.json()).catch(() => null);
+                if (m?.codecs) { codecs = m.codecs; break; }
+                await new Promise(r => setTimeout(r, 300));
+            }
+            if (!codecs) { console.error('[AML vseg] no codec from manifest'); return; }
+
+            sb = ms.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
+            sb.addEventListener('error', e => console.error('[AML vseg] SourceBuffer error', e));
+
+            // Fetch and append init segment (blocks until engine has indexed first moof).
+            const initRes = await fetch(`${base}/init`).catch(() => null);
+            if (!initRes?.ok) { console.error('[AML vseg] init fetch failed'); return; }
+            const initData = await initRes.arrayBuffer();
+            sb.appendBuffer(initData);
+            await waitUpdateEnd();
+
+            // Start buffering from seg/0.
+            runFetchLoop(0);
+        });
+
+        myVid.addEventListener('seeking', async () => {
+            if (!sb) return;
+            const seekSec = myVid.currentTime;
+            const gen = fetchGeneration + 1; // peek at next gen before stopFetchLoop
+            stopFetchLoop();
+            const sig = loopAbort.signal;
+            console.log(`[AML vseg] seek to ${seekSec.toFixed(2)}s`);
+            const startN = await findSeekFragment(seekSec, sig);
+            if (sig.aborted) return;
+            await waitUpdateEnd().catch(() => {});
+            if (sig.aborted) return;
+            // Clear existing buffer.
+            if (sb.buffered.length > 0) {
+                const end = sb.buffered.end(sb.buffered.length - 1);
+                if (end > 0) { sb.remove(0, end + 0.001); await waitUpdateEnd().catch(() => {}); }
+            }
+            if (sig.aborted) return;
+            runFetchLoop(startN);
+        });
+
+        myVid.addEventListener('canplay', () => {
+            _videoCanPlay = true;
+            tryStart();
+            // Also explicitly play myVid (audio is started by tryStart via mkAudio).
+            _iframePlay.call(myVid).catch(e => console.warn('[AML vseg] myVid play rejected:', e.message));
+        }, { once: true });
+
+        console.log('[AML vseg] setup done, waiting for sourceopen');
+    };
+
+    if (_vsegVideo) _setupVsegVideo();
+    else if (_nativeVideo) _setupNativeVideo();
     else if (_mp4Video) _setupMP4BoxVideo();
     else if (_wcVideo) _setupWebCodecsVideo();
     else _startVideoPipe();

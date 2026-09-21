@@ -407,6 +407,70 @@ func (m *MVLiveIndex) LookupComplete(t float64, written int64) (MVFragEntry, boo
 // InitSize returns the init-segment byte size (ftyp+moov) once known.
 func (m *MVLiveIndex) InitSize() (int64, bool) { return m.ix.initSizeLive() }
 
+// FragByIndex returns fragment n if it is fully on disk (frag.End != 0 && frag.End <= written).
+// Returns (zero, false) when n is out of range or the fragment is not yet complete.
+// Invariants: End==0 means the fragment is still open; End>0 means finalized.
+func (m *MVLiveIndex) FragByIndex(n int, written int64) (MVFragEntry, bool) {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	if n < 0 || n >= len(m.ix.frags) {
+		return MVFragEntry{}, false
+	}
+	f := m.ix.frags[n]
+	if f.End == 0 || f.End > written {
+		return MVFragEntry{}, false
+	}
+	return f, true
+}
+
+// FragCount returns the current number of indexed fragments (may grow while producer runs).
+func (m *MVLiveIndex) FragCount() int {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	return len(m.ix.frags)
+}
+
+// Timescale returns the video track timescale parsed from the moov box (0 until parsed).
+func (m *MVLiveIndex) Timescale() uint64 {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	return m.ix.timescale
+}
+
+// Finalize closes the last open fragment by setting its End to totalWritten.
+// Call this once the producer has confirmed all bytes are written (before Commit).
+func (m *MVLiveIndex) Finalize(totalWritten int64) {
+	m.ix.mu.Lock()
+	defer m.ix.mu.Unlock()
+	if len(m.ix.frags) > 0 {
+		last := &m.ix.frags[len(m.ix.frags)-1]
+		if last.End == 0 {
+			last.End = totalWritten
+		}
+	}
+}
+
+// VsegFragTiming is a snapshot of one fragment's start time and its index.
+type VsegFragTiming struct {
+	T float64 `json:"t"`
+	N int     `json:"n"`
+}
+
+// AllFragTimings returns a snapshot of all fragments' start times and indices.
+// Safe to call concurrently with Write. Returns nil (not []) when no frags yet.
+func (m *MVLiveIndex) AllFragTimings() []VsegFragTiming {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	if len(m.ix.frags) == 0 {
+		return nil
+	}
+	out := make([]VsegFragTiming, len(m.ix.frags))
+	for i, f := range m.ix.frags {
+		out[i] = VsegFragTiming{T: f.T, N: i}
+	}
+	return out
+}
+
 // ReadMVDecIndex loads the sidecar index for a dec-cache file, or (nil,false) if
 // none exists / is unreadable.
 func ReadMVDecIndex(assetID string, maxHeight int) (*MVDecIndex, bool) {

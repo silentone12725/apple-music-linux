@@ -874,6 +874,8 @@ func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	// Stop the mv-es WebCodecs growing-file producer and remove its scratch file.
 	s.stopMVGrowing(id)
+	// Cancel any active vseg (segmented video) producer for this session.
+	stopVsegSession(id)
 	// If this session's MV faststart file was written under "caching disabled",
 	// delete it now — it existed only to serve this playback.
 	if sess, ok := s.pm.GetSession(id); ok {
