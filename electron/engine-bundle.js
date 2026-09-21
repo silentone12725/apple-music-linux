@@ -1609,6 +1609,7 @@
     const _mp4Video = false;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
+    let _wcParsedSec = 0;
     let _wcVW = 0, _wcVH = 0;
     console.log("%c[AML MV]%c video backend = %c%s", "color:#bf5af2;font-weight:bold", "color:inherit", "color:#30d158;font-weight:bold", _nativeVideo ? "native-dl" : _wcVideo ? "webcodecs" : "mse");
     const _nativeVidStopEvt = (e) => e.stopImmediatePropagation();
@@ -2125,10 +2126,7 @@
         const t = parseFloat(rangeInput.value);
         if (!isNaN(t)) {
           if (_wcVideo || _nativeVideo) {
-            const max = parseFloat(rangeInput.max) || 1;
-            const pct = _fillPct(Math.min(1, Math.max(0, t / max))).toFixed(2) + "%";
-            rangeInput.style.setProperty("--progress", pct);
-            rangeInput.style.setProperty("--width", pct);
+            if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
           } else {
             myVid.currentTime = t;
             mkAudio.currentTime = t;
@@ -2393,7 +2391,7 @@
       if (max > 0) {
         let bFrac = 0;
         if (_wcVideo) {
-          bFrac = Math.min(1, Math.max(0, _wcBufferedSec / max));
+          bFrac = Math.min(1, Math.max(0, _wcParsedSec / max));
         } else if (_nativeVideo) {
           const nBuf = myVid.buffered;
           if (nBuf && nBuf.length > 0)
@@ -3030,7 +3028,7 @@
       const queue = [];
       const QUEUE_MAX = 24;
       const MAX_DECODE_QUEUE = QUEUE_MAX;
-      const DECODE_AHEAD_SEC = 5;
+      const DECODE_AHEAD_SEC = 15;
       const MAX_RENDER_QUEUE = 600;
       let _wcDiscarded = 0;
       const aborted = () => _abortCtrl?.signal.aborted;
@@ -3230,6 +3228,8 @@
               const durUs = dv.getUint32(9);
               const data = buf.slice(17, 17 + len);
               buf = buf.slice(17 + len);
+              const fParsedSec = tUs / 1e6;
+              if (fParsedSec > _wcParsedSec) _wcParsedSec = fParsedSec;
               if (!key && waitingForKeyframe) continue;
               waitingForKeyframe = false;
               try {
@@ -3330,6 +3330,7 @@
         _wcRebufStart = Date.now();
         _wcDecErrCount = 0;
         _wcBufferedSec = t;
+        _wcParsedSec = t;
         start(t).catch(() => {
         });
       };
