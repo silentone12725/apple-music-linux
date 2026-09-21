@@ -4074,67 +4074,53 @@ async function startMVPipeline() {
         _wcCleanup = () => fetchCtrl.abort();
     };
 
-    // Native video: <video src=/video-dl> — progressive cached download, Chrome native pipeline.
+    // Native video: <video src=/video-dl> — decrypted faststart cache, Chrome native pipeline.
     // No MSE, no SourceBuffer, no CHUNK_DEMUXER_ERROR. Audio stays on MSE (mkAudio).
-    // Video is synced to the audio clock via timeupdate + seeked events.
+    // The engine builds a faststart MP4 from the HLS CBCS decrypted stream in the
+    // background; /video-dl serves it once ready (503 while building). We poll
+    // /video-dl-info first so Chrome never loads FairPlay-encrypted CDN content.
     const _setupNativeVideo = () => {
-        // The engine's /video-dl endpoint is a transparent Range proxy to the Apple
-        // CDN (mvod.itunes.apple.com). Chrome's <video> element handles moov
-        // discovery and all seeking natively via Range requests forwarded to the CDN.
-        // On repeat plays the engine serves from the committed faststart disk cache
-        // (instant seek, no CDN round-trip). No FFmpeg, no growing file needed.
         const enginePath = `/api/v1/playback/${_sessionId}/video-dl`;
-        const dlUrl = `${ENGINE_HTTPS}${enginePath}`;       // https://127.0.0.1:PORT/…/video-dl
+        const dlUrl = `${ENGINE_HTTPS}${enginePath}`;
+        const infoUrl = `${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`;
 
-        // Reuse the shared buffering spinner (same as the MSE/WebCodecs paths) for
-        // the download-then-serve wait; the native amp-playback-controls-progress
-        // scrubber provides the buffer/progress bar, same as the other paths.
-        _bufSpinner.style.display = 'block';
-
-        // ── Self-contained handler set (ISOLATED from the MSE/WebCodecs paths) ──
-        // Native is excluded from the shared `if (!_wcVideo)` handler block below,
-        // so nothing here collides with MSE's SourceBuffer/pipe logic and vice
-        // versa. Everything the native path needs is wired right here.
-
-        // Lifecycle logging — keeps failures diagnosable instead of just code=N.
+        // Lifecycle logging.
         const _NET = ['EMPTY', 'IDLE', 'LOADING', 'NO_SOURCE'];
         const _RS  = ['HAVE_NOTHING', 'HAVE_METADATA', 'HAVE_CURRENT_DATA', 'HAVE_FUTURE_DATA', 'HAVE_ENOUGH_DATA'];
         const _nlog = (ev) => console.log(`%c[AML MV native]%c ${ev} net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} ct=${myVid.currentTime.toFixed(2)} dur=${isFinite(myVid.duration) ? myVid.duration.toFixed(2) : myVid.duration} vw=${myVid.videoWidth} vh=${myVid.videoHeight} err=${myVid.error ? myVid.error.code : '-'}`, 'color:#bf5af2;font-weight:bold', 'color:inherit');
-        // NB: 'durationchange' intentionally omitted — a progressive fMP4's duration
-        // grows on every appended fragment, which would flood the console.
         ['loadstart', 'loadedmetadata', 'loadeddata', 'canplaythrough', 'stalled', 'emptied', 'abort'].forEach(ev => myVid.addEventListener(ev, () => _nlog(ev)));
 
-        // Fatal error handler. MEDIA_ERR_DECODE (code=3) on first play is almost
-        // always EC-3 audio in the CDN progressive file — Chrome on Linux can't decode
-        // it. The engine's faststart cache (audio-stripped via -map 0:v:0) is being
-        // built in the background. Wait for it and retry instead of advancing track.
+        // Poll /video-dl-info until the faststart cache is ready, then load it.
+        const _startPoll = () => {
+            _bufSpinner.style.display = 'block';
+            const _poll = async () => {
+                if (_abortCtrl?.signal.aborted) return;
+                try {
+                    const info = await fetch(infoUrl).then(r => r.json());
+                    if (info.cached) {
+                        console.log('%c[AML MV native]%c faststart ready — loading', 'color:#30d158;font-weight:bold', 'color:inherit');
+                        _bufSpinner.style.display = 'none';
+                        myVid.src = '';
+                        myVid.load();
+                        myVid.src = dlUrl;
+                        myVid.load();
+                        return;
+                    }
+                    console.log(`%c[AML MV native]%c cache building (preparing=${info.preparing}) — retry in 2s`, 'color:#ff9f0a;font-weight:bold', 'color:inherit');
+                } catch (_e) { console.warn('[AML MV native] poll error', _e); }
+                setTimeout(_poll, 2000);
+            };
+            setTimeout(_poll, 2000);
+        };
+
+        // Error handler: if we somehow get a network or decode error (e.g. cache
+        // was evicted between info-check and load), fall back to polling.
         myVid.addEventListener('error', () => {
             const e = myVid.error;
             console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ''}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc}`, 'color:#ff453a;font-weight:bold', 'color:inherit');
-            if (e?.code === 3 /* MEDIA_ERR_DECODE */ && !_abortCtrl?.signal.aborted) {
-                console.log('%c[AML MV native]%c MEDIA_ERR_DECODE — waiting for audio-stripped faststart cache', 'color:#ff9f0a;font-weight:bold', 'color:inherit');
-                _bufSpinner.style.display = 'block';
-                const _pollCache = async () => {
-                    if (_abortCtrl?.signal.aborted) return;
-                    try {
-                        const info = await fetch(`${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`).then(r => r.json());
-                        if (info.cached) {
-                            console.log('%c[AML MV native]%c faststart ready — retrying with audio-stripped cache', 'color:#30d158;font-weight:bold', 'color:inherit');
-                            _bufSpinner.style.display = 'none';
-                            // Reset the video element — clears error state and triggers a fresh load.
-                            myVid.src = '';
-                            myVid.load();
-                            myVid.src = dlUrl;
-                            myVid.load();
-                            return;
-                        }
-                    } catch (_e) { console.warn('[AML MV native] poll error', _e); }
-                    setTimeout(_pollCache, 2000);
-                };
-                // Also trigger the faststart build via the info endpoint (in case it
-                // hasn't started yet — e.g. caching was disabled when playback began).
-                fetch(`${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`).catch(() => {});
-                setTimeout(_pollCache, 2000);
+            if ((e?.code === 2 || e?.code === 3) && !_abortCtrl?.signal.aborted) {
+                console.log('%c[AML MV native]%c transient error — polling for cache', 'color:#ff9f0a;font-weight:bold', 'color:inherit');
+                _startPoll();
                 return;
             }
             _abortMV(`video-error-${e?.code ?? '?'}`);
@@ -4248,25 +4234,26 @@ async function startMVPipeline() {
             tryStart();
         }, { once: true });
 
-        // Mute and disable audio tracks on myVid — mkAudio handles audio
-        // independently. Apple's progressive CDN files often carry EC-3 (Dolby
-        // Digital Plus) which Chrome on Linux cannot decode; silencing it here
-        // prevents PIPELINE_ERROR_DECODE before the first frame arrives.
+        // Mute — mkAudio handles audio independently.
         myVid.muted = true;
-        myVid.addEventListener('loadedmetadata', () => {
-            if (myVid.audioTracks) {
-                for (let i = 0; i < myVid.audioTracks.length; i++) {
-                    myVid.audioTracks[i].enabled = false;
-                }
-            }
-        }, { once: true });
 
-        // Progressive: assign the src immediately. The engine's /video-dl endpoint
-        // is a transparent Range proxy to the Apple CDN (mvod.itunes.apple.com).
-        // Chrome handles moov discovery and all seeking natively via Range requests.
-        console.log('%c[AML MV native]%c src=%s (progressive)', 'color:#bf5af2;font-weight:bold', 'color:inherit', dlUrl);
-        myVid.src = dlUrl;
-        try { myVid.load(); } catch (e) { console.error(`[AML MV native] load() threw: ${e.message}`); }
+        // Pre-flight: check if the faststart cache is already ready.
+        // If yes → load immediately; if no → show spinner and poll.
+        // Either way, Chrome never sees the raw FairPlay-encrypted CDN URL.
+        (async () => {
+            try {
+                const info = await fetch(infoUrl).then(r => r.json());
+                if (info.cached) {
+                    console.log('%c[AML MV native]%c cache hit — loading', 'color:#30d158;font-weight:bold', 'color:inherit');
+                    _bufSpinner.style.display = 'block';
+                    myVid.src = dlUrl;
+                    try { myVid.load(); } catch (e) { console.error(`[AML MV native] load() threw: ${e.message}`); }
+                    return;
+                }
+            } catch (_e) { console.warn('[AML MV native] info preflight error', _e); }
+            console.log('%c[AML MV native]%c cache miss — waiting for HLS decrypt + faststart', 'color:#ff9f0a;font-weight:bold', 'color:inherit');
+            _startPoll();
+        })();
     };
 
     if (_nativeVideo) _setupNativeVideo();

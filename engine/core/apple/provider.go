@@ -13,7 +13,6 @@ package apple
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,17 +37,6 @@ import (
 // cancellation still works before the 30s deadline.
 var webplaybackClient = &http.Client{Timeout: 30 * time.Second}
 
-// progressiveCDNClient forwards byte-range requests to Apple CDN for progressive
-// video playback.  No hard Timeout (streams can run for hours); only
-// ResponseHeaderTimeout so a stalled TLS handshake doesn't park a goroutine
-// forever.  The caller's request context handles client-disconnect cancellation.
-var progressiveCDNClient = &http.Client{
-	Transport: &http.Transport{
-		ResponseHeaderTimeout: 30 * time.Second,
-		MaxIdleConns:          10,
-		IdleConnTimeout:       90 * time.Second,
-	},
-}
 
 // AssetFlavor identifies the DRM family and bitrate of a webplayback asset.
 // The naming convention is "<id>:<enc><bitrate>" where enc is:
@@ -290,40 +278,20 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	lp := p.lp
 	assetID, mut := req.AssetID, req.MUT
 
-	// Try progressive download (Android subDownload lease) for video.
-	// This bypasses HLS segment-by-segment fetch entirely — Apple's CDN serves
-	// the full fMP4 in one request, which the growing-file handler caches locally.
-	var videoTrack media.Track
-	progURL, _, progErr := p.mvProgressiveURL(ctx, req.AssetID, token, req.MUT)
-	if progErr == nil {
-		log.Printf("[mv] progressive video url=%s", progURL)
-		mvlabel.Set(fmt.Sprintf("%dp", req.MVMaxHeight))
-		videoTrack = media.Track{
-			Kind:  pipeline.KindVideo,
-			Codec: pipeline.CodecH264,
-			Open: func(context.Context) (*pipeline.Stream, error) {
-				return &pipeline.Stream{
-					Source: &progressiveVideoSource{url: progURL},
-					Stages: nil,
-					Kind:   pipeline.KindVideo,
-					Codec:  pipeline.CodecH264,
-				}, nil
-			},
-		}
-	} else {
-		// Fall back to HLS segment pipeline.
-		log.Printf("[mv] subDownload failed (%v), falling back to HLS", progErr)
-		videoURL, videoCodecs, videoResolution, selErr := master.SelectVideoVariantWithCodec(req.MVMaxHeight)
-		if selErr != nil {
-			return nil, fmt.Errorf("select video variant: %w", selErr)
-		}
-		mvlabel.Set(videoResolution)
-		videoTrack = media.Track{
-			Kind:        pipeline.KindVideo,
-			Codec:       pipeline.CodecH264,
-			CodecString: videoCodecs,
-			Open:        makeAuthSeekableTrackOpener(lp, assetID, token, mut, videoURL, pipeline.KindVideo, pipeline.CodecH264),
-		}
+	// Always use the HLS CBCS segment pipeline for video. The progressive CDN
+	// files (mvod.itunes.apple.com) carry iTunes FairPlay DRM (drmi/drms,
+	// Scheme Type: itun) which Chrome on Linux cannot decrypt and FFmpeg
+	// cannot process. Only the HLS path goes through proper CBCS decryption.
+	videoURL, videoCodecs, videoResolution, selErr := master.SelectVideoVariantWithCodec(req.MVMaxHeight)
+	if selErr != nil {
+		return nil, fmt.Errorf("select video variant: %w", selErr)
+	}
+	mvlabel.Set(videoResolution)
+	videoTrack := media.Track{
+		Kind:        pipeline.KindVideo,
+		Codec:       pipeline.CodecH264,
+		CodecString: videoCodecs,
+		Open:        makeAuthSeekableTrackOpener(lp, assetID, token, mut, videoURL, pipeline.KindVideo, pipeline.CodecH264),
 	}
 
 	return &media.Session{
@@ -530,174 +498,6 @@ func (p *appleMusicProvider) webplaybackAssetURL(ctx context.Context, adamID, to
 
 // ── subDownload API (Android lease endpoint) ──────────────────────────────────
 
-// fetchSubDownload calls Apple's Android-native lease API for a progressive
-// download URL.  The endpoint is the same MZPlay host as webPlayback but on
-// the subDownload operation, which returns mvod.itunes.apple.com direct URLs.
-func (p *appleMusicProvider) fetchSubDownload(ctx context.Context, adamID, token, mut string) ([]byte, error) {
-	var guidBytes [16]byte
-	_, _ = rand.Read(guidBytes[:])
-	guid := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		guidBytes[0:4], guidBytes[4:6], guidBytes[6:8], guidBytes[8:10], guidBytes[10:16])
-
-	body, _ := json.Marshal(map[string]string{
-		"salableAdamId": adamID,
-		"action":        "lease-start",
-		"guid":          guid,
-		"sbsync":        "",
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://play.music.apple.com/WebObjects/MZPlay.woa/wa/subDownload",
-		bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Prefer iTunes-style tokens from the DRM backend (proper Anisette auth).
-	// Fall back to web MusicKit tokens if DRM is unavailable or not authenticated.
-	if p.acct != nil {
-		if devTok, musicTok, aerr := p.acct.GetMusicToken(ctx); aerr == nil && musicTok != "" {
-			req.Header.Set("Authorization", "Bearer "+devTok)
-			req.Header.Set("Music-User-Token", musicTok)
-			log.Printf("[mv-subdl] using DRM-backend iTunes tokens for adamID=%s", adamID)
-		} else {
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("x-apple-music-user-token", mut)
-		}
-	} else {
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("x-apple-music-user-token", mut)
-	}
-	req.Header.Set("Origin", "https://music.apple.com")
-	req.Header.Set("User-Agent", "Music/6.5.2 (iPhone13,2; OS 16.7.2) music.apple.com")
-	resp, err := webplaybackClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap for API JSON
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("subDownload HTTP %d: %s", resp.StatusCode, string(raw))
-	}
-	return raw, nil
-}
-
-type mvProgressiveAsset struct {
-	URL         string `json:"URL"`
-	DownloadKey string `json:"downloadKey"`
-	Flavor      string `json:"flavor"`
-	FileSize    int64  `json:"file-size"`
-}
-
-// mvProgressiveURL returns the progressive video URL for adamID.
-// It tries the DRM backend's native Android StoreKit path first (wrapper port
-// 40020), which uses proper x-token/x-dsid/AMD auth internally. Falls back to
-// the external web subDownload endpoint if the backend is unavailable.
-func (p *appleMusicProvider) mvProgressiveURL(ctx context.Context, adamID, token, mut string) (url, downloadKey string, err error) {
-	if p.acct != nil {
-		id, convErr := strconv.ParseUint(adamID, 10, 64)
-		if convErr == nil {
-			u, wrapErr := p.acct.GetProgressiveMVURL(ctx, id)
-			if wrapErr == nil && u != "" {
-				log.Printf("[mv-subdl] wrapper native url adamID=%s", adamID)
-				return u, "", nil
-			}
-			log.Printf("[mv-subdl] wrapper native failed (%v), falling back to web subDownload", wrapErr)
-		}
-	}
-	raw, err := p.fetchSubDownload(ctx, adamID, token, mut)
-	if err != nil {
-		return "", "", err
-	}
-	log.Printf("[mv-subdl] web subDownload adamID=%s raw=%s", adamID, string(raw))
-	var obj struct {
-		SongList []struct {
-			Assets []mvProgressiveAsset `json:"assets"`
-		} `json:"songList"`
-	}
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return "", "", fmt.Errorf("parse subDownload: %w", err)
-	}
-	if len(obj.SongList) == 0 || len(obj.SongList[0].Assets) == 0 {
-		return "", "", fmt.Errorf("subDownload: no assets in response")
-	}
-	finalURL, ok := selectBestProgressiveAsset(obj.SongList[0].Assets)
-	if !ok {
-		return "", "", fmt.Errorf("subDownload: no video asset found")
-	}
-	return finalURL, "", nil
-}
-
-// selectBestProgressiveAsset picks the best progressive download asset from a
-// subDownload response.  It prefers mvod.itunes.apple.com URLs and within that
-// domain picks the largest file size (highest quality).  Falls back to the
-// largest asset regardless of host if no mvod URL is present.  The final URL
-// has ?accessKey=<downloadKey> appended if not already present in the URL.
-func selectBestProgressiveAsset(assets []mvProgressiveAsset) (finalURL string, ok bool) {
-	var best mvProgressiveAsset
-	for _, a := range assets {
-		if strings.Contains(a.URL, "mvod.itunes.apple.com") && a.FileSize > best.FileSize {
-			best = a
-		}
-	}
-	if best.URL == "" {
-		for _, a := range assets {
-			if a.FileSize > best.FileSize {
-				best = a
-			}
-		}
-	}
-	if best.URL == "" {
-		return "", false
-	}
-	u := best.URL
-	if best.DownloadKey != "" && !strings.Contains(u, "accessKey=") {
-		sep := "?"
-		if strings.Contains(u, "?") {
-			sep = "&"
-		}
-		u += sep + "accessKey=" + best.DownloadKey
-	}
-	return u, true
-}
-
-// progressiveVideoSource is a pipeline.SeekableSource backed by a direct HTTP
-// download from mvod.itunes.apple.com.  No HLS segments; no FairPlay decrypt —
-// the URL already carries ?accessKey=<downloadKey> for CDN auth.
-type progressiveVideoSource struct {
-	url string
-}
-
-func (s *progressiveVideoSource) Stream(ctx context.Context, w io.Writer) error {
-	// s.url already includes ?accessKey=<downloadKey> — no auth headers needed.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := progressiveCDNClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("progressive download: HTTP %d for %s", resp.StatusCode, s.url)
-	}
-	_, err = io.Copy(w, resp.Body)
-	return err
-}
-
-// SourceFrom restarts from the beginning. Seeking is handled by the engine's
-// Range proxy (forwarding the browser's Range header to the CDN directly).
-func (s *progressiveVideoSource) SourceFrom(_ float64) (pipeline.Source, float64) {
-	return s, 0
-}
-
-// SourceURL returns the raw CDN URL so the engine can proxy Range requests
-// directly to Apple CDN without buffering the whole download locally.
-func (s *progressiveVideoSource) SourceURL() string { return s.url }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
