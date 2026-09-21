@@ -295,6 +295,25 @@ func (m *Manager) GetSeekStart(id string, kind pipeline.StreamKind, startSec flo
 	return actual, true
 }
 
+// GetProgressiveURL returns the raw CDN URL for the video stream if its
+// underlying Source implements pipeline.URLSource (i.e. it is an mvod
+// progressive source). Returns ("", false) for HLS-based streams.
+func (m *Manager) GetProgressiveURL(id string, kind pipeline.StreamKind) (string, bool) {
+	_, pctx, ok := m.lookup(id)
+	if !ok {
+		return "", false
+	}
+	stream, ok := pctx.streams[kind]
+	if !ok {
+		return "", false
+	}
+	us, ok := stream.Source.(pipeline.URLSource)
+	if !ok {
+		return "", false
+	}
+	return us.SourceURL(), true
+}
+
 // Release deletes a session and its private context.
 func (m *Manager) Release(id string) {
 	m.mu.Lock()

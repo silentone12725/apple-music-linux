@@ -1604,8 +1604,8 @@
     myVid.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;";
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
-    const _nativeVideo = false;
-    const _wcVideo = true;
+    const _nativeVideo = true;
+    const _wcVideo = false;
     const _mp4Video = false;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
@@ -3642,6 +3642,7 @@
       });
       let _reseeking = false;
       const _nativeSeek = (target) => {
+        if (_reseeking) return;
         target = Math.max(0, Math.min(_durationSec || target, target));
         for (let i = 0; i < myVid.buffered.length; i++) {
           if (target >= myVid.buffered.start(i) && target <= myVid.buffered.end(i)) {
@@ -3656,27 +3657,21 @@
             return;
           }
         }
-        console.log(`%c[AML MV native]%c re-stream from ${target.toFixed(2)}s`, "color:#bf5af2;font-weight:bold", "color:#f4a100");
-        _reseeking = true;
+        console.log(`%c[AML MV native]%c seek ${target.toFixed(2)}s via Range`, "color:#bf5af2;font-weight:bold", "color:#30d158");
         _bufSpinner.style.display = "block";
+        _reseeking = true;
+        try {
+          myVid.currentTime = target;
+        } catch (_) {
+        }
         try {
           mkAudio.currentTime = target;
         } catch (_) {
         }
-        myVid.src = `${dlUrl}?t=${target.toFixed(3)}`;
-        try {
-          myVid.load();
-        } catch (_) {
-        }
-        myVid.addEventListener("loadedmetadata", () => {
-          try {
-            if (Math.abs(myVid.currentTime - target) > 1) myVid.currentTime = target;
-          } catch (_) {
-          }
+        myVid.addEventListener("seeked", () => {
           _reseeking = false;
           _bufSpinner.style.display = "none";
-          _iframePlay.call(myVid).catch(() => {
-          });
+          if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.1) mkAudio.currentTime = myVid.currentTime;
         }, { once: true });
       };
       _nativeSeekRef = _nativeSeek;

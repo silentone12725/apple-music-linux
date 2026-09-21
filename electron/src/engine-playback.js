@@ -1882,8 +1882,8 @@ async function startMVPipeline() {
     // Chrome's native H.264 pipeline; no MSE, no SourceBuffer, no CHUNK_DEMUXER_ERROR.
     // Seeks within downloaded portion are instant (browser Range request from cache).
     // Set false to fall back to the MSE path below.
-    const _nativeVideo = false;
-    const _wcVideo = true;
+    const _nativeVideo = true;
+    const _wcVideo = false;
     // Experimental: mp4box.js MSE path — re-segments raw fMP4 in-browser with B-frame-safe
     // timestamps, then feeds to MSE SourceBuffer. Requires window.MP4Box (mp4box-bundle.js).
     // Set true to test; _wcVideo and _nativeVideo must be false for this path to be reached.
@@ -4078,13 +4078,11 @@ async function startMVPipeline() {
     // No MSE, no SourceBuffer, no CHUNK_DEMUXER_ERROR. Audio stays on MSE (mkAudio).
     // Video is synced to the audio clock via timeupdate + seeked events.
     const _setupNativeVideo = () => {
-        // aml-video:// is a privileged Electron protocol registered in main.mjs that
-        // serves the engine's on-disk faststart MP4 cache directly (proper 206
-        // byte-range seeking). Native <video src> needs a COMPLETE, non-fragmented
-        // MP4 (moov with a full sample table), so the engine builds the faststart
-        // cache asynchronously — this is download-then-serve, not progressive. We
-        // poll video-dl-info until it reports cached, showing a loading animation,
-        // then assign the src.
+        // The engine's /video-dl endpoint is a transparent Range proxy to the Apple
+        // CDN (mvod.itunes.apple.com). Chrome's <video> element handles moov
+        // discovery and all seeking natively via Range requests forwarded to the CDN.
+        // On repeat plays the engine serves from the committed faststart disk cache
+        // (instant seek, no CDN round-trip). No FFmpeg, no growing file needed.
         const enginePath = `/api/v1/playback/${_sessionId}/video-dl`;
         const dlUrl = `${ENGINE_HTTPS}${enginePath}`;       // https://127.0.0.1:PORT/…/video-dl
 
@@ -4169,34 +4167,31 @@ async function startMVPipeline() {
             }
         });
 
-        // Progressive seek handler (called with a REAL target in [0, _durationSec]).
-        // If the target is inside the current stream's buffered range, seek natively
-        // (instant). Otherwise re-point src to ?t=<sec>: the engine re-streams a fresh
-        // fragmented MP4 whose fragments are timeline-anchored at ~sec (tsOffset), so
-        // playback resumes at the target — the only way to reach an unbuffered point,
-        // since myVid.duration only spans what's been streamed.
+        // Seek handler: set currentTime directly — Chrome issues a Range request to
+        // the engine's /video-dl proxy, which forwards it to the Apple CDN. The CDN
+        // returns a 206 Partial Content response and Chrome seeks natively.
+        // If the faststart cache is committed (common on repeat plays), http.ServeContent
+        // serves from disk and seeking is instant with no CDN round-trip.
         let _reseeking = false;
         const _nativeSeek = (target) => {
+            if (_reseeking) return;
             target = Math.max(0, Math.min(_durationSec || target, target));
             for (let i = 0; i < myVid.buffered.length; i++) {
                 if (target >= myVid.buffered.start(i) && target <= myVid.buffered.end(i)) {
                     try { myVid.currentTime = target; } catch (_) {}
                     try { mkAudio.currentTime = target; } catch (_) {}
-                    return; // within buffer → instant native seek
+                    return; // within buffer → instant seek, no network
                 }
             }
-            console.log(`%c[AML MV native]%c re-stream from ${target.toFixed(2)}s`, 'color:#bf5af2;font-weight:bold', 'color:#f4a100');
-            _reseeking = true;
+            console.log(`%c[AML MV native]%c seek ${target.toFixed(2)}s via Range`, 'color:#bf5af2;font-weight:bold', 'color:#30d158');
             _bufSpinner.style.display = 'block';
+            _reseeking = true;
+            try { myVid.currentTime = target; } catch (_) {}
             try { mkAudio.currentTime = target; } catch (_) {}
-            myVid.src = `${dlUrl}?t=${target.toFixed(3)}`;
-            try { myVid.load(); } catch (_) {}
-            myVid.addEventListener('loadedmetadata', () => {
-                // Fragments are anchored at ~target; nudge if Chrome landed elsewhere.
-                try { if (Math.abs(myVid.currentTime - target) > 1) myVid.currentTime = target; } catch (_) {}
+            myVid.addEventListener('seeked', () => {
                 _reseeking = false;
                 _bufSpinner.style.display = 'none';
-                _iframePlay.call(myVid).catch(() => {});
+                if (Math.abs(mkAudio.currentTime - myVid.currentTime) > 0.1) mkAudio.currentTime = myVid.currentTime;
             }, { once: true });
         };
         _nativeSeekRef = _nativeSeek;

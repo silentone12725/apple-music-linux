@@ -75,6 +75,15 @@ type SeekableSource interface {
 	SourceFrom(startSec float64) (source Source, actualStart float64)
 }
 
+// URLSource is an optional extension of Source for sources backed by a direct
+// CDN URL (e.g. progressiveVideoSource). Exposing the URL lets the engine
+// forward browser Range headers straight to the CDN instead of buffering the
+// full download locally — the same pattern Android's ExoPlayer uses for mvod.
+type URLSource interface {
+	Source
+	SourceURL() string
+}
+
 // Decryptor decrypts an encrypted fMP4 stream into clear output.
 // It is the sole holder of key bytes anywhere in the engine.
 // Only engine/fairplay creates Decryptors; everything else uses this interface.

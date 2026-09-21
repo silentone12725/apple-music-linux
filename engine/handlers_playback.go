@@ -47,9 +47,6 @@ type mvGrowingState struct {
 var (
 	mvGrowing   sync.Map   // sessionID → *mvGrowingState (mv-es WebCodecs path)
 	mvGrowingMu sync.Mutex // serializes producer creation (one BeginStreamingPut per session)
-
-	mvDlGrowing   sync.Map   // sessionID → *mvGrowingState (mv-dl native video path)
-	mvDlGrowingMu sync.Mutex
 )
 
 // getOrStartMVGrowing returns the session's growing-file producer, starting it on
@@ -107,59 +104,36 @@ func (s *APIServer) stopMVGrowing(id string) {
 	}
 }
 
-// getOrStartDlGrowing is the /video-dl counterpart of getOrStartMVGrowing. It
-// starts a session-lifetime producer that runs transcodeVideoForMSE into a
-// growing ephemeral file and an MVLiveIndex simultaneously, so that seek
-// requests can be served from the file instead of re-downloading from Apple CDN.
-// Returns nil if BeginStreamingPut fails (caller falls back to stateless stream).
-func (s *APIServer) getOrStartDlGrowing(id, assetID string, durationSec float64) *mvGrowingState {
-	if v, ok := mvDlGrowing.Load(id); ok {
-		return v.(*mvGrowingState)
+// proxyProgressiveVideo forwards the browser's Range request to the Apple CDN
+// URL and pipes the response back verbatim. Chrome handles moov discovery and
+// all seeking natively — the same pattern Android's ExoPlayer uses for mvod.
+func (s *APIServer) proxyProgressiveVideo(w http.ResponseWriter, r *http.Request, mvURL string) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, mvURL, nil)
+	if err != nil {
+		http.Error(w, "proxy: "+err.Error(), http.StatusBadGateway)
+		return
 	}
-	mvDlGrowingMu.Lock()
-	defer mvDlGrowingMu.Unlock()
-	if v, ok := mvDlGrowing.Load(id); ok {
-		return v.(*mvGrowingState)
+	if rng := r.Header.Get("Range"); rng != "" {
+		req.Header.Set("Range", rng)
 	}
-	const qualifier = "mv-dl-grow"
-	spw, err := s.diskCache.BeginStreamingPut(assetID, qualifier)
-	if err != nil || spw == nil {
-		return nil
-	}
-	ix := aacstream.NewMVLiveIndex()
-	pctx, cancel := context.WithCancel(context.Background())
-	st := &mvGrowingState{spw: spw, ix: ix, cancel: cancel, done: make(chan struct{}), assetID: assetID, qualifier: qualifier}
-	mvDlGrowing.Store(id, st)
-	go func() {
-		defer close(st.done)
-		err := transcodeVideoForMSE(pctx, func(dst io.Writer) error {
-			return s.pm.Stream(pctx, id, pipeline.KindVideo, dst)
-		}, io.MultiWriter(spw, ix), 0, durationSec)
-		if err != nil {
-			spw.Discard()
-		} else {
-			spw.Commit()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return // client disconnected
 		}
-		log.Printf("%s dl-grow producer done assetID=%s err=%v", tagVideo("[video-dl]"), assetID, err)
-	}()
-	log.Printf("%s dl-grow producer started id=%s assetID=%s", tagVideo("[video-dl]"), id, assetID)
-	return st
-}
-
-// stopDlGrowing cancels the /video-dl growing-file producer and removes the
-// scratch file. Called on session release (track change or exit).
-func (s *APIServer) stopDlGrowing(id string) {
-	if v, ok := mvDlGrowing.LoadAndDelete(id); ok {
-		st := v.(*mvGrowingState)
-		st.cancel()
-		select {
-		case <-st.done:
-		case <-time.After(5 * time.Second):
-			log.Printf("%s dl-grow stop timed out id=%s (removing anyway)", tagWarn("[video-dl]"), id)
-		}
-		s.diskCache.Remove(st.assetID, st.qualifier)
-		log.Printf("%s dl-grow producer stopped + scratch removed id=%s", tagInfo("[video-dl]"), id)
+		http.Error(w, "proxy: "+err.Error(), http.StatusBadGateway)
+		return
 	}
+	defer resp.Body.Close()
+	hdr := w.Header()
+	for _, h := range []string{"Content-Type", "Content-Length", "Content-Range", "Last-Modified", "ETag"} {
+		if v := resp.Header.Get(h); v != "" {
+			hdr.Set(h, v)
+		}
+	}
+	hdr.Set("Accept-Ranges", "bytes")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body) //nolint:errcheck
 }
 
 // parseRangeStart extracts the start offset from an HTTP Range header value.
@@ -681,21 +655,18 @@ func (s *APIServer) handlePlaybackVideoNativeInfo(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, map[string]any{"cached": false, "preparing": preparing})
 }
 
-// handlePlaybackVideoNative serves a video session as a progressively-downloaded
-// disk-cached fMP4 for use with a plain <video src> element (no MSE, no
-// SourceBuffer, no CHUNK_DEMUXER_ERROR possible).
+// handlePlaybackVideoNative serves a video session for use with a plain
+// <video src> element. Chrome handles moov discovery and all seeking natively
+// via Range requests — the same pattern Android's ExoPlayer uses for mvod.
 //
-// First play: streams FFmpeg-remuxed fMP4 to the client while downloading to
-// disk in the background (BeginStreamingPut model from ALAC). The browser plays
-// as bytes arrive; seeks within the buffered range work natively. Seeks beyond
-// the download head return 416 so the client knows to wait or limit the scrubber.
+// Fast path (committed faststart cache): http.ServeContent with full
+// Accept-Ranges / 206 — instant random-access seeking from disk.
 //
-// Replay (committed cache): http.ServeContent with Accept-Ranges — full random-
-// access seeking anywhere in the file, instant.
-//
-// Range requests during active download: served via NewReaderAt(offset) which
-// blocks until the requested offset is available, then streams from there.
-// Offsets beyond Written() return 416 immediately.
+// Slow path (no cache): transparent Range proxy to the Apple CDN URL.
+// The browser's Range header is forwarded to mvod.itunes.apple.com;
+// the CDN 206 is piped back. No FFmpeg, no growing file needed.
+// prepareMVFaststart runs in the background (when MV caching is enabled)
+// so subsequent plays hit the fast path.
 func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sess, ok := s.pm.GetSession(id)
@@ -709,18 +680,12 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 	}
 
 	assetID := sess.AssetID
-	var seekSec float64
-	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
-		seekSec = v
-	}
 	durationSec := float64(sess.DurationMs) / 1000.0
 
 	// ── Fast path: committed faststart cache ──────────────────────────────────
 	// Serve the pre-built non-fragmented MP4 with a full moov sample table.
-	// http.ServeContent provides proper Accept-Ranges / 206 responses so Chrome
-	// can seek anywhere instantly without re-streaming. Ignores ?t= — the browser
-	// handles seeking via Range requests; the JS _nativeSeek loadedmetadata handler
-	// sets currentTime after load, triggering a Range request to the correct offset.
+	// http.ServeContent provides proper Accept-Ranges / 206 so Chrome can seek
+	// anywhere instantly without any CDN round-trips.
 	const qualDL = "mv-dl"
 	if path, ok2 := s.diskCache.Path(assetID, qualDL); ok2 {
 		log.Printf("%s cache hit id=%s assetID=%s", tagOK("[video-dl]"), id, assetID)
@@ -732,121 +697,25 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 		defer f.Close()
 		fi, _ := f.Stat()
 		w.Header().Set("Content-Type", "video/mp4")
-		w.Header().Set("X-Cache-Status", "hit") // readable by JS via fetch, not via <video>
 		http.ServeContent(w, r, "video.mp4", fi.ModTime(), f)
 		return
 	}
 
-	// ── Slow path: first play / seek — growing-file producer ─────────────────
-	// A session-lifetime goroutine runs transcodeVideoForMSE into a growing file
-	// and an MVLiveIndex. First play serves from spw.NewReader() (starts immediately
-	// as FFmpeg produces output). Seeks check LookupComplete: if the fragment is on
-	// disk, serve init+fragment from the file (no CDN re-download); otherwise fall
-	// back to the stateless network stream with the original tsOffset handling.
-	log.Printf("%s cache miss id=%s assetID=%q t=%.2f", tagVideo("[video-dl]"), id, assetID, seekSec)
+	// ── Slow path: Range proxy to Apple CDN ───────────────────────────────────
+	// Forward the browser's Range header directly to mvod.itunes.apple.com.
+	// Chrome handles moov discovery, byte-range seeking, and buffering natively.
+	// Start building the faststart cache in the background so future plays are instant.
+	log.Printf("%s cache miss id=%s assetID=%s → CDN proxy", tagVideo("[video-dl]"), id, assetID)
 	if aacstream.MVCacheEnabled() {
 		go s.prepareMVFaststart(id, assetID, durationSec)
 	}
 
-	st := s.getOrStartDlGrowing(id, assetID, durationSec)
-
-	if seekSec > 0 && st != nil {
-		initSize, iok := st.ix.InitSize()
-		frag, ok := st.ix.LookupComplete(seekSec, st.spw.Written())
-		if !ok && iok {
-			frag, ok = st.ix.Lookup(seekSec)
-		}
-		const maxFragLag = 8.0
-		if ok && iok {
-			producerDone := false
-			select {
-			case <-st.done:
-				producerDone = true
-			default:
-			}
-			if producerDone {
-				if f, ok2 := s.diskCache.Get(st.assetID, st.qualifier); ok2 {
-					defer f.Close()
-					totalWritten := st.spw.Written()
-					combined := io.MultiReader(
-						io.NewSectionReader(f, 0, initSize),
-						io.NewSectionReader(f, frag.Off, totalWritten-frag.Off),
-					)
-					log.Printf("%s seek=%.3f source=committed-grow fragT=%.3f id=%s", tagOK("[video-dl]"), seekSec, frag.T, id)
-					streamMediaCoalesced(w, r, func(dst io.Writer) error {
-						_, err := io.Copy(dst, combined)
-						return err
-					}, "video/mp4")
-					return
-				}
-			} else if frag.End > 0 && frag.End <= st.spw.Written() && seekSec-frag.T <= maxFragLag {
-				initRaw := st.spw.NewReaderAt(0)
-				defer initRaw.Close()
-				fragR := st.spw.NewReaderAt(frag.Off)
-				defer fragR.Close()
-				combined := io.MultiReader(io.LimitReader(initRaw, initSize), fragR)
-				log.Printf("%s seek=%.3f source=growing-file fragT=%.3f id=%s", tagOK("[video-dl]"), seekSec, frag.T, id)
-				streamMediaCoalesced(w, r, func(dst io.Writer) error {
-					_, err := io.Copy(dst, combined)
-					return err
-				}, "video/mp4")
-				return
-			}
-		}
-		// Beyond head / index not ready — stateless network fallback.
-		log.Printf("%s seek=%.3f source=network written=%d id=%s", tagWarn("[video-dl]"), seekSec, st.spw.Written(), id)
-		videoSrc := func(dst io.Writer) error {
-			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, dst)
-			return err
-		}
-		var tsOffset float64
-		if actual, ok2 := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok2 {
-			tsOffset = actual
-		} else {
-			tsOffset = seekSec
-		}
-		streamMediaCoalesced(w, r, func(dst io.Writer) error {
-			return transcodeVideoForMSE(r.Context(), videoSrc, dst, tsOffset, durationSec)
-		}, "video/mp4")
+	mvURL, hasURL := s.pm.GetProgressiveURL(id, pipeline.KindVideo)
+	if !hasURL {
+		http.Error(w, "no progressive URL for this video session", http.StatusNotFound)
 		return
 	}
-
-	if seekSec > 0 && st == nil {
-		// No growing file — stateless seek (original behaviour).
-		videoSrc := func(dst io.Writer) error {
-			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, dst)
-			return err
-		}
-		var tsOffset float64
-		if actual, ok2 := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok2 {
-			tsOffset = actual
-		} else {
-			tsOffset = seekSec
-		}
-		streamMediaCoalesced(w, r, func(dst io.Writer) error {
-			return transcodeVideoForMSE(r.Context(), videoSrc, dst, tsOffset, durationSec)
-		}, "video/mp4")
-		return
-	}
-
-	// First play (seekSec == 0): serve from growing file.
-	if st != nil {
-		log.Printf("%s first-play source=growing id=%s written=%d", tagVideo("[video-dl]"), id, st.spw.Written())
-		rd := st.spw.NewReader()
-		defer rd.Close()
-		streamMediaCoalesced(w, r, func(dst io.Writer) error {
-			_, err := io.Copy(dst, rd)
-			return err
-		}, "video/mp4")
-		return
-	}
-
-	// Fallback: growing file unavailable — stateless stream.
-	streamMediaCoalesced(w, r, func(dst io.Writer) error {
-		return transcodeVideoForMSE(r.Context(), func(dst io.Writer) error {
-			return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
-		}, dst, 0, durationSec)
-	}, "video/mp4")
+	s.proxyProgressiveVideo(w, r, mvURL)
 }
 
 // handlePlaybackVideoRaw streams the raw decrypted multi-track fMP4 for a
@@ -1039,10 +908,8 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 
 func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	// Stop both growing-file producers (mv-es WebCodecs and mv-dl native video)
-	// and remove their scratch files before releasing the session.
+	// Stop the mv-es WebCodecs growing-file producer and remove its scratch file.
 	s.stopMVGrowing(id)
-	s.stopDlGrowing(id)
 	// If this session's MV faststart file was written under "caching disabled",
 	// delete it now — it existed only to serve this playback.
 	if sess, ok := s.pm.GetSession(id); ok {
