@@ -3778,7 +3778,7 @@
         sb.addEventListener("error", onFail);
       });
       const findSeekFragment = async (seekSec, sig) => {
-        for (let attempt = 0; attempt < 20 && !sig.aborted; attempt++) {
+        for (let attempt = 0; attempt < 10 && !sig.aborted; attempt++) {
           const m = await fetch(`${base}/manifest`, { signal: sig }).then((r) => r.json()).catch(() => null);
           if (!m || sig.aborted) return 0;
           const frags = m.frags || [];
@@ -3788,6 +3788,12 @@
           }
           if (best !== null) return best.n;
           if (m.done) return 0;
+          if (frags.length >= 2) {
+            const avgDur = frags[frags.length - 1].t / (frags.length - 1);
+            const estN = Math.max(0, Math.floor(seekSec / avgDur));
+            console.log(`[AML vseg] seek estimate: n=${estN} (avgDur=${avgDur.toFixed(2)}s, seekSec=${seekSec.toFixed(2)}s)`);
+            return estN;
+          }
           await new Promise((r) => setTimeout(r, 200));
         }
         return 0;
