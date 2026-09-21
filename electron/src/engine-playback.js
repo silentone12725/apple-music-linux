@@ -1882,17 +1882,21 @@ async function startMVPipeline() {
     // Chrome's native H.264 pipeline; no MSE, no SourceBuffer, no CHUNK_DEMUXER_ERROR.
     // Seeks within downloaded portion are instant (browser Range request from cache).
     // Set false to fall back to the MSE path below.
-    const _nativeVideo = true;
-    const _wcVideo = false;
+    const _nativeVideo = false;
+    const _wcVideo = true;
     // Experimental: mp4box.js MSE path — re-segments raw fMP4 in-browser with B-frame-safe
     // timestamps, then feeds to MSE SourceBuffer. Requires window.MP4Box (mp4box-bundle.js).
     // Set true to test; _wcVideo and _nativeVideo must be false for this path to be reached.
     const _mp4Video = false;
     let _wcCleanup = null; // set by _setupWebCodecsVideo; called from cleanup()
-    // Furthest VIDEO position (sec) decoded/available in the WC pipeline — drives the
-    // native buffer bar in WC mode (there is no video SourceBuffer to read). Reset to
-    // the target on seek so the bar doesn't show a stale forward range.
+    // Furthest VIDEO position (sec) decoded/available in the WC pipeline — used for
+    // the seek-skip guard (queue[last] ≤ _wcBufferedSec). Reset to seek target.
     let _wcBufferedSec = 0;
+    // Furthest VIDEO position (sec) parsed from the ES stream (consumed from buf into
+    // the decoder). Much farther ahead than _wcBufferedSec (~DECODE_AHEAD_SEC window).
+    // Drives the buffer bar so it reflects the real downloaded extent, not just the
+    // tiny decoded window. Reset to seek target so the bar doesn't show stale range.
+    let _wcParsedSec = 0;
     // Native video dimensions from the decoded canvas (myVid is empty in WC mode).
     // Written by _setupWebCodecsVideo on first frame; read by _resizeScrim.
     let _wcVW = 0, _wcVH = 0;
@@ -2500,13 +2504,12 @@ async function startMVPipeline() {
             const t = parseFloat(rangeInput.value);
             if (!isNaN(t)) {
                 if (_wcVideo || _nativeVideo) {
-                    // WC / native-dl: update CSS only during drag; commit the seek on
-                    // release. Live-seeking on every drag tick cancels the in-flight
-                    // byte-range read repeatedly → PIPELINE_ERROR_READ (code=2).
-                    const max = parseFloat(rangeInput.max) || 1;
-                    const pct = _fillPct(Math.min(1, Math.max(0, t / max))).toFixed(2) + '%';
-                    rangeInput.style.setProperty('--progress', pct);
-                    rangeInput.style.setProperty('--width',    pct);
+                    // WC / native-dl: show the scrub position in the time label only.
+                    // Do NOT update --progress/--width: the native <input type=range>
+                    // thumb already tracks the drag visually; writing --progress also
+                    // moves our CSS fill element, creating a second visible thumb/circle.
+                    // The seek commits on mouseup → _updateProgress redraws CSS then.
+                    if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
                 } else {
                     // MSE: live-seek both elements; _updateProgress() redraws CSS
                     myVid.currentTime = t; mkAudio.currentTime = t;
@@ -2782,7 +2785,7 @@ async function startMVPipeline() {
         if (max > 0) {
             let bFrac = 0;
             if (_wcVideo) {
-                bFrac = Math.min(1, Math.max(0, _wcBufferedSec / max));
+                bFrac = Math.min(1, Math.max(0, _wcParsedSec / max));
             } else if (_nativeVideo) {
                 // Native <video src>: read the element's own buffered ranges.
                 const nBuf = myVid.buffered;
@@ -3558,7 +3561,12 @@ async function startMVPipeline() {
         const queue = [];              // {frame, tUs, g} in display order (VideoDecoder reorders B-frames); g = producing generation
         const QUEUE_MAX = 24;          // encoded frames in flight before backpressure
         const MAX_DECODE_QUEUE = QUEUE_MAX;
-        const DECODE_AHEAD_SEC = 5;    // cap decoded-frame lead over the clock (memory bound, esp. during a stall)
+        const DECODE_AHEAD_SEC = 15;   // cap decoded-frame lead over the clock; 15s gives enough headroom for the growing-file refill on any seek
+        // Hard ceiling on decoded frames held (safety net above DECODE_AHEAD_SEC's
+        // ~120 @24fps): a runaway decode can't grow memory unbounded. Pattern from
+        // facebook webcodecs-capture-play's video_render_buffer. Rarely hit.
+        const MAX_RENDER_QUEUE = 600;
+        let _wcDiscarded = 0;          // frames dropped this session because the queue hit the ceiling
         const aborted = () => _abortCtrl?.signal.aborted;
 
         // ── Concurrency: generation epoch ──────────────────────────────────────
@@ -3583,11 +3591,14 @@ async function startMVPipeline() {
         let lastCt = null;          // audio-clock monotonic guard
         let _metricN = 0;
 
+        // queueLengthMs = span of decoded frames currently held (last.tUs - first.tUs).
+        const _queueLengthMs = () => (queue.length >= 2 ? Math.max(0, (queue[queue.length - 1].tUs - queue[0].tUs) / 1000) : 0);
         window._wcFrameStats = () => ({ opened: wcFramesOpened, closed: wcFramesClosed, outstanding: wcFramesOpened - wcFramesClosed });
         window._wcStats = () => ({
             gen, outstanding: wcFramesOpened - wcFramesClosed, obsoletePaints: wcObsoletePaints,
             obsoleteState: wcObsoleteState, medianDriftMs: +(medianDrift() * 1000).toFixed(1),
             bufferedSec: +(_wcBufferedSec || 0).toFixed(2), queued: queue.length,
+            discarded: _wcDiscarded, queueLengthMs: +_queueLengthMs().toFixed(0),
         });
 
         // Producer wake: shared resolver woken by the current decoder's 'dequeue'
@@ -3679,6 +3690,10 @@ async function startMVPipeline() {
                 output: (frame) => {
                     wcFramesOpened++;
                     if (!live()) { if (myGen !== gen) wcObsoleteState++; closeWcFrame(frame); return; }
+                    if (wcFramesOpened <= 4) console.log(`[wc-raw] frame#${wcFramesOpened} ts=${frame.timestamp} tsSec=${(frame.timestamp/1e6).toFixed(3)} mkAudio.ct=${mkAudio.currentTime.toFixed(3)} gen=${myGen}`);
+                    // Hard ceiling: if the render queue somehow overgrows (render loop
+                    // starved), drop the oldest frame so memory stays bounded.
+                    while (queue.length >= MAX_RENDER_QUEUE) { closeWcFrame(queue.shift().frame); _wcDiscarded++; }
                     queue.push({ frame, tUs: frame.timestamp, g: myGen });
                     const fSec = frame.timestamp / 1e6;
                     if (fSec > _wcBufferedSec) _wcBufferedSec = fSec; // drives the buffer bar
@@ -3739,6 +3754,8 @@ async function startMVPipeline() {
                         const tUs = Number(dv.getBigInt64(1));
                         const durUs = dv.getUint32(9);
                         const data = buf.slice(17, 17 + len); buf = buf.slice(17 + len);
+                        const fParsedSec = tUs / 1e6;
+                        if (fParsedSec > _wcParsedSec) _wcParsedSec = fParsedSec; // drives buffer bar
                         if (!key && waitingForKeyframe) continue; // drop delta frames until first IDR
                         waitingForKeyframe = false;
                         try { myDec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: tUs, duration: durUs, data })); }
@@ -3799,11 +3816,24 @@ async function startMVPipeline() {
             try { if (dec && dec.state !== 'closed') dec.close(); } catch (_) {}
             while (queue.length) closeWcFrame(queue.shift().frame); // decoder.close() does NOT close frames already handed to output
             firstFrame = _avStarted;            // keep gate open if A/V already started; else let first post-restart frame re-open it
-            _wcStallPaused = false;             // clear any active WC stall
+            // Seek hold: pause audio until the first post-seek frame so it can't run
+            // ahead of the re-stream (the black-on-backward-seek cause). In-range/backward
+            // seeks resume near-instantly from the engine's growing file; only a
+            // beyond-head (network) seek lingers on the hold as a clean buffer. The
+            // render loop's resume path (_wcStallPaused && queue.length>0) lifts it once
+            // _wcRebuffering clears on the first decoded frame.
+            if (_avStarted) {
+                _wcStallPaused = true;
+                try { HTMLMediaElement.prototype.pause.call(mkAudio); } catch (_) {}
+                _wcSpinner.style.display = 'block';
+            } else {
+                _wcStallPaused = false;
+            }
             _wcRebuffering = true;              // suppress stall detection until first post-restart frame
             _wcRebufStart = Date.now();         // arm hang timeout
             _wcDecErrCount = 0;
             _wcBufferedSec = t;
+            _wcParsedSec = t;
             start(t).catch(() => {});
         };
         const onWcSeek = () => {
