@@ -4104,11 +4104,39 @@ async function startMVPipeline() {
         // grows on every appended fragment, which would flood the console.
         ['loadstart', 'loadedmetadata', 'loadeddata', 'canplaythrough', 'stalled', 'emptied', 'abort'].forEach(ev => myVid.addEventListener(ev, () => _nlog(ev)));
 
-        // Fatal error → advance track. Native has NO MSE pipe to restart, so any
-        // hard error (code 2/3/4) is terminal; log and move on.
+        // Fatal error handler. MEDIA_ERR_DECODE (code=3) on first play is almost
+        // always EC-3 audio in the CDN progressive file — Chrome on Linux can't decode
+        // it. The engine's faststart cache (audio-stripped via -map 0:v:0) is being
+        // built in the background. Wait for it and retry instead of advancing track.
         myVid.addEventListener('error', () => {
             const e = myVid.error;
-            console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ''}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc} — advancing track`, 'color:#ff453a;font-weight:bold', 'color:inherit');
+            console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ''}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc}`, 'color:#ff453a;font-weight:bold', 'color:inherit');
+            if (e?.code === 3 /* MEDIA_ERR_DECODE */ && !_abortCtrl?.signal.aborted) {
+                console.log('%c[AML MV native]%c MEDIA_ERR_DECODE — waiting for audio-stripped faststart cache', 'color:#ff9f0a;font-weight:bold', 'color:inherit');
+                _bufSpinner.style.display = 'block';
+                const _pollCache = async () => {
+                    if (_abortCtrl?.signal.aborted) return;
+                    try {
+                        const info = await fetch(`${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`).then(r => r.json());
+                        if (info.cached) {
+                            console.log('%c[AML MV native]%c faststart ready — retrying with audio-stripped cache', 'color:#30d158;font-weight:bold', 'color:inherit');
+                            _bufSpinner.style.display = 'none';
+                            // Reset the video element — clears error state and triggers a fresh load.
+                            myVid.src = '';
+                            myVid.load();
+                            myVid.src = dlUrl;
+                            myVid.load();
+                            return;
+                        }
+                    } catch (_e) { console.warn('[AML MV native] poll error', _e); }
+                    setTimeout(_pollCache, 2000);
+                };
+                // Also trigger the faststart build via the info endpoint (in case it
+                // hasn't started yet — e.g. caching was disabled when playback began).
+                fetch(`${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`).catch(() => {});
+                setTimeout(_pollCache, 2000);
+                return;
+            }
             _abortMV(`video-error-${e?.code ?? '?'}`);
             _amlNextRef?.().catch(() => {});
             setTimeout(() => exitBtn?.click(), 200);
@@ -4220,9 +4248,22 @@ async function startMVPipeline() {
             tryStart();
         }, { once: true });
 
-        // Progressive: assign the src immediately. The engine streams a fragmented
-        // MP4 over HTTPS as it transcodes (fast startup — plays as bytes arrive, no
-        // full-file pre-cache/poll). Seek-ahead re-points src to ?t=<sec>.
+        // Mute and disable audio tracks on myVid — mkAudio handles audio
+        // independently. Apple's progressive CDN files often carry EC-3 (Dolby
+        // Digital Plus) which Chrome on Linux cannot decode; silencing it here
+        // prevents PIPELINE_ERROR_DECODE before the first frame arrives.
+        myVid.muted = true;
+        myVid.addEventListener('loadedmetadata', () => {
+            if (myVid.audioTracks) {
+                for (let i = 0; i < myVid.audioTracks.length; i++) {
+                    myVid.audioTracks[i].enabled = false;
+                }
+            }
+        }, { once: true });
+
+        // Progressive: assign the src immediately. The engine's /video-dl endpoint
+        // is a transparent Range proxy to the Apple CDN (mvod.itunes.apple.com).
+        // Chrome handles moov discovery and all seeking natively via Range requests.
         console.log('%c[AML MV native]%c src=%s (progressive)', 'color:#bf5af2;font-weight:bold', 'color:inherit', dlUrl);
         myVid.src = dlUrl;
         try { myVid.load(); } catch (e) { console.error(`[AML MV native] load() threw: ${e.message}`); }

@@ -709,12 +709,14 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 	// Chrome handles moov discovery, byte-range seeking, and buffering natively.
 	// Start building the faststart cache in the background so future plays are instant.
 	log.Printf("%s cache miss id=%s assetID=%s → CDN proxy", tagVideo("[video-dl]"), id, assetID)
-	if aacstream.MVCacheEnabled() {
-		// Guard with mvPreparing so multiple concurrent Range requests
-		// from the same play (moov + data) don't each spawn a goroutine.
-		if _, already := mvPreparing.Load(assetID); !already {
-			go s.prepareMVFaststart(id, assetID, durationSec)
-		}
+	// Always start the faststart build regardless of caching setting — the
+	// native <video src> path depends on it for EC-3 audio recovery (CDN files
+	// often carry EC-3 which Chrome on Linux cannot decode; the faststart remux
+	// uses -map 0:v:0 so the cached file is video-only, no crash).
+	// When caching is disabled the file is marked ephemeral and deleted on
+	// session release; the cache still exists for the duration of this session.
+	if _, already := mvPreparing.Load(assetID); !already {
+		go s.prepareMVFaststart(id, assetID, durationSec)
 	}
 
 	mvURL, hasURL := s.pm.GetProgressiveURL(id, pipeline.KindVideo)
@@ -722,6 +724,7 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 		http.Error(w, "no progressive URL for this video session", http.StatusNotFound)
 		return
 	}
+	log.Printf("%s CDN url=%s", tagVideo("[video-dl]"), mvURL)
 	s.proxyProgressiveVideo(w, r, mvURL)
 }
 
