@@ -4284,20 +4284,31 @@ async function startMVPipeline() {
             sb.addEventListener('error', onFail);
         });
 
-        // findSeekFragment: finds best frag index for seekSec, polling manifest if needed.
+        // findSeekFragment: returns the best frag index for seekSec.
+        // If the producer hasn't yet indexed that far, we estimate from timescale/density
+        // so the fetch loop can start immediately (the engine blocks on the seg endpoint
+        // until that fragment is on disk — no need to poll until it appears in the manifest).
         const findSeekFragment = async (seekSec, sig) => {
-            for (let attempt = 0; attempt < 20 && !sig.aborted; attempt++) {
+            // Up to ~2 s of polling: if the manifest already has a frag at seekSec, use it.
+            for (let attempt = 0; attempt < 10 && !sig.aborted; attempt++) {
                 const m = await fetch(`${base}/manifest`, { signal: sig }).then(r => r.json()).catch(() => null);
                 if (!m || sig.aborted) return 0;
                 const frags = m.frags || [];
-                // Find last frag whose t <= seekSec
                 let best = null;
                 for (const f of frags) { if (f.t <= seekSec) best = f; }
                 if (best !== null) return best.n;
-                if (m.done) return 0;
+                if (m.done) return 0; // stream finished, seekSec is past end
+                // Estimate: use average frag duration from whatever is indexed so far.
+                // If frags are already indexed, compute avg duration and extrapolate.
+                if (frags.length >= 2) {
+                    const avgDur = frags[frags.length - 1].t / (frags.length - 1);
+                    const estN = Math.max(0, Math.floor(seekSec / avgDur));
+                    console.log(`[AML vseg] seek estimate: n=${estN} (avgDur=${avgDur.toFixed(2)}s, seekSec=${seekSec.toFixed(2)}s)`);
+                    return estN; // engine /vseg/seg/{n} will block until fragment is written
+                }
                 await new Promise(r => setTimeout(r, 200));
             }
-            return 0;
+            return 0; // fallback: let the loop start from 0 and the engine catch up
         };
 
         const runFetchLoop = async (startN) => {
