@@ -2381,7 +2381,15 @@
     const _updateProgress = () => {
       if (!rangeInput) return;
       if (_userScrubbing) return;
-      if (_wcStallPaused && _wcVideo) return;
+      if (_wcStallPaused && _wcVideo) {
+        const t2 = mkAudio.currentTime;
+        const max2 = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute("max")) || 1;
+        rangeInput.value = String(t2);
+        const frac2 = max2 > 0 ? Math.min(1, Math.max(0, t2 / max2)) : 0;
+        rangeInput.style.setProperty("--progress", _fillPct(frac2).toFixed(2) + "%");
+        if (timeElapsed) timeElapsed.textContent = _fmtTime(t2);
+        return;
+      }
       const t = _wcVideo ? mkAudio.currentTime : myVid.currentTime;
       const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute("max")) || 1;
       rangeInput.value = String(t);

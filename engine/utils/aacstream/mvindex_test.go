@@ -276,6 +276,49 @@ func TestMVLiveIndex_LookupAndEnd(t *testing.T) {
 	t.Log("VERDICT: MVLiveIndex.Lookup returns latest frag ≤ t with correct End bounds; InitSize exposed; last frag unbounded.")
 }
 
+// TestMVLiveIndex_LookupComplete verifies that LookupComplete returns the latest
+// fragment that is both at/before t AND fully written (End <= written), falling
+// back to earlier complete fragments when the closest one isn't downloaded yet.
+func TestMVLiveIndex_LookupComplete(t *testing.T) {
+	const timescale = 1000
+	decTimes := []uint64{0, 2000, 4000, 6000} // → 0,2,4,6 s
+	stream, _, _, wantOffsets := buildMVStream(t, timescale, decTimes)
+
+	m := NewMVLiveIndex()
+	m.Write(stream) //nolint:errcheck
+
+	// All fragments complete. LookupComplete(5, allWritten) → frag at 4s (index 2).
+	allWritten := int64(len(stream))
+	f, ok := m.LookupComplete(5.0, allWritten)
+	if !ok || f.Off != wantOffsets[2] {
+		t.Fatalf("LookupComplete(5.0, all): ok=%v off=%d want off=%d", ok, f.Off, wantOffsets[2])
+	}
+
+	// Simulate only first two fragments written: written = offset of frag[2] (meaning
+	// frag[2].End = wantOffsets[3] > written). LookupComplete(5.0, partial) should
+	// return frag at 2s (index 1), the latest complete one before the seek target.
+	partial := wantOffsets[2] // frag[1].End = wantOffsets[2] <= partial → complete
+	f, ok = m.LookupComplete(5.0, partial)
+	if !ok || f.Off != wantOffsets[1] {
+		t.Fatalf("LookupComplete(5.0, partial=%d): ok=%v off=%d want off=%d (frag 1)", partial, ok, f.Off, wantOffsets[1])
+	}
+
+	// Only frag[0] complete (written < frag[1].End = wantOffsets[2]).
+	partial0 := wantOffsets[2] - 1
+	f, ok = m.LookupComplete(5.0, partial0)
+	if !ok || f.Off != wantOffsets[0] {
+		t.Fatalf("LookupComplete(5.0, partial0=%d): ok=%v off=%d want off=%d (frag 0)", partial0, ok, f.Off, wantOffsets[0])
+	}
+
+	// Seek before first fragment → not found.
+	_, ok = m.LookupComplete(-1.0, allWritten)
+	if ok {
+		t.Fatal("LookupComplete(-1.0) should return not-found")
+	}
+
+	t.Log("VERDICT: LookupComplete falls back to the latest complete earlier fragment when the exact one is not yet downloaded.")
+}
+
 func TestMVDecIndex_FinishRoundTrips(t *testing.T) {
 	stream, _, _, _ := buildMVStream(t, 1000, []uint64{0, 1000})
 	ix := newMVDecIndexer()
