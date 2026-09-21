@@ -45,8 +45,11 @@ type mvGrowingState struct {
 }
 
 var (
-	mvGrowing   sync.Map   // sessionID → *mvGrowingState
+	mvGrowing   sync.Map   // sessionID → *mvGrowingState (mv-es WebCodecs path)
 	mvGrowingMu sync.Mutex // serializes producer creation (one BeginStreamingPut per session)
+
+	mvDlGrowing   sync.Map   // sessionID → *mvGrowingState (mv-dl native video path)
+	mvDlGrowingMu sync.Mutex
 )
 
 // getOrStartMVGrowing returns the session's growing-file producer, starting it on
@@ -101,6 +104,61 @@ func (s *APIServer) stopMVGrowing(id string) {
 		}
 		s.diskCache.Remove(st.assetID, st.qualifier)
 		log.Printf("%s producer stopped + scratch removed id=%s assetID=%s", tagInfo("[mv-es]"), id, st.assetID)
+	}
+}
+
+// getOrStartDlGrowing is the /video-dl counterpart of getOrStartMVGrowing. It
+// starts a session-lifetime producer that runs transcodeVideoForMSE into a
+// growing ephemeral file and an MVLiveIndex simultaneously, so that seek
+// requests can be served from the file instead of re-downloading from Apple CDN.
+// Returns nil if BeginStreamingPut fails (caller falls back to stateless stream).
+func (s *APIServer) getOrStartDlGrowing(id, assetID string, durationSec float64) *mvGrowingState {
+	if v, ok := mvDlGrowing.Load(id); ok {
+		return v.(*mvGrowingState)
+	}
+	mvDlGrowingMu.Lock()
+	defer mvDlGrowingMu.Unlock()
+	if v, ok := mvDlGrowing.Load(id); ok {
+		return v.(*mvGrowingState)
+	}
+	const qualifier = "mv-dl-grow"
+	spw, err := s.diskCache.BeginStreamingPut(assetID, qualifier)
+	if err != nil || spw == nil {
+		return nil
+	}
+	ix := aacstream.NewMVLiveIndex()
+	pctx, cancel := context.WithCancel(context.Background())
+	st := &mvGrowingState{spw: spw, ix: ix, cancel: cancel, done: make(chan struct{}), assetID: assetID, qualifier: qualifier}
+	mvDlGrowing.Store(id, st)
+	go func() {
+		defer close(st.done)
+		err := transcodeVideoForMSE(pctx, func(dst io.Writer) error {
+			return s.pm.Stream(pctx, id, pipeline.KindVideo, dst)
+		}, io.MultiWriter(spw, ix), 0, durationSec)
+		if err != nil {
+			spw.Discard()
+		} else {
+			spw.Commit()
+		}
+		log.Printf("%s dl-grow producer done assetID=%s err=%v", tagVideo("[video-dl]"), assetID, err)
+	}()
+	log.Printf("%s dl-grow producer started id=%s assetID=%s", tagVideo("[video-dl]"), id, assetID)
+	return st
+}
+
+// stopDlGrowing cancels the /video-dl growing-file producer and removes the
+// scratch file. Called on session release (track change or exit).
+func (s *APIServer) stopDlGrowing(id string) {
+	if v, ok := mvDlGrowing.LoadAndDelete(id); ok {
+		st := v.(*mvGrowingState)
+		st.cancel()
+		select {
+		case <-st.done:
+		case <-time.After(5 * time.Second):
+			log.Printf("%s dl-grow stop timed out id=%s (removing anyway)", tagWarn("[video-dl]"), id)
+		}
+		s.diskCache.Remove(st.assetID, st.qualifier)
+		log.Printf("%s dl-grow producer stopped + scratch removed id=%s", tagInfo("[video-dl]"), id)
 	}
 }
 
@@ -655,33 +713,139 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 	if v, err := strconv.ParseFloat(r.URL.Query().Get("t"), 64); err == nil && v > 0 {
 		seekSec = v
 	}
-	log.Printf("%s GET id=%s assetID=%q t=%.2f (progressive fMP4)", tagVideo("[video-dl]"), id, assetID, seekSec)
+	durationSec := float64(sess.DurationMs) / 1000.0
 
-	// Progressive fragmented MP4 stream over HTTPS — fast startup (plays as it
-	// transcodes, no full-file pre-cache), served to a native <video src>. The
-	// real HTTPS transport sidesteps the custom-protocol seek bug (electron#38749)
-	// that made the fragmented format fail before. `?t=` re-streams from a seek
-	// point; tsOffset re-anchors make_zero's 0-based output onto the real timeline
-	// so the client's currentTime lands inside the buffered range. durationSec
-	// writes a valid mvhd duration into empty_moov so the scrubber shows total time.
-	videoSrc := func(dst io.Writer) error {
-		if seekSec > 0 {
+	// ── Fast path: committed faststart cache ──────────────────────────────────
+	// Serve the pre-built non-fragmented MP4 with a full moov sample table.
+	// http.ServeContent provides proper Accept-Ranges / 206 responses so Chrome
+	// can seek anywhere instantly without re-streaming. Ignores ?t= — the browser
+	// handles seeking via Range requests; the JS _nativeSeek loadedmetadata handler
+	// sets currentTime after load, triggering a Range request to the correct offset.
+	const qualDL = "mv-dl"
+	if path, ok2 := s.diskCache.Path(assetID, qualDL); ok2 {
+		log.Printf("%s cache hit id=%s assetID=%s", tagOK("[video-dl]"), id, assetID)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, "cache open: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer f.Close()
+		fi, _ := f.Stat()
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("X-Cache-Status", "hit") // readable by JS via fetch, not via <video>
+		http.ServeContent(w, r, "video.mp4", fi.ModTime(), f)
+		return
+	}
+
+	// ── Slow path: first play / seek — growing-file producer ─────────────────
+	// A session-lifetime goroutine runs transcodeVideoForMSE into a growing file
+	// and an MVLiveIndex. First play serves from spw.NewReader() (starts immediately
+	// as FFmpeg produces output). Seeks check LookupComplete: if the fragment is on
+	// disk, serve init+fragment from the file (no CDN re-download); otherwise fall
+	// back to the stateless network stream with the original tsOffset handling.
+	log.Printf("%s cache miss id=%s assetID=%q t=%.2f", tagVideo("[video-dl]"), id, assetID, seekSec)
+	if aacstream.MVCacheEnabled() {
+		go s.prepareMVFaststart(id, assetID, durationSec)
+	}
+
+	st := s.getOrStartDlGrowing(id, assetID, durationSec)
+
+	if seekSec > 0 && st != nil {
+		initSize, iok := st.ix.InitSize()
+		frag, ok := st.ix.LookupComplete(seekSec, st.spw.Written())
+		if !ok && iok {
+			frag, ok = st.ix.Lookup(seekSec)
+		}
+		const maxFragLag = 8.0
+		if ok && iok {
+			producerDone := false
+			select {
+			case <-st.done:
+				producerDone = true
+			default:
+			}
+			if producerDone {
+				if f, ok2 := s.diskCache.Get(st.assetID, st.qualifier); ok2 {
+					defer f.Close()
+					totalWritten := st.spw.Written()
+					combined := io.MultiReader(
+						io.NewSectionReader(f, 0, initSize),
+						io.NewSectionReader(f, frag.Off, totalWritten-frag.Off),
+					)
+					log.Printf("%s seek=%.3f source=committed-grow fragT=%.3f id=%s", tagOK("[video-dl]"), seekSec, frag.T, id)
+					streamMediaCoalesced(w, r, func(dst io.Writer) error {
+						_, err := io.Copy(dst, combined)
+						return err
+					}, "video/mp4")
+					return
+				}
+			} else if frag.End > 0 && frag.End <= st.spw.Written() && seekSec-frag.T <= maxFragLag {
+				initRaw := st.spw.NewReaderAt(0)
+				defer initRaw.Close()
+				fragR := st.spw.NewReaderAt(frag.Off)
+				defer fragR.Close()
+				combined := io.MultiReader(io.LimitReader(initRaw, initSize), fragR)
+				log.Printf("%s seek=%.3f source=growing-file fragT=%.3f id=%s", tagOK("[video-dl]"), seekSec, frag.T, id)
+				streamMediaCoalesced(w, r, func(dst io.Writer) error {
+					_, err := io.Copy(dst, combined)
+					return err
+				}, "video/mp4")
+				return
+			}
+		}
+		// Beyond head / index not ready — stateless network fallback.
+		log.Printf("%s seek=%.3f source=network written=%d id=%s", tagWarn("[video-dl]"), seekSec, st.spw.Written(), id)
+		videoSrc := func(dst io.Writer) error {
 			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, dst)
 			return err
 		}
-		return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
-	}
-	var tsOffset float64
-	if seekSec > 0 {
-		if actual, ok := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok {
+		var tsOffset float64
+		if actual, ok2 := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok2 {
 			tsOffset = actual
 		} else {
 			tsOffset = seekSec
 		}
+		streamMediaCoalesced(w, r, func(dst io.Writer) error {
+			return transcodeVideoForMSE(r.Context(), videoSrc, dst, tsOffset, durationSec)
+		}, "video/mp4")
+		return
 	}
-	durationSec := float64(sess.DurationMs) / 1000.0
+
+	if seekSec > 0 && st == nil {
+		// No growing file — stateless seek (original behaviour).
+		videoSrc := func(dst io.Writer) error {
+			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, dst)
+			return err
+		}
+		var tsOffset float64
+		if actual, ok2 := s.pm.GetSeekStart(id, pipeline.KindVideo, seekSec); ok2 {
+			tsOffset = actual
+		} else {
+			tsOffset = seekSec
+		}
+		streamMediaCoalesced(w, r, func(dst io.Writer) error {
+			return transcodeVideoForMSE(r.Context(), videoSrc, dst, tsOffset, durationSec)
+		}, "video/mp4")
+		return
+	}
+
+	// First play (seekSec == 0): serve from growing file.
+	if st != nil {
+		log.Printf("%s first-play source=growing id=%s written=%d", tagVideo("[video-dl]"), id, st.spw.Written())
+		rd := st.spw.NewReader()
+		defer rd.Close()
+		streamMediaCoalesced(w, r, func(dst io.Writer) error {
+			_, err := io.Copy(dst, rd)
+			return err
+		}, "video/mp4")
+		return
+	}
+
+	// Fallback: growing file unavailable — stateless stream.
 	streamMediaCoalesced(w, r, func(dst io.Writer) error {
-		return transcodeVideoForMSE(r.Context(), videoSrc, dst, tsOffset, durationSec)
+		return transcodeVideoForMSE(r.Context(), func(dst io.Writer) error {
+			return s.pm.Stream(r.Context(), id, pipeline.KindVideo, dst)
+		}, dst, 0, durationSec)
 	}, "video/mp4")
 }
 
@@ -729,19 +893,19 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 	assetID := sess.AssetID
 	log.Printf("[video-es] GET id=%s assetID=%q seekSec=%.2f decExists=%v", id, assetID, seekSec, aacstream.MVDecExists(assetID, sess.MVMaxHeight))
 
-	esHeaders := func() {
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Accept-Ranges", "none")
-	}
+	// esw wraps the ResponseWriter so every DemuxFMP4ToES write is immediately
+	// flushed to the network. Without this, Go's HTTP layer buffers small writes
+	// (e.g. the tiny first video fragment, ~4 KB) and holds them until the buffer
+	// fills — causing a multi-second stall before the renderer sees the first byte.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	esw := &firstByteWriter{w: w, ct: "application/octet-stream"}
 
 	// Full play from dec-cache: no FFmpeg, real-timeline PTS already in the fMP4.
 	if seekSec == 0 && aacstream.MVDecExists(assetID, sess.MVMaxHeight) {
 		log.Printf("[video-es] full play from dec-cache id=%s", id)
 		pr, pw := io.Pipe()
 		go func() { pw.CloseWithError(aacstream.ServeMVDec(assetID, sess.MVMaxHeight, pw)) }()
-		esHeaders()
-		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, esw); err != nil && r.Context().Err() == nil {
 			log.Printf("[video-es] dec-cache demux error id=%s: %v", id, err)
 		}
 		return
@@ -755,8 +919,7 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 		go func() {
 			pw.CloseWithError(aacstream.ServeMVDecFrom(assetID, sess.MVMaxHeight, seekSec, pw))
 		}()
-		esHeaders()
-		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, esw); err != nil && r.Context().Err() == nil {
 			log.Printf("[video-es] indexed seek demux error id=%s: %v", id, err)
 		}
 		return
@@ -780,14 +943,11 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 			}
 			pw.CloseWithError(err)
 		}()
-		esHeaders()
-		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, esw); err != nil && r.Context().Err() == nil {
 			log.Printf("[video-es] direct demux error id=%s: %v", id, err)
 		}
 		return
 	}
-
-	esHeaders()
 
 	// Seek: serve from the growing file when we can find a complete fragment at or
 	// before seekSec (End > 0 && End <= Written). LookupComplete falls back to an
@@ -825,27 +985,30 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 						io.NewSectionReader(f, 0, initSize),
 						io.NewSectionReader(f, frag.Off, totalWritten-frag.Off),
 					)
-					if err := aacstream.DemuxFMP4ToES(r.Context(), combined, w); err != nil && r.Context().Err() == nil {
+					if err := aacstream.DemuxFMP4ToES(r.Context(), combined, esw); err != nil && r.Context().Err() == nil {
 						log.Printf("[video-es] committed seek demux error id=%s: %v", id, err)
 					}
 					return
 				}
 				// Committed file not readable (evicted?); fall through to network.
 			} else if frag.End > 0 && frag.End <= st.spw.Written() {
-				// LookupComplete found a fully-downloaded fragment: serve it immediately.
-				// The growing reader blocks at the current write position and delivers more
-				// data as the producer writes it.
-				initRaw := st.spw.NewReaderAt(0)
-				defer initRaw.Close()
-				fragR := st.spw.NewReaderAt(frag.Off)
-				defer fragR.Close()
-				// init segment (ftyp+moov, bounded) then the fragment onward (grows,
-				// so playback continues from the seek point without re-streaming).
-				combined := io.MultiReader(io.LimitReader(initRaw, initSize), fragR)
-				if err := aacstream.DemuxFMP4ToES(r.Context(), combined, w); err != nil && r.Context().Err() == nil {
-					log.Printf("[video-es] growing-file seek demux error id=%s: %v", id, err)
+				// Only serve from the growing file if the fragment starts within
+				// 8 seconds of the seek target. A fragment much earlier means the
+				// renderer would decode+discard many seconds before reaching seekSec,
+				// causing a long visible stall. Fall through to network seek instead.
+				const maxFragLag = 8.0
+				if seekSec-frag.T <= maxFragLag {
+					initRaw := st.spw.NewReaderAt(0)
+					defer initRaw.Close()
+					fragR := st.spw.NewReaderAt(frag.Off)
+					defer fragR.Close()
+					combined := io.MultiReader(io.LimitReader(initRaw, initSize), fragR)
+					if err := aacstream.DemuxFMP4ToES(r.Context(), combined, esw); err != nil && r.Context().Err() == nil {
+						log.Printf("[video-es] growing-file seek demux error id=%s: %v", id, err)
+					}
+					return
 				}
-				return
+				log.Printf("[video-es] growing-file frag too early (%.1fs before target) → network id=%s", seekSec-frag.T, id)
 			}
 		}
 		// Beyond the download head (or index not ready): network fallback. The
@@ -857,7 +1020,7 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, pw)
 			pw.CloseWithError(err)
 		}()
-		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, w); err != nil && r.Context().Err() == nil {
+		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, esw); err != nil && r.Context().Err() == nil {
 			log.Printf("[video-es] network seek demux error id=%s: %v", id, err)
 		}
 		return
@@ -869,16 +1032,17 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 	log.Printf("%s cache=streaming id=%s written=%d", tagVideo("[mv-es]"), id, st.spw.Written())
 	rd := st.spw.NewReader()
 	defer rd.Close()
-	if err := aacstream.DemuxFMP4ToES(r.Context(), rd, w); err != nil && r.Context().Err() == nil {
+	if err := aacstream.DemuxFMP4ToES(r.Context(), rd, esw); err != nil && r.Context().Err() == nil {
 		log.Printf("[video-es] growing-file demux error id=%s: %v", id, err)
 	}
 }
 
 func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	// Stop the MV WebCodecs growing-file producer (if any) and remove its scratch
-	// file. Done before Release so the detached producer is cancelled first.
+	// Stop both growing-file producers (mv-es WebCodecs and mv-dl native video)
+	// and remove their scratch files before releasing the session.
 	s.stopMVGrowing(id)
+	s.stopDlGrowing(id)
 	// If this session's MV faststart file was written under "caching disabled",
 	// delete it now — it existed only to serve this playback.
 	if sess, ok := s.pm.GetSession(id); ok {
