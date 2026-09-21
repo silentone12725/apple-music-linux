@@ -3583,7 +3583,33 @@
       ["loadstart", "loadedmetadata", "loadeddata", "canplaythrough", "stalled", "emptied", "abort"].forEach((ev) => myVid.addEventListener(ev, () => _nlog(ev)));
       myVid.addEventListener("error", () => {
         const e = myVid.error;
-        console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ""}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc} \u2014 advancing track`, "color:#ff453a;font-weight:bold", "color:inherit");
+        console.error(`%c[AML MV native]%c ERROR code=${e?.code} msg="${e?.message || ""}" net=${_NET[myVid.networkState]} rs=${_RS[myVid.readyState]} currentSrc=${myVid.currentSrc}`, "color:#ff453a;font-weight:bold", "color:inherit");
+        if (e?.code === 3 && !_abortCtrl?.signal.aborted) {
+          console.log("%c[AML MV native]%c MEDIA_ERR_DECODE \u2014 waiting for audio-stripped faststart cache", "color:#ff9f0a;font-weight:bold", "color:inherit");
+          _bufSpinner.style.display = "block";
+          const _pollCache = async () => {
+            if (_abortCtrl?.signal.aborted) return;
+            try {
+              const info = await fetch(`${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`).then((r) => r.json());
+              if (info.cached) {
+                console.log("%c[AML MV native]%c faststart ready \u2014 retrying with audio-stripped cache", "color:#30d158;font-weight:bold", "color:inherit");
+                _bufSpinner.style.display = "none";
+                myVid.src = "";
+                myVid.load();
+                myVid.src = dlUrl;
+                myVid.load();
+                return;
+              }
+            } catch (_e) {
+              console.warn("[AML MV native] poll error", _e);
+            }
+            setTimeout(_pollCache, 2e3);
+          };
+          fetch(`${ENGINE_HTTPS}/api/v1/playback/${_sessionId}/video-dl-info`).catch(() => {
+          });
+          setTimeout(_pollCache, 2e3);
+          return;
+        }
         _abortMV(`video-error-${e?.code ?? "?"}`);
         _amlNextRef?.().catch(() => {
         });
@@ -3694,6 +3720,14 @@
         _dispatchNative("canplay");
         _videoCanPlay = true;
         tryStart();
+      }, { once: true });
+      myVid.muted = true;
+      myVid.addEventListener("loadedmetadata", () => {
+        if (myVid.audioTracks) {
+          for (let i = 0; i < myVid.audioTracks.length; i++) {
+            myVid.audioTracks[i].enabled = false;
+          }
+        }
       }, { once: true });
       console.log("%c[AML MV native]%c src=%s (progressive)", "color:#bf5af2;font-weight:bold", "color:inherit", dlUrl);
       myVid.src = dlUrl;
