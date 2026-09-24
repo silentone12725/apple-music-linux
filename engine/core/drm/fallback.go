@@ -195,11 +195,11 @@ func (b *fallbackBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 	return AccountInfo{}, fmt.Errorf("drm: backend not started")
 }
 
-func (b *fallbackBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, error) {
+func (b *fallbackBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, string, error) {
 	if a := b.activeOr(); a != nil {
 		return a.GetProgressiveMVURL(ctx, adamID)
 	}
-	return "", fmt.Errorf("drm: backend not started")
+	return "", "", fmt.Errorf("drm: backend not started")
 }
 
 func (b *fallbackBackend) DialCBCS(ctx context.Context) (net.Conn, error) {

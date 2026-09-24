@@ -35,10 +35,10 @@ type DRMProvider interface {
 	// GetAccount returns cached account information (storefront, tokens).
 	GetAccount(ctx context.Context) (AccountInfo, error)
 
-	// GetProgressiveMVURL returns a progressive video download URL for the given
-	// adamID, obtained through the Android DRM backend's native auth stack.
-	// The returned URL already contains ?accessKey=… for CDN authentication.
-	GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, error)
+	// GetProgressiveMVURL returns a progressive video download URL and the
+	// associated downloadKey (base64 FairPlay token; empty if not available) for
+	// the given adamID, via the Android DRM backend's native auth stack.
+	GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error)
 }
 
 // DecryptRequest carries the inputs for a CBCS decryption operation.

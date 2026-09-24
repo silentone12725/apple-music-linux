@@ -42,6 +42,8 @@ electron/dist/resources/drm
 apple-music-cli
 engine/apple-music-cli
 engine/main
+engine/engine
+frida-server*
 engine/bench
 engine/startupbench
 engine/drmcheck

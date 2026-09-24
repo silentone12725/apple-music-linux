@@ -84,7 +84,7 @@ type DRMBackend interface {
 	Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error)
 	GetM3U8(ctx context.Context, adamID uint64) (string, error)
 	GetAccount(ctx context.Context) (AccountInfo, error)
-	GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, error)
+	GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error)
 
 	// DialCBCS opens one CBCS decryption connection (satisfies fairplay.CBCSDialer).
 	// Phase 1: returns a TCP connection to the wrapper's port 10020.

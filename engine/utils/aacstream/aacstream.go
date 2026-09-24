@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"log"
 	"log/slog"
+	"os"
 
 	cdm "engine/utils/aacstream/cdm"
 	wvkey "engine/utils/aacstream/wvkey"
@@ -359,6 +360,9 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 		"https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense",
 		pssh, nil)
 	if err == nil && len(keyBytes) > 0 {
+		// ponytail: temp key dump for itun key-match verification, remove after test
+		slog.Info("[KEY DUMP] widevine content key", "adamID", adamID, "key_hex", fmt.Sprintf("%x", keyBytes), "key_b64", base64.StdEncoding.EncodeToString(keyBytes))
+		os.WriteFile(fmt.Sprintf("/tmp/widevine_key_%s.txt", adamID), []byte(fmt.Sprintf("%x\n", keyBytes)), 0644)
 		keyCache.Store(ck, keyBytes)
 	}
 	return keyBytes, err
