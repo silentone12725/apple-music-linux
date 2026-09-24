@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -185,15 +186,21 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 	sess.Streams.Audio = "/api/v1/playback/" + sess.ID + "/audio"
 
 	pctx := &playContext{
-		streams: make(map[pipeline.StreamKind]*pipeline.Stream),
-		expiry:  time.Now().Add(sessionTTL),
+		streams:          make(map[pipeline.StreamKind]*pipeline.Stream),
+		expiry:           time.Now().Add(sessionTTL),
+		mvProgressiveURL: ms.MVProgressiveURL,
+		mvDownloadKey:    ms.MVDownloadKey,
 	}
 
+	log.Printf("[openDirect] %s: provider returned %d tracks", req.AssetID, len(ms.Tracks))
 	for _, track := range ms.Tracks {
+		log.Printf("[openDirect] %s: calling track.Open kind=%s", req.AssetID, track.Kind)
 		stream, err := track.Open(ctx)
 		if err != nil {
+			log.Printf("[openDirect] %s: track.Open kind=%s FAILED: %v", req.AssetID, track.Kind, err)
 			return nil, fmt.Errorf("open %s stream: %w", track.Kind, err)
 		}
+		log.Printf("[openDirect] %s: track.Open kind=%s OK", req.AssetID, track.Kind)
 		pctx.streams[track.Kind] = stream
 
 		switch track.Kind {
@@ -312,6 +319,16 @@ func (m *Manager) GetProgressiveURL(id string, kind pipeline.StreamKind) (string
 		return "", false
 	}
 	return us.SourceURL(), true
+}
+
+// GetMVProgressiveInfo returns the progressive CDN URL and downloadKey cookie
+// token for an MV session. Both are empty strings when unavailable.
+func (m *Manager) GetMVProgressiveInfo(id string) (url, key string, ok bool) {
+	_, pctx, found := m.lookup(id)
+	if !found {
+		return "", "", false
+	}
+	return pctx.mvProgressiveURL, pctx.mvDownloadKey, pctx.mvProgressiveURL != ""
 }
 
 // Release deletes a session and its private context.

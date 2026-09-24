@@ -739,10 +739,6 @@
           window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3, seeked: true });
         }, T().debounce);
       } else if (_activeMvControls) {
-        if (!_mvGateOpen) {
-          console.log(`[AML MV] seek blocked \u2014 gate not open (seekSec=${seekSec.toFixed(2)})`);
-          return;
-        }
         _activeMvControls.seekTo(seekSec);
       } else {
         if (!_mvGateOpen) {
@@ -1604,10 +1600,11 @@
     myVid.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:1;pointer-events:none;";
     mvContainer.insertAdjacentElement("afterbegin", myVid);
     if (nativeVidEl) nativeVidEl.style.opacity = "0";
-    const _nativeVideo = true;
+    const _nativeVideo = false;
     const _wcVideo = false;
     const _mp4Video = false;
-    const _vsegVideo = false;
+    const _vsegVideo = true;
+    let _vsegBufferedSec = 0;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
     let _wcParsedSec = 0;
@@ -1622,22 +1619,10 @@
     const _subDiv = document.createElement("div");
     _subDiv.style.cssText = "position:absolute;bottom:10%;left:5%;right:5%;text-align:center;z-index:20;pointer-events:none;font-family:-apple-system,SF Pro Text,system-ui,sans-serif;transition:bottom 0.25s ease;";
     mvContainer.appendChild(_subDiv);
-    if (!document.getElementById("_mvBufSpinStyle")) {
-      const s = document.createElement("style");
-      s.id = "_mvBufSpinStyle";
-      s.textContent = "@keyframes _mvBufSpin{from{transform:translate(-50%,-50%) rotate(0deg)}to{transform:translate(-50%,-50%) rotate(360deg)}}";
-      document.head.appendChild(s);
-    }
-    const _bufSpinner = document.createElement("div");
-    _bufSpinner.style.cssText = [
-      "position:absolute;top:50%;left:50%",
-      "transform:translate(-50%,-50%)",
-      "width:44px;height:44px;border-radius:50%",
-      "border:3px solid rgba(255,255,255,0.25)",
-      "border-top-color:rgba(255,255,255,0.9)",
-      "animation:_mvBufSpin 0.75s linear infinite",
-      "pointer-events:none;z-index:3;display:none"
-    ].join(";");
+    const _spinSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44"><circle cx="22" cy="22" r="19" fill="none" stroke="rgba(255,255,255,.2)" stroke-width="3"/><circle cx="22" cy="22" r="19" fill="none" stroke="white" stroke-width="3" stroke-dasharray="24 96" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 22 22" to="360 22 22" dur=".75s" repeatCount="indefinite"/></circle></svg>';
+    const _bufSpinner = document.createElement("img");
+    _bufSpinner.src = "data:image/svg+xml," + encodeURIComponent(_spinSvg);
+    _bufSpinner.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:44px;height:44px;pointer-events:none;z-index:3;display:none";
     mvContainer.appendChild(_bufSpinner);
     let _ccEnabled = true;
     const _renderSubs = () => {
@@ -2218,7 +2203,8 @@
       } else if (_nativeVideo && _nativeSeekRef) {
         _nativeSeekRef(Math.max(0, Math.min(_durationSec || 1e9, sec)));
       } else {
-        myVid.currentTime = Math.max(0, Math.min(myVid.duration || 1e9, sec));
+        const dur = _durationSec || myVid.duration || 1e9;
+        myVid.currentTime = Math.max(0, Math.min(dur, sec));
         mkAudio.currentTime = myVid.currentTime;
       }
     };
@@ -2402,6 +2388,8 @@
         let bFrac = 0;
         if (_wcVideo) {
           bFrac = Math.min(1, Math.max(0, _wcParsedSec / max));
+        } else if (_vsegVideo) {
+          bFrac = Math.min(1, Math.max(0, _vsegBufferedSec / max));
         } else if (_nativeVideo) {
           const nBuf = myVid.buffered;
           if (nBuf && nBuf.length > 0)
@@ -3589,7 +3577,8 @@
           try {
             const info = await fetch(infoUrl).then((r) => r.json());
             if (info.cached) {
-              console.log("%c[AML MV native]%c faststart ready \u2014 loading", "color:#30d158;font-weight:bold", "color:inherit");
+              const _src = info.cdnProxy ? "CDN proxy (instant)" : "faststart cache";
+              console.log(`%c[AML MV native]%c ${_src} ready \u2014 loading`, "color:#30d158;font-weight:bold", "color:inherit");
               _bufSpinner.style.display = "none";
               myVid.src = "";
               myVid.load();
@@ -3751,9 +3740,12 @@
       const BUFFER_AHEAD = 12;
       const ms2 = new MediaSource();
       myVid.src = URL.createObjectURL(ms2);
+      _bufSpinner.style.display = "block";
       let sb = null;
       let fetchGeneration = 0;
       let loopAbort = new AbortController();
+      let _seekHandlerActive = false;
+      let _seekFreeze = null;
       const stopFetchLoop = () => {
         fetchGeneration++;
         loopAbort.abort();
@@ -3777,26 +3769,30 @@
         sb.addEventListener("updateend", onDone);
         sb.addEventListener("error", onFail);
       });
-      const findSeekFragment = async (seekSec, sig) => {
-        for (let attempt = 0; attempt < 10 && !sig.aborted; attempt++) {
-          const m = await fetch(`${base}/manifest`, { signal: sig }).then((r) => r.json()).catch(() => null);
-          if (!m || sig.aborted) return 0;
-          const frags = m.frags || [];
-          let best = null;
-          for (const f of frags) {
-            if (f.t <= seekSec) best = f;
+      const _showSeekFreeze = () => {
+        if (myVid.readyState < 2 || myVid.videoWidth === 0) return;
+        if (_seekFreeze) {
+          try {
+            _seekFreeze.remove();
+          } catch (_) {
           }
-          if (best !== null) return best.n;
-          if (m.done) return 0;
-          if (frags.length >= 2) {
-            const avgDur = frags[frags.length - 1].t / (frags.length - 1);
-            const estN = Math.max(0, Math.floor(seekSec / avgDur));
-            console.log(`[AML vseg] seek estimate: n=${estN} (avgDur=${avgDur.toFixed(2)}s, seekSec=${seekSec.toFixed(2)}s)`);
-            return estN;
-          }
-          await new Promise((r) => setTimeout(r, 200));
         }
-        return 0;
+        const c = document.createElement("canvas");
+        c.width = myVid.videoWidth;
+        c.height = myVid.videoHeight;
+        c.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:100%;height:100%;object-fit:contain;z-index:2;pointer-events:none;";
+        c.getContext("2d").drawImage(myVid, 0, 0);
+        mvContainer.appendChild(c);
+        _seekFreeze = c;
+      };
+      const _clearSeekFreeze = () => {
+        if (_seekFreeze) {
+          try {
+            _seekFreeze.remove();
+          } catch (_) {
+          }
+          _seekFreeze = null;
+        }
       };
       const runFetchLoop = async (startN) => {
         const gen = fetchGeneration;
@@ -3828,6 +3824,8 @@
             sb.appendBuffer(data);
             await waitUpdateEnd();
             if (gen !== fetchGeneration) break;
+            if (sb.buffered.length > 0)
+              _vsegBufferedSec = sb.buffered.end(sb.buffered.length - 1);
             nextSeg++;
           }
         } catch (e) {
@@ -3835,6 +3833,12 @@
         }
       };
       ms2.addEventListener("sourceopen", async () => {
+        if (_durationSec > 0) {
+          try {
+            ms2.duration = _durationSec;
+          } catch (_) {
+          }
+        }
         let codecs = "";
         for (let i = 0; i < 10 && !codecs; i++) {
           const m = await fetch(`${base}/manifest`).then((r) => r.json()).catch(() => null);
@@ -3862,16 +3866,29 @@
       });
       myVid.addEventListener("seeking", async () => {
         if (!sb) return;
+        if (_seekHandlerActive) return;
         const seekSec = myVid.currentTime;
-        const gen = fetchGeneration + 1;
+        for (let i = 0; i < sb.buffered.length; i++) {
+          if (sb.buffered.start(i) <= seekSec && seekSec < sb.buffered.end(i)) return;
+        }
+        _seekHandlerActive = true;
+        _showSeekFreeze();
+        _bufSpinner.style.display = "block";
+        if (!mkAudio.paused) mkAudio.pause();
+        mkAudio.currentTime = seekSec;
+        _vsegBufferedSec = seekSec;
         stopFetchLoop();
         const sig = loopAbort.signal;
         console.log(`[AML vseg] seek to ${seekSec.toFixed(2)}s`);
-        const startN = await findSeekFragment(seekSec, sig);
-        if (sig.aborted) return;
+        const resp = await fetch(`${base}/seek?t=${seekSec}`, { signal: sig }).then((r) => r.json()).catch(() => null);
+        if (sig.aborted) {
+          _seekHandlerActive = false;
+          return;
+        }
+        const startN = resp?.n ?? 0;
+        const startT = resp?.t ?? 0;
         await waitUpdateEnd().catch(() => {
         });
-        if (sig.aborted) return;
         if (sb.buffered.length > 0) {
           const end = sb.buffered.end(sb.buffered.length - 1);
           if (end > 0) {
@@ -3880,13 +3897,31 @@
             });
           }
         }
-        if (sig.aborted) return;
-        runFetchLoop(startN);
+        try {
+          sb.timestampOffset = startN === 0 ? startT : 0;
+        } catch (_) {
+        }
+        if (!sig.aborted) runFetchLoop(startN);
+      });
+      myVid.addEventListener("seeked", () => {
+        _seekHandlerActive = false;
+        _bufSpinner.style.display = "none";
+        _clearSeekFreeze();
+        if (!myVid.paused && mkAudio.paused)
+          mkAudio.play().catch(() => {
+          });
       });
       myVid.addEventListener("canplay", () => {
+        _bufSpinner.style.display = "none";
+        _clearSeekFreeze();
         _videoCanPlay = true;
         tryStart();
         _iframePlay.call(myVid).catch((e) => console.warn("[AML vseg] myVid play rejected:", e.message));
+      }, { once: true });
+      _abortCtrl.signal.addEventListener("abort", () => {
+        stopFetchLoop();
+        fetch(`${base}`, { method: "DELETE" }).catch(() => {
+        });
       }, { once: true });
       console.log("[AML vseg] setup done, waiting for sourceopen");
     };

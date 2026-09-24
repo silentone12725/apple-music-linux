@@ -931,28 +931,36 @@ func (b *ProcessBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 }
 
 // GetProgressiveMVURL implements DRMBackend via port 40020 TCP protocol.
-// The wrapper always calls get_m3u8_method_download (native Android StoreKit auth),
-// returning a progressive mvod.itunes.apple.com URL with ?accessKey= embedded.
-func (b *ProcessBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) (string, error) {
-	conn, err := net.DialTimeout("tcp", b.mvAddr(), 5*time.Second)
-	if err != nil {
-		return "", fmt.Errorf("drm mv dial: %w", err)
+//
+// Wire format (updated):
+//
+//	Send: uint8 adamIDLen + []byte adamID (decimal string)
+//	Recv: URL\n
+//	Recv: downloadKey\n  (empty line = not available; base64 FairPlay key token)
+func (b *ProcessBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) (url string, downloadKey string, err error) {
+	conn, connErr := net.DialTimeout("tcp", b.mvAddr(), 5*time.Second)
+	if connErr != nil {
+		return "", "", fmt.Errorf("drm mv dial: %w", connErr)
 	}
 	defer conn.Close()
 	rw := newBufRW(conn)
-	if err := sendString(rw, fmt.Sprintf("%d", adamID)); err != nil {
-		return "", fmt.Errorf("drm mv send id: %w", err)
+	if sendErr := sendString(rw, fmt.Sprintf("%d", adamID)); sendErr != nil {
+		return "", "", fmt.Errorf("drm mv send id: %w", sendErr)
 	}
 	_ = rw.Flush()
 	scanner := bufio.NewScanner(conn)
 	if !scanner.Scan() {
-		return "", fmt.Errorf("drm mv: no response")
+		return "", "", fmt.Errorf("drm mv: no response")
 	}
-	url := strings.TrimSpace(scanner.Text())
+	url = strings.TrimSpace(scanner.Text())
 	if url == "" {
-		return "", fmt.Errorf("drm mv: empty URL (adamID %d)", adamID)
+		return "", "", fmt.Errorf("drm mv: empty URL (adamID %d)", adamID)
 	}
-	return url, nil
+	// Second line: downloadKey (may be absent in older wrapper builds).
+	if scanner.Scan() {
+		downloadKey = strings.TrimSpace(scanner.Text())
+	}
+	return url, downloadKey, nil
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

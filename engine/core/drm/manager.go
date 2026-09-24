@@ -177,16 +177,16 @@ func (m *DRMManager) GetM3U8(ctx context.Context, adamID uint64) (string, error)
 }
 
 // GetProgressiveMVURL auto-starts the backend and fetches a progressive MV URL
-// via the wrapper's native Android StoreKit auth (port 40020).
-func (m *DRMManager) GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, error) {
-	if err := m.ensureRunning(ctx); err != nil {
-		return "", err
+// and the associated downloadKey (may be empty) via port 40020.
+func (m *DRMManager) GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error) {
+	if err = m.ensureRunning(ctx); err != nil {
+		return "", "", err
 	}
-	url, err := m.backend.GetProgressiveMVURL(ctx, adamID)
+	url, downloadKey, err = m.backend.GetProgressiveMVURL(ctx, adamID)
 	if err == nil {
 		m.session.RecordSuccess()
 	}
-	return url, err
+	return url, downloadKey, err
 }
 
 // GetAccount auto-starts the backend if a session exists.

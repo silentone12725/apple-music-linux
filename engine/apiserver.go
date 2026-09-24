@@ -83,7 +83,7 @@ func (a *drmAccountAdapter) GetMusicToken(ctx context.Context) (devToken, musicT
 	return info.DevToken, info.MusicToken, err
 }
 
-func (a *drmAccountAdapter) GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, error) {
+func (a *drmAccountAdapter) GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, string, error) {
 	return a.dm.GetProgressiveMVURL(ctx, adamID)
 }
 
@@ -641,6 +641,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/init", cors(s.handlePlaybackVsegInit))
 	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/seg/{n}", cors(s.handlePlaybackVsegSeg))
 	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/manifest", cors(s.handlePlaybackVsegManifest))
+	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/seek", cors(s.handlePlaybackVsegSeek))
+	mux.HandleFunc("DELETE /api/v1/playback/{id}/vseg", cors(s.handlePlaybackVsegStop))
 	mux.HandleFunc("POST /api/v1/playback/{id}/precache", cors(s.handlePlaybackPrecache))
 	mux.HandleFunc("DELETE /api/v1/playback/{id}", cors(s.handleDeletePlayback))
 

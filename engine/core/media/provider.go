@@ -55,6 +55,14 @@ type Session struct {
 	Metadata     Metadata
 	Tracks       []Track
 	VideoHeights []int // available video variant heights from HLS master (MV only)
+
+	// MVProgressiveURL is the progressive CDN URL for the video (MV only).
+	// MVDownloadKey is the auth token sent as a "downloadKey" cookie to the CDN;
+	// the CDN uses it for server-side decryption authorisation (Android pattern).
+	// Both are empty for non-MV sessions and when the wrapper did not return a key.
+	// Never serialised — not DRM key material, but treated as auth material.
+	MVProgressiveURL string
+	MVDownloadKey    string
 }
 
 // OpenRequest carries the parameters that Providers use to locate and open a

@@ -72,10 +72,10 @@ type AccountTokenSource interface {
 	// Called once per subDownload attempt; errors fall back to web MusicKit tokens.
 	GetMusicToken(ctx context.Context) (devToken, musicToken string, err error)
 
-	// GetProgressiveMVURL fetches a progressive video URL for the given adamID
-	// through the wrapper's native Android StoreKit auth (port 40020). The
-	// returned URL already contains ?accessKey=… for CDN authentication.
-	GetProgressiveMVURL(ctx context.Context, adamID uint64) (string, error)
+	// GetProgressiveMVURL fetches a progressive video URL and associated
+	// downloadKey (base64 FairPlay token; empty if not available) for the given
+	// adamID through the wrapper's native Android StoreKit auth (port 40020).
+	GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error)
 }
 
 // NewProviderWithCBCS returns a media.Provider backed by Apple Music with
@@ -294,7 +294,7 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 		Open:        makeAuthSeekableTrackOpener(lp, assetID, token, mut, videoURL, pipeline.KindVideo, pipeline.CodecH264),
 	}
 
-	return &media.Session{
+	sess := &media.Session{
 		Kind: "mv",
 		Metadata: media.Metadata{
 			Title:      a.Name,
@@ -312,7 +312,26 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 				Open:  makeAuthSeekableTrackOpener(lp, assetID, token, mut, audioURL, pipeline.KindAudio, pipeline.CodecAAC),
 			},
 		},
-	}, nil
+	}
+
+	// Try to obtain the progressive CDN URL and downloadKey from the native
+	// wrapper (port 40020). The downloadKey is sent as an HTTP cookie to the
+	// CDN (Android pattern) — the CDN authorises server-side decryption.
+	// Non-fatal: HLS CBCS path is always the primary; this is an optimisation.
+	if p.acct != nil {
+		if adamID, parseErr := strconv.ParseUint(req.AssetID, 10, 64); parseErr == nil {
+			if pURL, pKey, pErr := p.acct.GetProgressiveMVURL(ctx, adamID); pErr == nil && pURL != "" {
+				sess.MVProgressiveURL = pURL
+				sess.MVDownloadKey = pKey
+				log.Printf("[mv] progressive URL obtained for adamID=%s keyLen=%d", req.AssetID, len(pKey))
+			} else if pErr != nil {
+				log.Printf("[mv] GetProgressiveMVURL adamID=%s: %v (non-fatal)", req.AssetID, pErr)
+			}
+		}
+	}
+
+	log.Printf("[mv] openMV %s: returning sess with %d tracks mvProgressiveURL=%v", req.AssetID, len(sess.Tracks), sess.MVProgressiveURL != "")
+	return sess, nil
 }
 
 // makeSeekableTrackOpener is like makeTrackOpener but uses HLSSeekableSource so
@@ -350,6 +369,7 @@ func makeSeekableTrackOpenerWithAuth(
 	auth bool,
 ) func(context.Context) (*pipeline.Stream, error) {
 	return func(ctx context.Context) (*pipeline.Stream, error) {
+		log.Printf("[apple] %s: opening media playlist url=%s auth=%v", kind, playlistURL, auth)
 		var med *hls.Media
 		var err error
 		if auth {
@@ -358,8 +378,10 @@ func makeSeekableTrackOpenerWithAuth(
 			med, err = hls.OpenMedia(ctx, playlistURL)
 		}
 		if err != nil {
+			log.Printf("[apple] %s: open media playlist FAILED: %v", kind, err)
 			return nil, fmt.Errorf("open media playlist: %w", err)
 		}
+		log.Printf("[apple] %s: media playlist OK nSegs=%d enc=%v", kind, len(med.SegmentURLs), med.Encryption != nil)
 		var dec pipeline.Decryptor
 		if med.Encryption == nil {
 			log.Printf("[apple] %s %s: enc=nil → passthrough (no content-level encryption detected)", kind, playlistURL)
@@ -526,4 +548,82 @@ func extractALACQuality(traits []string) (sampleRate, bitDepth int) {
 func fmtArtwork(template string, size int) string {
 	s := strconv.Itoa(size)
 	return strings.ReplaceAll(strings.ReplaceAll(template, "{w}", s), "{h}", s)
+}
+
+// ── Progressive MV asset selection ───────────────────────────────────────────
+
+// mvProgressiveAsset is one entry from the webplayback asset list for an MV.
+type mvProgressiveAsset struct {
+	URL         string
+	FileSize    int64
+	DownloadKey string // FairPlay CDN auth token; empty if not available
+}
+
+// selectBestProgressiveAsset picks the best CDN URL from a list of progressive
+// MV assets. Prefers mvod.itunes.apple.com; among equals takes the largest
+// FileSize. Falls back to the largest of any URL when no mvod entry exists.
+// Appends ?accessKey=<DownloadKey> when DownloadKey is set and the URL does not
+// already contain an accessKey parameter.
+// Returns ("", false) for an empty slice.
+func selectBestProgressiveAsset(assets []mvProgressiveAsset) (string, bool) {
+	if len(assets) == 0 {
+		return "", false
+	}
+	var best *mvProgressiveAsset
+	for i := range assets {
+		a := &assets[i]
+		if best == nil {
+			best = a
+			continue
+		}
+		bestMvod := strings.Contains(best.URL, "mvod.itunes.apple.com")
+		aMvod := strings.Contains(a.URL, "mvod.itunes.apple.com")
+		switch {
+		case aMvod && !bestMvod:
+			best = a
+		case bestMvod && !aMvod:
+			// keep best
+		default:
+			if a.FileSize > best.FileSize {
+				best = a
+			}
+		}
+	}
+	u := best.URL
+	if best.DownloadKey != "" && !strings.Contains(u, "accessKey=") {
+		if strings.Contains(u, "?") {
+			u += "&accessKey=" + best.DownloadKey
+		} else {
+			u += "?accessKey=" + best.DownloadKey
+		}
+	}
+	return u, true
+}
+
+// progressiveVideoSource is a pipeline.Source that streams a progressive MP4
+// directly from a CDN URL. Seeking is not supported (SourceFrom returns self
+// at t=0); the growing-file layer above handles in-range seeks.
+type progressiveVideoSource struct {
+	url string
+}
+
+func (s *progressiveVideoSource) Stream(ctx context.Context, w io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("progressive CDN returned HTTP %d", resp.StatusCode)
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
+func (s *progressiveVideoSource) SourceFrom(_ float64) (pipeline.Source, float64) {
+	return s, 0
 }

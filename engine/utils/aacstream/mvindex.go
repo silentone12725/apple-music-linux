@@ -456,6 +456,29 @@ type VsegFragTiming struct {
 	N int     `json:"n"`
 }
 
+// FragIndexForTime returns the index and entry of the last complete fragment
+// whose start time is <= tSec. Blocks nothing — callers wanting to wait for
+// the fragment to exist should poll with the StreamingPutWriter wake pattern.
+// Returns (0, zero, false) when no complete fragment at or before tSec exists.
+func (m *MVLiveIndex) FragIndexForTime(tSec float64, written int64) (int, MVFragEntry, bool) {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	best := -1
+	for i := range m.ix.frags {
+		f := &m.ix.frags[i]
+		if f.T > tSec {
+			break
+		}
+		if f.End > 0 && f.End <= written {
+			best = i
+		}
+	}
+	if best < 0 {
+		return 0, MVFragEntry{}, false
+	}
+	return best, m.ix.frags[best], true
+}
+
 // AllFragTimings returns a snapshot of all fragments' start times and indices.
 // Safe to call concurrently with Write. Returns nil (not []) when no frags yet.
 func (m *MVLiveIndex) AllFragTimings() []VsegFragTiming {

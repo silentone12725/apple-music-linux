@@ -577,26 +577,29 @@ func (b *EmbeddedBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 	}, nil
 }
 
-func (b *EmbeddedBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) (string, error) {
-	conn, err := net.DialTimeout("tcp", b.mvAddr(), 5*time.Second)
-	if err != nil {
-		return "", fmt.Errorf("drm mv dial: %w", err)
+func (b *EmbeddedBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) (url string, downloadKey string, err error) {
+	conn, connErr := net.DialTimeout("tcp", b.mvAddr(), 5*time.Second)
+	if connErr != nil {
+		return "", "", fmt.Errorf("drm mv dial: %w", connErr)
 	}
 	defer conn.Close()
 	rw := newBufRW(conn)
-	if err := sendString(rw, fmt.Sprintf("%d", adamID)); err != nil {
-		return "", fmt.Errorf("drm mv send id: %w", err)
+	if sendErr := sendString(rw, fmt.Sprintf("%d", adamID)); sendErr != nil {
+		return "", "", fmt.Errorf("drm mv send id: %w", sendErr)
 	}
 	_ = rw.Flush()
 	scanner := bufio.NewScanner(conn)
 	if !scanner.Scan() {
-		return "", fmt.Errorf("drm mv: no response")
+		return "", "", fmt.Errorf("drm mv: no response")
 	}
-	url := strings.TrimSpace(scanner.Text())
+	url = strings.TrimSpace(scanner.Text())
 	if url == "" {
-		return "", fmt.Errorf("drm mv: empty URL (adamID %d)", adamID)
+		return "", "", fmt.Errorf("drm mv: empty URL (adamID %d)", adamID)
 	}
-	return url, nil
+	if scanner.Scan() {
+		downloadKey = strings.TrimSpace(scanner.Text())
+	}
+	return url, downloadKey, nil
 }
 
 // ── CGO config helpers ────────────────────────────────────────────────────────

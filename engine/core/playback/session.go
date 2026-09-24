@@ -57,6 +57,8 @@ type Session struct {
 // Source + Decryptor) while leaving the Session (and the client's sessionId)
 // completely unchanged.
 type playContext struct {
-	streams map[pipeline.StreamKind]*pipeline.Stream
-	expiry  time.Time
+	streams          map[pipeline.StreamKind]*pipeline.Stream
+	expiry           time.Time
+	mvProgressiveURL string // CDN URL for cookie-authenticated proxy (MV only)
+	mvDownloadKey    string // auth token sent as "downloadKey" cookie to CDN
 }

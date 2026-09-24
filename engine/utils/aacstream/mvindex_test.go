@@ -457,3 +457,106 @@ func TestMVLiveIndex_FragByIndex_OutOfRange(t *testing.T) {
 		}
 	}
 }
+
+// TestMVLiveIndex_FragIndexForTime_ForwardSeek validates the "basePast" guard used
+// by handlePlaybackVsegSeek. When the user seeks forward to a time not yet indexed,
+// FragIndexForTime returns the last available fragment (which is before the target),
+// and FragCount() == fragN+1 (no later fragment exists), so basePast is false.
+// This must trigger a seek producer rather than instant-serve from base.
+func TestMVLiveIndex_FragIndexForTime_ForwardSeek(t *testing.T) {
+	const timescale = 1000
+	// 5 fragments at T = 0, 10, 20, 30, 40 s (timescale=1000 → decTimes in ms)
+	decTimes := []uint64{0, 10000, 20000, 30000, 40000}
+	stream, _, _, _ := buildMVStream(t, timescale, decTimes)
+
+	written := int64(len(stream))
+	idx := NewMVLiveIndex()
+	idx.Write(stream)
+	idx.Finalize(written)
+
+	// Seek target well beyond indexed range — simulates forward seek.
+	const target = 164.0
+
+	fragN, frag, hasIt := idx.FragIndexForTime(target, written)
+	if !hasIt {
+		t.Fatal("FragIndexForTime: expected hasIt=true (last frag covers ≤ target)")
+	}
+	// The returned fragment should be the last one (T≈40s), not the target.
+	if frag.T >= target {
+		t.Errorf("expected frag.T < target=%.1f, got %.3f", target, frag.T)
+	}
+
+	// basePast guard: FragCount() > fragN+1 must be FALSE for forward seeks.
+	basePast := idx.FragCount() > fragN+1
+	if basePast {
+		t.Errorf("basePast should be false for forward seek (fragN=%d FragCount=%d)", fragN, idx.FragCount())
+	}
+}
+
+// TestMVLiveIndex_FragIndexForTime_BackwardSeek validates instant-serve from base.
+// When base has encoded past the seek target (a later fragment exists in the index),
+// FragCount() > fragN+1, so basePast is true — no seek producer needed.
+func TestMVLiveIndex_FragIndexForTime_BackwardSeek(t *testing.T) {
+	const timescale = 1000
+	// 10 fragments at T = 0, 10, 20, ..., 90 s
+	decTimes := make([]uint64, 10)
+	for i := range decTimes {
+		decTimes[i] = uint64(i) * 10000
+	}
+	stream, _, _, _ := buildMVStream(t, timescale, decTimes)
+
+	written := int64(len(stream))
+	idx := NewMVLiveIndex()
+	idx.Write(stream)
+	idx.Finalize(written)
+
+	// Seek backward to 30s when base has fully encoded to 90s.
+	const target = 30.0
+
+	fragN, frag, hasIt := idx.FragIndexForTime(target, written)
+	if !hasIt {
+		t.Fatal("FragIndexForTime: expected hasIt=true")
+	}
+	if frag.T > target {
+		t.Errorf("expected frag.T <= %.1f, got %.3f", target, frag.T)
+	}
+
+	// basePast guard must be TRUE — a later fragment exists.
+	basePast := idx.FragCount() > fragN+1
+	if !basePast {
+		t.Errorf("basePast should be true for backward seek (fragN=%d FragCount=%d)", fragN, idx.FragCount())
+	}
+}
+
+// TestMVLiveIndex_FragIndexForTime_DoneState validates instant-serve when base is done
+// but the seek target equals the last fragment (no fragN+1 exists).
+// basePast must still be true because the producer is done.
+func TestMVLiveIndex_FragIndexForTime_DoneState(t *testing.T) {
+	const timescale = 1000
+	decTimes := []uint64{0, 10000, 20000}
+	stream, _, _, _ := buildMVStream(t, timescale, decTimes)
+
+	written := int64(len(stream))
+	idx := NewMVLiveIndex()
+	idx.Write(stream)
+	idx.Finalize(written)
+
+	// Target is the last fragment's time — fragN+1 doesn't exist, but base is done.
+	const target = 20.0
+
+	fragN, _, hasIt := idx.FragIndexForTime(target, written)
+	if !hasIt {
+		t.Fatal("FragIndexForTime: expected hasIt=true")
+	}
+
+	// Without "done" flag: fragCount == fragN+1 so basePast via count is false.
+	basePastCount := idx.FragCount() > fragN+1
+	if basePastCount {
+		t.Errorf("expected basePastCount=false for last frag (fragN=%d FragCount=%d)", fragN, idx.FragCount())
+	}
+	// With "done" flag (simulated by Finalize already called): basePast must be true.
+	// In production, the handler checks `base.done` to cover this case.
+	// Here we just verify the count-based path gives false so the caller must also
+	// check `base.done` to get the correct answer.
+	// (This test documents the invariant, not the handler logic directly.)
+}

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -617,8 +618,17 @@ func (s *APIServer) handlePlaybackVideoNativeInfo(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusOK, map[string]any{"cached": true, "path": path, "size": size})
 		return
 	}
-	// Not cached — start the faststart build (idempotent) so the client can poll
-	// this endpoint and show a loading state until "cached" flips true.
+	// CDN proxy path: if we have a progressive URL + downloadKey, tell the
+	// frontend the video is ready immediately — the video endpoint will serve
+	// via the CDN cookie proxy.  Faststart still builds in the background so
+	// subsequent plays hit the fast disk-cache path.
+	if _, _, hasCDN := s.pm.GetMVProgressiveInfo(id); hasCDN {
+		go s.prepareMVFaststart(id, sess.AssetID, float64(sess.DurationMs)/1000.0)
+		writeJSON(w, http.StatusOK, map[string]any{"cached": true, "cdnProxy": true})
+		return
+	}
+	// Not cached, no CDN proxy — start the faststart build and have the client
+	// poll until ready.
 	go s.prepareMVFaststart(id, sess.AssetID, float64(sess.DurationMs)/1000.0)
 	_, preparing := mvPreparing.Load(sess.AssetID)
 	writeJSON(w, http.StatusOK, map[string]any{"cached": false, "preparing": preparing})
@@ -670,16 +680,70 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// ── Middle path: CDN cookie proxy ─────────────────────────────────────────
+	// If the wrapper returned a progressive CDN URL + downloadKey, proxy the
+	// CDN with the downloadKey cookie (Android pattern: CDN performs server-side
+	// decryption authorisation when the cookie is present).
+	// The faststart background build still runs so subsequent plays are instant.
+	if cdnURL, dk, hasCDN := s.pm.GetMVProgressiveInfo(id); hasCDN {
+		log.Printf("%s CDN proxy id=%s assetID=%s", tagVideo("[video-cdn]"), id, assetID)
+		if _, already := mvPreparing.Load(assetID); !already {
+			go s.prepareMVFaststart(id, assetID, durationSec)
+		}
+		r2 := r.Clone(r.Context())
+		if dk != "" {
+			r2.Header.Set("Cookie", "downloadKey="+url.QueryEscape(dk))
+		}
+		s.proxyProgressiveVideo(w, r2, cdnURL)
+		return
+	}
+
 	// ── Slow path: faststart not ready ────────────────────────────────────────
-	// The decrypted faststart MP4 is still being built from the HLS CBCS stream.
-	// Return 503 so the frontend can show a spinner and poll /video-dl-info.
-	// Do not serve the raw CDN URL — those files carry iTunes FairPlay (drmi/drms)
-	// which Chrome on Linux cannot decrypt.
+	// No progressive URL available; return 503 so the frontend shows a spinner
+	// and polls /video-dl-info until the HLS CBCS → faststart build completes.
 	log.Printf("%s cache miss id=%s assetID=%s → 503 (building)", tagVideo("[video-dl]"), id, assetID)
 	if _, already := mvPreparing.Load(assetID); !already {
 		go s.prepareMVFaststart(id, assetID, durationSec)
 	}
 	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"cached": false, "preparing": true})
+}
+
+// proxyProgressiveVideo forwards a video Range request to cdnURL.
+// It passes through cookies set on r (caller sets downloadKey if available),
+// always advertises Accept-Ranges: bytes, and falls back to video/mp4 when
+// the CDN omits Content-Type.
+func (s *APIServer) proxyProgressiveVideo(w http.ResponseWriter, r *http.Request, cdnURL string) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, cdnURL, nil)
+	if err != nil {
+		http.Error(w, "cdn proxy: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if rng := r.Header.Get("Range"); rng != "" {
+		req.Header.Set("Range", rng)
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return // client disconnected — not an error
+		}
+		http.Error(w, "cdn proxy: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "video/mp4")
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body) //nolint:errcheck
 }
 
 // handlePlaybackVideoRaw streams the raw decrypted multi-track fMP4 for a
