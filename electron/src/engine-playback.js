@@ -11298,6 +11298,24 @@ window.amlGetQueueInfo = function () {
         return wrap;
     }
 
+    // ── Settings data pre-loader ───────────────────────────────────────────
+    // Fetches DRM, tools and prefs in the background so they are ready before
+    // the user clicks the cog.  openSettings() consumes the cached promise
+    // (resolves immediately if data already arrived) then kicks off the next
+    // warm cycle so reopens are equally fast.
+    let _settingsPreload = null;
+    function _warmSettingsCache() {
+        _settingsPreload = Promise.all([
+            fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
+            fetch(`${ENGINE}/api/v1/tools`).then(r => r.json()).catch(() => ({})),
+            window.amlBridge.getPrefs().catch(() => ({})),
+        ]);
+        return _settingsPreload;
+    }
+    // Start warming shortly after page load so it doesn't race with critical
+    // startup work, but is ready well before anyone can click the cog.
+    setTimeout(_warmSettingsCache, 600);
+
     // ── Open settings — anchored to the account button ─────────────────────
     // Generation counter: each openSettings() call gets a unique ID.
     // After each await, stale callers (whose ID was superseded by a newer call)
@@ -11344,7 +11362,11 @@ window.amlGetQueueInfo = function () {
             clearTimeout(_savedTimer);
             _savedTimer = setTimeout(() => { savedBadge.style.opacity = '0'; }, 1400);
         };
-        dlg.addEventListener('close', _restoreProxy, { once: true });
+        dlg.addEventListener('close', () => {
+            _restoreProxy();
+            // Re-warm for the next open now that prefs may have changed.
+            _warmSettingsCache();
+        }, { once: true });
 
         // Show the dialog immediately — sections populate as data arrives.
         if (!dlg.open) {
@@ -11354,12 +11376,10 @@ window.amlGetQueueInfo = function () {
             dlg.addEventListener('animationend', () => dlg.classList.remove('aml-opening'), { once: true });
         }
 
-        // Fetch all remote data in parallel so none blocks the others.
-        const [drm, tools, prefs] = await Promise.all([
-            fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
-            fetch(`${ENGINE}/api/v1/tools`).then(r => r.json()).catch(() => ({})),
-            window.amlBridge.getPrefs().catch(() => ({})),
-        ]);
+        // Consume the pre-loaded cache (resolves instantly if already warm)
+        // then immediately start re-warming for the next open.
+        const [drm, tools, prefs] = await (_settingsPreload ?? _warmSettingsCache());
+        _warmSettingsCache(); // refresh in background while sections render
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
 
         // DRM signed in = CBCS decryption is live (required for lossless/hi-res).
