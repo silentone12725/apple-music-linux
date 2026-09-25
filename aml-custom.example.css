@@ -3,30 +3,59 @@
  * Copy this file, edit it, then import via AML Settings → Theme → Custom CSS.
  * Changes apply instantly without restarting.
  *
- * ── CSS variables ─────────────────────────────────────────────────────────────
+ * ── CSS variables set by AML ──────────────────────────────────────────────────
+ *
+ * These are available in all modes. Override them on :root to change the theme.
  *
  * Sidebar / navigation
- *   --aml-nav-bg          Sidebar background color (overrides glass formula)
+ *   --aml-nav-bg          Sidebar background color (HSLA with alpha)
  *   --aml-nav-border      Sidebar right-edge border color
  *   --aml-nav-text        Primary sidebar text color
  *   --aml-nav-text-sec    Secondary / muted sidebar text color
  *   --aml-glass-blur      Sidebar backdrop-filter blur amount   (default: 20px)
- *   --aml-glass-opacity   Sidebar glass white tint (0–1)        (default: 0.07)
+ *   --aml-glass-opacity   Sidebar glass white tint intensity (0–1) (default: 0.07)
  *
  * Accent / interactive
- *   --aml-accent          Highlight color for selected state and links
- *   --aml-accent-active   Selected nav item background fill
+ *   --aml-accent          Highlight color for selected items and links
+ *   --aml-accent-active   Selected nav item / row background fill
  *
- * Background / art
- *   --aml-bg-blur         Wallpaper blur intensity (Hyprland only) (default: 18px)
- *   --aml-fallback-bg     Solid background used when no wallpaper is set
- *   --aml-art-tint        Color overlay on album art in the now-playing view
+ * Background
+ *   --aml-bg-blur         Wallpaper blur intensity — Blur & Accented Blur modes (default: 18px)
+ *   --aml-fallback-bg     Solid background when no wallpaper is set
+ *
+ * ── Art-theme CSS variables (set when a track is playing + Album art theming on) ──
+ *
+ * These are written to <body> style by the art-theme engine. They change each time
+ * the playing track changes. Available in Accent and Accented Blur modes.
+ * Custom CSS can read them to build tinted components that follow the album art.
+ *
+ *   --aml-art-page-bg     Page body background — dark, hue-tinted from the artwork
+ *   --aml-art-glow-a      Radial gradient glow A (top-left corner)
+ *   --aml-art-glow-b      Radial gradient glow B (bottom-right corner)
+ *   --aml-art-raised      Raised surface / hover state color
+ *   --aml-art-on-accent   Text color that reads on --aml-accent (#000 or #fff)
+ *   --aml-art-src         url(…) of the current artwork — drives the blur backdrop
+ *
+ * (--aml-nav-bg, --aml-nav-border, --aml-accent, --aml-accent-active and
+ *  --keyColor are also overridden by the art-theme engine when active.)
+ *
+ * ── Body attributes set by AML ────────────────────────────────────────────────
+ *
+ *   body[data-aml-mode]         Active theme mode: "blur" | "art-blur" | "accent" | "custom"
+ *   body[data-aml-art-theme]    Present when Album art theming is on and a track is playing
+ *   body[data-aml-art-blur]     Present in Accented Blur mode (combines blur + art palette)
  *
  * ── Injected element IDs ──────────────────────────────────────────────────────
  *
- * Overlays / chrome
- *   #_amlBlurBg           Wallpaper blur backdrop element
- *   #_amlBlurTint         Tint layer above the blur backdrop
+ * Wallpaper blur layers (present in Blur and Accented Blur modes)
+ *   #_amlBlurBg           Wallpaper image element with CSS blur filter (z-index: -1)
+ *   #_amlBlurTint         Dark/palette tint layer above the wallpaper (z-index: -1)
+ *                         In Accented Blur mode its background is set to --aml-nav-bg
+ *
+ * Art-theme overlay layers (present when art theming is active)
+ *   #_amlArtBlur          CSS-blurred artwork backdrop — visible in Accent mode,
+ *                         hidden in Accented Blur mode (wallpaper blur takes its place)
+ *   #_amlArtBg            Radial gradient glow layer (uses --aml-art-glow-a/b)
  *
  * HUD badges (top-right of now-playing header)
  *   #aml-quality-badge    Streaming quality badge (e.g. "LOSSLESS", "HI-RES")
@@ -56,6 +85,28 @@
     --aml-accent:        #a855f7;
     --aml-accent-active: hsla(270, 80%, 65%, 0.22);
 }
+
+
+/* ── Example: tint the wallpaper blur with a custom colour instead of the art palette ─ */
+/* Applies in Blur and Accented Blur modes. */
+/*
+body[data-aml-mode="blur"] #_amlBlurTint,
+body[data-aml-mode="art-blur"] #_amlBlurTint {
+    background: hsla(240, 30%, 8%, 0.55) !important;
+    opacity: 1 !important;
+}
+*/
+
+
+/* ── Example: build a tinted surface that follows the art palette ─────────── */
+/* Only shows when art theming is active. */
+/*
+body[data-aml-art-theme] .my-custom-element {
+    background: var(--aml-art-raised);
+    border-color: var(--aml-nav-border);
+    color: var(--aml-accent);
+}
+*/
 
 
 /* ── Example: increase sidebar font size ─────────────────────────────────── */

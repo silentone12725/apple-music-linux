@@ -8120,6 +8120,15 @@
         }
         body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
 
+        /* \u2500\u2500 Mode isolation: hide wallpaper blur layers in non-blur modes \u2500\u2500 */
+        /* main.mjs injects #_amlBlurBg + #_amlBlurTint for blur/art-blur modes but
+           never removes them. When the user switches to accent or custom CSS the layers
+           must disappear so they don't bleed through as ghost colours. */
+        body[data-aml-mode="accent"] #_amlBlurBg,
+        body[data-aml-mode="accent"] #_amlBlurTint,
+        body[data-aml-mode="custom"] #_amlBlurBg,
+        body[data-aml-mode="custom"] #_amlBlurTint { opacity: 0 !important; transition: opacity .4s ease !important; }
+
         /* \u2500\u2500 Accented Blur: use wallpaper blur + palette tint \u2500\u2500 */
         /* Hide the CSS artwork blur layer \u2014 wallpaper blur (#_amlBlurBg) does the blur */
         body[data-aml-art-theme][data-aml-art-blur] #_amlArtBlur { display: none !important; }
@@ -8355,10 +8364,18 @@
       lastSrc = null;
       sync();
     });
+    window.addEventListener("aml:art-blur-mode", (e) => {
+      artBlurMode = !!e.detail;
+      lastSrc = null;
+      sync();
+    });
     window.amlBridge?.getPrefs?.().then((p) => {
       enabled = p?.artTheme !== false;
       artBlurMode = p?.artThemeMode === "art-blur";
-      if (artBlurMode) document.body.setAttribute("data-aml-art-blur", "");
+      if (artBlurMode) {
+        document.body.setAttribute("data-aml-art-blur", "");
+        document.body.setAttribute("data-aml-mode", "art-blur");
+      }
       sync();
     }).catch(() => {
     });
@@ -9435,6 +9452,7 @@
         thPresets: thInfo.themePresets || [],
         curAppearance: thInfo.themeAppearance || "dark"
       };
+      document.body.setAttribute("data-aml-mode", st.curMode);
       function renderCustomCss(container) {
         container.innerHTML = "";
         const pathDiv = document.createElement("div");
@@ -9476,7 +9494,7 @@
         } else if (mode === "art-blur") {
           const info = document.createElement("div");
           info.style.cssText = FF + "font-size:12px;color:rgba(255,255,255,0.4);padding:12px 0;";
-          info.textContent = "The currently playing track's artwork is blurred full-screen and tinted with its palette colours. Enable Album art theming above to activate.";
+          info.textContent = "Your desktop wallpaper is blurred behind the app and tinted with the playing track's palette colours. Album art theming is enabled automatically.";
           thContentArea.appendChild(info);
         } else if (mode === "accent") {
           if (!st.curPalette) st.curPalette = _amlGenPalette(thInfo.systemAccent || "#fc3c44", st.curAppearance);
@@ -9512,10 +9530,12 @@
             b.style.color = a ? "rgba(255,255,255,0.88)" : "rgba(255,255,255,0.38)";
             b.style.fontWeight = a ? "500" : "";
           });
+          document.body.setAttribute("data-aml-mode", value);
           if (value === "art-blur") {
             window.amlBridge.setThemeMode("blur");
             window.amlBridge.setTweak("artThemeMode", "art-blur");
             document.body.setAttribute("data-aml-art-blur", "");
+            window.dispatchEvent(new CustomEvent("aml:art-blur-mode", { detail: true }));
             if (!artToggle._cb.checked) {
               artToggle._cb.checked = true;
               window.amlBridge.setTweak("artTheme", true);
@@ -9525,6 +9545,7 @@
             window.amlBridge.setThemeMode(value);
             window.amlBridge.setTweak("artThemeMode", null);
             document.body.removeAttribute("data-aml-art-blur");
+            window.dispatchEvent(new CustomEvent("aml:art-blur-mode", { detail: false }));
             if (prev === "art-blur") {
               artToggle._cb.checked = false;
               window.amlBridge.setTweak("artTheme", false);
