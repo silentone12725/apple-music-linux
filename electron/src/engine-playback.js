@@ -10515,12 +10515,12 @@ window.amlGetQueueInfo = function () {
                 .aml-qdrop-btn:hover { background:rgba(255,255,255,0.15); }
                 .aml-qdrop-chevron { font-size:8px;color:rgba(255,255,255,0.45);flex-shrink:0; }
                 .aml-qdrop-menu {
-                    background:rgba(32,32,34,0.97);
-                    border:0.5px solid rgba(255,255,255,0.12);
+                    background:rgba(32,32,36,0.72);
+                    border:0.5px solid rgba(255,255,255,0.14);
                     border-radius:10px;
-                    box-shadow:0 8px 32px rgba(0,0,0,0.7),0 1px 0 rgba(255,255,255,0.06) inset;
-                    backdrop-filter:blur(32px) saturate(1.8);
-                    -webkit-backdrop-filter:blur(32px) saturate(1.8);
+                    box-shadow:0 8px 32px rgba(0,0,0,0.6),0 1px 0 rgba(255,255,255,0.06) inset;
+                    backdrop-filter:blur(40px) saturate(2.0);
+                    -webkit-backdrop-filter:blur(40px) saturate(2.0);
                     overflow:hidden;padding:4px 0;
                 }
                 .aml-qdrop-item {
