@@ -9151,19 +9151,21 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 
         /* ── footer player bar ── */
         /* DOM: div.player-bar.player-bar__floating-player > div.wrapper > div.chrome-player */
-        body[data-aml-art-theme] .player-bar {
+        /* Only the inner chrome-player pill gets the tinted/blurred background;
+           the outer player-bar row stays transparent so the page shows through. */
+        body[data-aml-art-theme] .player-bar,
+        body[data-aml-art-theme] .player-bar .wrapper { background: transparent !important; border: none !important; }
+        body[data-aml-art-theme] .chrome-player {
             background: var(--aml-nav-bg) !important;
-            border-top: 1px solid var(--aml-nav-border) !important;
+            border: 1px solid var(--aml-nav-border) !important;
             backdrop-filter: blur(20px) !important;
             -webkit-backdrop-filter: blur(20px) !important;
         }
-        body[data-aml-art-theme] .player-bar .wrapper,
-        body[data-aml-art-theme] .chrome-player,
         body[data-aml-art-theme] .player-lcd,
         body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
         /* Light text on all dark themed panels, regardless of palette saturation */
         body[data-aml-art-theme] nav.navigation,
-        body[data-aml-art-theme] .player-bar,
+        body[data-aml-art-theme] .chrome-player,
         body[data-aml-art-theme] .side-panel,
         body[data-aml-art-theme] .contextual-menu { color: rgba(255,255,255,0.85) !important; }
         body[data-aml-art-theme] .navigation-items__header { color: rgba(255,255,255,0.5) !important; }
