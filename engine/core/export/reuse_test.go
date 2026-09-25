@@ -99,14 +99,16 @@ func (f *failingTail) Close() error { return nil }
 type blockingTail struct{ closed chan struct{} }
 
 func (b *blockingTail) Read([]byte) (int, error) { <-b.closed; return 0, io.ErrClosedPipe }
-func (b *blockingTail) Close() error            { return nil }
+func (b *blockingTail) Close() error             { return nil }
 
 func newReuseManager(t *testing.T, p *countingProvider, c AudioCache) *Manager {
 	t.Helper()
+	pm := playback.NewWithProvider(p)
 	m := &Manager{
 		jobs:     make(map[string]*ExportJob),
 		requests: make(map[string]ExportRequest),
-		manager:  playback.NewWithProvider(p),
+		manager:  pm,
+		bw:       newBWController(pm.ForegroundStats, 0),
 	}
 	if c != nil {
 		m.cache = c
