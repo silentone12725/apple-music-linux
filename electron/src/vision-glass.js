@@ -105,21 +105,6 @@ sheet.replaceSync(`
   /* ── Footer removal ── */
   footer, [class*="footer-wrapper"] { display: none !important; }
 
-  /* ── Background continuity strip — only visible when art theme is active ── */
-  #aml-bg-strip {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 72px;
-    z-index: 0;
-    pointer-events: none;
-    background: transparent;
-  }
-  body[data-aml-art-theme] #aml-bg-strip {
-    background: var(--aml-art-page-bg);
-  }
-
   /* ── Player bar clearance — pad scrollable page so content never hides under the 54px bar ── */
   [class*="scrollable-page"] { padding-bottom: 72px !important; }
 
@@ -427,20 +412,6 @@ sheet.replaceSync(`
   }
 `);
 document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-
-// ── Background continuity strip ──────────────────────────────────────────────
-(function mountBgStrip() {
-    if (document.getElementById('aml-bg-strip')) return;
-    const div = document.createElement('div');
-    div.id = 'aml-bg-strip';
-    const attach = () => {
-        if (!document.getElementById('aml-bg-strip') && document.body)
-            document.body.appendChild(div);
-    };
-    if (document.body) attach();
-    else new MutationObserver((_, obs) => { if (document.body) { attach(); obs.disconnect(); } })
-        .observe(document.documentElement, { childList: true });
-})();
 
 // ── Event-driven art tinting ──────────────────────────────────────────────────
 // Instead of polling every 2 seconds, watch for the player thumbnail img
