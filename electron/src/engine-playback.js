@@ -9108,6 +9108,7 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         '--aml-art-src'];
     const BG_LAYER_IDS = ['_amlBlurBg', '_amlAccentBg', '_amlCustomBg', '_amlArtBlur', '_amlArtBg'];
     let enabled = true;
+    let artBlurMode = false;
     let lastSrc = null;
     let token = 0;
 
@@ -9137,6 +9138,17 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
             opacity: 0.55;
         }
         body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
+
+        /* ── Accented Blur: use wallpaper blur + palette tint ── */
+        /* Hide the CSS artwork blur layer — wallpaper blur (#_amlBlurBg) does the blur */
+        body[data-aml-art-theme][data-aml-art-blur] #_amlArtBlur { display: none !important; }
+        /* Body must be transparent so the wallpaper layer (#_amlBlurBg, z-index:-1) shows */
+        body[data-aml-art-theme][data-aml-art-blur] { background: transparent !important; }
+        /* Override the dark tint with palette colour derived from artwork */
+        body[data-aml-art-theme][data-aml-art-blur] #_amlBlurTint {
+            background: var(--aml-nav-bg, rgba(20,10,35,0.55)) !important;
+            opacity: 0.8 !important;
+        }
 
         /* ── gradient glow layer (sits above the blur) ── */
         /* pageBg removed — the blur layer's tint overlay provides the dark base. */
@@ -9280,12 +9292,15 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         b.setProperty('--aml-art-src', artSrc ? `url("${artSrc.replace(/"/g, '%22')}")` : 'none');
         ensureBgLayers();
         document.body.setAttribute('data-aml-art-theme', '');
+        if (artBlurMode) document.body.setAttribute('data-aml-art-blur', '');
+        else document.body.removeAttribute('data-aml-art-blur');
     }
 
     function clear() {
         if (!document.body) return;
         for (const v of BODY_VARS) document.body.style.removeProperty(v);
         document.body.removeAttribute('data-aml-art-theme');
+        document.body.removeAttribute('data-aml-art-blur');
     }
 
     // Palette from the artwork pixels; falls back to Apple's --artwork-bg-color
@@ -9368,6 +9383,8 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
     });
     window.amlBridge?.getPrefs?.().then(p => {
         enabled = p?.artTheme !== false;
+        artBlurMode = p?.artThemeMode === 'art-blur';
+        if (artBlurMode) document.body.setAttribute('data-aml-art-blur', '');
         sync();
     }).catch(() => {});
     watchDomSettled(sync);
@@ -10371,11 +10388,12 @@ window.amlGetQueueInfo = function () {
                     b.style.color = a ? 'rgba(255,255,255,0.88)' : 'rgba(255,255,255,0.38)';
                     b.style.fontWeight = a ? '500' : '';
                 });
-                // 'art-blur' is a UI-only mode — backend only knows blur/accent/custom.
-                // Persist the selection as a pref; use 'accent' as the underlying mode.
+                // 'art-blur' uses wallpaper blur as the base + palette tint overlay.
+                // Backend is set to 'blur' so main.mjs injects the wallpaper blur layers.
                 if (value === 'art-blur') {
-                    window.amlBridge.setThemeMode('accent');
+                    window.amlBridge.setThemeMode('blur');
                     window.amlBridge.setTweak('artThemeMode', 'art-blur');
+                    document.body.setAttribute('data-aml-art-blur', '');
                     if (!artToggle._cb.checked) {
                         artToggle._cb.checked = true;
                         window.amlBridge.setTweak('artTheme', true);
@@ -10384,6 +10402,7 @@ window.amlGetQueueInfo = function () {
                 } else {
                     window.amlBridge.setThemeMode(value);
                     window.amlBridge.setTweak('artThemeMode', null);
+                    document.body.removeAttribute('data-aml-art-blur');
                     if (prev === 'art-blur') {
                         artToggle._cb.checked = false;
                         window.amlBridge.setTweak('artTheme', false);
