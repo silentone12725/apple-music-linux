@@ -9108,6 +9108,7 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         '--aml-art-src'];
     const BG_LAYER_IDS = ['_amlBlurBg', '_amlAccentBg', '_amlCustomBg', '_amlArtBlur', '_amlArtBg'];
     let enabled = true;
+    let blurEnabled = true;
     let lastSrc = null;
     let token = 0;
 
@@ -9135,7 +9136,7 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
             content: ''; position: absolute; inset: 0;
             background: var(--aml-nav-bg, rgba(0,0,0,0.65));
         }
-        body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
+        body[data-aml-art-blur] #_amlArtBlur { opacity: 1; }
 
         /* ── gradient glow layer (sits above the blur) ── */
         /* pageBg removed — the blur layer's tint overlay provides the dark base. */
@@ -9279,12 +9280,15 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         b.setProperty('--aml-art-src', artSrc ? `url("${artSrc.replace(/"/g, '%22')}")` : 'none');
         ensureBgLayers();
         document.body.setAttribute('data-aml-art-theme', '');
+        if (blurEnabled) document.body.setAttribute('data-aml-art-blur', '');
+        else document.body.removeAttribute('data-aml-art-blur');
     }
 
     function clear() {
         if (!document.body) return;
         for (const v of BODY_VARS) document.body.style.removeProperty(v);
         document.body.removeAttribute('data-aml-art-theme');
+        document.body.removeAttribute('data-aml-art-blur');
     }
 
     // Palette from the artwork pixels; falls back to Apple's --artwork-bg-color
@@ -9360,8 +9364,16 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         lastSrc = null;
         sync();
     });
+    window.addEventListener('aml:art-blur', (e) => {
+        blurEnabled = !!e.detail;
+        if (document.body.hasAttribute('data-aml-art-theme')) {
+            if (blurEnabled) document.body.setAttribute('data-aml-art-blur', '');
+            else document.body.removeAttribute('data-aml-art-blur');
+        }
+    });
     window.amlBridge?.getPrefs?.().then(p => {
         enabled = p?.artTheme !== false;
+        blurEnabled = p?.artThemeBlur !== false;
         sync();
     }).catch(() => {});
     watchDomSettled(sync);
@@ -10369,6 +10381,11 @@ window.amlGetQueueInfo = function () {
             window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: v }));
         });
         thBody.appendChild(makeRow('Album art theming', artToggle, 'Colour album and playlist pages with a palette from their artwork', false));
+        const blurToggle = _amlIOSToggle(prefs.artThemeBlur !== false, v => {
+            window.amlBridge.setTweak('artThemeBlur', v);
+            window.dispatchEvent(new CustomEvent('aml:art-blur', { detail: v }));
+        });
+        thBody.appendChild(makeRow('Blurred artwork backdrop', blurToggle, 'Show a full-screen blurred version of the artwork as a background', false));
         thBody.appendChild(modeRow);
         thBody.appendChild(thContentArea);
         renderThemeContent(st.curMode);
@@ -11329,12 +11346,20 @@ window.amlGetQueueInfo = function () {
         };
         dlg.addEventListener('close', _restoreProxy, { once: true });
 
-        const [drm, tools] = await Promise.all([
+        // Show the dialog immediately — sections populate as data arrives.
+        if (!dlg.open) {
+            dlg.classList.remove('aml-closing');
+            dlg.classList.add('aml-opening');
+            dlg.showModal();
+            dlg.addEventListener('animationend', () => dlg.classList.remove('aml-opening'), { once: true });
+        }
+
+        // Fetch all remote data in parallel so none blocks the others.
+        const [drm, tools, prefs] = await Promise.all([
             fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
             fetch(`${ENGINE}/api/v1/tools`).then(r => r.json()).catch(() => ({})),
+            window.amlBridge.getPrefs().catch(() => ({})),
         ]);
-        if (myGen !== _settingsGen) { _restoreProxy(); return; }
-        const prefs = await window.amlBridge.getPrefs().catch(() => ({}));
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
 
         // DRM signed in = CBCS decryption is live (required for lossless/hi-res).
@@ -11344,31 +11369,34 @@ window.amlGetQueueInfo = function () {
             || drmState?.fairplay === 'ready'
             || drm?.capabilities?.cbcs === true;
 
+        // Build all async sections in parallel now that we have prefs.
+        const [themeWrap, cacheWrap, { wrap: playbackWrap }, scrobbleWrap, historyWrap, libraryWrap] = await Promise.all([
+            _buildThemeSection(prefs),
+            _buildCacheSection(prefs),
+            _buildPlaybackSection(prefs, drmSignedIn),
+            _buildScrobbleSection().then(r => r.wrap),
+            _buildHistorySection(),
+            _buildLibrarySection(),
+        ]);
+        if (myGen !== _settingsGen) { _restoreProxy(); return; }
+
         dlg.appendChild(buildAccountSection(drm, openSettings));
         dlg.appendChild(_buildEngineStatusSection(drm));
         dlg.appendChild(_buildDisplaySection(prefs));
-        dlg.appendChild(await _buildThemeSection(prefs));
+        dlg.appendChild(themeWrap);
         const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn);
         dlg.appendChild(audioWrap);
-        dlg.appendChild(await _buildCacheSection(prefs));
+        dlg.appendChild(cacheWrap);
         const { wrap: dlWrap, applyLossless: applyDlLossless } = _buildDownloadsSection(prefs, tools, drmSignedIn);
         dlg.appendChild(dlWrap);
         // Wire lossless toggle → downloads quality row.
         onLosslessChange(applyDlLossless);
-        const { wrap: playbackWrap } = await _buildPlaybackSection(prefs, drmSignedIn);
         dlg.appendChild(playbackWrap);
         dlg.appendChild(_buildShortcutsSection().wrap);
-        dlg.appendChild((await _buildScrobbleSection()).wrap);
-        dlg.appendChild(await _buildHistorySection());
-        dlg.appendChild(await _buildLibrarySection());
+        dlg.appendChild(scrobbleWrap);
+        dlg.appendChild(historyWrap);
+        dlg.appendChild(libraryWrap);
         dlg.appendChild(_buildDevSection(prefs));
-
-        if (!dlg.open) {
-            dlg.classList.remove('aml-closing');
-            dlg.classList.add('aml-opening');
-            dlg.showModal();
-            dlg.addEventListener('animationend', () => dlg.classList.remove('aml-opening'), { once: true });
-        }
     }
 
     // ── Settings cog + downloads button next to account row ───────────────
