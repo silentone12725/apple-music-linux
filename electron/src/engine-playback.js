@@ -9133,7 +9133,8 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         }
         #_amlArtBlur::after {
             content: ''; position: absolute; inset: 0;
-            background: var(--aml-nav-bg, rgba(0,0,0,0.65));
+            background: var(--aml-nav-bg, rgba(0,0,0,0.35));
+            opacity: 0.55;
         }
         body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
 
@@ -9312,13 +9313,13 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 
     // Returns the artwork URL for the currently playing track via MusicKit, or
     // null when nothing is playing or the API is unavailable.
-    function nowPlayingArtSrc() {
+    function nowPlayingArtSrc(size = '80') {
         try {
             const mk = window.MusicKit?.getInstance?.();
             if (!mk?.nowPlayingItem) return null;
             const art = mk.nowPlayingItem.attributes?.artwork;
             if (!art?.url) return null;
-            return art.url.replace('{w}', '80').replace('{h}', '80');
+            return art.url.replace('{w}', size).replace('{h}', size);
         } catch (_) { return null; }
     }
 
@@ -9341,7 +9342,12 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 
         // Priority 2: currently playing track artwork — themes every other page
         // so the palette follows playback as you browse the library.
-        if (!src) src = nowPlayingArtSrc();
+        // Small size (80px) for palette extraction; large (600px) for the backdrop.
+        let backdropSrc = null;
+        if (!src) {
+            src = nowPlayingArtSrc('80');
+            backdropSrc = nowPlayingArtSrc('600');
+        }
 
         if (!src) {
             if (lastSrc !== null) { clear(); lastSrc = null; token++; }
@@ -9352,7 +9358,7 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         const my = ++token;
         const roles = await computeRoles(src, img?.closest('.artwork-component'));
         if (my !== token || !enabled) return;
-        if (roles) apply(roles, src); else clear();
+        if (roles) apply(roles, backdropSrc || src); else clear();
     }
 
     window.addEventListener('aml:art-theme', (e) => {
@@ -10341,8 +10347,8 @@ window.amlGetQueueInfo = function () {
         modeSeg.style.cssText = 'display:flex;background:rgba(255,255,255,0.06);border-radius:8px;padding:2px;gap:2px;';
         const thModes = [
             { label: 'Blur', value: 'blur', disabled: !blurAvail, tip: blurAvail ? '' : 'Only on Hyprland / KDE' },
-            { label: 'Accent', value: 'accent', disabled: false, tip: '' },
             { label: 'Accented Blur', value: 'art-blur', disabled: false, tip: '' },
+            { label: 'Accent', value: 'accent', disabled: false, tip: '' },
             { label: 'Custom CSS', value: 'custom', disabled: false, tip: '' },
         ];
         thModes.forEach(({ label, value, disabled, tip }) => {

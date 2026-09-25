@@ -8114,7 +8114,8 @@
         }
         #_amlArtBlur::after {
             content: ''; position: absolute; inset: 0;
-            background: var(--aml-nav-bg, rgba(0,0,0,0.65));
+            background: var(--aml-nav-bg, rgba(0,0,0,0.35));
+            opacity: 0.55;
         }
         body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
 
@@ -8279,13 +8280,13 @@
       const [h, s, l] = rgbToHsl(parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16));
       return paletteRoles([{ h, s, l, weight: 1 }]);
     }
-    function nowPlayingArtSrc() {
+    function nowPlayingArtSrc(size = "80") {
       try {
         const mk = window.MusicKit?.getInstance?.();
         if (!mk?.nowPlayingItem) return null;
         const art = mk.nowPlayingItem.attributes?.artwork;
         if (!art?.url) return null;
-        return art.url.replace("{w}", "80").replace("{h}", "80");
+        return art.url.replace("{w}", size).replace("{h}", size);
       } catch (_) {
         return null;
       }
@@ -8307,7 +8308,11 @@
         img.addEventListener("load", sync, { once: true });
         return;
       }
-      if (!src) src = nowPlayingArtSrc();
+      let backdropSrc = null;
+      if (!src) {
+        src = nowPlayingArtSrc("80");
+        backdropSrc = nowPlayingArtSrc("600");
+      }
       if (!src) {
         if (lastSrc !== null) {
           clear();
@@ -8321,7 +8326,7 @@
       const my = ++token;
       const roles = await computeRoles(src, img?.closest(".artwork-component"));
       if (my !== token || !enabled) return;
-      if (roles) apply(roles, src);
+      if (roles) apply(roles, backdropSrc || src);
       else clear();
     }
     window.addEventListener("aml:art-theme", (e) => {
@@ -9463,8 +9468,8 @@
       modeSeg.style.cssText = "display:flex;background:rgba(255,255,255,0.06);border-radius:8px;padding:2px;gap:2px;";
       const thModes = [
         { label: "Blur", value: "blur", disabled: !blurAvail, tip: blurAvail ? "" : "Only on Hyprland / KDE" },
-        { label: "Accent", value: "accent", disabled: false, tip: "" },
         { label: "Accented Blur", value: "art-blur", disabled: false, tip: "" },
+        { label: "Accent", value: "accent", disabled: false, tip: "" },
         { label: "Custom CSS", value: "custom", disabled: false, tip: "" }
       ];
       thModes.forEach(({ label, value, disabled, tip }) => {
