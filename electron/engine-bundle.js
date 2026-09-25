@@ -7910,33 +7910,68 @@
   })();
   (function initTracklistStatsInHeader() {
     let statsEl = null;
-    let lastText = "";
+    let restEl = null;
+    let lastText = null;
+    const COPYRIGHT = /^[℗©]/;
+    const DATE = /\b(19|20)\d{2}\b/;
+    const COUNT = /\d+\s*(songs?|videos?|episodes?|items?|tracks?)\b|\b\d+\s*(minutes?|mins?|hours?|hrs?|hr)\b/i;
+    function splitLines(text) {
+      const up = [], stay = [];
+      for (const raw of text.split("\n")) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (!COPYRIGHT.test(line) && (COUNT.test(line) || DATE.test(line))) up.push(line);
+        else stay.push(line);
+      }
+      return { up, stay };
+    }
     function sync() {
       const header = document.querySelector('[class*="container-detail-header"]:not([class*="wrapper"])');
       if (!header) {
         if (statsEl) {
           statsEl.remove();
           statsEl = null;
-          lastText = "";
         }
+        if (restEl) {
+          restEl.remove();
+          restEl = null;
+        }
+        lastText = null;
         return;
       }
       const headings = header.querySelector('[class*="headings"]:not([class*="primary"]):not([class*="secondary"])');
       if (!headings) return;
       const src = document.querySelector('[data-testid="tracklist-footer-description"]') || document.querySelector('[class*="tracklist-footer"] p[class*="description"]');
-      const text = src?.textContent?.trim() ?? "";
+      const text = src?.textContent ?? "";
+      const { up, stay } = splitLines(text);
       if (!statsEl || !headings.contains(statsEl)) {
         statsEl?.remove();
         statsEl = document.createElement("p");
         statsEl.id = "aml-tracklist-stats";
         headings.appendChild(statsEl);
-        lastText = "";
+        lastText = null;
+      }
+      if (src && (!restEl || restEl.previousElementSibling !== src)) {
+        restEl?.remove();
+        restEl = document.createElement("p");
+        restEl.id = "aml-tracklist-footer-rest";
+        src.after(restEl);
+        lastText = null;
       }
       if (text !== lastText) {
-        statsEl.textContent = text;
+        statsEl.textContent = up.join("\n");
+        statsEl.style.display = up.length ? "" : "none";
+        if (restEl) {
+          restEl.className = src.className;
+          restEl.textContent = stay.join("\n");
+          restEl.style.display = stay.length ? "" : "none";
+        }
         lastText = text;
       }
-      if (src?.parentElement) src.parentElement.style.display = "none";
+      if (src) {
+        src.style.display = "none";
+        if (src.parentElement?.style.display === "none") src.parentElement.style.display = "";
+      }
     }
     watchDomSettled(sync);
   })();
