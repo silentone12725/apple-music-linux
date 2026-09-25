@@ -8131,37 +8131,16 @@
         body[data-aml-art-theme] .navigation-item--selected .navigation-item__icon { color: var(--aml-accent) !important; }
 
         /* \u2500\u2500 footer player bar \u2500\u2500 */
-        /* DOM: div.player-bar.player-bar__floating-player > div.wrapper > div.chrome-player */
-        /* backdrop-filter on a non-composited child of a sticky element does not
-           reliably blur page content in Chromium. Fix: move blur to .player-bar
-           (the sticky compositor layer that CAN see page content below) and use
-           clip-path:inset to confine the blurred output to just the pill shape.
-           clip-path cuts visual output including the backdrop, so the blur is
-           only visible through the pill-shaped area. */
-        body[data-aml-art-theme] .player-bar {
-            background: transparent !important;
-            border: none !important;
-            backdrop-filter: blur(20px) !important;
-            -webkit-backdrop-filter: blur(20px) !important;
-            clip-path: inset(0 28% 0 28% round 1000px) !important;
-        }
-        body[data-aml-art-theme] .player-bar .wrapper { background: transparent !important; }
-        body[data-aml-art-theme] .chrome-player {
-            background: var(--aml-nav-bg) !important;
-            border: 1px solid var(--aml-nav-border) !important;
-        }
-        body[data-aml-art-theme] .player-lcd,
-        body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
-        /* Light text on all dark themed panels, regardless of palette saturation */
+        /* Leave Apple's player bar completely unstyled. The --keyColor override on
+           body[data-aml-art-theme] (see keyColor propagation below) already swaps
+           the accent colour (play button, scrubber fill, etc.) from pink to the
+           art-derived accent. No background, blur or clip-path changes needed. */
+        /* Light text on nav sidebar, side panel and context menus */
         body[data-aml-art-theme] nav.navigation,
-        body[data-aml-art-theme] .chrome-player,
         body[data-aml-art-theme] .side-panel,
         body[data-aml-art-theme] .contextual-menu { color: rgba(255,255,255,0.85) !important; }
         body[data-aml-art-theme] .navigation-items__header { color: rgba(255,255,255,0.5) !important; }
         body[data-aml-art-theme] .search-input__text-field { color: rgba(255,255,255,0.85) !important; }
-
-        /* \u2500\u2500 footer play button: keep Apple's original white/transparent style \u2500\u2500 */
-        body[data-aml-art-theme] .playback-controls-play button { background: transparent !important; }
 
         /* \u2500\u2500 tracklist rows \u2500\u2500 */
         body[data-aml-art-theme] .songs-list-row { border-color: var(--aml-nav-border) !important; }
