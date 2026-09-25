@@ -114,7 +114,7 @@ sheet.replaceSync(`
     height: 72px;
     z-index: 0;
     pointer-events: none;
-    background: var(--aml-art-page-bg, #1d1d1f);
+    background: var(--aml-art-page-bg);
   }
 
   /* ── Player bar clearance — pad scrollable page so content never hides under the 54px bar ── */
