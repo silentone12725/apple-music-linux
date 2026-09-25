@@ -8504,28 +8504,28 @@
     }
     function makeSection(title) {
       const wrap = document.createElement("div");
-      wrap.style.cssText = "margin-top:32px;";
+      wrap.style.cssText = "margin-top:28px;";
       const h = document.createElement("h2");
       h.textContent = title;
-      h.style.cssText = FF + "font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.4);margin:0 0 8px;";
+      h.style.cssText = FF + "font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.07em;color:rgba(255,255,255,0.38);margin:0 0 7px;padding-left:2px;";
       const body = document.createElement("div");
-      body.style.cssText = "background:rgba(255,255,255,0.08);border-radius:10px;padding:0 14px;";
+      body.style.cssText = "background:rgba(255,255,255,0.07);border:0.5px solid rgba(255,255,255,0.1);border-radius:12px;padding:0 14px;";
       wrap.appendChild(h);
       wrap.appendChild(body);
       return { wrap, body };
     }
     function makeRow(label, val, subtitle, isLast) {
       const r = document.createElement("div");
-      r.style.cssText = "display:flex;align-items:center;padding:11px 0;" + (isLast ? "" : "border-bottom:0.5px solid rgba(255,255,255,0.07);");
+      r.style.cssText = "display:flex;align-items:center;padding:12px 0;" + (isLast ? "" : "border-bottom:0.5px solid rgba(255,255,255,0.07);");
       const lbl = document.createElement("div");
       lbl.style.cssText = "flex:1;";
       const m = document.createElement("div");
-      m.style.cssText = FF + "font-size:13px;color:rgba(255,255,255,0.85);";
+      m.style.cssText = FF + "font-size:13px;color:rgba(255,255,255,0.88);line-height:1.3;";
       m.textContent = label;
       lbl.appendChild(m);
       if (subtitle) {
         const s = document.createElement("div");
-        s.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;";
+        s.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.36);margin-top:2px;line-height:1.4;";
         s.textContent = subtitle;
         lbl.appendChild(s);
       }
@@ -8543,7 +8543,13 @@
     function makeBtn(text) {
       const b = document.createElement("button");
       b.textContent = text;
-      b.style.cssText = FF + "padding:5px 13px;border-radius:6px;border:none;font-size:12px;cursor:pointer;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.85);white-space:nowrap;";
+      b.style.cssText = FF + "padding:6px 14px;border-radius:8px;border:none;font-size:13px;cursor:pointer;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.88);white-space:nowrap;transition:background 0.15s;";
+      b.onmouseenter = () => {
+        b.style.background = "rgba(255,255,255,0.2)";
+      };
+      b.onmouseleave = () => {
+        b.style.background = "rgba(255,255,255,0.12)";
+      };
       return b;
     }
     function makeInput(type, placeholder) {
@@ -8725,7 +8731,7 @@
                 width:min(660px,calc(100vw - 48px));
                 max-height:min(82vh,760px); overflow-y:auto;
                 border:0.5px solid rgba(255,255,255,0.14); border-radius:16px;
-                background:rgba(18,18,20,0.93);
+                background:rgba(18,18,20,0.78);
                 backdrop-filter:blur(48px) saturate(1.9);
                 -webkit-backdrop-filter:blur(48px) saturate(1.9);
                 box-shadow:0 32px 80px rgba(0,0,0,0.8),0 0 0 0.5px rgba(255,255,255,0.07);
@@ -8737,16 +8743,22 @@
                 margin-left:auto; flex-shrink:0;
             }
             #aml-settings-dialog::backdrop {
-                background:rgba(0,0,0,0.4);
+                background:rgba(0,0,0,0.35);
+                backdrop-filter:blur(20px) saturate(1.4);
+                -webkit-backdrop-filter:blur(20px) saturate(1.4);
             }
             #aml-settings-dialog::-webkit-scrollbar { width:4px; }
             #aml-settings-dialog::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18);border-radius:2px; }
-            @keyframes _aml-pop-in  { from{opacity:0;transform:scale(0.88)} to{opacity:1;transform:scale(1)} }
-            @keyframes _aml-pop-out { from{opacity:1;transform:scale(1)}    to{opacity:0;transform:scale(0.88)} }
+            @keyframes _aml-pop-in  { from{opacity:0;transform:scale(0.94) translateY(10px)} to{opacity:1;transform:scale(1) translateY(0)} }
+            @keyframes _aml-pop-out { from{opacity:1;transform:scale(1) translateY(0)}       to{opacity:0;transform:scale(0.96) translateY(5px)} }
+            @keyframes _aml-bd-in   { from{opacity:0} to{opacity:1} }
+            @keyframes _aml-bd-out  { from{opacity:1} to{opacity:0} }
             @keyframes _aml-spin    { to{transform:rotate(360deg)} }
             ._aml-spinner { display:inline-block;width:10px;height:10px;border:1.5px solid rgba(255,255,255,0.18);border-top-color:rgba(255,255,255,0.6);border-radius:50%;animation:_aml-spin .7s linear infinite;flex-shrink:0; }
-            #aml-settings-dialog.aml-opening { animation:_aml-pop-in  .22s cubic-bezier(.34,1.4,.64,1) forwards; }
-            #aml-settings-dialog.aml-closing { animation:_aml-pop-out .16s ease-in forwards; }
+            #aml-settings-dialog.aml-opening { animation:_aml-pop-in  .32s cubic-bezier(.34,1.4,.64,1) forwards; }
+            #aml-settings-dialog.aml-closing { animation:_aml-pop-out .2s  cubic-bezier(.32,0,.67,0) forwards; }
+            #aml-settings-dialog.aml-opening::backdrop { animation:_aml-bd-in  .28s ease forwards; }
+            #aml-settings-dialog.aml-closing::backdrop { animation:_aml-bd-out .18s ease-in forwards; }
         `;
       document.head.appendChild(st);
       document.body.appendChild(dlg);
@@ -8785,16 +8797,29 @@
       return b;
     }
     function _amlIOSToggle(on, onChange) {
-      const label = document.createElement("label");
-      label.style.cssText = "display:inline-flex;align-items:center;cursor:pointer;flex-shrink:0;";
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = on;
-      cb.style.cssText = "width:15px;height:15px;cursor:pointer;accent-color:#fc3c44;flex-shrink:0;margin:0;";
-      label.append(cb);
-      cb.addEventListener("change", () => onChange(cb.checked));
-      label._cb = cb;
-      return label;
+      let _on = !!on;
+      const track = document.createElement("div");
+      track.style.cssText = "position:relative;width:34px;height:20px;border-radius:10px;background:" + (_on ? "#fc3c44" : "rgba(255,255,255,0.2)") + ";cursor:pointer;flex-shrink:0;transition:background 0.2s;box-sizing:border-box;";
+      const thumb = document.createElement("div");
+      thumb.style.cssText = "position:absolute;top:2px;left:" + (_on ? "16px" : "2px") + ";width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);transition:left 0.22s cubic-bezier(0.34,1.4,0.64,1);";
+      track.appendChild(thumb);
+      track.addEventListener("click", () => {
+        _on = !_on;
+        track.style.background = _on ? "#fc3c44" : "rgba(255,255,255,0.2)";
+        thumb.style.left = _on ? "16px" : "2px";
+        onChange(_on);
+      });
+      track._cb = {
+        get checked() {
+          return _on;
+        },
+        set checked(v) {
+          _on = !!v;
+          track.style.background = _on ? "#fc3c44" : "rgba(255,255,255,0.2)";
+          thumb.style.left = _on ? "16px" : "2px";
+        }
+      };
+      return track;
     }
     function _amlMakeQualityDropdown(prefKey, prefs, qualityOpts, onChange) {
       const saved = prefs[prefKey] ?? "lossless";
@@ -10583,7 +10608,7 @@
       titleBar.style.cssText = "display:flex;align-items:center;gap:10px;padding:4px 0 4px;margin-top:-26px;";
       const title = document.createElement("h1");
       title.textContent = "AML Settings";
-      title.style.cssText = FF + "font-size:15px;font-weight:600;margin:0;color:rgba(255,255,255,0.95);";
+      title.style.cssText = FF + "font-size:17px;font-weight:700;letter-spacing:-0.3px;margin:0;color:rgba(255,255,255,0.95);";
       const savedBadge = document.createElement("span");
       savedBadge.style.cssText = FF + "font-size:10px;color:#30d158;opacity:0;transition:opacity 0.3s;flex-shrink:0;";
       savedBadge.textContent = "\u2713 Saved";
