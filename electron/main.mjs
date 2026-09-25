@@ -878,6 +878,13 @@ function createWindow() {
         html, body { background: transparent !important; overscroll-behavior: none !important; }
         /* Strip grey tint from alternating content sections — let album art / wallpaper show through */
         .section--alternate, [class*="section--alternate"] { background: transparent !important; }
+        /* "Also available in the iTunes Store" CTA — hidden everywhere. Matched by
+           aria-label (Apple keeps "iTunes" in it across locales) since its classes
+           are generic Svelte hashes; the :has() rules drop the wrapper too so no
+           empty gap is left behind. */
+        button[aria-label*="iTunes"],
+        [data-testid="button-base-wrapper"]:has(> button[aria-label*="iTunes"]),
+        [class*="native-cta-wrapper"]:has(button[aria-label*="iTunes"]) { display: none !important; }
         nav.navigation {
             background: rgba(255,255,255,var(--aml-glass-opacity)) !important;
             backdrop-filter: blur(var(--aml-glass-blur)) !important;
