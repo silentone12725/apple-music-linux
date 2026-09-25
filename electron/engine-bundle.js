@@ -8341,7 +8341,7 @@
       let backdropSrc = null;
       if (!src) {
         src = nowPlayingArtSrc("80");
-        backdropSrc = nowPlayingArtSrc("600");
+        if (!artBlurMode) backdropSrc = nowPlayingArtSrc("600");
       }
       if (!src) {
         if (lastSrc !== null) {
@@ -8370,12 +8370,12 @@
       sync();
     });
     window.amlBridge?.getPrefs?.().then((p) => {
+      if (!document.body) return;
       enabled = p?.artTheme !== false;
       artBlurMode = p?.artThemeMode === "art-blur";
-      if (artBlurMode) {
-        document.body.setAttribute("data-aml-art-blur", "");
-        document.body.setAttribute("data-aml-mode", "art-blur");
-      }
+      const startupMode = p?.artThemeMode || p?.themeMode || "accent";
+      document.body.setAttribute("data-aml-mode", startupMode);
+      if (artBlurMode) document.body.setAttribute("data-aml-art-blur", "");
       sync();
     }).catch(() => {
     });
@@ -9450,7 +9450,10 @@
         curMode: prefs.artThemeMode || thInfo.themeMode || (blurAvail ? "blur" : "accent"),
         curPalette: thInfo.themePalette,
         thPresets: thInfo.themePresets || [],
-        curAppearance: thInfo.themeAppearance || "dark"
+        curAppearance: thInfo.themeAppearance || "dark",
+        // Remembers whether artTheme was on before the user entered art-blur
+        // so we only force-off artTheme on exit if WE forced it on at entry.
+        artThemeWasOn: prefs.artTheme !== false
       };
       document.body.setAttribute("data-aml-mode", st.curMode);
       function renderCustomCss(container) {
@@ -9537,16 +9540,19 @@
             document.body.setAttribute("data-aml-art-blur", "");
             window.dispatchEvent(new CustomEvent("aml:art-blur-mode", { detail: true }));
             if (!artToggle._cb.checked) {
+              st.artThemeWasOn = false;
               artToggle._cb.checked = true;
               window.amlBridge.setTweak("artTheme", true);
               window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: true }));
+            } else {
+              st.artThemeWasOn = true;
             }
           } else {
             window.amlBridge.setThemeMode(value);
             window.amlBridge.setTweak("artThemeMode", null);
             document.body.removeAttribute("data-aml-art-blur");
             window.dispatchEvent(new CustomEvent("aml:art-blur-mode", { detail: false }));
-            if (prev === "art-blur") {
+            if (prev === "art-blur" && !st.artThemeWasOn) {
               artToggle._cb.checked = false;
               window.amlBridge.setTweak("artTheme", false);
               window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: false }));
