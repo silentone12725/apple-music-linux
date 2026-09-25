@@ -18,6 +18,7 @@
 // Extracted modules (esbuild inlines these into engine-bundle.js at build time).
 import { mp4ParseBoxes as _mp4ParseBoxes } from './engine/mp4parse.js';
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
+import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
 
 if (window.__amlEngineInjected) throw new Error('[AML] double-injection guard');
 window.__amlEngineInjected = true;
@@ -9076,6 +9077,160 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
     watchDomSettled(sync);
 })();
 
+// ── Album-art page theming ────────────────────────────────────────────────────
+// Themes album/playlist pages from their artwork using a real palette (see
+// engine/artpalette.js): page background with two colour glows, sidebar, hover
+// and selected tracklist rows, Play/Shuffle/Add buttons and accent each get a
+// distinct colour role, instead of one colour washing over everything.
+//
+// Apple's own full-page background artwork (a huge portrait artwork-component
+// tinted with its single --artwork-bg-color) is hidden in both states: when the
+// toggle is on our palette layer replaces it; when off the normal theme shows.
+//
+// Theme vars are set on <body>, which beats main.mjs's values on <html> for all
+// descendants; removing them restores the user's accent theme untouched.
+// Toggle: AML Settings → Theme → "Album art theming" (pref artTheme, default on).
+(function initArtTheme() {
+    const BODY_VARS = ['--aml-nav-bg', '--aml-nav-border', '--aml-accent', '--aml-accent-active', '--keyColor',
+        '--aml-art-page-bg', '--aml-art-glow-a', '--aml-art-glow-b', '--aml-art-raised', '--aml-art-on-accent'];
+    const BG_LAYER_IDS = ['_amlBlurBg', '_amlAccentBg', '_amlCustomBg', '_amlArtBg'];
+    let enabled = true;
+    let lastSrc = null;
+    let token = 0;
+
+    const style = document.createElement('style');
+    style.id = 'aml-art-theme-style';
+    style.textContent = `
+        [data-aml-page-art] { visibility: hidden !important; }
+        #_amlArtBg {
+            position: fixed; inset: 0; z-index: 0; pointer-events: none;
+            opacity: 0; transition: opacity .6s ease;
+            background:
+                radial-gradient(60% 55% at 12% 8%, var(--aml-art-glow-a, transparent), transparent 70%),
+                radial-gradient(55% 50% at 92% 88%, var(--aml-art-glow-b, transparent), transparent 70%),
+                var(--aml-art-page-bg, transparent);
+        }
+        body[data-aml-art-theme] #_amlArtBg { opacity: 1; }
+        body[data-aml-art-theme] .songs-list-row { border-color: var(--aml-nav-border) !important; }
+        body[data-aml-art-theme] .songs-list-row:hover { background: var(--aml-art-raised) !important; }
+        body[data-aml-art-theme] .songs-list-row.songs-list-row--selected { background: var(--aml-accent-active) !important; }
+        body[data-aml-art-theme] .primary-actions__button--play button {
+            background: var(--aml-accent) !important; color: var(--aml-art-on-accent) !important;
+        }
+        body[data-aml-art-theme] .primary-actions__button--play button svg,
+        body[data-aml-art-theme] .primary-actions__button--play button svg path { fill: var(--aml-art-on-accent) !important; }
+        body[data-aml-art-theme] .primary-actions__button--shuffle button,
+        body[data-aml-art-theme] .primary-actions__button--add-to-library button {
+            background: var(--aml-art-raised) !important;
+        }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+
+    // Apple's page-background artwork: an artwork-component covering most of
+    // the viewport that is not a card, shelf, header cover or player art.
+    function markPageArt() {
+        const vw = innerWidth, vh = innerHeight;
+        for (const el of document.querySelectorAll('.artwork-component:not([data-aml-page-art])')) {
+            if (el.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el.setAttribute('data-aml-page-art', '');
+        }
+    }
+
+    function ensureBgLayer() {
+        if (document.getElementById('_amlArtBg')) return;
+        const layer = document.createElement('div');
+        layer.id = '_amlArtBg';
+        // Sit above main.mjs's blur/accent/custom backdrops, below page content.
+        let ref = document.body.firstElementChild;
+        while (ref && BG_LAYER_IDS.includes(ref.id)) ref = ref.nextElementSibling;
+        document.body.insertBefore(layer, ref);
+    }
+
+    function apply(roles) {
+        const b = document.body.style;
+        b.setProperty('--aml-nav-bg', roles.navBg);
+        b.setProperty('--aml-nav-border', roles.border);
+        b.setProperty('--aml-accent', roles.accent);
+        b.setProperty('--aml-accent-active', roles.accentActive);
+        b.setProperty('--keyColor', roles.accent);
+        b.setProperty('--aml-art-page-bg', roles.pageBg);
+        b.setProperty('--aml-art-glow-a', roles.glowA);
+        b.setProperty('--aml-art-glow-b', roles.glowB);
+        b.setProperty('--aml-art-raised', roles.raised);
+        b.setProperty('--aml-art-on-accent', roles.onAccent);
+        ensureBgLayer();
+        document.body.setAttribute('data-aml-art-theme', '');
+    }
+
+    function clear() {
+        if (!document.body) return;
+        for (const v of BODY_VARS) document.body.style.removeProperty(v);
+        document.body.removeAttribute('data-aml-art-theme');
+    }
+
+    // Palette from the artwork pixels; falls back to Apple's --artwork-bg-color
+    // (one colour, neighbours synthesised by paletteRoles) if the image can't
+    // be read (e.g. a CORS-tainted canvas).
+    async function computeRoles(src, headerArt) {
+        try {
+            const im = new Image();
+            im.crossOrigin = 'anonymous';
+            im.src = src;
+            await im.decode();
+            const cv = document.createElement('canvas');
+            cv.width = cv.height = 40;
+            const cx = cv.getContext('2d', { willReadFrequently: true });
+            cx.drawImage(im, 0, 0, 40, 40);
+            const roles = _paletteRoles(_extractPalette(cx.getImageData(0, 0, 40, 40).data));
+            if (roles) return roles;
+        } catch (_) {}
+        const hex = headerArt?.style.getPropertyValue('--artwork-bg-color').trim() ?? '';
+        const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+        if (!m) return null;
+        const [h, s, l] = _rgbToHsl(parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16));
+        return _paletteRoles([{ h, s, l, weight: 1 }]);
+    }
+
+    async function sync() {
+        if (!document.body) return;
+        markPageArt();
+        if (!enabled) {
+            if (lastSrc !== null || document.body.hasAttribute('data-aml-art-theme')) { clear(); lastSrc = null; token++; }
+            return;
+        }
+        const img = document.querySelector('.container-detail-header .artwork__main img');
+        if (!img) {
+            if (lastSrc !== null) { clear(); lastSrc = null; token++; }
+            return;
+        }
+        const src = img.currentSrc || '';
+        if (!src || /1x1\.gif$/.test(src)) {
+            // Lazy <picture> not resolved yet; no DOM mutation fires when it loads.
+            img.addEventListener('load', sync, { once: true });
+            return;
+        }
+        if (src === lastSrc) return;
+        lastSrc = src;
+        const my = ++token;
+        const roles = await computeRoles(src, img.closest('.artwork-component'));
+        if (my !== token || !enabled) return;
+        if (roles) apply(roles); else clear();
+    }
+
+    window.addEventListener('aml:art-theme', (e) => {
+        enabled = !!e.detail;
+        lastSrc = null;
+        sync();
+    });
+    window.amlBridge?.getPrefs?.().then(p => {
+        enabled = p?.artTheme !== false;
+        sync();
+    }).catch(() => {});
+    watchDomSettled(sync);
+    window.addEventListener('resize', markPageArt, { passive: true });
+})();
+
 // MusicKit's PlayActivity analytics throws "play() method was called without a
 // previous stop() or pause() call" as an unhandled promise rejection whenever
 // our VLC mode resumes playback — its state machine expects a real audio src.
@@ -10141,6 +10296,14 @@ window.amlGetQueueInfo = function () {
             modeSeg.appendChild(btn);
         });
         modeRow.appendChild(modeSeg);
+        const artToggle = document.createElement('input');
+        artToggle.type = 'checkbox'; artToggle.checked = prefs.artTheme !== false;
+        artToggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
+        artToggle.onchange = () => {
+            window.amlBridge.setTweak('artTheme', artToggle.checked);
+            window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: artToggle.checked }));
+        };
+        thBody.appendChild(makeRow('Album art theming', artToggle, 'Colour album and playlist pages with a palette from their artwork', false));
         thBody.appendChild(modeRow);
         thBody.appendChild(thContentArea);
         renderThemeContent(st.curMode);

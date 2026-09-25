@@ -78,6 +78,94 @@
   var isVideoType = (t) => t === "music-videos" || t === "musicVideo" || t === "library-music-videos";
   var extractItemType = (item) => item?.type ?? item?.attributes?.playParams?.kind ?? item?.playParams?.kind ?? null;
 
+  // src/engine/artpalette.js
+  function rgbToHsl(r, g, b) {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    if (max === min) return [0, 0, l];
+    const d = max - min;
+    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    let h;
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    return [h * 60, s, l];
+  }
+  var hueDist = (a, b) => {
+    const d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+  };
+  var clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  var pct = (v) => `${Math.round(v * 100)}%`;
+  var hsla = (h, s, l, a = 1) => `hsla(${Math.round(h)}, ${pct(s)}, ${pct(l)}, ${a})`;
+  function extractPalette(data, max = 5) {
+    const buckets = /* @__PURE__ */ new Map();
+    let total = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 200) continue;
+      const [h, s, l] = rgbToHsl(data[i], data[i + 1], data[i + 2]);
+      const sb = s < 0.12 ? 0 : s < 0.45 ? 1 : 2;
+      const hb = sb === 0 ? 0 : Math.floor(h / 24) % 15;
+      const lb = Math.min(4, Math.floor(l * 5));
+      const key = hb * 100 + sb * 10 + lb;
+      let bk = buckets.get(key);
+      if (!bk) buckets.set(key, bk = { r: 0, g: 0, b: 0, n: 0 });
+      bk.r += data[i];
+      bk.g += data[i + 1];
+      bk.b += data[i + 2];
+      bk.n++;
+      total++;
+    }
+    if (!total) return [];
+    const colors = [...buckets.values()].map((bk) => {
+      const [h, s, l] = rgbToHsl(bk.r / bk.n, bk.g / bk.n, bk.b / bk.n);
+      return { h, s, l, weight: bk.n / total };
+    }).sort((a, b) => b.weight - a.weight);
+    const picked = [];
+    for (const c of colors) {
+      if (c.weight < 0.01) break;
+      const distinct = picked.every((p) => (c.s > 0.12 && p.s > 0.12 ? hueDist(c.h, p.h) >= 30 : false) || Math.abs(c.l - p.l) >= 0.22 || Math.abs(c.s - p.s) >= 0.35);
+      if (distinct) picked.push(c);
+      if (picked.length === max) break;
+    }
+    return picked;
+  }
+  function luminance(h, s, l) {
+    const k = (n) => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1));
+    const lin = (v) => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    return 0.2126 * lin(f(0)) + 0.7152 * lin(f(8)) + 0.0722 * lin(f(4));
+  }
+  function paletteRoles(palette) {
+    if (!palette?.length) return null;
+    const base = palette[0];
+    const vivid = (c) => c.s * (1 - Math.abs(c.l - 0.55)) * (0.35 + Math.sqrt(c.weight));
+    const accent = [...palette].sort((a, b) => vivid(b) - vivid(a))[0];
+    const others = palette.filter((c) => c !== base && c !== accent);
+    const second = others[0] ?? { h: (base.h + 35) % 360, s: base.s, l: base.l };
+    const third = others[1] ?? { h: (base.h + 325) % 360, s: base.s, l: base.l };
+    const tone = (c, cap) => clamp(c.s, 0, cap);
+    const mono = accent.s < 0.15;
+    const accentS = mono ? 0 : clamp(accent.s, 0.55, 0.85);
+    const accentL = mono ? 0.82 : 0.62;
+    const onAccent = luminance(accent.h, accentS, accentL) > 0.36 ? "#000" : "#fff";
+    return {
+      pageBg: hsla(base.h, tone(base, 0.45), 0.08),
+      glowA: hsla(second.h, tone(second, 0.6), 0.24, 0.55),
+      glowB: hsla(third.h, tone(third, 0.6), 0.2, 0.45),
+      navBg: hsla(base.h, tone(base, 0.35) * 0.8, 0.13, 0.78),
+      raised: hsla(second.h, tone(second, 0.3), 0.22, 0.5),
+      border: hsla(accent.h, mono ? 0 : 0.4, 0.55, 0.22),
+      accent: hsla(accent.h, accentS, accentL),
+      accentActive: hsla(accent.h, accentS, accentL, 0.26),
+      onAccent
+    };
+  }
+
   // src/engine-playback.js
   if (window.__amlEngineInjected) throw new Error("[AML] double-injection guard");
   window.__amlEngineInjected = true;
@@ -2381,9 +2469,9 @@
       const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute("max")) || 1;
       rangeInput.value = String(t);
       const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
-      const pct = _fillPct(frac).toFixed(2) + "%";
-      rangeInput.style.setProperty("--progress", pct);
-      if (!_wcVideo && !_nativeVideo) rangeInput.style.setProperty("--width", pct);
+      const pct2 = _fillPct(frac).toFixed(2) + "%";
+      rangeInput.style.setProperty("--progress", pct2);
+      if (!_wcVideo && !_nativeVideo) rangeInput.style.setProperty("--width", pct2);
       if (max > 0) {
         let bFrac = 0;
         if (_wcVideo) {
@@ -7975,6 +8063,152 @@
     }
     watchDomSettled(sync);
   })();
+  (function initArtTheme() {
+    const BODY_VARS = [
+      "--aml-nav-bg",
+      "--aml-nav-border",
+      "--aml-accent",
+      "--aml-accent-active",
+      "--keyColor",
+      "--aml-art-page-bg",
+      "--aml-art-glow-a",
+      "--aml-art-glow-b",
+      "--aml-art-raised",
+      "--aml-art-on-accent"
+    ];
+    const BG_LAYER_IDS = ["_amlBlurBg", "_amlAccentBg", "_amlCustomBg", "_amlArtBg"];
+    let enabled = true;
+    let lastSrc = null;
+    let token = 0;
+    const style = document.createElement("style");
+    style.id = "aml-art-theme-style";
+    style.textContent = `
+        [data-aml-page-art] { visibility: hidden !important; }
+        #_amlArtBg {
+            position: fixed; inset: 0; z-index: 0; pointer-events: none;
+            opacity: 0; transition: opacity .6s ease;
+            background:
+                radial-gradient(60% 55% at 12% 8%, var(--aml-art-glow-a, transparent), transparent 70%),
+                radial-gradient(55% 50% at 92% 88%, var(--aml-art-glow-b, transparent), transparent 70%),
+                var(--aml-art-page-bg, transparent);
+        }
+        body[data-aml-art-theme] #_amlArtBg { opacity: 1; }
+        body[data-aml-art-theme] .songs-list-row { border-color: var(--aml-nav-border) !important; }
+        body[data-aml-art-theme] .songs-list-row:hover { background: var(--aml-art-raised) !important; }
+        body[data-aml-art-theme] .songs-list-row.songs-list-row--selected { background: var(--aml-accent-active) !important; }
+        body[data-aml-art-theme] .primary-actions__button--play button {
+            background: var(--aml-accent) !important; color: var(--aml-art-on-accent) !important;
+        }
+        body[data-aml-art-theme] .primary-actions__button--play button svg,
+        body[data-aml-art-theme] .primary-actions__button--play button svg path { fill: var(--aml-art-on-accent) !important; }
+        body[data-aml-art-theme] .primary-actions__button--shuffle button,
+        body[data-aml-art-theme] .primary-actions__button--add-to-library button {
+            background: var(--aml-art-raised) !important;
+        }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+    function markPageArt() {
+      const vw = innerWidth, vh = innerHeight;
+      for (const el of document.querySelectorAll(".artwork-component:not([data-aml-page-art])")) {
+        if (el.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el.setAttribute("data-aml-page-art", "");
+      }
+    }
+    function ensureBgLayer() {
+      if (document.getElementById("_amlArtBg")) return;
+      const layer = document.createElement("div");
+      layer.id = "_amlArtBg";
+      let ref = document.body.firstElementChild;
+      while (ref && BG_LAYER_IDS.includes(ref.id)) ref = ref.nextElementSibling;
+      document.body.insertBefore(layer, ref);
+    }
+    function apply(roles) {
+      const b = document.body.style;
+      b.setProperty("--aml-nav-bg", roles.navBg);
+      b.setProperty("--aml-nav-border", roles.border);
+      b.setProperty("--aml-accent", roles.accent);
+      b.setProperty("--aml-accent-active", roles.accentActive);
+      b.setProperty("--keyColor", roles.accent);
+      b.setProperty("--aml-art-page-bg", roles.pageBg);
+      b.setProperty("--aml-art-glow-a", roles.glowA);
+      b.setProperty("--aml-art-glow-b", roles.glowB);
+      b.setProperty("--aml-art-raised", roles.raised);
+      b.setProperty("--aml-art-on-accent", roles.onAccent);
+      ensureBgLayer();
+      document.body.setAttribute("data-aml-art-theme", "");
+    }
+    function clear() {
+      if (!document.body) return;
+      for (const v of BODY_VARS) document.body.style.removeProperty(v);
+      document.body.removeAttribute("data-aml-art-theme");
+    }
+    async function computeRoles(src, headerArt) {
+      try {
+        const im = new Image();
+        im.crossOrigin = "anonymous";
+        im.src = src;
+        await im.decode();
+        const cv = document.createElement("canvas");
+        cv.width = cv.height = 40;
+        const cx = cv.getContext("2d", { willReadFrequently: true });
+        cx.drawImage(im, 0, 0, 40, 40);
+        const roles = paletteRoles(extractPalette(cx.getImageData(0, 0, 40, 40).data));
+        if (roles) return roles;
+      } catch (_) {
+      }
+      const hex = headerArt?.style.getPropertyValue("--artwork-bg-color").trim() ?? "";
+      const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+      if (!m) return null;
+      const [h, s, l] = rgbToHsl(parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16));
+      return paletteRoles([{ h, s, l, weight: 1 }]);
+    }
+    async function sync() {
+      if (!document.body) return;
+      markPageArt();
+      if (!enabled) {
+        if (lastSrc !== null || document.body.hasAttribute("data-aml-art-theme")) {
+          clear();
+          lastSrc = null;
+          token++;
+        }
+        return;
+      }
+      const img = document.querySelector(".container-detail-header .artwork__main img");
+      if (!img) {
+        if (lastSrc !== null) {
+          clear();
+          lastSrc = null;
+          token++;
+        }
+        return;
+      }
+      const src = img.currentSrc || "";
+      if (!src || /1x1\.gif$/.test(src)) {
+        img.addEventListener("load", sync, { once: true });
+        return;
+      }
+      if (src === lastSrc) return;
+      lastSrc = src;
+      const my = ++token;
+      const roles = await computeRoles(src, img.closest(".artwork-component"));
+      if (my !== token || !enabled) return;
+      if (roles) apply(roles);
+      else clear();
+    }
+    window.addEventListener("aml:art-theme", (e) => {
+      enabled = !!e.detail;
+      lastSrc = null;
+      sync();
+    });
+    window.amlBridge?.getPrefs?.().then((p) => {
+      enabled = p?.artTheme !== false;
+      sync();
+    }).catch(() => {
+    });
+    watchDomSettled(sync);
+    window.addEventListener("resize", markPageArt, { passive: true });
+  })();
   window.addEventListener("unhandledrejection", (e) => {
     const msg = e.reason?.message ?? "";
     if (msg.includes("play() method was called without a previous") || msg.includes("lyrics are not being displayed") || msg.includes("lyrics are already being displayed")) {
@@ -9109,6 +9343,15 @@
         modeSeg.appendChild(btn);
       });
       modeRow.appendChild(modeSeg);
+      const artToggle = document.createElement("input");
+      artToggle.type = "checkbox";
+      artToggle.checked = prefs.artTheme !== false;
+      artToggle.style.cssText = "width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;";
+      artToggle.onchange = () => {
+        window.amlBridge.setTweak("artTheme", artToggle.checked);
+        window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: artToggle.checked }));
+      };
+      thBody.appendChild(makeRow("Album art theming", artToggle, "Colour album and playlist pages with a palette from their artwork", false));
       thBody.appendChild(modeRow);
       thBody.appendChild(thContentArea);
       renderThemeContent(st.curMode);
@@ -9246,13 +9489,13 @@
         songsSubhead.style.cssText = FF + "font-size:10px;font-weight:600;letter-spacing:0.06em;color:rgba(255,255,255,0.35);padding:12px 0 4px;text-transform:uppercase;";
         songsSubhead.textContent = "Songs";
         cBody.appendChild(songsSubhead);
-        const pct = limitMB > 0 ? Math.min(100, Math.round(usedMB / limitMB * 100)) : 0;
+        const pct2 = limitMB > 0 ? Math.min(100, Math.round(usedMB / limitMB * 100)) : 0;
         const barWrap = document.createElement("div");
         barWrap.style.cssText = "flex:1;";
         const barBg = document.createElement("div");
         barBg.style.cssText = "height:4px;background:rgba(255,255,255,0.12);border-radius:2px;overflow:hidden;margin-bottom:4px;";
         const barFill = document.createElement("div");
-        barFill.style.cssText = `height:100%;width:${pct}%;background:#fc3c44;border-radius:2px;`;
+        barFill.style.cssText = `height:100%;width:${pct2}%;background:#fc3c44;border-radius:2px;`;
         barBg.appendChild(barFill);
         const barLabel = document.createElement("div");
         barLabel.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.4);";
@@ -10902,14 +11145,14 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     function _applyJobFill(fill, phase, isActive, isTerminal, job) {
       if (!fill) return;
       const BG = { done: "#30d158", failed: "#ff453a", cancelled: "rgba(255,255,255,0.10)" };
-      const pct = isTerminal ? 100 : job.percent ?? 0;
+      const pct2 = isTerminal ? 100 : job.percent ?? 0;
       const bg = BG[phase] || "rgba(255,255,255,0.85)";
       if (phase === "downloading") {
-        fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.6s ease;background:${bg};animation:none;`;
+        fill.style.cssText = `height:100%;border-radius:2px;width:${pct2}%;transition:width 0.6s ease;background:${bg};animation:none;`;
       } else if (isActive) {
-        fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.4s ease;background:${bg};animation:aml-dl-pulse 1.2s ease-in-out infinite;`;
+        fill.style.cssText = `height:100%;border-radius:2px;width:${pct2}%;transition:width 0.4s ease;background:${bg};animation:aml-dl-pulse 1.2s ease-in-out infinite;`;
       } else {
-        fill.style.cssText = `height:100%;border-radius:2px;width:${pct}%;transition:width 0.4s ease;background:${bg};animation:none;`;
+        fill.style.cssText = `height:100%;border-radius:2px;width:${pct2}%;transition:width 0.4s ease;background:${bg};animation:none;`;
       }
     }
     function _applyJobRetry(row, job, phase) {
