@@ -15,6 +15,7 @@
 package export
 
 import (
+	"context"
 	"time"
 )
 
@@ -138,6 +139,10 @@ type ExportRequest struct {
 	HintTitle   string `json:"hintTitle,omitempty"`
 	HintArtist  string `json:"hintArtist,omitempty"`
 	HintArtwork string `json:"hintArtwork,omitempty"`
+
+	// Priority orders this job in the queue: higher runs sooner, FIFO among
+	// equal priorities. Tracks expanded from an album or playlist inherit it.
+	Priority int `json:"priority,omitempty"`
 }
 
 // ExportEvent is emitted for each significant state transition and is
@@ -154,11 +159,16 @@ type ExportEvent struct {
 // ExportJob is the public view of an in-flight or completed export job.
 // Its fields are safe to serialise to JSON and return to API clients.
 type ExportJob struct {
-	ID         string `json:"jobId"`
-	AssetID    string `json:"assetId"`
-	Phase      Phase  `json:"phase"`
-	Percent    int    `json:"percent"`
-	QueuePos   int64  `json:"queuePos"` // monotonically increasing enqueue order
+	ID       string `json:"jobId"`
+	AssetID  string `json:"assetId"`
+	Phase    Phase  `json:"phase"`
+	Percent  int    `json:"percent"`
+	QueuePos int64  `json:"queuePos"` // monotonically increasing enqueue order
+	// QueueIndex is the job's 1-based position in run order while queued;
+	// 0 once it is running or finished.
+	QueueIndex int `json:"queueIndex,omitempty"`
+	// Priority orders queued jobs: higher runs sooner, FIFO among equals.
+	Priority   int    `json:"priority"`
 	Title      string `json:"title,omitempty"`
 	ArtistName string `json:"artistName,omitempty"`
 	ArtworkURL string `json:"artworkUrl,omitempty"`
@@ -179,4 +189,6 @@ type ExportJob struct {
 
 	// cancel is called to request cancellation; not exported.
 	cancel func()
+	// ctx is the job's context; cancelled by Cancel. Not exported.
+	ctx context.Context
 }

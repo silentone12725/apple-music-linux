@@ -18,6 +18,7 @@ import (
 
 	"engine/core/pipeline"
 	"engine/core/playback"
+	"engine/internal/pq"
 	"engine/utils/ampapi"
 	"engine/utils/lyrics"
 )
@@ -54,18 +55,23 @@ type Options struct {
 	FloorBps int64
 }
 
-// Manager enqueues and executes export jobs one at a time in FIFO order.
-// It is safe for concurrent use.
+// Manager enqueues and executes export jobs one at a time: highest priority
+// first, FIFO among equal priorities. It is safe for concurrent use.
+//
+// A single worker is deliberate: the DRM wrapper is one process, and one
+// active export keeps the bandwidth limiter's meaning simple (the maximum
+// background egress rate).
 type Manager struct {
 	mu       sync.RWMutex
 	jobs     map[string]*ExportJob
 	requests map[string]ExportRequest // original request per job, for Retry
-	queue    chan *workItem
+	queue    *pq.Queue[*workItem]
 	sink     EventSink
 	manager  *playback.Manager
 	cache    AudioCache // nil when the playback disk cache is disabled
 	bw       *bwController
-	seq      atomic.Int64 // monotonically increasing enqueue counter
+	run      func(*workItem) // test seam; nil means m.execute
+	seq      atomic.Int64    // monotonically increasing enqueue counter
 }
 
 type workItem struct {
@@ -75,13 +81,13 @@ type workItem struct {
 }
 
 // NewManager creates an ExportManager that acquires media through pm and
-// notifies ev on each state transition. Jobs are processed one at a time
-// in the order they were enqueued.
+// notifies ev on each state transition. Jobs are processed one at a time,
+// highest priority first and FIFO within a priority.
 func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
 	m := &Manager{
 		jobs:     make(map[string]*ExportJob),
 		requests: make(map[string]ExportRequest),
-		queue:    make(chan *workItem, 256),
+		queue:    pq.New[*workItem](),
 		sink:     ev,
 		manager:  pm,
 		cache:    opts.Cache,
@@ -122,29 +128,73 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 		AssetID:    req.AssetID,
 		Phase:      PhaseQueued,
 		QueuePos:   m.seq.Add(1),
+		Priority:   req.Priority,
 		Title:      req.HintTitle,
 		ArtistName: req.HintArtist,
 		ArtworkURL: req.HintArtwork,
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
+		ctx:        jobCtx,
 		cancel:     cancel,
 	}
 
 	m.mu.Lock()
 	m.jobs[job.ID] = job
 	m.requests[job.ID] = req
+	m.queue.Push(job.ID, &workItem{job: job, req: req, ctx: jobCtx}, req.Priority)
 	m.mu.Unlock()
 
-	m.queue <- &workItem{job: job, req: req, ctx: jobCtx}
 	m.emit(job, 0, "")
 	return job, nil
 }
 
-// worker processes items from the queue one at a time in FIFO order.
+// worker processes items one at a time, highest priority first.
 func (m *Manager) worker() {
-	for item := range m.queue {
+	for {
+		item, ok := m.queue.Pop()
+		if !ok {
+			return
+		}
+		if m.run != nil {
+			m.run(item)
+			continue
+		}
 		m.execute(item)
 	}
+}
+
+// Errors returned by Prioritize.
+var (
+	ErrJobNotFound = errors.New("job not found")
+	ErrNotQueued   = errors.New("job is not queued")
+)
+
+// Prioritize changes the priority of a queued job and returns its updated
+// snapshot. A job that is already running (or finished) is never reordered.
+func (m *Manager) Prioritize(id string, prio int) (*ExportJob, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return nil, ErrJobNotFound
+	}
+	if !m.queue.Update(id, prio) {
+		return nil, ErrNotQueued
+	}
+	j.Priority = prio
+	j.UpdatedAt = time.Now()
+	return m.snapshotLocked(j, m.queuePositions()), nil
+}
+
+// queuePositions maps queued job IDs to their 1-based run order, from one
+// sorted snapshot of the queue.
+func (m *Manager) queuePositions() map[string]int {
+	snap := m.queue.Snapshot()
+	pos := make(map[string]int, len(snap))
+	for i, e := range snap {
+		pos[e.ID] = i + 1
+	}
+	return pos
 }
 
 // Get returns a snapshot of a job's current state, or (nil, false) if unknown.
@@ -156,7 +206,7 @@ func (m *Manager) Get(id string) (*ExportJob, bool) {
 	if !ok {
 		return nil, false
 	}
-	return m.snapshotLocked(j), true
+	return m.snapshotLocked(j, m.queuePositions()), true
 }
 
 // List returns snapshots of all known jobs.
@@ -165,17 +215,21 @@ func (m *Manager) List() []*ExportJob {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]*ExportJob, 0, len(m.jobs))
+	pos := m.queuePositions()
 	for _, j := range m.jobs {
-		out = append(out, m.snapshotLocked(j))
+		out = append(out, m.snapshotLocked(j, pos))
 	}
 	return out
 }
 
 // Cancel cancels or removes a job by id.
-// For in-progress jobs (queued/resolving/downloading/tagging/moving) it
-// signals cancellation and leaves the row visible so the UI can show the
-// cancelled state.  For terminal jobs (done/failed/cancelled) it removes the
-// job from the map entirely — this is what the "Clear done" button uses.
+//   - queued:   removed from the queue immediately and marked cancelled.
+//   - running:  its context is cancelled; the worker observes it and the job
+//     ends in the cancelled phase. (A job the worker has just popped is
+//     running: the queue no longer holds it, so Remove reports false.)
+//   - terminal (done/failed/cancelled): removed from the map entirely — this
+//     is what the "Clear done" button uses.
+//
 // Returns false if the job is not found.
 func (m *Manager) Cancel(id string) bool {
 	m.mu.Lock()
@@ -184,16 +238,23 @@ func (m *Manager) Cancel(id string) bool {
 		m.mu.Unlock()
 		return false
 	}
-	phase := j.Phase
-	switch phase {
+	switch j.Phase {
 	case PhaseDone, PhaseFailed, PhaseCancelled:
 		delete(m.jobs, id)
 		delete(m.requests, id)
 		m.mu.Unlock()
-	default:
+		return true
+	}
+	if _, queued := m.queue.Remove(id); queued {
+		j.Phase = PhaseCancelled
+		j.UpdatedAt = time.Now()
 		m.mu.Unlock()
 		j.cancel()
+		m.emit(j, 0, "")
+		return true
 	}
+	m.mu.Unlock()
+	j.cancel()
 	return true
 }
 
@@ -389,6 +450,12 @@ func (m *Manager) execute(item *workItem) {
 			m.fail(job, fmt.Errorf("panic: %v", r))
 		}
 	}()
+
+	// Cancelled between Pop and here: end cleanly without doing any work.
+	if ctx.Err() != nil {
+		m.fail(job, ctx.Err())
+		return
+	}
 
 	// ── Phase 1: Resolve catalog metadata ────────────────────────────────
 	m.advance(job, PhaseResolving, 0)
@@ -991,8 +1058,9 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 // snapshotLocked copies j for API clients (caller holds m.mu). LimitBps is
 // the export limit in force at snapshot time — only a job streaming from the
 // network is throttled; nil means unlimited.
-func (m *Manager) snapshotLocked(j *ExportJob) *ExportJob {
+func (m *Manager) snapshotLocked(j *ExportJob, pos map[string]int) *ExportJob {
 	cp := *j
+	cp.QueueIndex = pos[j.ID]
 	cp.LimitBps = nil
 	if cp.Phase == PhaseDownloading && cp.Source == SourceNetwork && m.bw != nil {
 		cp.LimitBps = m.bw.currentLimit()
@@ -1025,9 +1093,14 @@ func (m *Manager) advance(job *ExportJob, phase Phase, pct int) {
 	m.emit(job, pct, "")
 }
 
+// fail ends job. A job whose context was cancelled (Cancel on a running job)
+// ends in PhaseCancelled rather than PhaseFailed.
 func (m *Manager) fail(job *ExportJob, err error) {
 	m.mu.Lock()
 	job.Phase = PhaseFailed
+	if job.ctx != nil && job.ctx.Err() != nil {
+		job.Phase = PhaseCancelled
+	}
 	job.Error = err.Error()
 	job.UpdatedAt = time.Now()
 	m.mu.Unlock()

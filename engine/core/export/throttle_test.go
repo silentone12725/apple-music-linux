@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"engine/internal/pq"
 )
 
 // ── controller harness ────────────────────────────────────────────────────────
@@ -331,7 +333,7 @@ func TestThrottledWriter_RealLimiterPaces(t *testing.T) {
 func TestSnapshot_LimitBps(t *testing.T) {
 	t.Parallel()
 	fg := &fakeFg{}
-	m := &Manager{jobs: map[string]*ExportJob{}, bw: newBWController(fg.stats, 0)}
+	m := &Manager{jobs: map[string]*ExportJob{}, queue: pq.New[*workItem](), bw: newBWController(fg.stats, 0)}
 	m.jobs["j"] = &ExportJob{ID: "j", Phase: PhaseDownloading, Source: SourceNetwork}
 
 	if j, _ := m.Get("j"); j.LimitBps != nil || j.Throttled {
