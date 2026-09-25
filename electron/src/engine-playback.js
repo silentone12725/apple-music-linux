@@ -9101,7 +9101,10 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
     const style = document.createElement('style');
     style.id = 'aml-art-theme-style';
     style.textContent = `
+        /* ── hide Apple's full-page artwork wash ── */
         [data-aml-page-art] { visibility: hidden !important; }
+
+        /* ── gradient background layer ── */
         #_amlArtBg {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             opacity: 0; transition: opacity .6s ease;
@@ -9111,18 +9114,102 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
                 var(--aml-art-page-bg, transparent);
         }
         body[data-aml-art-theme] #_amlArtBg { opacity: 1; }
+
+        /* ── page body: hue-tinted dark base ── */
+        body[data-aml-art-theme] { background: var(--aml-art-page-bg) !important; }
+        body[data-aml-art-theme] .body-container,
+        body[data-aml-art-theme] .app-container,
+        body[data-aml-art-theme] main,
+        body[data-aml-art-theme] .content-container,
+        body[data-aml-art-theme] .scrollable-page,
+        body[data-aml-art-theme] .section,
+        body[data-aml-art-theme] .section-content,
+        body[data-aml-art-theme] .container-detail-header,
+        body[data-aml-art-theme] .container-detail-header-wrapper { background: transparent !important; }
+
+        /* ── navigation sidebar ── */
+        body[data-aml-art-theme] nav.navigation {
+            background: var(--aml-nav-bg) !important;
+            border-right-color: var(--aml-nav-border) !important;
+        }
+        body[data-aml-art-theme] .navigation-item__link:hover { background: var(--aml-art-raised) !important; }
+        body[data-aml-art-theme] .navigation-item--selected .navigation-item__link { background: var(--aml-accent-active) !important; }
+        body[data-aml-art-theme] .navigation-item--selected .navigation-item__label,
+        body[data-aml-art-theme] .navigation-item--selected .navigation-item__icon { color: var(--aml-accent) !important; }
+
+        /* ── footer player bar ── */
+        body[data-aml-art-theme] footer.footer--full-width,
+        body[data-aml-art-theme] .footer-wrapper,
+        body[data-aml-art-theme] .footer-contents,
+        body[data-aml-art-theme] .player-bar,
+        body[data-aml-art-theme] .player-bar__floating-player {
+            background: var(--aml-nav-bg) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
+        }
+        body[data-aml-art-theme] .footer-wrapper { border-top: 1px solid var(--aml-nav-border) !important; }
+        body[data-aml-art-theme] .chrome-player,
+        body[data-aml-art-theme] .player-lcd,
+        body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
+
+        /* ── footer play button ── */
+        body[data-aml-art-theme] .playback-controls-play button {
+            background: var(--aml-accent) !important;
+            color: var(--aml-art-on-accent) !important;
+        }
+        body[data-aml-art-theme] .playback-controls-play button svg path { fill: var(--aml-art-on-accent) !important; }
+
+        /* ── tracklist rows ── */
         body[data-aml-art-theme] .songs-list-row { border-color: var(--aml-nav-border) !important; }
-        body[data-aml-art-theme] .songs-list-row:hover { background: var(--aml-art-raised) !important; }
-        body[data-aml-art-theme] .songs-list-row.songs-list-row--selected { background: var(--aml-accent-active) !important; }
+        body[data-aml-art-theme] .songs-list-row:hover,
+        body[data-aml-art-theme] .library-track:not(.library-track--header):hover { background: var(--aml-art-raised) !important; }
+        body[data-aml-art-theme] .songs-list-row.songs-list-row--selected,
+        body[data-aml-art-theme] .library-track.is-playing { background: var(--aml-accent-active) !important; }
+        body[data-aml-art-theme] .songs-list__header,
+        body[data-aml-art-theme] .library-track--header { background: transparent !important; }
+
+        /* ── primary actions (Play / Shuffle / Add) ── */
         body[data-aml-art-theme] .primary-actions__button--play button {
             background: var(--aml-accent) !important; color: var(--aml-art-on-accent) !important;
         }
         body[data-aml-art-theme] .primary-actions__button--play button svg,
         body[data-aml-art-theme] .primary-actions__button--play button svg path { fill: var(--aml-art-on-accent) !important; }
         body[data-aml-art-theme] .primary-actions__button--shuffle button,
-        body[data-aml-art-theme] .primary-actions__button--add-to-library button {
-            background: var(--aml-art-raised) !important;
+        body[data-aml-art-theme] .primary-actions__button--add-to-library button { background: var(--aml-art-raised) !important; }
+
+        /* ── context menus ── */
+        body[data-aml-art-theme] .contextual-menu {
+            background: var(--aml-nav-bg) !important;
+            border: 1px solid var(--aml-nav-border) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
         }
+        body[data-aml-art-theme] .contextual-menu-item > button:hover,
+        body[data-aml-art-theme] .contextual-menu-item > a:hover { background: var(--aml-art-raised) !important; }
+
+        /* ── search ── */
+        body[data-aml-art-theme] .search-input__text-field,
+        body[data-aml-art-theme] .search-input-wrapper { background: var(--aml-art-raised) !important; }
+        body[data-aml-art-theme] .search-scope-bar__pill-option--selected {
+            background: var(--aml-accent) !important; color: var(--aml-art-on-accent) !important;
+        }
+
+        /* ── side panel / Up Next ── */
+        body[data-aml-art-theme] .side-panel {
+            background: var(--aml-nav-bg) !important;
+            border-left-color: var(--aml-nav-border) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
+        }
+        body[data-aml-art-theme] .up-next-item:hover { background: var(--aml-art-raised) !important; }
+
+        /* ── shelf / grid ── */
+        body[data-aml-art-theme] .shelf,
+        body[data-aml-art-theme] section.shelf-grid,
+        body[data-aml-art-theme] .shelf-grid__body { background: transparent !important; }
+
+        /* ── keyColor propagation for amp-* web components ── */
+        body[data-aml-art-theme] { --keyColor: var(--aml-accent); }
     `;
     (document.head || document.documentElement).appendChild(style);
 
