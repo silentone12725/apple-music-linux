@@ -64,7 +64,9 @@ function savePlayCounts(counts) {
     }
     try {
         localStorage.setItem(PLAY_COUNTS_KEY, JSON.stringify(counts));
-    } catch {}
+    } catch (e) {
+        if (window._AML_DEBUG) console.warn('[AML] savePlayCounts failed:', e);
+    }
 }
 
 // ── SmartCache ─────────────────────────────────────────────────────────────────

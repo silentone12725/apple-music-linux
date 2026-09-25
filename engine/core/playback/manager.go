@@ -70,7 +70,8 @@ type Manager struct {
 	mu         sync.RWMutex
 	sessions   map[string]*Session
 	contexts   map[string]*playContext
-	assetIndex map[string]string // openKey → sessionID; secondary index for resume reuse
+	assetIndex     map[string]string // openKey → sessionID; secondary index for resume reuse
+	sessionToAsset map[string]string // sessionID → openKey; reverse of assetIndex for O(1) Release
 	inflightMu sync.Mutex
 	inflight   map[string]*openFlight // key: assetID+storefront+capabilities
 
@@ -193,7 +194,14 @@ func (c countingHeaderWriter) SetHeader(k, v string) { c.hw.SetHeader(k, v) }
 // New returns a Manager backed by the Apple Music provider.
 // Swap apple.NewProvider() for any media.Provider to change the source.
 func New() *Manager {
-	m := &Manager{provider: apple.NewProvider(), sessions: make(map[string]*Session), contexts: make(map[string]*playContext), assetIndex: make(map[string]string), inflight: make(map[string]*openFlight)}
+	m := &Manager{
+		provider:       apple.NewProvider(),
+		sessions:       make(map[string]*Session),
+		contexts:       make(map[string]*playContext),
+		assetIndex:     make(map[string]string),
+		sessionToAsset: make(map[string]string),
+		inflight:       make(map[string]*openFlight),
+	}
 	go m.reap()
 	return m
 }
@@ -202,7 +210,14 @@ func New() *Manager {
 // Use this when the caller needs to configure the provider before wiring it
 // (e.g. passing a CBCS socket address to apple.NewProviderWithCBCS).
 func NewWithProvider(p media.Provider) *Manager {
-	m := &Manager{provider: p, sessions: make(map[string]*Session), contexts: make(map[string]*playContext), assetIndex: make(map[string]string), inflight: make(map[string]*openFlight)}
+	m := &Manager{
+		provider:       p,
+		sessions:       make(map[string]*Session),
+		contexts:       make(map[string]*playContext),
+		assetIndex:     make(map[string]string),
+		sessionToAsset: make(map[string]string),
+		inflight:       make(map[string]*openFlight),
+	}
 	go m.reap()
 	return m
 }
@@ -443,14 +458,10 @@ func (m *Manager) GetMVProgressiveInfo(id string) (url, key string, ok bool) {
 // Release deletes a session and its private context.
 func (m *Manager) Release(id string) {
 	m.mu.Lock()
-	if sess, ok := m.sessions[id]; ok {
-		// Remove from asset index so the next Open for this asset re-opens DRM.
-		for k, v := range m.assetIndex {
-			if v == sess.ID {
-				delete(m.assetIndex, k)
-				break
-			}
-		}
+	// O(1) reverse-map lookup to remove from assetIndex without scanning all sessions.
+	if assetKey, ok := m.sessionToAsset[id]; ok {
+		delete(m.assetIndex, assetKey)
+		delete(m.sessionToAsset, id)
 	}
 	delete(m.sessions, id)
 	delete(m.contexts, id)
@@ -483,11 +494,16 @@ func (m *Manager) store(assetKey string, sess *Session, pctx *playContext) {
 		m.sessions = make(map[string]*Session)
 		m.contexts = make(map[string]*playContext)
 		m.assetIndex = make(map[string]string)
+		m.sessionToAsset = make(map[string]string)
+	}
+	if m.sessionToAsset == nil {
+		m.sessionToAsset = make(map[string]string)
 	}
 	m.contexts[sess.ID] = pctx // context first — lookup won't see the session without its context
 	m.sessions[sess.ID] = sess
 	if assetKey != "" {
 		m.assetIndex[assetKey] = sess.ID
+		m.sessionToAsset[sess.ID] = assetKey
 	}
 	m.mu.Unlock()
 }
