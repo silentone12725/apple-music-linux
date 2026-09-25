@@ -157,7 +157,7 @@
       pageBg: hsla(base.h, tone(base, 0.45), 0.08),
       glowA: hsla(second.h, tone(second, 0.6), 0.24, 0.55),
       glowB: hsla(third.h, tone(third, 0.6), 0.2, 0.45),
-      navBg: hsla(base.h, tone(base, 0.35) * 0.8, 0.13, 0.78),
+      navBg: hsla(base.h, tone(base, 0.35) * 0.8, 0.13, 0.6),
       raised: hsla(second.h, tone(second, 0.3), 0.22, 0.5),
       border: hsla(accent.h, mono ? 0 : 0.4, 0.55, 0.22),
       accent: hsla(accent.h, accentS, accentL),
@@ -8132,21 +8132,16 @@
 
         /* \u2500\u2500 footer player bar \u2500\u2500 */
         /* DOM: div.player-bar.player-bar__floating-player > div.wrapper > div.chrome-player */
-        /* backdrop-filter must live on the fixed-position ancestor (.player-bar)
-           to reach through the compositing boundary to page content below.
-           .player-bar is transparent so the blur is only visible through the
-           semi-transparent .chrome-player pill; outside the pill the page shows
-           through with the blur layer beneath it. */
-        body[data-aml-art-theme] .player-bar {
-            background: transparent !important;
-            border: none !important;
-            backdrop-filter: blur(20px) !important;
-            -webkit-backdrop-filter: blur(20px) !important;
-        }
-        body[data-aml-art-theme] .player-bar .wrapper { background: transparent !important; }
+        /* .player-bar is position:sticky (no compositing boundary), so
+           backdrop-filter on the inner .chrome-player pill blurs page content
+           behind it directly. */
+        body[data-aml-art-theme] .player-bar,
+        body[data-aml-art-theme] .player-bar .wrapper { background: transparent !important; border: none !important; }
         body[data-aml-art-theme] .chrome-player {
             background: var(--aml-nav-bg) !important;
             border: 1px solid var(--aml-nav-border) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
         }
         body[data-aml-art-theme] .player-lcd,
         body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
