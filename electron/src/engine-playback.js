@@ -9148,9 +9148,17 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
             -webkit-backdrop-filter: blur(20px) !important;
         }
         body[data-aml-art-theme] .footer-wrapper { border-top: 1px solid var(--aml-nav-border) !important; }
+        body[data-aml-art-theme] .player-bar .wrapper,
         body[data-aml-art-theme] .chrome-player,
         body[data-aml-art-theme] .player-lcd,
         body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
+        /* Light text on all dark themed panels, regardless of palette saturation */
+        body[data-aml-art-theme] nav.navigation,
+        body[data-aml-art-theme] footer.footer--full-width,
+        body[data-aml-art-theme] .side-panel,
+        body[data-aml-art-theme] .contextual-menu { color: rgba(255,255,255,0.85) !important; }
+        body[data-aml-art-theme] .navigation-items__header { color: rgba(255,255,255,0.5) !important; }
+        body[data-aml-art-theme] .search-input__text-field { color: rgba(255,255,255,0.85) !important; }
 
         /* ── footer play button ── */
         body[data-aml-art-theme] .playback-controls-play button {
