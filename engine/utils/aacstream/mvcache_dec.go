@@ -294,12 +294,25 @@ func (w *decCacheWriter) Abort() {
 }
 
 // ClearMVDecCache deletes all cached encrypted track files.
+// Uses an atomic rename so in-progress writers keep writing to the old directory
+// rather than hitting ENOENT after RemoveAll.
 func ClearMVDecCache() error {
 	mvDecMu.Lock()
 	defer mvDecMu.Unlock()
-	if err := os.RemoveAll(mvDecDir); err != nil {
+
+	// Rename the old directory aside so in-flight writers (which have open file
+	// handles) continue to succeed; their files will be cleaned up below.
+	old := mvDecDir + ".clearing"
+	_ = os.RemoveAll(old) // remove any stale .clearing dir from a previous crash
+	if err := os.Rename(mvDecDir, old); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	mvDecTotalSz.Store(0)
-	return os.MkdirAll(mvDecDir, 0700)
+	if err := os.MkdirAll(mvDecDir, 0700); err != nil {
+		return err
+	}
+	// Remove the old directory in the background so the caller isn't blocked by
+	// disk I/O proportional to how much was cached.
+	go os.RemoveAll(old)
+	return nil
 }

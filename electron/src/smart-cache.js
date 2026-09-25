@@ -232,6 +232,9 @@ class SmartCache {
     // Monkey-patches history.pushState / replaceState and listens to popstate
     // so we detect SPA navigation without polling.
     observeNavigation(getMk) {
+        if (this._navigationObserved) return; // guard against duplicate installation
+        this._navigationObserved = true;
+
         const onNavigate = (url) => {
             const parsed = parseContentUrl(url);
             if (!parsed) return;
@@ -253,7 +256,8 @@ class SmartCache {
 
         history.pushState    = wrap(history.pushState);
         history.replaceState = wrap(history.replaceState);
-        window.addEventListener('popstate', () => onNavigate(location.href));
+        this._popstateHandler = () => onNavigate(location.href);
+        window.addEventListener('popstate', this._popstateHandler);
 
         // Fire once for current page in case the app loaded directly to a content URL.
         onNavigate(location.href);

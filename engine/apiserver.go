@@ -447,6 +447,10 @@ type APIServer struct {
 	// Observability
 	openLatency *ring.Buffer    // session-open latency ring buffer (last 100 opens)
 	openCB      *circuitBreaker // circuit breaker for session-open failures
+
+	// shutdownCtx is cancelled in Stop() to signal background goroutines to exit.
+	shutdownCtx  context.Context
+	shutdownStop context.CancelFunc
 }
 
 // ServerConfig holds infrastructure values resolved once at startup.
@@ -468,13 +472,16 @@ type ServerConfig struct {
 // NewAPIServer wires all routes.
 func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	epoch := newEpochManager()
+	shutCtx, shutStop := context.WithCancel(context.Background())
 	s := &APIServer{
-		port:        port,
-		epoch:       epoch,
-		lifecycle:   newEngineLifecycle(epoch),
-		events:      newEventBus(epoch),
-		openLatency: ring.New(100),
-		openCB:      newCircuitBreaker(3, 60*time.Second),
+		port:         port,
+		epoch:        epoch,
+		lifecycle:    newEngineLifecycle(epoch),
+		events:       newEventBus(epoch),
+		openLatency:  ring.New(100),
+		openCB:       newCircuitBreaker(3, 60*time.Second),
+		shutdownCtx:  shutCtx,
+		shutdownStop: shutStop,
 	}
 
 	// DRM subsystem constructed first: DRMManager is passed to the PlaybackManager
@@ -579,15 +586,20 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()
-		for range t.C {
-			s.scheduler.PruneExpiredPreWarmed()
+		for {
+			select {
+			case <-s.shutdownCtx.Done():
+				return
+			case <-t.C:
+				s.scheduler.PruneExpiredPreWarmed()
+			}
 		}
 	}()
 
 	// Pre-warm TLS connection to Apple's FairPlay license server so the first
 	// AcquireKey call skips the handshake latency. Mirrors Android
 	// FootHillDecryptionKeyController pre-warming the CDM at player init time.
-	go fairplay.WarmLicensePool(context.Background())
+	go fairplay.WarmLicensePool(s.shutdownCtx)
 
 	// Disk cache — decrypted per-track audio; falls back gracefully on error.
 	// Limits (persistLimitMB, persistTTLDays) are pushed by the frontend on
@@ -598,8 +610,13 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 			go func() {
 				t := time.NewTicker(time.Hour)
 				defer t.Stop()
-				for range t.C {
-					s.diskCache.EvictExpired()
+				for {
+					select {
+					case <-s.shutdownCtx.Done():
+						return
+					case <-t.C:
+						s.diskCache.EvictExpired()
+					}
 				}
 			}()
 		}
@@ -820,6 +837,12 @@ func (s *APIServer) Stop() {
 	if s.vlcPlayer != nil {
 		s.vlcPlayer.Close()
 	}
+	// Cancel the server lifetime context to stop background goroutines.
+	s.shutdownStop()
+	// Stop the export worker before shutting down playback.
+	if s.em != nil {
+		s.em.Stop()
+	}
 	// Stop the wrapper process first so it doesn't keep running as an orphan.
 	// Session files are NOT cleared — they persist for the next server start.
 	s.dm.Shutdown()
@@ -882,8 +905,7 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case origin == "https://music.apple.com",
 		strings.HasPrefix(origin, "http://localhost"),
-		strings.HasPrefix(origin, "http://127.0.0.1"),
-		origin == "null": // file:// QA console and local dev tools
+		strings.HasPrefix(origin, "http://127.0.0.1"):
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	default:
 		w.Header().Set("Access-Control-Allow-Origin", "https://music.apple.com")

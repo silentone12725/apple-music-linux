@@ -79,8 +79,10 @@ type DRMManager struct {
 	mu       sync.RWMutex
 
 	// crash restart state
-	crashCount int
-	restartMu  sync.Mutex // serialises concurrent handleCrash goroutines
+	crashCount   int
+	restartMu    sync.Mutex // serialises concurrent handleCrash goroutines
+	shutdownCtx  context.Context
+	shutdownStop context.CancelFunc
 
 	// recoveryGate is a channel that is CLOSED when the DRM backend is not in
 	// active lease recovery, and OPEN (not yet closed) while recovery is in
@@ -98,6 +100,7 @@ type DRMManager struct {
 func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, cfg BackendConfig, policy RestartPolicy) *DRMManager {
 	gate := make(chan struct{})
 	close(gate) // start closed: no recovery in progress
+	shutCtx, shutStop := context.WithCancel(context.Background())
 	m := &DRMManager{
 		backend:      backend,
 		session:      session,
@@ -105,6 +108,8 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 		policy:       policy,
 		sink:         sink,
 		recoveryGate: gate,
+		shutdownCtx:  shutCtx,
+		shutdownStop: shutStop,
 	}
 	m.auth = NewAuthCoordinator(func(snap DRMSnapshot) {
 		m.mergeAndEmit(snap)
@@ -335,6 +340,7 @@ func (m *DRMManager) DialCBCS(ctx context.Context) (net.Conn, error) {
 // Call this on clean server exit so the session DB persists for the next start.
 // Unlike Logout, Shutdown does not remove mpl_db or any session files.
 func (m *DRMManager) Shutdown() {
+	m.shutdownStop() // cancel any in-progress handleCrash sleep or restart
 	m.setManagerState(ManagerShuttingDown)
 	if m.backend.Running() {
 		_ = m.backend.Stop()
@@ -407,9 +413,13 @@ func (m *DRMManager) handleCrash() {
 		Message: fmt.Sprintf("backend crashed (attempt %d); restarting in %v", count+1, delay),
 	})
 
-	time.Sleep(delay)
+	select {
+	case <-m.shutdownCtx.Done():
+		return // server is shutting down; abort the restart
+	case <-time.After(delay):
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), m.policy.StartupTimeout)
+	ctx, cancel := context.WithTimeout(m.shutdownCtx, m.policy.StartupTimeout)
 	defer cancel()
 
 	if err := m.backend.Start(ctx, m.cfg); err != nil {
