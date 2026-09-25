@@ -2,8 +2,12 @@
   "name": "apple-music-linux",
   "version": "1.0.0",
   "description": "Apple Music desktop client for Linux",
+  "license": "MIT",
   "main": "main.mjs",
   "type": "module",
+  "engines": {
+    "electron": "^43.0.0"
+  },
   "dependencies": {
     "mpris-service": "^2.1.2",
     "x11": "^2.3.0"
@@ -67,7 +71,8 @@
       "description": "Apple Music desktop client for Linux",
       "executableName": "apple-music-linux",
       "artifactName": "apple-music-linux.AppImage",
-      "syncDesktopName": true
+      "syncDesktopName": true,
+      "mimeTypes": ["x-scheme-handler/aml"]
     }
   }
 }

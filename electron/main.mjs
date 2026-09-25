@@ -1278,7 +1278,8 @@ function createWindow() {
             win.loadURL(url);
             return { action: 'deny' };
         }
-        shell.openExternal(url);
+        // Only open safe https:// URLs externally; drop file://, app://, etc.
+        if (url.startsWith('https://')) shell.openExternal(url);
         return { action: 'deny' };
     });
 
@@ -1425,7 +1426,11 @@ ipcMain.handle('dialog:choose-download-dir', async () => {
     });
     return { canceled, filePaths };
 });
-ipcMain.on('pref:set',        (_, k, v) => { const p = loadPrefs(); p[k] = v; savePrefs(p); });
+const _VALID_PREF_KEYS = new Set(['debug', 'persistLimitMB', 'persistTTLDays', 'prewarmLimitMB']);
+ipcMain.on('pref:set', (_, k, v) => {
+    if (!_VALID_PREF_KEYS.has(k)) return; // allowlist: ignore unknown keys
+    const p = loadPrefs(); p[k] = v; savePrefs(p);
+});
 ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));
 ipcMain.on('view:glass-blur', (_, b) => { const p = loadPrefs(); applyGlassEffect(parseInt(b), p.glassOpacity ?? 0.07); });
 ipcMain.on('view:bg-blur',   (_, b) => {
@@ -1706,6 +1711,13 @@ function createMprisPlayer() {
         // MPRIS2 § Rate: we only support 1.0x; reject attempts to change it.
         player.on('rate', () => { try { player.rate = 1.0; } catch (_) {} });
 
+        // MPRIS2 § OpenUri: forward to the deep-link dispatcher (https:// only).
+        player.on('open-uri', (uri) => {
+            const s = String(uri ?? '');
+            if (s.startsWith('https://music.apple.com/') || s.startsWith('aml://'))
+                win?.webContents.send('aml:open', { url: s });
+        });
+
         // MPRIS → app: Seek (delta µs) and SetPosition (absolute µs).
         // dbus-next returns int64 as BigInt; convert to Number before dividing.
         // The renderer emits Seeked back after the seek settles.
@@ -1790,7 +1802,20 @@ function replayMprisState() {
     if (!mprisPlayer) return;
     // Give the D-Bus auth handshake a moment to complete before the first write.
     setTimeout(() => {
-        if (!mprisPlayer) return;
+        const p = mprisPlayer;
+        if (!p) return;
+        try {
+            // MPRIS2 § Rate constraints — we do not support playback rate changes.
+            p.minimumRate = 1.0;
+            p.maximumRate = 1.0;
+            p.rate = 1.0;
+            // MPRIS2 § Control capabilities (static — we always allow control).
+            p.canControl  = true;
+            p.canGoNext   = true;
+            p.canGoPrevious = true;
+            p.canPlay  = true;
+            p.canPause = true;
+        } catch (_) {}
         try {
             if (_lastMprisStatus)        applyMprisData({ status: _lastMprisStatus });
             if (_lastMprisMetadata)      applyMprisData({ metadata: _lastMprisMetadata });
@@ -2211,11 +2236,13 @@ function createMiniPlayer() {
         alwaysOnTop: true,
         title: 'Apple Music — Mini Player',
         webPreferences: {
-            // Trusted local page: use nodeIntegration directly (its own inline
-            // ipcRenderer bridge) instead of a preload — the sandboxed child-window
-            // preload bootstrap crashes with "binding.startupData is null".
-            nodeIntegration: true,
-            contextIsolation: false,
+            preload: path.join(__dirname, 'miniplayer-preload.cjs'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            // sandbox: false keeps the sandbox off to avoid the preload
+            // bootstrap crash ("binding.startupData is null") seen on some
+            // Linux FUSE/AppImage setups — contextIsolation provides the
+            // security boundary instead.
             sandbox: false,
             devTools: !app.isPackaged,
         },
