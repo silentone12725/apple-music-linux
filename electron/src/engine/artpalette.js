@@ -103,7 +103,7 @@ export function paletteRoles(palette) {
         pageBg:       hsla(base.h, tone(base, 0.45), 0.08),
         glowA:        hsla(second.h, tone(second, 0.6), 0.24, 0.55),
         glowB:        hsla(third.h, tone(third, 0.6), 0.2, 0.45),
-        navBg:        hsla(base.h, tone(base, 0.35) * 0.8, 0.13, 0.78),
+        navBg:        hsla(base.h, tone(base, 0.35) * 0.8, 0.13, 0.60),
         raised:       hsla(second.h, tone(second, 0.3), 0.22, 0.5),
         border:       hsla(accent.h, mono ? 0 : 0.4, 0.55, 0.22),
         accent:       hsla(accent.h, accentS, accentL),

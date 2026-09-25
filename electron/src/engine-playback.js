@@ -9151,21 +9151,16 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 
         /* ── footer player bar ── */
         /* DOM: div.player-bar.player-bar__floating-player > div.wrapper > div.chrome-player */
-        /* backdrop-filter must live on the fixed-position ancestor (.player-bar)
-           to reach through the compositing boundary to page content below.
-           .player-bar is transparent so the blur is only visible through the
-           semi-transparent .chrome-player pill; outside the pill the page shows
-           through with the blur layer beneath it. */
-        body[data-aml-art-theme] .player-bar {
-            background: transparent !important;
-            border: none !important;
-            backdrop-filter: blur(20px) !important;
-            -webkit-backdrop-filter: blur(20px) !important;
-        }
-        body[data-aml-art-theme] .player-bar .wrapper { background: transparent !important; }
+        /* .player-bar is position:sticky (no compositing boundary), so
+           backdrop-filter on the inner .chrome-player pill blurs page content
+           behind it directly. */
+        body[data-aml-art-theme] .player-bar,
+        body[data-aml-art-theme] .player-bar .wrapper { background: transparent !important; border: none !important; }
         body[data-aml-art-theme] .chrome-player {
             background: var(--aml-nav-bg) !important;
             border: 1px solid var(--aml-nav-border) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
         }
         body[data-aml-art-theme] .player-lcd,
         body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
