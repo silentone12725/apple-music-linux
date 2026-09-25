@@ -49,6 +49,9 @@ type AudioCache interface {
 type Options struct {
 	// Cache, when non-nil, lets audio exports reuse bytes playback fetched.
 	Cache AudioCache
+	// FloorBps is the minimum export rate (bytes/s) while playback streams.
+	// Zero selects the default (128 KiB/s).
+	FloorBps int64
 }
 
 // Manager enqueues and executes export jobs one at a time in FIFO order.
@@ -60,7 +63,8 @@ type Manager struct {
 	queue    chan *workItem
 	sink     EventSink
 	manager  *playback.Manager
-	cache    AudioCache   // nil when the playback disk cache is disabled
+	cache    AudioCache // nil when the playback disk cache is disabled
+	bw       *bwController
 	seq      atomic.Int64 // monotonically increasing enqueue counter
 }
 
@@ -82,6 +86,11 @@ func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
 		manager:  pm,
 		cache:    opts.Cache,
 	}
+	var stats fgStatsFunc
+	if pm != nil {
+		stats = pm.ForegroundStats
+	}
+	m.bw = newBWController(stats, float64(opts.FloorBps))
 	go m.worker()
 	return m
 }
@@ -147,8 +156,7 @@ func (m *Manager) Get(id string) (*ExportJob, bool) {
 	if !ok {
 		return nil, false
 	}
-	cp := *j
-	return &cp, true
+	return m.snapshotLocked(j), true
 }
 
 // List returns snapshots of all known jobs.
@@ -158,8 +166,7 @@ func (m *Manager) List() []*ExportJob {
 	defer m.mu.RUnlock()
 	out := make([]*ExportJob, 0, len(m.jobs))
 	for _, j := range m.jobs {
-		cp := *j
-		out = append(out, &cp)
+		out = append(out, m.snapshotLocked(j))
 	}
 	return out
 }
@@ -543,6 +550,9 @@ func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *Ex
 		return "", false
 	}
 	m.setSource(job, SourceNetwork)
+	// Only the network path competes with playback, so only it is throttled.
+	m.bw.start()
+	defer m.bw.stop()
 
 	sess, err := m.manager.Open(ctx, playback.OpenRequest{
 		AssetID:     req.AssetID,
@@ -567,7 +577,7 @@ func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *Ex
 		}
 	} else {
 		var buf bytes.Buffer
-		pw := &progressWriter{w: &buf, mu: &m.mu, job: job}
+		pw := m.bw.writer(ctx, &progressWriter{w: &buf, mu: &m.mu, job: job})
 		if err := m.manager.Stream(ctx, sess.ID, pipeline.KindAudio, pw); err != nil {
 			m.manager.Release(sess.ID)
 			m.fail(job, fmt.Errorf("stream: %w", err))
@@ -592,7 +602,7 @@ func (m *Manager) streamVideoAudio(ctx context.Context, req ExportRequest, job *
 		m.fail(job, fmt.Errorf("create video tmp: %w", err))
 		return err
 	}
-	vpw := &progressWriter{w: vf, mu: &m.mu, job: job}
+	vpw := m.bw.writer(ctx, &progressWriter{w: vf, mu: &m.mu, job: job})
 	if err := m.manager.Stream(ctx, sessID, pipeline.KindVideo, vpw); err != nil {
 		vf.Close()
 		os.Remove(videoTmp)
@@ -610,7 +620,7 @@ func (m *Manager) streamVideoAudio(ctx context.Context, req ExportRequest, job *
 		m.fail(job, fmt.Errorf("create audio tmp: %w", err))
 		return err
 	}
-	if err := m.manager.Stream(ctx, sessID, pipeline.KindAudio, af); err != nil {
+	if err := m.manager.Stream(ctx, sessID, pipeline.KindAudio, m.bw.writer(ctx, af)); err != nil {
 		af.Close()
 		os.Remove(videoTmp)
 		os.Remove(audioTmp)
@@ -976,6 +986,19 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 		m.resetProgress(job)
 	}
 	return err
+}
+
+// snapshotLocked copies j for API clients (caller holds m.mu). LimitBps is
+// the export limit in force at snapshot time — only a job streaming from the
+// network is throttled; nil means unlimited.
+func (m *Manager) snapshotLocked(j *ExportJob) *ExportJob {
+	cp := *j
+	cp.LimitBps = nil
+	if cp.Phase == PhaseDownloading && cp.Source == SourceNetwork && m.bw != nil {
+		cp.LimitBps = m.bw.currentLimit()
+	}
+	cp.Throttled = cp.LimitBps != nil
+	return &cp
 }
 
 func (m *Manager) resetProgress(job *ExportJob) {

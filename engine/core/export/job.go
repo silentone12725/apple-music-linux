@@ -169,7 +169,11 @@ type ExportJob struct {
 	// Source records where the media bytes came from: "cache" (committed
 	// playback disk cache), "playback" (tail of an in-progress playback
 	// download) or "network" (a fresh export stream). Empty until downloading.
-	Source    string    `json:"source,omitempty"`
+	Source string `json:"source,omitempty"`
+	// LimitBps is the export bandwidth limit (bytes/s) in force when this
+	// snapshot was taken; nil means unlimited. Throttled mirrors LimitBps != nil.
+	LimitBps  *int64    `json:"limitBps"`
+	Throttled bool      `json:"throttled"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 
