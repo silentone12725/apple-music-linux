@@ -9104,8 +9104,9 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 // Toggle: AML Settings → Theme → "Album art theming" (pref artTheme, default on).
 (function initArtTheme() {
     const BODY_VARS = ['--aml-nav-bg', '--aml-nav-border', '--aml-accent', '--aml-accent-active', '--keyColor',
-        '--aml-art-page-bg', '--aml-art-glow-a', '--aml-art-glow-b', '--aml-art-raised', '--aml-art-on-accent'];
-    const BG_LAYER_IDS = ['_amlBlurBg', '_amlAccentBg', '_amlCustomBg', '_amlArtBg'];
+        '--aml-art-page-bg', '--aml-art-glow-a', '--aml-art-glow-b', '--aml-art-raised', '--aml-art-on-accent',
+        '--aml-art-src'];
+    const BG_LAYER_IDS = ['_amlBlurBg', '_amlAccentBg', '_amlCustomBg', '_amlArtBlur', '_amlArtBg'];
     let enabled = true;
     let lastSrc = null;
     let token = 0;
@@ -9116,14 +9117,34 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         /* ── hide Apple's full-page artwork wash ── */
         [data-aml-page-art] { visibility: hidden !important; }
 
-        /* ── gradient background layer ── */
+        /* ── blurred artwork backdrop ── */
+        /* Sits below the gradient glow layer. ::before = blurred artwork fill;
+           ::after = palette-tinted dark overlay so content stays legible. */
+        #_amlArtBlur {
+            position: fixed; inset: 0; z-index: 0; pointer-events: none;
+            opacity: 0; transition: opacity .8s ease;
+            overflow: hidden;
+        }
+        #_amlArtBlur::before {
+            content: ''; position: absolute; inset: -8%;
+            background-image: var(--aml-art-src, none);
+            background-size: cover; background-position: center;
+            filter: blur(80px) saturate(1.6);
+        }
+        #_amlArtBlur::after {
+            content: ''; position: absolute; inset: 0;
+            background: var(--aml-nav-bg, rgba(0,0,0,0.65));
+        }
+        body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
+
+        /* ── gradient glow layer (sits above the blur) ── */
+        /* pageBg removed — the blur layer's tint overlay provides the dark base. */
         #_amlArtBg {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             opacity: 0; transition: opacity .6s ease;
             background:
                 radial-gradient(60% 55% at 12% 8%, var(--aml-art-glow-a, transparent), transparent 70%),
-                radial-gradient(55% 50% at 92% 88%, var(--aml-art-glow-b, transparent), transparent 70%),
-                var(--aml-art-page-bg, transparent);
+                radial-gradient(55% 50% at 92% 88%, var(--aml-art-glow-b, transparent), transparent 70%);
         }
         body[data-aml-art-theme] #_amlArtBg { opacity: 1; }
 
@@ -9226,17 +9247,23 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         }
     }
 
-    function ensureBgLayer() {
-        if (document.getElementById('_amlArtBg')) return;
-        const layer = document.createElement('div');
-        layer.id = '_amlArtBg';
-        // Sit above main.mjs's blur/accent/custom backdrops, below page content.
+    function ensureBgLayers() {
+        // DOM order: _amlArtBlur (blur backdrop) → _amlArtBg (gradient glows).
+        // Both sit above main.mjs's own background layers and below page content.
         let ref = document.body.firstElementChild;
         while (ref && BG_LAYER_IDS.includes(ref.id)) ref = ref.nextElementSibling;
-        document.body.insertBefore(layer, ref);
+
+        if (!document.getElementById('_amlArtBg')) {
+            const l = document.createElement('div'); l.id = '_amlArtBg';
+            document.body.insertBefore(l, ref);
+        }
+        if (!document.getElementById('_amlArtBlur')) {
+            const l = document.createElement('div'); l.id = '_amlArtBlur';
+            document.body.insertBefore(l, document.getElementById('_amlArtBg'));
+        }
     }
 
-    function apply(roles) {
+    function apply(roles, artSrc) {
         const b = document.body.style;
         b.setProperty('--aml-nav-bg', roles.navBg);
         b.setProperty('--aml-nav-border', roles.border);
@@ -9248,7 +9275,9 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         b.setProperty('--aml-art-glow-b', roles.glowB);
         b.setProperty('--aml-art-raised', roles.raised);
         b.setProperty('--aml-art-on-accent', roles.onAccent);
-        ensureBgLayer();
+        // --aml-art-src drives the blurred artwork backdrop (url(...) or none).
+        b.setProperty('--aml-art-src', artSrc ? `url("${artSrc.replace(/"/g, '%22')}")` : 'none');
+        ensureBgLayers();
         document.body.setAttribute('data-aml-art-theme', '');
     }
 
@@ -9323,7 +9352,7 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         const my = ++token;
         const roles = await computeRoles(src, img?.closest('.artwork-component'));
         if (my !== token || !enabled) return;
-        if (roles) apply(roles); else clear();
+        if (roles) apply(roles, src); else clear();
     }
 
     window.addEventListener('aml:art-theme', (e) => {
@@ -9722,15 +9751,16 @@ window.amlGetQueueInfo = function () {
         cb.type = 'checkbox'; cb.checked = on;
         cb.style.cssText = 'position:absolute;opacity:0;width:0;height:0;pointer-events:none;';
         const track = document.createElement('span');
-        track.style.cssText = `position:absolute;inset:0;border-radius:13px;transition:background 0.22s;background:${on ? '#fc3c44' : 'rgba(255,255,255,0.18)'};`;
+        track.style.cssText = `position:absolute;inset:0;border-radius:13px;transition:background 0.22s;background:${on ? 'var(--aml-accent,#fc3c44)' : 'rgba(255,255,255,0.18)'};`;
         const thumb = document.createElement('span');
         thumb.style.cssText = `position:absolute;top:3px;left:${on ? '21px' : '3px'};width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);transition:left 0.22s;`;
         label.append(cb, track, thumb);
         cb.addEventListener('change', () => {
-            track.style.background = cb.checked ? '#fc3c44' : 'rgba(255,255,255,0.18)';
+            track.style.background = cb.checked ? 'var(--aml-accent,#fc3c44)' : 'rgba(255,255,255,0.18)';
             thumb.style.left = cb.checked ? '21px' : '3px';
             onChange(cb.checked);
         });
+        label._cb = cb; // expose internal checkbox for external state reads/writes
         return label;
     }
 
@@ -10038,12 +10068,11 @@ window.amlGetQueueInfo = function () {
         rowWrap.style.cssText = 'display:flex;flex-direction:column;gap:5px;';
         const topRow = document.createElement('div');
         topRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-        const customLbl = document.createElement('label');
-        customLbl.style.cssText = FF + 'display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.4);font-size:11px;cursor:pointer;flex-shrink:0;';
-        const customCb = document.createElement('input');
-        customCb.type = 'checkbox'; customCb.checked = isCustom;
-        customCb.style.cssText = 'accent-color:#fc3c44;cursor:pointer;';
-        customLbl.append(customCb, document.createTextNode('Custom'));
+        const customLbl = document.createElement('span');
+        customLbl.style.cssText = FF + 'display:inline-flex;align-items:center;gap:6px;color:rgba(255,255,255,0.4);font-size:11px;flex-shrink:0;';
+        const _customToggleEl = _amlIOSToggle(isCustom, () => syncMode && syncMode());
+        const customCb = _customToggleEl._cb;
+        customLbl.append(_customToggleEl, document.createTextNode('Custom'));
         const resetBtn = document.createElement('button');
         resetBtn.textContent = 'Reset';
         resetBtn.title = 'Restore default';
@@ -10111,7 +10140,6 @@ window.amlGetQueueInfo = function () {
             updatePreview();
             syncMode();
         };
-        customCb.onchange = syncMode;
         syncMode();
         topRow.append(ddWrap, customLbl, resetBtn);
         rowWrap.append(topRow, customWrap, exampleEl);
@@ -10240,15 +10268,11 @@ window.amlGetQueueInfo = function () {
         zoomR.appendChild(zoomSl); zoomR.appendChild(zoomVal);
         zoomR.appendChild(makeResetBtn('zoom', () => { zoomSl.value = 100; zoomVal.textContent = '100%'; window.amlBridge.setZoom(1); }));
         dBody.appendChild(makeRow('Zoom', zoomR, null, false));
-        const toggle = document.createElement('input');
-        toggle.type = 'checkbox'; toggle.checked = prefs.hideUpsell !== false;
-        toggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
-        toggle.onchange = () => window.amlBridge.setTweak('hideUpsell', toggle.checked);
+        const toggle = _amlIOSToggle(prefs.hideUpsell !== false,
+            v => window.amlBridge.setTweak('hideUpsell', v));
         dBody.appendChild(makeRow('Hide upsell banners', toggle, null, false));
-        const radioToggle = document.createElement('input');
-        radioToggle.type = 'checkbox'; radioToggle.checked = !!prefs.hideRadio;
-        radioToggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
-        radioToggle.onchange = () => window.amlBridge.setTweak('hideRadio', radioToggle.checked);
+        const radioToggle = _amlIOSToggle(!!prefs.hideRadio,
+            v => window.amlBridge.setTweak('hideRadio', v));
         dBody.appendChild(makeRow('Hide Radio', radioToggle, 'Remove Radio from the sidebar', true));
         return wrap;
     }
@@ -10340,13 +10364,10 @@ window.amlGetQueueInfo = function () {
             modeSeg.appendChild(btn);
         });
         modeRow.appendChild(modeSeg);
-        const artToggle = document.createElement('input');
-        artToggle.type = 'checkbox'; artToggle.checked = prefs.artTheme !== false;
-        artToggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
-        artToggle.onchange = () => {
-            window.amlBridge.setTweak('artTheme', artToggle.checked);
-            window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: artToggle.checked }));
-        };
+        const artToggle = _amlIOSToggle(prefs.artTheme !== false, v => {
+            window.amlBridge.setTweak('artTheme', v);
+            window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: v }));
+        });
         thBody.appendChild(makeRow('Album art theming', artToggle, 'Colour album and playlist pages with a palette from their artwork', false));
         thBody.appendChild(modeRow);
         thBody.appendChild(thContentArea);
