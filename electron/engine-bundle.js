@@ -9402,7 +9402,7 @@
       const thInfo = await window.amlBridge.getThemeInfo().catch(() => ({ blurAvailable: false, themeMode: "accent", themePalette: null, themePresets: [], customCssPath: null, systemAccent: "#fc3c44", themeAppearance: "dark" }));
       const blurAvail = !!thInfo.blurAvailable;
       const st = {
-        curMode: thInfo.themeMode || (blurAvail ? "blur" : "accent"),
+        curMode: prefs.artThemeMode || thInfo.themeMode || (blurAvail ? "blur" : "accent"),
         curPalette: thInfo.themePalette,
         thPresets: thInfo.themePresets || [],
         curAppearance: thInfo.themeAppearance || "dark"
@@ -9484,15 +9484,22 @@
             b.style.color = a ? "rgba(255,255,255,0.88)" : "rgba(255,255,255,0.38)";
             b.style.fontWeight = a ? "500" : "";
           });
-          window.amlBridge.setThemeMode(value);
-          if (value === "art-blur" && prev !== "art-blur") {
-            artToggle._cb.checked = true;
-            window.amlBridge.setTweak("artTheme", true);
-            window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: true }));
-          } else if (prev === "art-blur" && value !== "art-blur") {
-            artToggle._cb.checked = false;
-            window.amlBridge.setTweak("artTheme", false);
-            window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: false }));
+          if (value === "art-blur") {
+            window.amlBridge.setThemeMode("accent");
+            window.amlBridge.setTweak("artThemeMode", "art-blur");
+            if (!artToggle._cb.checked) {
+              artToggle._cb.checked = true;
+              window.amlBridge.setTweak("artTheme", true);
+              window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: true }));
+            }
+          } else {
+            window.amlBridge.setThemeMode(value);
+            window.amlBridge.setTweak("artThemeMode", null);
+            if (prev === "art-blur") {
+              artToggle._cb.checked = false;
+              window.amlBridge.setTweak("artTheme", false);
+              window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: false }));
+            }
           }
           renderThemeContent(value);
         };
