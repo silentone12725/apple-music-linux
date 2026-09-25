@@ -495,6 +495,9 @@ func (m *Manager) execute(item *workItem) {
 // downloadToTemp opens a playback session, streams to a temp file, and returns
 // the temp file path. Returns ("", false) on any error (already called m.fail).
 func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *ExportJob, sf, lang, finalPath string, durationMs int) (string, bool) {
+	// Exports are background work: they must not count as playback, or the
+	// prefetcher would defer cache-warming while a download runs.
+	ctx = playback.WithClass(ctx, playback.Background)
 	if durationMs > 0 {
 		m.mu.Lock()
 		job.BytesTotal = int64(durationMs) * bitrateForCapabilities(req.Capabilities)
