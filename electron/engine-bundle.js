@@ -8148,11 +8148,17 @@
         body[data-aml-art-theme] .app-container,
         body[data-aml-art-theme] main,
         body[data-aml-art-theme] .content-container,
+        body[data-aml-art-theme] [data-main-content],
         body[data-aml-art-theme] .scrollable-page,
+        body[data-aml-art-theme] .album-container,
         body[data-aml-art-theme] .section,
         body[data-aml-art-theme] .section-content,
         body[data-aml-art-theme] .container-detail-header,
         body[data-aml-art-theme] .container-detail-header-wrapper { background: transparent !important; }
+        /* Remove section dividers that show as black lines */
+        body[data-aml-art-theme] .section,
+        body[data-aml-art-theme] .album-container,
+        body[data-aml-art-theme] .container-detail-header { border-color: var(--aml-nav-border) !important; }
 
         /* \u2500\u2500 navigation sidebar \u2500\u2500 */
         body[data-aml-art-theme] nav.navigation {
