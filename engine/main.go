@@ -99,6 +99,7 @@ func main() {
 			DecryptM3u8Port:    Config.DecryptM3u8Port,
 			GetM3u8Port:        Config.GetM3u8Port,
 			GetMVPort:          Config.GetMVPort,
+			ExportFloorKbps:    Config.ExportThrottleFloorKbps,
 		})
 		if err := srv.Start(); err != nil {
 			slog.Error("API server failed to start", "err", err)

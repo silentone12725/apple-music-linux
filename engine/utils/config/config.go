@@ -78,7 +78,10 @@ type ConfigSet struct {
 	ConvertDeleteBadALAC       bool          `yaml:"convert-delete-bad-alac"`
 	ALACFix                    bool          `yaml:"alac-fix"`
 	ExitOnError                bool          `yaml:"exit-on-error"`
-	StreamCacheSize            int           `yaml:"stream-cache-size"` // MB, 0 = unlimited
+	// ExportThrottleFloorKbps is the minimum export (download) rate in KiB/s
+	// while playback is streaming. 0 = engine default (128 KiB/s).
+	ExportThrottleFloorKbps int `yaml:"export-throttle-floor-kbps"`
+	StreamCacheSize         int `yaml:"stream-cache-size"` // MB, 0 = unlimited
 }
 
 type Counter struct {

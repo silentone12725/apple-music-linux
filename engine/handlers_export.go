@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"engine/core/export"
@@ -76,4 +77,29 @@ func (s *APIServer) handleExportRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
+}
+
+// handleExportPriority changes a queued job's priority.
+// Body: {"priority": N}. Higher runs sooner; equal priorities stay FIFO.
+// 200 + job snapshot; 404 unknown job; 409 job is running or finished.
+func (s *APIServer) handleExportPriority(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	var body struct {
+		Priority *int `json:"priority"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Priority == nil {
+		http.Error(w, `invalid request body: want {"priority": N}`, http.StatusBadRequest)
+		return
+	}
+	job, err := s.em.Prioritize(r.PathValue("id"), *body.Priority)
+	switch {
+	case errors.Is(err, export.ErrJobNotFound):
+		http.Error(w, "job not found", http.StatusNotFound)
+	case errors.Is(err, export.ErrNotQueued):
+		http.Error(w, "job is not queued (already running or finished)", http.StatusConflict)
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	default:
+		writeJSON(w, http.StatusOK, job)
+	}
 }
