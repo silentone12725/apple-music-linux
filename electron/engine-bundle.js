@@ -8251,6 +8251,17 @@
       const [h, s, l] = rgbToHsl(parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16));
       return paletteRoles([{ h, s, l, weight: 1 }]);
     }
+    function nowPlayingArtSrc() {
+      try {
+        const mk = window.MusicKit?.getInstance?.();
+        if (!mk?.nowPlayingItem) return null;
+        const art = mk.nowPlayingItem.attributes?.artwork;
+        if (!art?.url) return null;
+        return art.url.replace("{w}", "80").replace("{h}", "80");
+      } catch (_) {
+        return null;
+      }
+    }
     async function sync() {
       if (!document.body) return;
       markPageArt();
@@ -8263,7 +8274,13 @@
         return;
       }
       const img = document.querySelector(".container-detail-header .artwork__main img");
-      if (!img) {
+      let src = img ? img.currentSrc || "" : null;
+      if (img && (!src || /1x1\.gif$/.test(src))) {
+        img.addEventListener("load", sync, { once: true });
+        return;
+      }
+      if (!src) src = nowPlayingArtSrc();
+      if (!src) {
         if (lastSrc !== null) {
           clear();
           lastSrc = null;
@@ -8271,15 +8288,10 @@
         }
         return;
       }
-      const src = img.currentSrc || "";
-      if (!src || /1x1\.gif$/.test(src)) {
-        img.addEventListener("load", sync, { once: true });
-        return;
-      }
       if (src === lastSrc) return;
       lastSrc = src;
       const my = ++token;
-      const roles = await computeRoles(src, img.closest(".artwork-component"));
+      const roles = await computeRoles(src, img?.closest(".artwork-component"));
       if (my !== token || !enabled) return;
       if (roles) apply(roles);
       else clear();
@@ -8296,6 +8308,22 @@
     });
     watchDomSettled(sync);
     window.addEventListener("resize", markPageArt, { passive: true });
+    (function hookMusicKit() {
+      const mk = window.MusicKit?.getInstance?.();
+      if (mk) {
+        mk.addEventListener("nowPlayingItemDidChange", sync);
+        mk.addEventListener("playbackStateDidChange", sync);
+        return;
+      }
+      document.addEventListener("musickitloaded", hookMusicKit, { once: true });
+      const t = setInterval(() => {
+        if (window.MusicKit?.getInstance?.()) {
+          hookMusicKit();
+          clearInterval(t);
+        }
+      }, 500);
+      setTimeout(() => clearInterval(t), 2e4);
+    })();
   })();
   window.addEventListener("unhandledrejection", (e) => {
     const msg = e.reason?.message ?? "";
