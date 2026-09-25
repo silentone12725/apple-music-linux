@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,26 @@ const (
 // implementation that forwards them to SSE clients.
 type EventSink func(ev ExportEvent)
 
+// AudioCache is the slice of the playback disk cache that exports read from,
+// so an export of a track playback already fetched (or is fetching right now)
+// does not download it a second time. Implementations must only report a
+// tail when a playback download for that exact asset+qualifier is actually in
+// progress — never merely because a session exists.
+type AudioCache interface {
+	// Path returns the committed cache file for the track, if any.
+	Path(assetID, qualifier string) (string, bool)
+	// TailReader returns a reader over an in-progress playback download. Read
+	// blocks until more bytes arrive, returns io.EOF once the producer commits
+	// and a non-EOF error if it fails.
+	TailReader(assetID, qualifier string) (io.ReadCloser, bool)
+}
+
+// Options configures a Manager. The zero value is valid.
+type Options struct {
+	// Cache, when non-nil, lets audio exports reuse bytes playback fetched.
+	Cache AudioCache
+}
+
 // Manager enqueues and executes export jobs one at a time in FIFO order.
 // It is safe for concurrent use.
 type Manager struct {
@@ -39,6 +60,7 @@ type Manager struct {
 	queue    chan *workItem
 	sink     EventSink
 	manager  *playback.Manager
+	cache    AudioCache   // nil when the playback disk cache is disabled
 	seq      atomic.Int64 // monotonically increasing enqueue counter
 }
 
@@ -51,13 +73,14 @@ type workItem struct {
 // NewManager creates an ExportManager that acquires media through pm and
 // notifies ev on each state transition. Jobs are processed one at a time
 // in the order they were enqueued.
-func NewManager(pm *playback.Manager, ev EventSink, _ int) *Manager {
+func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
 	m := &Manager{
 		jobs:     make(map[string]*ExportJob),
 		requests: make(map[string]ExportRequest),
 		queue:    make(chan *workItem, 256),
 		sink:     ev,
 		manager:  pm,
+		cache:    opts.Cache,
 	}
 	go m.worker()
 	return m
@@ -504,6 +527,23 @@ func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *Ex
 		m.mu.Unlock()
 	}
 
+	if err := ensureDir(filepath.Dir(finalPath)); err != nil {
+		m.fail(job, fmt.Errorf("mkdir %s: %w", filepath.Dir(finalPath), err))
+		return "", false
+	}
+	tmpPath := filepath.Join(filepath.Dir(finalPath), "."+job.ID+".am-export.tmp")
+
+	// Prefer bytes playback already fetched: committed cache, then the tail of
+	// an in-progress playback download, and only then the network.
+	if !req.Capabilities.Video && m.reuseCachedAudio(ctx, req, job, tmpPath) {
+		return tmpPath, true
+	}
+	if ctx.Err() != nil {
+		m.fail(job, ctx.Err())
+		return "", false
+	}
+	m.setSource(job, SourceNetwork)
+
 	sess, err := m.manager.Open(ctx, playback.OpenRequest{
 		AssetID:     req.AssetID,
 		Storefront:  sf,
@@ -520,13 +560,6 @@ func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *Ex
 		m.fail(job, fmt.Errorf("open session: %w", err))
 		return "", false
 	}
-
-	if err := ensureDir(filepath.Dir(finalPath)); err != nil {
-		m.manager.Release(sess.ID)
-		m.fail(job, fmt.Errorf("mkdir %s: %w", filepath.Dir(finalPath), err))
-		return "", false
-	}
-	tmpPath := filepath.Join(filepath.Dir(finalPath), "."+job.ID+".am-export.tmp")
 
 	if req.Capabilities.Video {
 		if err := m.streamVideoAudio(ctx, req, job, sess.ID, tmpPath); err != nil {
@@ -856,6 +889,106 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 		pw.mu.Unlock()
 	}
 	return n, err
+}
+
+// ── playback byte reuse ───────────────────────────────────────────────────────
+
+// exportAudioQualifier returns the disk-cache qualifier playback would use for
+// this request. Playback keys its cache by sess.Codec, which the provider
+// derives from the request flags *and* the track's traits (a lossless request
+// for a track without lossless audio yields AAC). The request-only mapping
+// here can therefore miss a reusable entry, but never match wrong content: an
+// "alac" or "atmos" entry exists only for tracks that carry that trait, so a
+// miss just falls back to the network.
+func exportAudioQualifier(c ExportCapabilities) string {
+	switch {
+	case c.Atmos:
+		return string(pipeline.CodecAtmos)
+	case c.Lossless:
+		return string(pipeline.CodecALAC)
+	default:
+		return string(pipeline.CodecAAC)
+	}
+}
+
+// reuseCachedAudio tries to fill tmpPath from bytes playback already fetched.
+// Order: committed cache file, then the tail of an in-progress playback
+// download. It returns true only when tmpPath holds the complete track; on any
+// failure the partial temp file is removed and progress reset, so the caller's
+// fresh network stream never appends to a partial copy.
+func (m *Manager) reuseCachedAudio(ctx context.Context, req ExportRequest, job *ExportJob, tmpPath string) bool {
+	if m.cache == nil {
+		return false
+	}
+	q := exportAudioQualifier(req.Capabilities)
+
+	if path, ok := m.cache.Path(req.AssetID, q); ok {
+		f, err := os.Open(path)
+		if err == nil {
+			err = m.copyToTemp(ctx, job, tmpPath, f)
+		}
+		if err == nil {
+			m.setSource(job, SourceCache)
+			return true
+		}
+		log.Printf("[export] %s: cache copy failed, falling back: %v", job.ID, err)
+	}
+
+	if r, ok := m.cache.TailReader(req.AssetID, q); ok {
+		m.setSource(job, SourcePlayback)
+		err := m.copyToTemp(ctx, job, tmpPath, r)
+		if err == nil {
+			return true
+		}
+		log.Printf("[export] %s: playback tail failed, falling back to network: %v", job.ID, err)
+	}
+	return false
+}
+
+// copyToTemp copies r (which it closes) into a fresh tmpPath, counting
+// progress. A playback tail Read can block on its producer and is not
+// context-aware, so the copy runs in a goroutine: on cancellation the temp
+// file is closed and removed, which makes the goroutine's next write fail and
+// exit (it closes r on the way out). Any failure leaves no temp file behind.
+func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string, r io.ReadCloser) error {
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		r.Close()
+		return err
+	}
+	m.resetProgress(job)
+	done := make(chan error, 1)
+	go func() {
+		defer r.Close()
+		_, err := io.Copy(&progressWriter{w: f, mu: &m.mu, job: job}, r)
+		done <- err
+	}()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(tmpPath)
+		m.resetProgress(job)
+	}
+	return err
+}
+
+func (m *Manager) resetProgress(job *ExportJob) {
+	m.mu.Lock()
+	job.BytesDone = 0
+	job.Percent = 0
+	m.mu.Unlock()
+}
+
+func (m *Manager) setSource(job *ExportJob, src string) {
+	m.mu.Lock()
+	job.Source = src
+	m.mu.Unlock()
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
