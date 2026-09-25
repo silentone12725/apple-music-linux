@@ -10495,6 +10495,16 @@
       devBody.appendChild(makeRow("Enable debug mode", debugToggle, "Opens DevTools and full console on next launch", true));
       return wrap;
     }
+    let _settingsPreload = null;
+    function _warmSettingsCache() {
+      _settingsPreload = Promise.all([
+        fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
+        fetch(`${ENGINE}/api/v1/tools`).then((r) => r.json()).catch(() => ({})),
+        window.amlBridge.getPrefs().catch(() => ({}))
+      ]);
+      return _settingsPreload;
+    }
+    setTimeout(_warmSettingsCache, 600);
     let _settingsGen = 0;
     async function openSettings() {
       const myGen = ++_settingsGen;
@@ -10541,18 +10551,18 @@
           savedBadge.style.opacity = "0";
         }, 1400);
       };
-      dlg.addEventListener("close", _restoreProxy, { once: true });
+      dlg.addEventListener("close", () => {
+        _restoreProxy();
+        _warmSettingsCache();
+      }, { once: true });
       if (!dlg.open) {
         dlg.classList.remove("aml-closing");
         dlg.classList.add("aml-opening");
         dlg.showModal();
         dlg.addEventListener("animationend", () => dlg.classList.remove("aml-opening"), { once: true });
       }
-      const [drm, tools, prefs] = await Promise.all([
-        fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
-        fetch(`${ENGINE}/api/v1/tools`).then((r) => r.json()).catch(() => ({})),
-        window.amlBridge.getPrefs().catch(() => ({}))
-      ]);
+      const [drm, tools, prefs] = await (_settingsPreload ?? _warmSettingsCache());
+      _warmSettingsCache();
       if (myGen !== _settingsGen) {
         _restoreProxy();
         return;
