@@ -9281,6 +9281,18 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         return _paletteRoles([{ h, s, l, weight: 1 }]);
     }
 
+    // Returns the artwork URL for the currently playing track via MusicKit, or
+    // null when nothing is playing or the API is unavailable.
+    function nowPlayingArtSrc() {
+        try {
+            const mk = window.MusicKit?.getInstance?.();
+            if (!mk?.nowPlayingItem) return null;
+            const art = mk.nowPlayingItem.attributes?.artwork;
+            if (!art?.url) return null;
+            return art.url.replace('{w}', '80').replace('{h}', '80');
+        } catch (_) { return null; }
+    }
+
     async function sync() {
         if (!document.body) return;
         markPageArt();
@@ -9288,21 +9300,28 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
             if (lastSrc !== null || document.body.hasAttribute('data-aml-art-theme')) { clear(); lastSrc = null; token++; }
             return;
         }
+
+        // Priority 1: album/playlist detail page artwork (context-specific).
         const img = document.querySelector('.container-detail-header .artwork__main img');
-        if (!img) {
-            if (lastSrc !== null) { clear(); lastSrc = null; token++; }
-            return;
-        }
-        const src = img.currentSrc || '';
-        if (!src || /1x1\.gif$/.test(src)) {
+        let src = img ? (img.currentSrc || '') : null;
+        if (img && (!src || /1x1\.gif$/.test(src))) {
             // Lazy <picture> not resolved yet; no DOM mutation fires when it loads.
             img.addEventListener('load', sync, { once: true });
+            return;
+        }
+
+        // Priority 2: currently playing track artwork — themes every other page
+        // so the palette follows playback as you browse the library.
+        if (!src) src = nowPlayingArtSrc();
+
+        if (!src) {
+            if (lastSrc !== null) { clear(); lastSrc = null; token++; }
             return;
         }
         if (src === lastSrc) return;
         lastSrc = src;
         const my = ++token;
-        const roles = await computeRoles(src, img.closest('.artwork-component'));
+        const roles = await computeRoles(src, img?.closest('.artwork-component'));
         if (my !== token || !enabled) return;
         if (roles) apply(roles); else clear();
     }
@@ -9318,6 +9337,23 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
     }).catch(() => {});
     watchDomSettled(sync);
     window.addEventListener('resize', markPageArt, { passive: true });
+
+    // Re-sync whenever the playing track changes or playback starts/stops so the
+    // theme updates immediately on any page, not just detail pages.
+    (function hookMusicKit() {
+        const mk = window.MusicKit?.getInstance?.();
+        if (mk) {
+            mk.addEventListener('nowPlayingItemDidChange', sync);
+            mk.addEventListener('playbackStateDidChange', sync);
+            return;
+        }
+        // MusicKit loads asynchronously; retry until it's available.
+        document.addEventListener('musickitloaded', hookMusicKit, { once: true });
+        const t = setInterval(() => {
+            if (window.MusicKit?.getInstance?.()) { hookMusicKit(); clearInterval(t); }
+        }, 500);
+        setTimeout(() => clearInterval(t), 20000);
+    })();
 })();
 
 // MusicKit's PlayActivity analytics throws "play() method was called without a
