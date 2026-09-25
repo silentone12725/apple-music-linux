@@ -1697,8 +1697,18 @@ function createMprisPlayer() {
         player.on('stop',      () => sendCmd('pause'));
         player.on('shuffle',   (val) => sendCmd({ type: 'shuffle', value: Boolean(val) }));
 
+        // MPRIS2 § LoopStatus: client (e.g. KDE media widget) sets loop mode.
+        player.on('loopStatus', (status) => sendCmd({ type: 'setLoopStatus', value: status }));
+
+        // MPRIS2 § Volume: client changes volume (0.0–1.0 → 0–100 for renderer).
+        player.on('volume', (val) => sendCmd({ type: 'setVolume', value: Math.round(Number(val) * 100) }));
+
+        // MPRIS2 § Rate: we only support 1.0x; reject attempts to change it.
+        player.on('rate', () => { try { player.rate = 1.0; } catch (_) {} });
+
         // MPRIS → app: Seek (delta µs) and SetPosition (absolute µs).
         // dbus-next returns int64 as BigInt; convert to Number before dividing.
+        // The renderer emits Seeked back after the seek settles.
         player.on('seek', (offset) => {
             win?.webContents.send('mpris:cmd', { type: 'seek', deltaMs: Number(offset) / 1000 });
         });
@@ -1760,9 +1770,9 @@ function applyMprisData(data) {
         p.metadata = meta;
         p.canSeek = true;
     }
-    if (data.position != null) {
-        try { p.position = data.position; } catch (_) {}
-    }
+    // Do NOT set p.position here — that would emit PropertiesChanged for
+    // Position every 1s tick, causing applet jitter. getPosition() is already
+    // overridden to return _lastMprisPosition on every D-Bus GetPosition call.
     if (data.shuffle != null) {
         try { p.shuffle = data.shuffle; } catch (_) {}
     }
@@ -1772,6 +1782,8 @@ function applyMprisData(data) {
         const loopMap = ['None', 'Track', 'Playlist'];
         try { p.loopStatus = loopMap[data.repeat] ?? 'None'; } catch (_) {}
     }
+    // Propagate volume from renderer (0–100) to MPRIS (0.0–1.0).
+    if (data.volume != null) try { p.volume = Math.max(0, Math.min(1, data.volume / 100)); } catch (_) {}
 }
 
 function replayMprisState() {
@@ -2585,10 +2597,16 @@ app.whenReady().then(() => {
     // Global media key shortcuts — catches Bluetooth AVRCP play/pause/next/prev
     // which arrive as kernel input events (KEY_PLAYPAUSE etc.) regardless of focus.
     const sendMediaCmd = (cmd) => win?.webContents.send('mpris:cmd', cmd);
-    globalShortcut.register('MediaPlayPause',    () => sendMediaCmd('playpause'));
-    globalShortcut.register('MediaNextTrack',     () => sendMediaCmd('next'));
-    globalShortcut.register('MediaPreviousTrack', () => sendMediaCmd('previous'));
-    globalShortcut.register('MediaStop',          () => sendMediaCmd('pause'));
+    const _mkShortcuts = [
+        ['MediaPlayPause',    () => sendMediaCmd('playpause')],
+        ['MediaNextTrack',    () => sendMediaCmd('next')],
+        ['MediaPreviousTrack',() => sendMediaCmd('previous')],
+        ['MediaStop',         () => sendMediaCmd('pause')],
+    ];
+    for (const [key, fn] of _mkShortcuts) {
+        if (!globalShortcut.register(key, fn))
+            console.warn('[AML] media key shortcut already taken by another app:', key);
+    }
 
     // Always attempt to start the engine API server.  engine-playback.js checks
     // reachability at startup and silently falls back to the Apple CDN if the
@@ -2634,6 +2652,7 @@ app.on('before-quit', (e) => {
     // We then wait 300ms for the IPC round-trip + store update to land before
     // sync-writing to disk and really quitting.
     try { win?.webContents?.send('app:flush-and-quit'); } catch (_) {}
+    globalShortcut.unregisterAll();
     setTimeout(() => {
         _storeFlushSync();
         stopEngine();
