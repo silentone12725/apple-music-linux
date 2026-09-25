@@ -74,21 +74,121 @@ type Manager struct {
 	inflightMu sync.Mutex
 	inflight   map[string]*openFlight // key: assetID+storefront+capabilities
 
-	// activeStreams counts pipeline.Run calls currently pulling bytes from Apple
-	// for real playback. Background cache-warming consults it so it never
-	// competes for bandwidth with the stream the user is actually listening to
-	// — the same rule Apple's Android client applies in
-	// PlayerLoadControl.shouldPrepareNextPeriodForCaching, which pre-caches the
-	// next queue item only when the current period is NOT reading from network.
+	// activeStreams counts every in-flight pipeline.Run, foreground and
+	// background alike (for metrics).
 	activeStreams atomic.Int64
+
+	// fgActive counts Foreground streams — real playback. Background
+	// cache-warming consults it so it never competes for bandwidth with the
+	// stream the user is actually listening to — the same rule Apple's Android
+	// client applies in PlayerLoadControl.shouldPrepareNextPeriodForCaching,
+	// which pre-caches the next queue item only when the current period is NOT
+	// reading from network. Background streams (exports) are excluded so they
+	// never make prefetch believe playback is active.
+	fgActive atomic.Int64
+	// fgBytes is the cumulative number of bytes written by Foreground streams.
+	fgBytes atomic.Int64
+	// fgNeedBps is the sum of the required rates of active Foreground streams.
+	fgNeedBps atomic.Int64
 }
 
-// IsStreaming reports whether any playback stream is currently pulling from the
-// network. Used to defer background prefetch while real playback is in flight.
-func (m *Manager) IsStreaming() bool { return m.activeStreams.Load() > 0 }
+// Class tells the Manager who a stream is for. It is carried on the context
+// passed to Stream/StreamFrom; the zero value is Foreground.
+type Class int
 
-// ActiveStreams returns the number of in-flight playback streams (for metrics).
+const (
+	// Foreground is real playback: it owns the bandwidth budget.
+	Foreground Class = iota
+	// Background is opportunistic work (exports) that must yield to playback.
+	Background
+)
+
+type classKey struct{}
+
+// WithClass returns a child context that tags streams run with it as class c.
+func WithClass(ctx context.Context, c Class) context.Context {
+	return context.WithValue(ctx, classKey{}, c)
+}
+
+func classFrom(ctx context.Context) Class {
+	c, _ := ctx.Value(classKey{}).(Class)
+	return c
+}
+
+// Fallback required rates when a session does not report its bit-rate.
+const (
+	defaultAudioNeedBps = 1_500_000 / 8 // ~1.5 Mb/s in bytes/s
+	defaultVideoNeedBps = 8_000_000 / 8 // ~8 Mb/s in bytes/s
+)
+
+// IsStreaming reports whether any Foreground (playback) stream is currently
+// pulling from the network. Used to defer background prefetch while real
+// playback is in flight. Background streams never make this true.
+func (m *Manager) IsStreaming() bool { return m.fgActive.Load() > 0 }
+
+// ActiveStreams returns the number of in-flight streams of every class (for metrics).
 func (m *Manager) ActiveStreams() int { return int(m.activeStreams.Load()) }
+
+// ForegroundStats returns a snapshot of Foreground stream instrumentation:
+//
+//   - active:  number of Foreground streams currently running
+//   - bytes:   cumulative bytes written by Foreground streams (monotonic)
+//   - needBps: sum of the required rates (bytes/s) of the active streams
+//
+// It deliberately returns raw counters, never a rate: measuring throughput is
+// the caller's job (see export's bandwidth controller).
+func (m *Manager) ForegroundStats() (active int, bytes int64, needBps int64) {
+	return int(m.fgActive.Load()), m.fgBytes.Load(), m.fgNeedBps.Load()
+}
+
+// beginStream registers one stream for its whole lifetime and returns the
+// writer to run the pipeline into plus a func that must be deferred to
+// unregister it (including on error paths).
+func (m *Manager) beginStream(ctx context.Context, sess *Session, kind pipeline.StreamKind, dst io.Writer) (io.Writer, func()) {
+	m.activeStreams.Add(1)
+	if classFrom(ctx) == Background {
+		return dst, func() { m.activeStreams.Add(-1) }
+	}
+	need := int64(defaultAudioNeedBps)
+	if kind == pipeline.KindVideo {
+		need = defaultVideoNeedBps
+	} else if sess != nil && sess.BitRate > 0 {
+		need = int64(sess.BitRate) / 8
+	}
+	m.fgActive.Add(1)
+	m.fgNeedBps.Add(need)
+	end := func() {
+		m.fgNeedBps.Add(-need)
+		m.fgActive.Add(-1)
+		m.activeStreams.Add(-1)
+	}
+	cw := countingWriter{w: dst, n: &m.fgBytes}
+	if hw, ok := dst.(pipeline.HeaderWriter); ok {
+		return countingHeaderWriter{countingWriter: cw, hw: hw}, end
+	}
+	return cw, end
+}
+
+// countingWriter adds every byte written to n.
+type countingWriter struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (c countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// countingHeaderWriter preserves pipeline.HeaderWriter so sources can still
+// propagate Content-Length through the counting wrapper.
+type countingHeaderWriter struct {
+	countingWriter
+	hw pipeline.HeaderWriter
+}
+
+func (c countingHeaderWriter) SetHeader(k, v string) { c.hw.SetHeader(k, v) }
 
 // New returns a Manager backed by the Apple Music provider.
 // Swap apple.NewProvider() for any media.Provider to change the source.
@@ -239,7 +339,7 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 // Stream pipes the decrypted media for sessionID/kind to dst.
 // dst can be http.ResponseWriter, *os.File, io.PipeWriter, or anything.
 func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.StreamKind, dst io.Writer) error {
-	_, pctx, ok := m.lookup(sessionID)
+	sess, pctx, ok := m.lookup(sessionID)
 	if !ok {
 		return fmt.Errorf("session %s not found or expired", sessionID)
 	}
@@ -247,8 +347,8 @@ func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.St
 	if !ok {
 		return fmt.Errorf("session %s has no %s stream", sessionID, kind)
 	}
-	m.activeStreams.Add(1)
-	defer m.activeStreams.Add(-1)
+	dst, end := m.beginStream(ctx, sess, kind, dst)
+	defer end()
 	return pipeline.Run(ctx, stream, dst)
 }
 
@@ -259,7 +359,7 @@ func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.St
 // The returned actualStart is the actual presentation start (segment-granular,
 // may be slightly earlier than startSec).
 func (m *Manager) StreamFrom(ctx context.Context, sessionID string, kind pipeline.StreamKind, startSec float64, dst io.Writer) (float64, error) {
-	_, pctx, ok := m.lookup(sessionID)
+	sess, pctx, ok := m.lookup(sessionID)
 	if !ok {
 		return 0, fmt.Errorf("session %s not found or expired", sessionID)
 	}
@@ -278,8 +378,8 @@ func (m *Manager) StreamFrom(ctx context.Context, sessionID string, kind pipelin
 		Kind:   stream.Kind,
 		Codec:  stream.Codec,
 	}
-	m.activeStreams.Add(1)
-	defer m.activeStreams.Add(-1)
+	dst, end := m.beginStream(ctx, sess, kind, dst)
+	defer end()
 	return actualStart, pipeline.Run(ctx, seekStream, dst)
 }
 
