@@ -9108,7 +9108,6 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         '--aml-art-src'];
     const BG_LAYER_IDS = ['_amlBlurBg', '_amlAccentBg', '_amlCustomBg', '_amlArtBlur', '_amlArtBg'];
     let enabled = true;
-    let blurEnabled = true;
     let lastSrc = null;
     let token = 0;
 
@@ -9136,7 +9135,7 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
             content: ''; position: absolute; inset: 0;
             background: var(--aml-nav-bg, rgba(0,0,0,0.65));
         }
-        body[data-aml-art-blur] #_amlArtBlur { opacity: 1; }
+        body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
 
         /* ── gradient glow layer (sits above the blur) ── */
         /* pageBg removed — the blur layer's tint overlay provides the dark base. */
@@ -9280,15 +9279,12 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         b.setProperty('--aml-art-src', artSrc ? `url("${artSrc.replace(/"/g, '%22')}")` : 'none');
         ensureBgLayers();
         document.body.setAttribute('data-aml-art-theme', '');
-        if (blurEnabled) document.body.setAttribute('data-aml-art-blur', '');
-        else document.body.removeAttribute('data-aml-art-blur');
     }
 
     function clear() {
         if (!document.body) return;
         for (const v of BODY_VARS) document.body.style.removeProperty(v);
         document.body.removeAttribute('data-aml-art-theme');
-        document.body.removeAttribute('data-aml-art-blur');
     }
 
     // Palette from the artwork pixels; falls back to Apple's --artwork-bg-color
@@ -9364,16 +9360,8 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         lastSrc = null;
         sync();
     });
-    window.addEventListener('aml:art-blur', (e) => {
-        blurEnabled = !!e.detail;
-        if (document.body.hasAttribute('data-aml-art-theme')) {
-            if (blurEnabled) document.body.setAttribute('data-aml-art-blur', '');
-            else document.body.removeAttribute('data-aml-art-blur');
-        }
-    });
     window.amlBridge?.getPrefs?.().then(p => {
         enabled = p?.artTheme !== false;
-        blurEnabled = p?.artThemeBlur !== false;
         sync();
     }).catch(() => {});
     watchDomSettled(sync);
@@ -10335,6 +10323,11 @@ window.amlGetQueueInfo = function () {
                     ? 'Wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above.'
                     : 'Blur is only available on Hyprland and KDE. Your current desktop does not support it.';
                 thContentArea.appendChild(info);
+            } else if (mode === 'art-blur') {
+                const info = document.createElement('div');
+                info.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.4);padding:12px 0;';
+                info.textContent = 'The currently playing track\'s artwork is blurred full-screen and tinted with its palette colours. Enable Album art theming above to activate.';
+                thContentArea.appendChild(info);
             } else if (mode === 'accent') {
                 if (!st.curPalette) st.curPalette = _amlGenPalette(thInfo.systemAccent || '#fc3c44', st.curAppearance);
                 _amlRenderPaletteEditor(thContentArea, thInfo, st);
@@ -10349,6 +10342,7 @@ window.amlGetQueueInfo = function () {
         const thModes = [
             { label: 'Blur', value: 'blur', disabled: !blurAvail, tip: blurAvail ? '' : 'Only on Hyprland / KDE' },
             { label: 'Accent', value: 'accent', disabled: false, tip: '' },
+            { label: 'Accented Blur', value: 'art-blur', disabled: false, tip: '' },
             { label: 'Custom CSS', value: 'custom', disabled: false, tip: '' },
         ];
         thModes.forEach(({ label, value, disabled, tip }) => {
@@ -10363,6 +10357,7 @@ window.amlGetQueueInfo = function () {
                 (disabled ? 'opacity:0.3;' : '');
             btn.onclick = () => {
                 if (disabled) return;
+                const prev = st.curMode;
                 st.curMode = value;
                 modeSeg.querySelectorAll('button').forEach((b, i) => {
                     const a = thModes[i].value === st.curMode;
@@ -10371,6 +10366,16 @@ window.amlGetQueueInfo = function () {
                     b.style.fontWeight = a ? '500' : '';
                 });
                 window.amlBridge.setThemeMode(value);
+                // Accented Blur activates art theming; leaving it restores prior state.
+                if (value === 'art-blur' && prev !== 'art-blur') {
+                    artToggle._cb.checked = true;
+                    window.amlBridge.setTweak('artTheme', true);
+                    window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: true }));
+                } else if (prev === 'art-blur' && value !== 'art-blur') {
+                    artToggle._cb.checked = false;
+                    window.amlBridge.setTweak('artTheme', false);
+                    window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: false }));
+                }
                 renderThemeContent(value);
             };
             modeSeg.appendChild(btn);
@@ -10381,11 +10386,6 @@ window.amlGetQueueInfo = function () {
             window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: v }));
         });
         thBody.appendChild(makeRow('Album art theming', artToggle, 'Colour album and playlist pages with a palette from their artwork', false));
-        const blurToggle = _amlIOSToggle(prefs.artThemeBlur !== false, v => {
-            window.amlBridge.setTweak('artThemeBlur', v);
-            window.dispatchEvent(new CustomEvent('aml:art-blur', { detail: v }));
-        });
-        thBody.appendChild(makeRow('Blurred artwork backdrop', blurToggle, 'Show a full-screen blurred version of the artwork as a background', false));
         thBody.appendChild(modeRow);
         thBody.appendChild(thContentArea);
         renderThemeContent(st.curMode);
