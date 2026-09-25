@@ -9372,11 +9372,13 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 
         // Priority 2: currently playing track artwork — themes every other page
         // so the palette follows playback as you browse the library.
-        // Small size (80px) for palette extraction; large (600px) for the backdrop.
+        // 80px for palette extraction; 600px for the CSS-blur backdrop only in
+        // accent mode — in art-blur mode #_amlArtBlur is hidden so the large
+        // fetch is unnecessary.
         let backdropSrc = null;
         if (!src) {
             src = nowPlayingArtSrc('80');
-            backdropSrc = nowPlayingArtSrc('600');
+            if (!artBlurMode) backdropSrc = nowPlayingArtSrc('600');
         }
 
         if (!src) {
@@ -9404,12 +9406,14 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         sync();
     });
     window.amlBridge?.getPrefs?.().then(p => {
+        if (!document.body) return; // body may not be available during early init
         enabled = p?.artTheme !== false;
         artBlurMode = p?.artThemeMode === 'art-blur';
-        if (artBlurMode) {
-            document.body.setAttribute('data-aml-art-blur', '');
-            document.body.setAttribute('data-aml-mode', 'art-blur');
-        }
+        // Stamp data-aml-mode from prefs so CSS mode-isolation (ghost blur layer
+        // suppression) is correct from first paint, before settings are ever opened.
+        const startupMode = p?.artThemeMode || p?.themeMode || 'accent';
+        document.body.setAttribute('data-aml-mode', startupMode);
+        if (artBlurMode) document.body.setAttribute('data-aml-art-blur', '');
         sync();
     }).catch(() => {});
     watchDomSettled(sync);
@@ -10334,6 +10338,9 @@ window.amlGetQueueInfo = function () {
             curPalette: thInfo.themePalette,
             thPresets: thInfo.themePresets || [],
             curAppearance: thInfo.themeAppearance || 'dark',
+            // Remembers whether artTheme was on before the user entered art-blur
+            // so we only force-off artTheme on exit if WE forced it on at entry.
+            artThemeWasOn: prefs.artTheme !== false,
         };
         // Stamp the active mode onto body so CSS mode-isolation rules apply
         // immediately — ensures blur ghost layers are hidden if we're in accent/custom.
@@ -10426,16 +10433,22 @@ window.amlGetQueueInfo = function () {
                     document.body.setAttribute('data-aml-art-blur', '');
                     window.dispatchEvent(new CustomEvent('aml:art-blur-mode', { detail: true }));
                     if (!artToggle._cb.checked) {
+                        st.artThemeWasOn = false; // we forced it on; remember to restore off
                         artToggle._cb.checked = true;
                         window.amlBridge.setTweak('artTheme', true);
                         window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: true }));
+                    } else {
+                        st.artThemeWasOn = true; // already on; leaving should keep it on
                     }
                 } else {
                     window.amlBridge.setThemeMode(value);
                     window.amlBridge.setTweak('artThemeMode', null);
                     document.body.removeAttribute('data-aml-art-blur');
                     window.dispatchEvent(new CustomEvent('aml:art-blur-mode', { detail: false }));
-                    if (prev === 'art-blur') {
+                    // Only turn artTheme off on exit if we forced it on at entry.
+                    // If the user had art theming on independently before entering art-blur,
+                    // honour that choice and leave it on.
+                    if (prev === 'art-blur' && !st.artThemeWasOn) {
                         artToggle._cb.checked = false;
                         window.amlBridge.setTweak('artTheme', false);
                         window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: false }));
