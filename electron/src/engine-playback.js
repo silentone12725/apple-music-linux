@@ -9803,20 +9803,13 @@ window.amlGetQueueInfo = function () {
 
     function _amlIOSToggle(on, onChange) {
         const label = document.createElement('label');
-        label.style.cssText = 'position:relative;display:inline-flex;align-items:center;cursor:pointer;flex-shrink:0;width:44px;height:26px;';
+        label.style.cssText = 'display:inline-flex;align-items:center;cursor:pointer;flex-shrink:0;';
         const cb = document.createElement('input');
         cb.type = 'checkbox'; cb.checked = on;
-        cb.style.cssText = 'position:absolute;opacity:0;width:0;height:0;pointer-events:none;';
-        const track = document.createElement('span');
-        track.style.cssText = `position:absolute;inset:0;border-radius:13px;transition:background 0.22s;background:${on ? 'var(--aml-accent,#fc3c44)' : 'rgba(255,255,255,0.18)'};`;
-        const thumb = document.createElement('span');
-        thumb.style.cssText = `position:absolute;top:3px;left:${on ? '21px' : '3px'};width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);transition:left 0.22s;`;
-        label.append(cb, track, thumb);
-        cb.addEventListener('change', () => {
-            track.style.background = cb.checked ? 'var(--aml-accent,#fc3c44)' : 'rgba(255,255,255,0.18)';
-            thumb.style.left = cb.checked ? '21px' : '3px';
-            onChange(cb.checked);
-        });
+        // Fixed accent-color so checkboxes never shift with album-art palette.
+        cb.style.cssText = 'width:15px;height:15px;cursor:pointer;accent-color:#fc3c44;flex-shrink:0;margin:0;';
+        label.append(cb);
+        cb.addEventListener('change', () => onChange(cb.checked));
         label._cb = cb; // expose internal checkbox for external state reads/writes
         return label;
     }
