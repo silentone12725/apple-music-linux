@@ -39,6 +39,10 @@ backend:
 # set to 'true' to exit on error instead of requiring manual intervention. (for using this program in scripts)
 exit-on-error: false
 
+# Minimum download (export) rate in KiB/s while music is playing. Downloads
+# slow down to protect playback but never go below this. 0 = default (128).
+export-throttle-floor-kbps: 0
+
 #set 'all' to retrieve all m3u8, and set 'hires' to only detect hires m3u8.
 get-m3u8-mode: hires # all hires
 aac-type: aac-lc # aac-lc aac aac-binaural aac-downmix

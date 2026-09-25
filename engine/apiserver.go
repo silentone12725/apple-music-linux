@@ -460,6 +460,9 @@ type ServerConfig struct {
 	DecryptM3u8Port    string
 	GetM3u8Port        string
 	GetMVPort          string
+	// ExportFloorKbps is the minimum export rate (KiB/s) while playback
+	// streams; 0 selects the export package default.
+	ExportFloorKbps int
 }
 
 // NewAPIServer wires all routes.
@@ -618,7 +621,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
-	}, export.Options{Cache: exportCache})
+	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10})
 
 	mux := http.NewServeMux()
 
@@ -675,6 +678,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("GET /api/v1/export/{id}", cors(s.handleExportGet))
 	mux.HandleFunc("DELETE /api/v1/export/{id}", cors(s.handleExportCancel))
 	mux.HandleFunc("POST /api/v1/export/{id}/retry", cors(s.handleExportRetry))
+	mux.HandleFunc("POST /api/v1/export/{id}/priority", cors(s.handleExportPriority))
 
 	// DRM subsystem — wrapper lifecycle, authentication, session management.
 	// The frontend expresses intent (login, submit 2FA); the engine orchestrates.
