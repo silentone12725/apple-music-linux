@@ -9160,7 +9160,6 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
             border: 1px solid var(--aml-nav-border) !important;
             backdrop-filter: blur(20px) !important;
             -webkit-backdrop-filter: blur(20px) !important;
-            overflow: hidden !important;
         }
         body[data-aml-art-theme] .player-lcd,
         body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
