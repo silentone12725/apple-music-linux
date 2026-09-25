@@ -8085,9 +8085,10 @@
       "--aml-art-glow-a",
       "--aml-art-glow-b",
       "--aml-art-raised",
-      "--aml-art-on-accent"
+      "--aml-art-on-accent",
+      "--aml-art-src"
     ];
-    const BG_LAYER_IDS = ["_amlBlurBg", "_amlAccentBg", "_amlCustomBg", "_amlArtBg"];
+    const BG_LAYER_IDS = ["_amlBlurBg", "_amlAccentBg", "_amlCustomBg", "_amlArtBlur", "_amlArtBg"];
     let enabled = true;
     let lastSrc = null;
     let token = 0;
@@ -8097,14 +8098,34 @@
         /* \u2500\u2500 hide Apple's full-page artwork wash \u2500\u2500 */
         [data-aml-page-art] { visibility: hidden !important; }
 
-        /* \u2500\u2500 gradient background layer \u2500\u2500 */
+        /* \u2500\u2500 blurred artwork backdrop \u2500\u2500 */
+        /* Sits below the gradient glow layer. ::before = blurred artwork fill;
+           ::after = palette-tinted dark overlay so content stays legible. */
+        #_amlArtBlur {
+            position: fixed; inset: 0; z-index: 0; pointer-events: none;
+            opacity: 0; transition: opacity .8s ease;
+            overflow: hidden;
+        }
+        #_amlArtBlur::before {
+            content: ''; position: absolute; inset: -8%;
+            background-image: var(--aml-art-src, none);
+            background-size: cover; background-position: center;
+            filter: blur(80px) saturate(1.6);
+        }
+        #_amlArtBlur::after {
+            content: ''; position: absolute; inset: 0;
+            background: var(--aml-nav-bg, rgba(0,0,0,0.65));
+        }
+        body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
+
+        /* \u2500\u2500 gradient glow layer (sits above the blur) \u2500\u2500 */
+        /* pageBg removed \u2014 the blur layer's tint overlay provides the dark base. */
         #_amlArtBg {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             opacity: 0; transition: opacity .6s ease;
             background:
                 radial-gradient(60% 55% at 12% 8%, var(--aml-art-glow-a, transparent), transparent 70%),
-                radial-gradient(55% 50% at 92% 88%, var(--aml-art-glow-b, transparent), transparent 70%),
-                var(--aml-art-page-bg, transparent);
+                radial-gradient(55% 50% at 92% 88%, var(--aml-art-glow-b, transparent), transparent 70%);
         }
         body[data-aml-art-theme] #_amlArtBg { opacity: 1; }
 
@@ -8203,15 +8224,21 @@
         if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el.setAttribute("data-aml-page-art", "");
       }
     }
-    function ensureBgLayer() {
-      if (document.getElementById("_amlArtBg")) return;
-      const layer = document.createElement("div");
-      layer.id = "_amlArtBg";
+    function ensureBgLayers() {
       let ref = document.body.firstElementChild;
       while (ref && BG_LAYER_IDS.includes(ref.id)) ref = ref.nextElementSibling;
-      document.body.insertBefore(layer, ref);
+      if (!document.getElementById("_amlArtBg")) {
+        const l = document.createElement("div");
+        l.id = "_amlArtBg";
+        document.body.insertBefore(l, ref);
+      }
+      if (!document.getElementById("_amlArtBlur")) {
+        const l = document.createElement("div");
+        l.id = "_amlArtBlur";
+        document.body.insertBefore(l, document.getElementById("_amlArtBg"));
+      }
     }
-    function apply(roles) {
+    function apply(roles, artSrc) {
       const b = document.body.style;
       b.setProperty("--aml-nav-bg", roles.navBg);
       b.setProperty("--aml-nav-border", roles.border);
@@ -8223,7 +8250,8 @@
       b.setProperty("--aml-art-glow-b", roles.glowB);
       b.setProperty("--aml-art-raised", roles.raised);
       b.setProperty("--aml-art-on-accent", roles.onAccent);
-      ensureBgLayer();
+      b.setProperty("--aml-art-src", artSrc ? `url("${artSrc.replace(/"/g, "%22")}")` : "none");
+      ensureBgLayers();
       document.body.setAttribute("data-aml-art-theme", "");
     }
     function clear() {
@@ -8293,7 +8321,7 @@
       const my = ++token;
       const roles = await computeRoles(src, img?.closest(".artwork-component"));
       if (my !== token || !enabled) return;
-      if (roles) apply(roles);
+      if (roles) apply(roles, src);
       else clear();
     }
     window.addEventListener("aml:art-theme", (e) => {
@@ -8719,15 +8747,16 @@
       cb.checked = on;
       cb.style.cssText = "position:absolute;opacity:0;width:0;height:0;pointer-events:none;";
       const track = document.createElement("span");
-      track.style.cssText = `position:absolute;inset:0;border-radius:13px;transition:background 0.22s;background:${on ? "#fc3c44" : "rgba(255,255,255,0.18)"};`;
+      track.style.cssText = `position:absolute;inset:0;border-radius:13px;transition:background 0.22s;background:${on ? "var(--aml-accent,#fc3c44)" : "rgba(255,255,255,0.18)"};`;
       const thumb = document.createElement("span");
       thumb.style.cssText = `position:absolute;top:3px;left:${on ? "21px" : "3px"};width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);transition:left 0.22s;`;
       label.append(cb, track, thumb);
       cb.addEventListener("change", () => {
-        track.style.background = cb.checked ? "#fc3c44" : "rgba(255,255,255,0.18)";
+        track.style.background = cb.checked ? "var(--aml-accent,#fc3c44)" : "rgba(255,255,255,0.18)";
         thumb.style.left = cb.checked ? "21px" : "3px";
         onChange(cb.checked);
       });
+      label._cb = cb;
       return label;
     }
     function _amlMakeQualityDropdown(prefKey, prefs, qualityOpts, onChange) {
@@ -9093,13 +9122,11 @@
       rowWrap.style.cssText = "display:flex;flex-direction:column;gap:5px;";
       const topRow = document.createElement("div");
       topRow.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
-      const customLbl = document.createElement("label");
-      customLbl.style.cssText = FF + "display:flex;align-items:center;gap:5px;color:rgba(255,255,255,0.4);font-size:11px;cursor:pointer;flex-shrink:0;";
-      const customCb = document.createElement("input");
-      customCb.type = "checkbox";
-      customCb.checked = isCustom;
-      customCb.style.cssText = "accent-color:#fc3c44;cursor:pointer;";
-      customLbl.append(customCb, document.createTextNode("Custom"));
+      const customLbl = document.createElement("span");
+      customLbl.style.cssText = FF + "display:inline-flex;align-items:center;gap:6px;color:rgba(255,255,255,0.4);font-size:11px;flex-shrink:0;";
+      const _customToggleEl = _amlIOSToggle(isCustom, () => syncMode && syncMode());
+      const customCb = _customToggleEl._cb;
+      customLbl.append(_customToggleEl, document.createTextNode("Custom"));
       const resetBtn = document.createElement("button");
       resetBtn.textContent = "Reset";
       resetBtn.title = "Restore default";
@@ -9175,7 +9202,6 @@
         updatePreview();
         syncMode();
       };
-      customCb.onchange = syncMode;
       syncMode();
       topRow.append(ddWrap, customLbl, resetBtn);
       rowWrap.append(topRow, customWrap, exampleEl);
@@ -9359,17 +9385,15 @@
         window.amlBridge.setZoom(1);
       }));
       dBody.appendChild(makeRow("Zoom", zoomR, null, false));
-      const toggle = document.createElement("input");
-      toggle.type = "checkbox";
-      toggle.checked = prefs.hideUpsell !== false;
-      toggle.style.cssText = "width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;";
-      toggle.onchange = () => window.amlBridge.setTweak("hideUpsell", toggle.checked);
+      const toggle = _amlIOSToggle(
+        prefs.hideUpsell !== false,
+        (v) => window.amlBridge.setTweak("hideUpsell", v)
+      );
       dBody.appendChild(makeRow("Hide upsell banners", toggle, null, false));
-      const radioToggle = document.createElement("input");
-      radioToggle.type = "checkbox";
-      radioToggle.checked = !!prefs.hideRadio;
-      radioToggle.style.cssText = "width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;";
-      radioToggle.onchange = () => window.amlBridge.setTweak("hideRadio", radioToggle.checked);
+      const radioToggle = _amlIOSToggle(
+        !!prefs.hideRadio,
+        (v) => window.amlBridge.setTweak("hideRadio", v)
+      );
       dBody.appendChild(makeRow("Hide Radio", radioToggle, "Remove Radio from the sidebar", true));
       return wrap;
     }
@@ -9459,14 +9483,10 @@
         modeSeg.appendChild(btn);
       });
       modeRow.appendChild(modeSeg);
-      const artToggle = document.createElement("input");
-      artToggle.type = "checkbox";
-      artToggle.checked = prefs.artTheme !== false;
-      artToggle.style.cssText = "width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;";
-      artToggle.onchange = () => {
-        window.amlBridge.setTweak("artTheme", artToggle.checked);
-        window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: artToggle.checked }));
-      };
+      const artToggle = _amlIOSToggle(prefs.artTheme !== false, (v) => {
+        window.amlBridge.setTweak("artTheme", v);
+        window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: v }));
+      });
       thBody.appendChild(makeRow("Album art theming", artToggle, "Colour album and playlist pages with a palette from their artwork", false));
       thBody.appendChild(modeRow);
       thBody.appendChild(thContentArea);
