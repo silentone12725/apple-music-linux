@@ -23,11 +23,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strings"
 
 	"engine/core/pipeline"
 	"github.com/itouakirai/mp4ff/mp4"
 )
+
+// amlDebug gates verbose DRM intercept logs so key-flow metadata is never
+// written to production logs.
+var amlDebug = os.Getenv("AML_DEBUG") == "1"
 
 // audioTimescale extracts the timescale from the first audio track in an init
 // segment. Falls back to 44100 (standard AAC) if not found.
@@ -303,13 +308,17 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 	if err != nil {
 		return fmt.Errorf("init segment: %w", err)
 	}
-	logInterceptInit(init, len(key))
+	if amlDebug {
+		logInterceptInit(init, len(key))
+	}
 
 	decryptInfo, err := mp4.DecryptInit(init)
 	if err != nil {
 		return fmt.Errorf("decrypt init: %w", err)
 	}
-	logInterceptDecryptInit(decryptInfo)
+	if amlDebug {
+		logInterceptDecryptInit(decryptInfo)
+	}
 
 	if err := init.Encode(w); err != nil {
 		return fmt.Errorf("write init: %w", err)
@@ -349,7 +358,9 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		}
 		fragNum++
 
-		logInterceptFrag(fragNum, frag, &tfdtT0, &tfdtInitialized)
+		if amlDebug {
+			logInterceptFrag(fragNum, frag, &tfdtT0, &tfdtInitialized)
+		}
 		if !isVideoStream {
 			shiftFragTfdt(frag, tfdtT0)
 		}
@@ -359,7 +370,9 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 			log.Printf("[INTERCEPT] FRAG#%d DECRYPT ERROR: %v", fragNum, decErr)
 			return fmt.Errorf("decrypt fragment: %w", decErr)
 		}
-		logInterceptDecryptResult(fragNum, decErr, frag)
+		if amlDebug {
+			logInterceptDecryptResult(fragNum, decErr, frag)
+		}
 
 		if err := frag.Encode(w); err != nil {
 			return fmt.Errorf("write fragment: %w", err)

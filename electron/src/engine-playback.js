@@ -31,11 +31,13 @@ const ENGINE_HTTPS = ENGINE.replace(/^http:\/\/(127\.0\.0\.1|localhost):(\d+)/, 
 const _AML_DEBUG = !!(window.amlBridge?.isDev) || localStorage.getItem('_AML_DEBUG') === '1';
 
 // ── Last.fm API credentials ────────────────────────────────────────────────────
-// Set your own API key and shared secret from https://www.last.fm/api/account/create
-// These are intentionally left blank in source; paste values in Settings → Last.fm
-// or set them via the lastfmSetCredentials bridge if you fork this project.
-const LASTFM_API_KEY    = '';
-const LASTFM_API_SECRET = '';
+// Last.fm's API guidelines for native desktop applications require the key and
+// shared secret to be embedded in the binary. The secret signs API method calls
+// (HMAC-MD5) and does not grant access to any user account — each user
+// authenticates separately via OAuth and their session key is stored locally.
+// See: https://www.last.fm/api/authentication (desktop auth flow)
+const LASTFM_API_KEY    = 'de5f164dcf024dc00e0aab05ba464d17';
+const LASTFM_API_SECRET = 'c03db782a5d29db42da06edcbf76d89a';
 
 // ── Power Budget ───────────────────────────────────────────────────────────────
 // Classifies runtime into full / reduced / minimal based on battery state and
