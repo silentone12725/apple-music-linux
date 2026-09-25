@@ -8132,16 +8132,23 @@
 
         /* \u2500\u2500 footer player bar \u2500\u2500 */
         /* DOM: div.player-bar.player-bar__floating-player > div.wrapper > div.chrome-player */
-        /* .player-bar is position:sticky (no compositing boundary), so
-           backdrop-filter on the inner .chrome-player pill blurs page content
-           behind it directly. */
-        body[data-aml-art-theme] .player-bar,
-        body[data-aml-art-theme] .player-bar .wrapper { background: transparent !important; border: none !important; }
+        /* backdrop-filter on a non-composited child of a sticky element does not
+           reliably blur page content in Chromium. Fix: move blur to .player-bar
+           (the sticky compositor layer that CAN see page content below) and use
+           clip-path:inset to confine the blurred output to just the pill shape.
+           clip-path cuts visual output including the backdrop, so the blur is
+           only visible through the pill-shaped area. */
+        body[data-aml-art-theme] .player-bar {
+            background: transparent !important;
+            border: none !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
+            clip-path: inset(0 28% 0 28% round 1000px) !important;
+        }
+        body[data-aml-art-theme] .player-bar .wrapper { background: transparent !important; }
         body[data-aml-art-theme] .chrome-player {
             background: var(--aml-nav-bg) !important;
             border: 1px solid var(--aml-nav-border) !important;
-            backdrop-filter: blur(20px) !important;
-            -webkit-backdrop-filter: blur(20px) !important;
         }
         body[data-aml-art-theme] .player-lcd,
         body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
