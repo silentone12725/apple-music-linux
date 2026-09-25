@@ -754,8 +754,10 @@ func (s *APIServer) Start() error {
 
 	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
 	if err != nil {
-		s.sessionLock.Release()
-		s.sessionLock = nil
+		if s.sessionLock != nil {
+			s.sessionLock.Release()
+			s.sessionLock = nil
+		}
 		return err
 	}
 
@@ -828,8 +830,11 @@ func (s *APIServer) Stop() {
 		s.tlsSrv.Shutdown(ctx) //nolint:errcheck
 	}
 	// Release the session lock last, after the wrapper is fully stopped.
-	s.sessionLock.Release()
-	s.sessionLock = nil
+	// Guard nil: when drmReady==false, Start() never acquires the lock.
+	if s.sessionLock != nil {
+		s.sessionLock.Release()
+		s.sessionLock = nil
+	}
 }
 
 // ── Backend policy ──────────────────────────────────────────────────────────
