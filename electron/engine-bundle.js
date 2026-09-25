@@ -8083,7 +8083,10 @@
     const style = document.createElement("style");
     style.id = "aml-art-theme-style";
     style.textContent = `
+        /* \u2500\u2500 hide Apple's full-page artwork wash \u2500\u2500 */
         [data-aml-page-art] { visibility: hidden !important; }
+
+        /* \u2500\u2500 gradient background layer \u2500\u2500 */
         #_amlArtBg {
             position: fixed; inset: 0; z-index: 0; pointer-events: none;
             opacity: 0; transition: opacity .6s ease;
@@ -8093,18 +8096,102 @@
                 var(--aml-art-page-bg, transparent);
         }
         body[data-aml-art-theme] #_amlArtBg { opacity: 1; }
+
+        /* \u2500\u2500 page body: hue-tinted dark base \u2500\u2500 */
+        body[data-aml-art-theme] { background: var(--aml-art-page-bg) !important; }
+        body[data-aml-art-theme] .body-container,
+        body[data-aml-art-theme] .app-container,
+        body[data-aml-art-theme] main,
+        body[data-aml-art-theme] .content-container,
+        body[data-aml-art-theme] .scrollable-page,
+        body[data-aml-art-theme] .section,
+        body[data-aml-art-theme] .section-content,
+        body[data-aml-art-theme] .container-detail-header,
+        body[data-aml-art-theme] .container-detail-header-wrapper { background: transparent !important; }
+
+        /* \u2500\u2500 navigation sidebar \u2500\u2500 */
+        body[data-aml-art-theme] nav.navigation {
+            background: var(--aml-nav-bg) !important;
+            border-right-color: var(--aml-nav-border) !important;
+        }
+        body[data-aml-art-theme] .navigation-item__link:hover { background: var(--aml-art-raised) !important; }
+        body[data-aml-art-theme] .navigation-item--selected .navigation-item__link { background: var(--aml-accent-active) !important; }
+        body[data-aml-art-theme] .navigation-item--selected .navigation-item__label,
+        body[data-aml-art-theme] .navigation-item--selected .navigation-item__icon { color: var(--aml-accent) !important; }
+
+        /* \u2500\u2500 footer player bar \u2500\u2500 */
+        body[data-aml-art-theme] footer.footer--full-width,
+        body[data-aml-art-theme] .footer-wrapper,
+        body[data-aml-art-theme] .footer-contents,
+        body[data-aml-art-theme] .player-bar,
+        body[data-aml-art-theme] .player-bar__floating-player {
+            background: var(--aml-nav-bg) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
+        }
+        body[data-aml-art-theme] .footer-wrapper { border-top: 1px solid var(--aml-nav-border) !important; }
+        body[data-aml-art-theme] .chrome-player,
+        body[data-aml-art-theme] .player-lcd,
+        body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
+
+        /* \u2500\u2500 footer play button \u2500\u2500 */
+        body[data-aml-art-theme] .playback-controls-play button {
+            background: var(--aml-accent) !important;
+            color: var(--aml-art-on-accent) !important;
+        }
+        body[data-aml-art-theme] .playback-controls-play button svg path { fill: var(--aml-art-on-accent) !important; }
+
+        /* \u2500\u2500 tracklist rows \u2500\u2500 */
         body[data-aml-art-theme] .songs-list-row { border-color: var(--aml-nav-border) !important; }
-        body[data-aml-art-theme] .songs-list-row:hover { background: var(--aml-art-raised) !important; }
-        body[data-aml-art-theme] .songs-list-row.songs-list-row--selected { background: var(--aml-accent-active) !important; }
+        body[data-aml-art-theme] .songs-list-row:hover,
+        body[data-aml-art-theme] .library-track:not(.library-track--header):hover { background: var(--aml-art-raised) !important; }
+        body[data-aml-art-theme] .songs-list-row.songs-list-row--selected,
+        body[data-aml-art-theme] .library-track.is-playing { background: var(--aml-accent-active) !important; }
+        body[data-aml-art-theme] .songs-list__header,
+        body[data-aml-art-theme] .library-track--header { background: transparent !important; }
+
+        /* \u2500\u2500 primary actions (Play / Shuffle / Add) \u2500\u2500 */
         body[data-aml-art-theme] .primary-actions__button--play button {
             background: var(--aml-accent) !important; color: var(--aml-art-on-accent) !important;
         }
         body[data-aml-art-theme] .primary-actions__button--play button svg,
         body[data-aml-art-theme] .primary-actions__button--play button svg path { fill: var(--aml-art-on-accent) !important; }
         body[data-aml-art-theme] .primary-actions__button--shuffle button,
-        body[data-aml-art-theme] .primary-actions__button--add-to-library button {
-            background: var(--aml-art-raised) !important;
+        body[data-aml-art-theme] .primary-actions__button--add-to-library button { background: var(--aml-art-raised) !important; }
+
+        /* \u2500\u2500 context menus \u2500\u2500 */
+        body[data-aml-art-theme] .contextual-menu {
+            background: var(--aml-nav-bg) !important;
+            border: 1px solid var(--aml-nav-border) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
         }
+        body[data-aml-art-theme] .contextual-menu-item > button:hover,
+        body[data-aml-art-theme] .contextual-menu-item > a:hover { background: var(--aml-art-raised) !important; }
+
+        /* \u2500\u2500 search \u2500\u2500 */
+        body[data-aml-art-theme] .search-input__text-field,
+        body[data-aml-art-theme] .search-input-wrapper { background: var(--aml-art-raised) !important; }
+        body[data-aml-art-theme] .search-scope-bar__pill-option--selected {
+            background: var(--aml-accent) !important; color: var(--aml-art-on-accent) !important;
+        }
+
+        /* \u2500\u2500 side panel / Up Next \u2500\u2500 */
+        body[data-aml-art-theme] .side-panel {
+            background: var(--aml-nav-bg) !important;
+            border-left-color: var(--aml-nav-border) !important;
+            backdrop-filter: blur(20px) !important;
+            -webkit-backdrop-filter: blur(20px) !important;
+        }
+        body[data-aml-art-theme] .up-next-item:hover { background: var(--aml-art-raised) !important; }
+
+        /* \u2500\u2500 shelf / grid \u2500\u2500 */
+        body[data-aml-art-theme] .shelf,
+        body[data-aml-art-theme] section.shelf-grid,
+        body[data-aml-art-theme] .shelf-grid__body { background: transparent !important; }
+
+        /* \u2500\u2500 keyColor propagation for amp-* web components \u2500\u2500 */
+        body[data-aml-art-theme] { --keyColor: var(--aml-accent); }
     `;
     (document.head || document.documentElement).appendChild(style);
     function markPageArt() {
