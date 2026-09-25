@@ -8090,6 +8090,7 @@
     ];
     const BG_LAYER_IDS = ["_amlBlurBg", "_amlAccentBg", "_amlCustomBg", "_amlArtBlur", "_amlArtBg"];
     let enabled = true;
+    let blurEnabled = true;
     let lastSrc = null;
     let token = 0;
     const style = document.createElement("style");
@@ -8116,7 +8117,7 @@
             content: ''; position: absolute; inset: 0;
             background: var(--aml-nav-bg, rgba(0,0,0,0.65));
         }
-        body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
+        body[data-aml-art-blur] #_amlArtBlur { opacity: 1; }
 
         /* \u2500\u2500 gradient glow layer (sits above the blur) \u2500\u2500 */
         /* pageBg removed \u2014 the blur layer's tint overlay provides the dark base. */
@@ -8253,11 +8254,14 @@
       b.setProperty("--aml-art-src", artSrc ? `url("${artSrc.replace(/"/g, "%22")}")` : "none");
       ensureBgLayers();
       document.body.setAttribute("data-aml-art-theme", "");
+      if (blurEnabled) document.body.setAttribute("data-aml-art-blur", "");
+      else document.body.removeAttribute("data-aml-art-blur");
     }
     function clear() {
       if (!document.body) return;
       for (const v of BODY_VARS) document.body.style.removeProperty(v);
       document.body.removeAttribute("data-aml-art-theme");
+      document.body.removeAttribute("data-aml-art-blur");
     }
     async function computeRoles(src, headerArt) {
       try {
@@ -8329,8 +8333,16 @@
       lastSrc = null;
       sync();
     });
+    window.addEventListener("aml:art-blur", (e) => {
+      blurEnabled = !!e.detail;
+      if (document.body.hasAttribute("data-aml-art-theme")) {
+        if (blurEnabled) document.body.setAttribute("data-aml-art-blur", "");
+        else document.body.removeAttribute("data-aml-art-blur");
+      }
+    });
     window.amlBridge?.getPrefs?.().then((p) => {
       enabled = p?.artTheme !== false;
+      blurEnabled = p?.artThemeBlur !== false;
       sync();
     }).catch(() => {
     });
@@ -9488,6 +9500,11 @@
         window.dispatchEvent(new CustomEvent("aml:art-theme", { detail: v }));
       });
       thBody.appendChild(makeRow("Album art theming", artToggle, "Colour album and playlist pages with a palette from their artwork", false));
+      const blurToggle = _amlIOSToggle(prefs.artThemeBlur !== false, (v) => {
+        window.amlBridge.setTweak("artThemeBlur", v);
+        window.dispatchEvent(new CustomEvent("aml:art-blur", { detail: v }));
+      });
+      thBody.appendChild(makeRow("Blurred artwork backdrop", blurToggle, "Show a full-screen blurred version of the artwork as a background", false));
       thBody.appendChild(modeRow);
       thBody.appendChild(thContentArea);
       renderThemeContent(st.curMode);
@@ -10525,44 +10542,51 @@
         }, 1400);
       };
       dlg.addEventListener("close", _restoreProxy, { once: true });
-      const [drm, tools] = await Promise.all([
-        fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
-        fetch(`${ENGINE}/api/v1/tools`).then((r) => r.json()).catch(() => ({}))
-      ]);
-      if (myGen !== _settingsGen) {
-        _restoreProxy();
-        return;
-      }
-      const prefs = await window.amlBridge.getPrefs().catch(() => ({}));
-      if (myGen !== _settingsGen) {
-        _restoreProxy();
-        return;
-      }
-      const drmState = drm?.state ?? drm ?? {};
-      const drmSignedIn = drmState?.process === "running" && drmState?.session === "valid" || drmState?.authentication === "logged_in" || drmState?.fairplay === "ready" || drm?.capabilities?.cbcs === true;
-      dlg.appendChild(buildAccountSection(drm, openSettings));
-      dlg.appendChild(_buildEngineStatusSection(drm));
-      dlg.appendChild(_buildDisplaySection(prefs));
-      dlg.appendChild(await _buildThemeSection(prefs));
-      const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn);
-      dlg.appendChild(audioWrap);
-      dlg.appendChild(await _buildCacheSection(prefs));
-      const { wrap: dlWrap, applyLossless: applyDlLossless } = _buildDownloadsSection(prefs, tools, drmSignedIn);
-      dlg.appendChild(dlWrap);
-      onLosslessChange(applyDlLossless);
-      const { wrap: playbackWrap } = await _buildPlaybackSection(prefs, drmSignedIn);
-      dlg.appendChild(playbackWrap);
-      dlg.appendChild(_buildShortcutsSection().wrap);
-      dlg.appendChild((await _buildScrobbleSection()).wrap);
-      dlg.appendChild(await _buildHistorySection());
-      dlg.appendChild(await _buildLibrarySection());
-      dlg.appendChild(_buildDevSection(prefs));
       if (!dlg.open) {
         dlg.classList.remove("aml-closing");
         dlg.classList.add("aml-opening");
         dlg.showModal();
         dlg.addEventListener("animationend", () => dlg.classList.remove("aml-opening"), { once: true });
       }
+      const [drm, tools, prefs] = await Promise.all([
+        fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
+        fetch(`${ENGINE}/api/v1/tools`).then((r) => r.json()).catch(() => ({})),
+        window.amlBridge.getPrefs().catch(() => ({}))
+      ]);
+      if (myGen !== _settingsGen) {
+        _restoreProxy();
+        return;
+      }
+      const drmState = drm?.state ?? drm ?? {};
+      const drmSignedIn = drmState?.process === "running" && drmState?.session === "valid" || drmState?.authentication === "logged_in" || drmState?.fairplay === "ready" || drm?.capabilities?.cbcs === true;
+      const [themeWrap, cacheWrap, { wrap: playbackWrap }, scrobbleWrap, historyWrap, libraryWrap] = await Promise.all([
+        _buildThemeSection(prefs),
+        _buildCacheSection(prefs),
+        _buildPlaybackSection(prefs, drmSignedIn),
+        _buildScrobbleSection().then((r) => r.wrap),
+        _buildHistorySection(),
+        _buildLibrarySection()
+      ]);
+      if (myGen !== _settingsGen) {
+        _restoreProxy();
+        return;
+      }
+      dlg.appendChild(buildAccountSection(drm, openSettings));
+      dlg.appendChild(_buildEngineStatusSection(drm));
+      dlg.appendChild(_buildDisplaySection(prefs));
+      dlg.appendChild(themeWrap);
+      const { wrap: audioWrap, onLosslessChange } = _buildAudioSection(prefs, drmSignedIn);
+      dlg.appendChild(audioWrap);
+      dlg.appendChild(cacheWrap);
+      const { wrap: dlWrap, applyLossless: applyDlLossless } = _buildDownloadsSection(prefs, tools, drmSignedIn);
+      dlg.appendChild(dlWrap);
+      onLosslessChange(applyDlLossless);
+      dlg.appendChild(playbackWrap);
+      dlg.appendChild(_buildShortcutsSection().wrap);
+      dlg.appendChild(scrobbleWrap);
+      dlg.appendChild(historyWrap);
+      dlg.appendChild(libraryWrap);
+      dlg.appendChild(_buildDevSection(prefs));
     }
     const COG_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:17%"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.05-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.03-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>`;
     const DOWNLOAD_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:19%"><path d="M11.9952,21.1159C12.3277,21.1159 12.6697,20.9829 12.8977,20.7359L19.12,14.5136C19.3765,14.2571 19.5,13.9531 19.5,13.6396C19.5,12.9462 19.006,12.4522 18.341,12.4522C17.9801,12.4522 17.6856,12.6042 17.4671,12.8322L15.3011,14.9791L13.1352,17.4395L13.2112,15.3781L13.2112,4.254C13.2112,3.5035 12.7172,3 11.9952,3C11.2733,3 10.7793,3.5035 10.7793,4.254L10.7793,15.3781L10.8648,17.4395L8.6894,14.9791L6.5329,12.8322C6.3049,12.6042 6.0199,12.4522 5.659,12.4522C4.994,12.4522 4.5,12.9462 4.5,13.6396C4.5,13.9531 4.6235,14.2571 4.88,14.5136L11.0928,20.7359C11.3303,20.9829 11.6628,21.1159 11.9952,21.1159Z"/></svg>`;
