@@ -7846,9 +7846,21 @@ async function setup() {
     window.amlBridge?.onMprisCmd?.((cmd) => {
         if (cmd && typeof cmd === 'object') {
             if (cmd.type === 'seek') {
-                mk.seekToTime(Math.max(0, (_mprisPosMs() + cmd.deltaMs) / 1000));
+                // MPRIS Seek is a relative delta in µs; deltaMs is already in ms.
+                const targetMs = Math.max(0, _mprisPosMs() + cmd.deltaMs);
+                mk.seekToTime(targetMs / 1000);
+                // Spec: emit Seeked after the call (position in µs).
+                window.amlBridge?.mprisUpdate?.({ position: targetMs * 1000, seeked: true });
             } else if (cmd.type === 'setPosition') {
-                mk.seekToTime(Math.max(0, cmd.ms / 1000));
+                // MPRIS SetPosition: absolute ms (converted from µs by main.mjs).
+                const targetMs = Math.max(0, cmd.ms);
+                mk.seekToTime(targetMs / 1000);
+                window.amlBridge?.mprisUpdate?.({ position: targetMs * 1000, seeked: true });
+            } else if (cmd.type === 'setLoopStatus') {
+                // MPRIS LoopStatus string → MusicKit repeatMode (0=none,1=one,2=all).
+                const loopMap = { 'None': 0, 'Track': 1, 'Playlist': 2 };
+                const mode = loopMap[cmd.value];
+                if (mode != null) { mk.repeatMode = mode; _pushMiniState(); }
             } else if (cmd.type === 'shuffle') {
                 mk.shuffleMode = cmd.value ? 1 : 0;
             } else if (cmd.type === 'setVolume') {
@@ -9138,23 +9150,20 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         body[data-aml-art-theme] .navigation-item--selected .navigation-item__icon { color: var(--aml-accent) !important; }
 
         /* ── footer player bar ── */
-        body[data-aml-art-theme] footer.footer--full-width,
-        body[data-aml-art-theme] .footer-wrapper,
-        body[data-aml-art-theme] .footer-contents,
-        body[data-aml-art-theme] .player-bar,
-        body[data-aml-art-theme] .player-bar__floating-player {
+        /* DOM: div.player-bar.player-bar__floating-player > div.wrapper > div.chrome-player */
+        body[data-aml-art-theme] .player-bar {
             background: var(--aml-nav-bg) !important;
+            border-top: 1px solid var(--aml-nav-border) !important;
             backdrop-filter: blur(20px) !important;
             -webkit-backdrop-filter: blur(20px) !important;
         }
-        body[data-aml-art-theme] .footer-wrapper { border-top: 1px solid var(--aml-nav-border) !important; }
         body[data-aml-art-theme] .player-bar .wrapper,
         body[data-aml-art-theme] .chrome-player,
         body[data-aml-art-theme] .player-lcd,
         body[data-aml-art-theme] .player-internal__playback-control { background: transparent !important; }
         /* Light text on all dark themed panels, regardless of palette saturation */
         body[data-aml-art-theme] nav.navigation,
-        body[data-aml-art-theme] footer.footer--full-width,
+        body[data-aml-art-theme] .player-bar,
         body[data-aml-art-theme] .side-panel,
         body[data-aml-art-theme] .contextual-menu { color: rgba(255,255,255,0.85) !important; }
         body[data-aml-art-theme] .navigation-items__header { color: rgba(255,255,255,0.5) !important; }
