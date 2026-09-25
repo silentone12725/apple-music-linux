@@ -612,9 +612,13 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		}
 	}
 
+	var exportCache export.AudioCache // nil interface when the disk cache is disabled
+	if s.diskCache != nil {
+		exportCache = diskAudioCache{s.diskCache}
+	}
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
-	}, 0)
+	}, export.Options{Cache: exportCache})
 
 	mux := http.NewServeMux()
 

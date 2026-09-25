@@ -106,6 +106,13 @@ type ExportOptions struct {
 // The default when empty is "{album_artist}/{album}/{track_number:02d} - {title}".
 type FilenameTemplate string
 
+// Byte sources recorded in ExportJob.Source.
+const (
+	SourceCache    = "cache"
+	SourcePlayback = "playback"
+	SourceNetwork  = "network"
+)
+
 // ExportRequest fully describes one export job.
 type ExportRequest struct {
 	// Track selection
@@ -147,20 +154,24 @@ type ExportEvent struct {
 // ExportJob is the public view of an in-flight or completed export job.
 // Its fields are safe to serialise to JSON and return to API clients.
 type ExportJob struct {
-	ID         string    `json:"jobId"`
-	AssetID    string    `json:"assetId"`
-	Phase      Phase     `json:"phase"`
-	Percent    int       `json:"percent"`
-	QueuePos   int64     `json:"queuePos"` // monotonically increasing enqueue order
-	Title      string    `json:"title,omitempty"`
-	ArtistName string    `json:"artistName,omitempty"`
-	ArtworkURL string    `json:"artworkUrl,omitempty"`
-	BytesDone  int64     `json:"bytesDone,omitempty"`
-	BytesTotal int64     `json:"bytesTotal,omitempty"`
-	Output     string    `json:"output,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID         string `json:"jobId"`
+	AssetID    string `json:"assetId"`
+	Phase      Phase  `json:"phase"`
+	Percent    int    `json:"percent"`
+	QueuePos   int64  `json:"queuePos"` // monotonically increasing enqueue order
+	Title      string `json:"title,omitempty"`
+	ArtistName string `json:"artistName,omitempty"`
+	ArtworkURL string `json:"artworkUrl,omitempty"`
+	BytesDone  int64  `json:"bytesDone,omitempty"`
+	BytesTotal int64  `json:"bytesTotal,omitempty"`
+	Output     string `json:"output,omitempty"`
+	Error      string `json:"error,omitempty"`
+	// Source records where the media bytes came from: "cache" (committed
+	// playback disk cache), "playback" (tail of an in-progress playback
+	// download) or "network" (a fresh export stream). Empty until downloading.
+	Source    string    `json:"source,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 
 	// cancel is called to request cancellation; not exported.
 	cancel func()
