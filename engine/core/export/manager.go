@@ -511,6 +511,7 @@ func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *Ex
 		Atmos:       req.Capabilities.Atmos,
 		Video:       req.Capabilities.Video,
 		MVMaxHeight: req.MVMaxHeight,
+		Private:     true, // our Release must never delete a session playback is serving
 	})
 	if err != nil {
 		m.fail(job, fmt.Errorf("open session: %w", err))

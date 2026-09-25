@@ -44,6 +44,12 @@ type OpenRequest struct {
 	Video             bool
 	MVMaxHeight       int
 	MVAudioPriorities []string
+
+	// Private opens a session owned exclusively by the caller: it never reuses
+	// an existing session, never joins a concurrent Open for the same asset,
+	// and is never indexed for reuse by later Opens. Exports use this so their
+	// Release can never delete a session that playback is still serving.
+	Private bool
 }
 
 // openFlight deduplicates concurrent Open calls for the same asset.
@@ -115,6 +121,9 @@ func openKey(req OpenRequest) string {
 // deduplicated: the second caller waits for the first to finish and receives
 // the same Session, preventing orphaned DRM sessions.
 func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
+	if req.Private {
+		return m.openDirect(ctx, req, "")
+	}
 	key := openKey(req)
 
 	// Reuse an existing valid session for this asset+capabilities combination.
