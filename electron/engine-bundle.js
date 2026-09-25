@@ -8150,12 +8150,8 @@
         body[data-aml-art-theme] .navigation-items__header { color: rgba(255,255,255,0.5) !important; }
         body[data-aml-art-theme] .search-input__text-field { color: rgba(255,255,255,0.85) !important; }
 
-        /* \u2500\u2500 footer play button \u2500\u2500 */
-        body[data-aml-art-theme] .playback-controls-play button {
-            background: var(--aml-accent) !important;
-            color: var(--aml-art-on-accent) !important;
-        }
-        body[data-aml-art-theme] .playback-controls-play button svg path { fill: var(--aml-art-on-accent) !important; }
+        /* \u2500\u2500 footer play button: keep Apple's original white/transparent style \u2500\u2500 */
+        body[data-aml-art-theme] .playback-controls-play button { background: transparent !important; }
 
         /* \u2500\u2500 tracklist rows \u2500\u2500 */
         body[data-aml-art-theme] .songs-list-row { border-color: var(--aml-nav-border) !important; }
