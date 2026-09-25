@@ -172,8 +172,8 @@
   var ENGINE = window._amlEngineURL || "http://127.0.0.1:20025";
   var ENGINE_HTTPS = ENGINE.replace(/^http:\/\/(127\.0\.0\.1|localhost):(\d+)/, (_, host, port) => `https://${host}:${Number(port) + 1}`);
   var _AML_DEBUG = !!window.amlBridge?.isDev || localStorage.getItem("_AML_DEBUG") === "1";
-  var LASTFM_API_KEY = "de5f164dcf024dc00e0aab05ba464d17";
-  var LASTFM_API_SECRET = "c03db782a5d29db42da06edcbf76d89a";
+  var LASTFM_API_KEY = "";
+  var LASTFM_API_SECRET = "";
   var _TIMINGS = {
     full: { poll: 250, debounce: 150, losslessWait: 1500, sseWait: 4e3, qualityRace: 200, mkCheck: 50 },
     reduced: { poll: 250, debounce: 150, losslessWait: 2e3, sseWait: 5e3, qualityRace: 250, mkCheck: 50 },

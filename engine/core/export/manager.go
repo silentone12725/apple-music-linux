@@ -148,6 +148,12 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	return job, nil
 }
 
+// Stop drains the export queue and waits for the worker goroutine to exit.
+// No new jobs should be enqueued after this call.
+func (m *Manager) Stop() {
+	m.queue.Close()
+}
+
 // worker processes items one at a time, highest priority first.
 func (m *Manager) worker() {
 	for {
@@ -1037,16 +1043,24 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 	done := make(chan error, 1)
 	go func() {
 		defer r.Close()
-		_, err := io.Copy(&progressWriter{w: f, mu: &m.mu, job: job}, r)
-		done <- err
+		_, copyErr := io.Copy(&progressWriter{w: f, mu: &m.mu, job: job}, r)
+		// The goroutine owns f exclusively — close it here so the parent goroutine
+		// never races f.Close() against an in-progress Write.
+		if cerr := f.Close(); copyErr == nil {
+			copyErr = cerr
+		}
+		done <- copyErr
 	}()
 	select {
 	case err = <-done:
 	case <-ctx.Done():
+		// Signal the goroutine to stop by closing the reader. This unblocks any
+		// blocking Read (e.g. a live tail reader) so the goroutine can exit and
+		// close f cleanly. We do not wait on <-done because some Close()
+		// implementations are no-ops; the goroutine will eventually fail its
+		// next write and self-exit.
+		r.Close()
 		err = ctx.Err()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
 	}
 	if err != nil {
 		os.Remove(tmpPath)

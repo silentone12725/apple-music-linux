@@ -54,8 +54,8 @@ func (b *Buffer) Stats() (avg, p95 float64) {
 		b.mu.Unlock()
 		return 0, 0
 	}
-	var tmp [1024]int64
-	s := tmp[:b.n]
+	tmp := make([]int64, b.n)
+	s := tmp
 	start := b.pos - b.n
 	cap := len(b.samples)
 	for i := range s {

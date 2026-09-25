@@ -29,6 +29,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"sync"
 
 	"github.com/itouakirai/mp4ff/mp4"
@@ -335,18 +336,12 @@ func (ix *mvDecIndexer) finish(decPath string) {
 func (ix *mvDecIndexer) lookup(t float64) (MVFragEntry, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	best := -1
-	for i := range ix.frags {
-		if ix.frags[i].T <= t {
-			best = i
-		} else {
-			break // frags are in ascending decode-time order
-		}
-	}
-	if best < 0 {
+	// Binary search: find the first fragment with T > t, then step back one.
+	i := sort.Search(len(ix.frags), func(i int) bool { return ix.frags[i].T > t })
+	if i == 0 {
 		return MVFragEntry{}, false
 	}
-	return ix.frags[best], true
+	return ix.frags[i-1], true
 }
 
 // initSizeLive returns the init-segment size (ftyp+moov) once the first moof has

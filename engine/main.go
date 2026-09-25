@@ -42,7 +42,9 @@ func main() {
 	// back. Purely additive — it only releases memory the GC already freed, so it
 	// cannot OOM or throttle any playback path (ALAC/VLC included).
 	go func() {
-		for range time.Tick(2 * time.Minute) {
+		t := time.NewTicker(2 * time.Minute)
+		defer t.Stop()
+		for range t.C {
 			debug.FreeOSMemory()
 		}
 	}()
