@@ -8090,6 +8090,7 @@
     ];
     const BG_LAYER_IDS = ["_amlBlurBg", "_amlAccentBg", "_amlCustomBg", "_amlArtBlur", "_amlArtBg"];
     let enabled = true;
+    let artBlurMode = false;
     let lastSrc = null;
     let token = 0;
     const style = document.createElement("style");
@@ -8118,6 +8119,17 @@
             opacity: 0.55;
         }
         body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
+
+        /* \u2500\u2500 Accented Blur: use wallpaper blur + palette tint \u2500\u2500 */
+        /* Hide the CSS artwork blur layer \u2014 wallpaper blur (#_amlBlurBg) does the blur */
+        body[data-aml-art-theme][data-aml-art-blur] #_amlArtBlur { display: none !important; }
+        /* Body must be transparent so the wallpaper layer (#_amlBlurBg, z-index:-1) shows */
+        body[data-aml-art-theme][data-aml-art-blur] { background: transparent !important; }
+        /* Override the dark tint with palette colour derived from artwork */
+        body[data-aml-art-theme][data-aml-art-blur] #_amlBlurTint {
+            background: var(--aml-nav-bg, rgba(20,10,35,0.55)) !important;
+            opacity: 0.8 !important;
+        }
 
         /* \u2500\u2500 gradient glow layer (sits above the blur) \u2500\u2500 */
         /* pageBg removed \u2014 the blur layer's tint overlay provides the dark base. */
@@ -8254,11 +8266,14 @@
       b.setProperty("--aml-art-src", artSrc ? `url("${artSrc.replace(/"/g, "%22")}")` : "none");
       ensureBgLayers();
       document.body.setAttribute("data-aml-art-theme", "");
+      if (artBlurMode) document.body.setAttribute("data-aml-art-blur", "");
+      else document.body.removeAttribute("data-aml-art-blur");
     }
     function clear() {
       if (!document.body) return;
       for (const v of BODY_VARS) document.body.style.removeProperty(v);
       document.body.removeAttribute("data-aml-art-theme");
+      document.body.removeAttribute("data-aml-art-blur");
     }
     async function computeRoles(src, headerArt) {
       try {
@@ -8336,6 +8351,8 @@
     });
     window.amlBridge?.getPrefs?.().then((p) => {
       enabled = p?.artTheme !== false;
+      artBlurMode = p?.artThemeMode === "art-blur";
+      if (artBlurMode) document.body.setAttribute("data-aml-art-blur", "");
       sync();
     }).catch(() => {
     });
@@ -9490,8 +9507,9 @@
             b.style.fontWeight = a ? "500" : "";
           });
           if (value === "art-blur") {
-            window.amlBridge.setThemeMode("accent");
+            window.amlBridge.setThemeMode("blur");
             window.amlBridge.setTweak("artThemeMode", "art-blur");
+            document.body.setAttribute("data-aml-art-blur", "");
             if (!artToggle._cb.checked) {
               artToggle._cb.checked = true;
               window.amlBridge.setTweak("artTheme", true);
@@ -9500,6 +9518,7 @@
           } else {
             window.amlBridge.setThemeMode(value);
             window.amlBridge.setTweak("artThemeMode", null);
+            document.body.removeAttribute("data-aml-art-blur");
             if (prev === "art-blur") {
               artToggle._cb.checked = false;
               window.amlBridge.setTweak("artTheme", false);
