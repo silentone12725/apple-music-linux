@@ -105,7 +105,7 @@ sheet.replaceSync(`
   /* ── Footer removal ── */
   footer, [class*="footer-wrapper"] { display: none !important; }
 
-  /* ── Background continuity strip — fills the gap below content ── */
+  /* ── Background continuity strip — only visible when art theme is active ── */
   #aml-bg-strip {
     position: fixed;
     bottom: 0;
@@ -114,6 +114,9 @@ sheet.replaceSync(`
     height: 72px;
     z-index: 0;
     pointer-events: none;
+    background: transparent;
+  }
+  body[data-aml-art-theme] #aml-bg-strip {
     background: var(--aml-art-page-bg);
   }
 
