@@ -14,6 +14,7 @@ import (
 	"engine/core/media"
 	"engine/core/pipeline"
 	"engine/core/playback"
+	"engine/internal/pq"
 )
 
 // ── fakes ─────────────────────────────────────────────────────────────────────
@@ -108,6 +109,7 @@ func newReuseManager(t *testing.T, p *countingProvider, c AudioCache) *Manager {
 		jobs:     make(map[string]*ExportJob),
 		requests: make(map[string]ExportRequest),
 		manager:  pm,
+		queue:    pq.New[*workItem](),
 		bw:       newBWController(pm.ForegroundStats, 0),
 	}
 	if c != nil {
