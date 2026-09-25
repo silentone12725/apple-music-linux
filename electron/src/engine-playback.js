@@ -8988,18 +8988,45 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 })();
 
 // ── Tracklist stats in detail header ─────────────────────────────────────────
-// Appends "N songs, X hr Y min" inside the headings grid area (after subtitle)
-// so it flows naturally in Apple's native two-column desktop layout without
-// overriding grid-template-areas and breaking the artwork/content split.
+// Lifts the release date and "N songs, X minutes" from Apple's tracklist footer
+// into the headings grid area (after the subtitle), so they sit next to the
+// title instead of below the whole tracklist. Only those two lines move: the
+// ℗/© label line and the "Also available in the iTunes Store" link stay in the
+// footer where Apple renders them. Appending inside headings keeps Apple's
+// native two-column desktop layout intact (no grid-template-areas override).
+//
+// Apple's description <p> is Svelte-owned, so it is hidden rather than edited
+// (editing its text would fight Svelte re-renders and corrupt the next read);
+// the lines that stay are rendered into a sibling <p> with the same classes.
 (function initTracklistStatsInHeader() {
     let statsEl = null;
-    let lastText = '';
+    let restEl = null;
+    let lastText = null;
+
+    // A line moves up when it is the release date or the track count/duration.
+    // Anything unrecognised (labels, other locales' wording) stays in the
+    // footer — the safe default is Apple's original placement.
+    const COPYRIGHT = /^[℗©]/;
+    const DATE = /\b(19|20)\d{2}\b/;
+    const COUNT = /\d+\s*(songs?|videos?|episodes?|items?|tracks?)\b|\b\d+\s*(minutes?|mins?|hours?|hrs?|hr)\b/i;
+    function splitLines(text) {
+        const up = [], stay = [];
+        for (const raw of text.split('\n')) {
+            const line = raw.trim();
+            if (!line) continue;
+            if (!COPYRIGHT.test(line) && (COUNT.test(line) || DATE.test(line))) up.push(line);
+            else stay.push(line);
+        }
+        return { up, stay };
+    }
 
     function sync() {
         const header = document.querySelector('[class*="container-detail-header"]:not([class*="wrapper"])');
 
         if (!header) {
-            if (statsEl) { statsEl.remove(); statsEl = null; lastText = ''; }
+            if (statsEl) { statsEl.remove(); statsEl = null; }
+            if (restEl) { restEl.remove(); restEl = null; }
+            lastText = null;
             return;
         }
 
@@ -9009,22 +9036,41 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
 
         const src = document.querySelector('[data-testid="tracklist-footer-description"]')
             || document.querySelector('[class*="tracklist-footer"] p[class*="description"]');
-        const text = src?.textContent?.trim() ?? '';
+        const text = src?.textContent ?? '';
+        const { up, stay } = splitLines(text);
 
         if (!statsEl || !headings.contains(statsEl)) {
             statsEl?.remove();
             statsEl = document.createElement('p');
             statsEl.id = 'aml-tracklist-stats';
             headings.appendChild(statsEl);
-            lastText = '';
+            lastText = null;
+        }
+        if (src && (!restEl || restEl.previousElementSibling !== src)) {
+            restEl?.remove();
+            restEl = document.createElement('p');
+            restEl.id = 'aml-tracklist-footer-rest';
+            src.after(restEl);
+            lastText = null;
         }
 
         if (text !== lastText) {
-            statsEl.textContent = text;
+            statsEl.textContent = up.join('\n');
+            statsEl.style.display = up.length ? '' : 'none';
+            if (restEl) {
+                restEl.className = src.className; // inherit Apple's footer typography
+                restEl.textContent = stay.join('\n');
+                restEl.style.display = stay.length ? '' : 'none';
+            }
             lastText = text;
         }
 
-        if (src?.parentElement) src.parentElement.style.display = 'none';
+        if (src) {
+            src.style.display = 'none';
+            // Earlier builds hid the whole footer body; undo that so the label
+            // line and the iTunes Store link stay visible.
+            if (src.parentElement?.style.display === 'none') src.parentElement.style.display = '';
+        }
     }
 
     watchDomSettled(sync);
