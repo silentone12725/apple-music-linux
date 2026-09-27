@@ -136,6 +136,10 @@ type ProcessBackend struct {
 	// Stop() would be a no-op for adopted wrappers, preventing fresh login
 	// after Logout (the adopted wrapper holds the port, blocking a new launch).
 	adoptedPID int
+
+	// itun decryptor state — set when GetProgressiveMVURL receives the ITUN flag
+	itunReady  bool
+	itunAdamID uint64
 }
 
 // NewProcessBackend creates a ProcessBackend with the given transport config.
@@ -932,17 +936,19 @@ func (b *ProcessBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 
 // GetProgressiveMVURL implements DRMBackend via port 40020 TCP protocol.
 //
-// Wire format (updated):
+// Wire format:
 //
 //	Send: uint8 adamIDLen + []byte adamID (decimal string)
 //	Recv: URL\n
 //	Recv: downloadKey\n  (empty line = not available; base64 FairPlay key token)
+//	Recv: itunFlag\n     (empty = no itun; "ITUN" = itun decryptor ready on port 50020)
 func (b *ProcessBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) (url string, downloadKey string, err error) {
 	conn, connErr := net.DialTimeout("tcp", b.mvAddr(), 5*time.Second)
 	if connErr != nil {
 		return "", "", fmt.Errorf("drm mv dial: %w", connErr)
 	}
 	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	rw := newBufRW(conn)
 	if sendErr := sendString(rw, fmt.Sprintf("%d", adamID)); sendErr != nil {
 		return "", "", fmt.Errorf("drm mv send id: %w", sendErr)
@@ -960,7 +966,84 @@ func (b *ProcessBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) (
 	if scanner.Scan() {
 		downloadKey = strings.TrimSpace(scanner.Text())
 	}
+	// Third line: itun flag — "ITUN" means itun decryptor is ready.
+	if scanner.Scan() {
+		flag := strings.TrimSpace(scanner.Text())
+		if flag == "ITUN" {
+			b.mu.Lock()
+			b.itunReady = true
+			b.itunAdamID = adamID
+			b.mu.Unlock()
+			// itun decryptor is ready on port 50020
+		}
+	}
 	return url, downloadKey, nil
+}
+
+// itunAddr returns the TCP address for the itun decrypt port (mv_port + 10000).
+func (b *ProcessBackend) itunAddr() string {
+	host, portStr, err := net.SplitHostPort(b.mvAddr())
+	if err != nil {
+		return "127.0.0.1:50020"
+	}
+	port, _ := strconv.Atoi(portStr)
+	return net.JoinHostPort(host, strconv.Itoa(port+10000))
+}
+
+// DecryptItunSamples connects to the wrapper's itun decrypt port (50020) and
+// decrypts samples one at a time. The caller provides a callback that feeds
+// samples and receives decrypted output.
+func (b *ProcessBackend) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
+	b.mu.RLock()
+	ready := b.itunReady && b.itunAdamID == adamID
+	b.mu.RUnlock()
+	if !ready {
+		return nil, fmt.Errorf("drm itun: decryptor not ready for adamID %d", adamID)
+	}
+
+	conn, connErr := net.DialTimeout("tcp", b.itunAddr(), 5*time.Second)
+	if connErr != nil {
+		return nil, fmt.Errorf("drm itun dial: %w", connErr)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(120 * time.Second))
+
+	// Send adamId
+	if err := sendString(bufio.NewWriter(conn), fmt.Sprintf("%d", adamID)); err != nil {
+		return nil, fmt.Errorf("drm itun send id: %w", err)
+	}
+
+	result := make([][]byte, 0, len(samples))
+	for _, sample := range samples {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Send sample size (4 bytes LE) + data
+		size := uint32(len(sample))
+		if err := binary.Write(conn, binary.LittleEndian, size); err != nil {
+			return nil, fmt.Errorf("drm itun send size: %w", err)
+		}
+		if _, err := conn.Write(sample); err != nil {
+			return nil, fmt.Errorf("drm itun send data: %w", err)
+		}
+
+		// Read decrypted size (4 bytes LE) + data
+		var outSize uint32
+		if err := binary.Read(conn, binary.LittleEndian, &outSize); err != nil {
+			return nil, fmt.Errorf("drm itun read out size: %w", err)
+		}
+		out := make([]byte, outSize)
+		if outSize > 0 {
+			if _, err := io.ReadFull(conn, out); err != nil {
+				return nil, fmt.Errorf("drm itun read out data: %w", err)
+			}
+		}
+		result = append(result, out)
+	}
+
+	// Send end-of-stream (size=0)
+	_ = binary.Write(conn, binary.LittleEndian, uint32(0))
+	return result, nil
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

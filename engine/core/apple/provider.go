@@ -76,6 +76,11 @@ type AccountTokenSource interface {
 	// downloadKey (base64 FairPlay token; empty if not available) for the given
 	// adamID through the wrapper's native Android StoreKit auth (port 40020).
 	GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error)
+
+	// DecryptItunSamples decrypts itun-encrypted samples via the wrapper's
+	// port 50020. Requires a prior GetProgressiveMVURL call for the same adamID
+	// to initialize the decryptor.
+	DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error)
 }
 
 // NewProviderWithCBCS returns a media.Provider backed by Apple Music with
@@ -320,7 +325,10 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	// Non-fatal: HLS CBCS path is always the primary; this is an optimisation.
 	if p.acct != nil {
 		if adamID, parseErr := strconv.ParseUint(req.AssetID, 10, 64); parseErr == nil {
-			if pURL, pKey, pErr := p.acct.GetProgressiveMVURL(ctx, adamID); pErr == nil && pURL != "" {
+			progCtx, progCancel := context.WithTimeout(ctx, 5*time.Second)
+			pURL, pKey, pErr := p.acct.GetProgressiveMVURL(progCtx, adamID)
+			progCancel()
+			if pErr == nil && pURL != "" {
 				sess.MVProgressiveURL = pURL
 				sess.MVDownloadKey = pKey
 				log.Printf("[mv] progressive URL obtained for adamID=%s keyLen=%d", req.AssetID, len(pKey))

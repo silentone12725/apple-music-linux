@@ -194,6 +194,16 @@ func (m *DRMManager) GetProgressiveMVURL(ctx context.Context, adamID uint64) (ur
 	return url, downloadKey, err
 }
 
+// DecryptItunSamples auto-starts the backend and decrypts itun-encrypted
+// samples via port 50020. The decryptor must have been initialized by a prior
+// GetProgressiveMVURL call for the same adamID.
+func (m *DRMManager) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
+	if err := m.ensureRunning(ctx); err != nil {
+		return nil, err
+	}
+	return m.backend.DecryptItunSamples(ctx, adamID, samples)
+}
+
 // GetAccount auto-starts the backend if a session exists.
 func (m *DRMManager) GetAccount(ctx context.Context) (AccountInfo, error) {
 	if err := m.ensureRunning(ctx); err != nil {

@@ -464,6 +464,7 @@ type CBCSMedia struct {
 	// SegmentDurations holds the declared duration (seconds) of each segment,
 	// in playlist order. Used by CBCSSeekableSource to compute seek offsets.
 	SegmentDurations []float64
+
 }
 
 // OpenMediaCBCS fetches and parses a FairPlay CBCS media playlist.

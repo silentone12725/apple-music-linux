@@ -202,6 +202,13 @@ func (b *fallbackBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64
 	return "", "", fmt.Errorf("drm: backend not started")
 }
 
+func (b *fallbackBackend) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
+	if a := b.activeOr(); a != nil {
+		return a.DecryptItunSamples(ctx, adamID, samples)
+	}
+	return nil, fmt.Errorf("drm: backend not started")
+}
+
 func (b *fallbackBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	if a := b.activeOr(); a != nil {
 		return a.DialCBCS(ctx)

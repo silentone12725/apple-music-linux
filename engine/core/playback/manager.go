@@ -314,6 +314,7 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 		expiry:           time.Now().Add(sessionTTL),
 		mvProgressiveURL: ms.MVProgressiveURL,
 		mvDownloadKey:    ms.MVDownloadKey,
+		mvFetchedAt:      time.Now(),
 	}
 
 	log.Printf("[openDirect] %s: provider returned %d tracks", req.AssetID, len(ms.Tracks))
@@ -453,6 +454,29 @@ func (m *Manager) GetMVProgressiveInfo(id string) (url, key string, ok bool) {
 		return "", "", false
 	}
 	return pctx.mvProgressiveURL, pctx.mvDownloadKey, pctx.mvProgressiveURL != ""
+}
+
+// MVProgressiveAge returns how long ago the progressive URL/key were fetched.
+// Returns (0, false) if the session doesn't exist or has no progressive info.
+func (m *Manager) MVProgressiveAge(id string) (time.Duration, bool) {
+	_, pctx, ok := m.lookup(id)
+	if !ok || pctx.mvProgressiveURL == "" {
+		return 0, false
+	}
+	return time.Since(pctx.mvFetchedAt), true
+}
+
+// UpdateMVProgressiveInfo replaces the stored progressive CDN URL and
+// downloadKey for an existing session. Called by the handler layer when the
+// URL/key have expired and a fresh pair has been obtained from the DRM backend.
+func (m *Manager) UpdateMVProgressiveInfo(id, url, key string) {
+	m.mu.Lock()
+	if pctx, ok := m.contexts[id]; ok {
+		pctx.mvProgressiveURL = url
+		pctx.mvDownloadKey = key
+		pctx.mvFetchedAt = time.Now()
+	}
+	m.mu.Unlock()
 }
 
 // Release deletes a session and its private context.

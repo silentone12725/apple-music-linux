@@ -45,7 +45,10 @@ func (f *fakeBackend) GetAccount(context.Context) (AccountInfo, error)          
 func (f *fakeBackend) GetProgressiveMVURL(context.Context, uint64) (string, string, error) {
 	return "", "", nil
 }
-func (f *fakeBackend) DialCBCS(context.Context) (net.Conn, error)                 { return nil, nil }
+func (f *fakeBackend) DecryptItunSamples(context.Context, uint64, [][]byte) ([][]byte, error) {
+	return nil, nil
+}
+func (f *fakeBackend) DialCBCS(context.Context) (net.Conn, error) { return nil, nil }
 func (f *fakeBackend) Events() <-chan DRMEvent                         { return f.events }
 
 func activeName(t *testing.T, b DRMBackend) string {

@@ -87,6 +87,10 @@ func (a *drmAccountAdapter) GetProgressiveMVURL(ctx context.Context, adamID uint
 	return a.dm.GetProgressiveMVURL(ctx, adamID)
 }
 
+func (a *drmAccountAdapter) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
+	return a.dm.DecryptItunSamples(ctx, adamID, samples)
+}
+
 // ── Request / response types ──────────────────────────────────────────────────
 
 // PlaybackRequest is the POST /api/v1/playback request body.

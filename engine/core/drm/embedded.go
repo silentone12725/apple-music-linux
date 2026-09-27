@@ -16,10 +16,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -583,6 +585,7 @@ func (b *EmbeddedBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) 
 		return "", "", fmt.Errorf("drm mv dial: %w", connErr)
 	}
 	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	rw := newBufRW(conn)
 	if sendErr := sendString(rw, fmt.Sprintf("%d", adamID)); sendErr != nil {
 		return "", "", fmt.Errorf("drm mv send id: %w", sendErr)
@@ -600,6 +603,55 @@ func (b *EmbeddedBackend) GetProgressiveMVURL(_ context.Context, adamID uint64) 
 		downloadKey = strings.TrimSpace(scanner.Text())
 	}
 	return url, downloadKey, nil
+}
+
+func (b *EmbeddedBackend) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
+	conn, connErr := net.DialTimeout("tcp", b.itunAddr(), 5*time.Second)
+	if connErr != nil {
+		return nil, fmt.Errorf("drm itun dial: %w", connErr)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(120 * time.Second))
+
+	if err := sendString(bufio.NewWriter(conn), fmt.Sprintf("%d", adamID)); err != nil {
+		return nil, fmt.Errorf("drm itun send id: %w", err)
+	}
+
+	result := make([][]byte, 0, len(samples))
+	for _, sample := range samples {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		size := uint32(len(sample))
+		if err := binary.Write(conn, binary.LittleEndian, size); err != nil {
+			return nil, fmt.Errorf("drm itun send size: %w", err)
+		}
+		if _, err := conn.Write(sample); err != nil {
+			return nil, fmt.Errorf("drm itun send data: %w", err)
+		}
+		var outSize uint32
+		if err := binary.Read(conn, binary.LittleEndian, &outSize); err != nil {
+			return nil, fmt.Errorf("drm itun read out size: %w", err)
+		}
+		out := make([]byte, outSize)
+		if outSize > 0 {
+			if _, err := io.ReadFull(conn, out); err != nil {
+				return nil, fmt.Errorf("drm itun read out data: %w", err)
+			}
+		}
+		result = append(result, out)
+	}
+	_ = binary.Write(conn, binary.LittleEndian, uint32(0))
+	return result, nil
+}
+
+func (b *EmbeddedBackend) itunAddr() string {
+	host, portStr, err := net.SplitHostPort(b.mvAddr())
+	if err != nil {
+		return "127.0.0.1:50020"
+	}
+	port, _ := strconv.Atoi(portStr)
+	return net.JoinHostPort(host, strconv.Itoa(port+10000))
 }
 
 // ── CGO config helpers ────────────────────────────────────────────────────────

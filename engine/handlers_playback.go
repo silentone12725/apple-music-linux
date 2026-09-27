@@ -618,13 +618,22 @@ func (s *APIServer) handlePlaybackVideoNativeInfo(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusOK, map[string]any{"cached": true, "path": path, "size": size})
 		return
 	}
-	// CDN proxy path: if we have a progressive URL + downloadKey, tell the
-	// frontend the video is ready immediately — the video endpoint will serve
-	// via the CDN cookie proxy.  Faststart still builds in the background so
-	// subsequent plays hit the fast disk-cache path.
-	if _, _, hasCDN := s.pm.GetMVProgressiveInfo(id); hasCDN {
-		go s.prepareMVFaststart(id, sess.AssetID, float64(sess.DurationMs)/1000.0)
-		writeJSON(w, http.StatusOK, map[string]any{"cached": true, "cdnProxy": true})
+	// CDN proxy path or itun offline decrypt.
+	if cdnURL, dk, hasCDN := s.pm.GetMVProgressiveInfo(id); hasCDN {
+		if dk != "" {
+			// Has downloadKey — CDN proxy will serve immediately.
+			go s.prepareMVFaststart(id, sess.AssetID, float64(sess.DurationMs)/1000.0)
+			writeJSON(w, http.StatusOK, map[string]any{"cached": true, "cdnProxy": true})
+			return
+		}
+		// No downloadKey — itun-encrypted. Start offline decrypt in background.
+		if adamID, parseErr := strconv.ParseUint(sess.AssetID, 10, 64); parseErr == nil {
+			if _, already := mvPreparing.Load(sess.AssetID); !already {
+				go s.prepareItunFaststart(id, sess.AssetID, cdnURL, adamID)
+			}
+		}
+		_, preparing := mvPreparing.Load(sess.AssetID)
+		writeJSON(w, http.StatusOK, map[string]any{"cached": false, "preparing": preparing})
 		return
 	}
 	// Not cached, no CDN proxy — start the faststart build and have the client
@@ -680,12 +689,44 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// ── Middle path: CDN cookie proxy ─────────────────────────────────────────
+	// ── Middle path: CDN cookie proxy or itun offline decrypt ─────────────────
 	// If the wrapper returned a progressive CDN URL + downloadKey, proxy the
 	// CDN with the downloadKey cookie (Android pattern: CDN performs server-side
 	// decryption authorisation when the cookie is present).
-	// The faststart background build still runs so subsequent plays are instant.
+	// If downloadKey is empty, the file is itun-encrypted — use offline
+	// decryption via port 50020 instead.
 	if cdnURL, dk, hasCDN := s.pm.GetMVProgressiveInfo(id); hasCDN {
+		// Proactive refresh: if the URL/key are older than mvProgressiveTTL,
+		// re-fetch from the DRM backend before proxying. Apple CDN URLs expire.
+		if age, ok := s.pm.MVProgressiveAge(id); ok && age > mvProgressiveTTL {
+			if adamID, parseErr := strconv.ParseUint(assetID, 10, 64); parseErr == nil {
+				refreshCtx, refreshCancel := context.WithTimeout(r.Context(), 5*time.Second)
+				newURL, newKey, refreshErr := s.dm.GetProgressiveMVURL(refreshCtx, adamID)
+				refreshCancel()
+				if refreshErr == nil && newURL != "" {
+					log.Printf("%s refreshed progressive URL id=%s (age=%s)", tagVideo("[video-cdn]"), id, age.Truncate(time.Second))
+					s.pm.UpdateMVProgressiveInfo(id, newURL, newKey)
+					cdnURL, dk = newURL, newKey
+				} else if refreshErr != nil {
+					log.Printf("%s progressive URL refresh failed id=%s: %v (using stale)", tagVideo("[video-cdn]"), id, refreshErr)
+				}
+			}
+		}
+
+		if dk == "" {
+			// No downloadKey = itun-encrypted file. Use offline decrypt path.
+			if adamID, parseErr := strconv.ParseUint(assetID, 10, 64); parseErr == nil {
+				log.Printf("%s itun offline decrypt id=%s assetID=%s", tagVideo("[video-itun]"), id, assetID)
+				if _, already := mvPreparing.Load(assetID); !already {
+					go s.prepareItunFaststart(id, assetID, cdnURL, adamID)
+				}
+				// Return 503 so the frontend polls /video-dl-info until the
+				// offline decrypt + faststart build completes.
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"cached": false, "preparing": true})
+				return
+			}
+		}
+
 		log.Printf("%s CDN proxy id=%s assetID=%s", tagVideo("[video-cdn]"), id, assetID)
 		if _, already := mvPreparing.Load(assetID); !already {
 			go s.prepareMVFaststart(id, assetID, durationSec)
@@ -724,7 +765,7 @@ func (s *APIServer) proxyProgressiveVideo(w http.ResponseWriter, r *http.Request
 	if cookie := r.Header.Get("Cookie"); cookie != "" {
 		req.Header.Set("Cookie", cookie)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := mvCDNClient.Do(req)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return // client disconnected — not an error
@@ -1129,6 +1170,22 @@ func transcodeVideoFaststart(ctx context.Context, src func(io.Writer) error, out
 	}
 	return nil
 }
+
+// mvCDNClient is a dedicated HTTP client for proxying requests to Apple's
+// progressive video CDN (mvod.itunes.apple.com). Uses a 30s timeout to avoid
+// hanging indefinitely on stalled CDN connections.
+var mvCDNClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+// mvProgressiveTTL is the maximum age of a cached progressive URL/downloadKey
+// before the CDN proxy handler proactively refreshes them from the DRM backend.
+// Apple's CDN URLs typically expire after ~15 minutes.
+const mvProgressiveTTL = 10 * time.Minute
 
 // mvPreparing tracks assetIDs whose faststart cache is being built, so the
 // info endpoint can report "preparing" and the handler avoids duplicate jobs.

@@ -59,6 +59,7 @@ type Session struct {
 type playContext struct {
 	streams          map[pipeline.StreamKind]*pipeline.Stream
 	expiry           time.Time
-	mvProgressiveURL string // CDN URL for cookie-authenticated proxy (MV only)
-	mvDownloadKey    string // auth token sent as "downloadKey" cookie to CDN
+	mvProgressiveURL string    // CDN URL for cookie-authenticated proxy (MV only)
+	mvDownloadKey    string    // auth token sent as "downloadKey" cookie to CDN
+	mvFetchedAt      time.Time // when mvProgressiveURL/mvDownloadKey were last obtained
 }

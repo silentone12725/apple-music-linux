@@ -98,6 +98,86 @@ func (sd *stallDetector) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// drmConnIdleTimeout is how long a DRM socket may sit idle between fragment
+// decryptions before we proactively reconnect.  Modeled after the Android
+// Apple Music app's scheduleAutoRefreshIfNeeded, which refreshes the playback
+// lease *before* it expires using a buffer window.  Our wrapper process may
+// drop idle TCP connections; this pre-empts that.
+const drmConnIdleTimeout = 10 * time.Second
+
+// drmConnFragLimit is the maximum number of fragments decrypted on a single
+// DRM socket connection before we proactively reconnect.  Modeled after
+// Android's startPeriodicSharedKeyRefresh, which refreshes the shared
+// decryption key on a fixed schedule (24h).  Our wrapper may have per-
+// connection resource limits; cycling the connection prevents accumulation.
+// 0 disables fragment-count-based reconnection.
+const drmConnFragLimit = 50
+
+// drmConn manages a DRM decryption socket with proactive lifecycle refresh.
+// Instead of waiting for a connection to fail (reactive), it reconnects
+// before failure is expected — after idle periods or after N fragments.
+type drmConn struct {
+	dialer   CBCSDialer
+	ctx      context.Context
+	conn     net.Conn
+	rw       *bufio.ReadWriter
+	lastUsed time.Time
+	fragsSinceConnect int
+}
+
+func newDRMConn(ctx context.Context, dialer CBCSDialer, conn net.Conn) *drmConn {
+	return &drmConn{
+		dialer:   dialer,
+		ctx:      ctx,
+		conn:     conn,
+		rw:       bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)),
+		lastUsed: time.Now(),
+	}
+}
+
+// refreshIfNeeded proactively reconnects the DRM socket if the connection
+// has been idle too long or has served too many fragments.  Returns true
+// if a reconnection occurred.  On reconnect failure, falls through to let
+// the caller's reactive reconnect handle it on the next decrypt error.
+func (dc *drmConn) refreshIfNeeded() bool {
+	idle := time.Since(dc.lastUsed)
+	fragLimitHit := drmConnFragLimit > 0 && dc.fragsSinceConnect >= drmConnFragLimit
+
+	if idle < drmConnIdleTimeout && !fragLimitHit {
+		return false
+	}
+
+	reason := "idle"
+	if fragLimitHit {
+		reason = fmt.Sprintf("fragment limit (%d)", drmConnFragLimit)
+	}
+
+	conn2, err := dc.dialer.DialCBCS(dc.ctx)
+	if err != nil {
+		fmt.Printf("cbcs: proactive reconnect (%s) failed: %v, continuing with current connection\n", reason, err)
+		return false
+	}
+
+	alacstream.Close(dc.conn)
+	dc.conn = conn2
+	dc.rw = bufio.NewReadWriter(bufio.NewReader(conn2), bufio.NewWriter(conn2))
+	dc.fragsSinceConnect = 0
+	dc.lastUsed = time.Now()
+	fmt.Printf("cbcs: proactive reconnect (%s) succeeded\n", reason)
+	return true
+}
+
+// recordUse marks the connection as just used after a successful decrypt.
+func (dc *drmConn) recordUse() {
+	dc.lastUsed = time.Now()
+	dc.fragsSinceConnect++
+}
+
+// close closes the underlying connection.
+func (dc *drmConn) close() {
+	alacstream.Close(dc.conn)
+}
+
 // CBCSDialer is the minimal interface CBCSSource requires to open a
 // FairPlay decryption connection. DRMManager implements this for Phase 1
 // (subprocess backend, TCP socket). In Phase 2 (EmbeddedBackend), the same
@@ -504,29 +584,6 @@ func skipStartFragments(inBuf *bufio.Reader, startOffset uint64, startFrag int) 
 	return accTfdt, finalOffset, nil
 }
 
-// streamKeptFragment patches, decrypts, and writes one kept fragment; returns
-// the updated accumulated TFDT.
-func (s *cbcsSkipSource) streamKeptFragment(ctx context.Context, i int, frag *mp4.Fragment, accTfdt uint64,
-	rw *bufio.ReadWriter, outBuf *bufio.Writer, tracks map[uint32]mp4.DecryptTrackInfo, tr *tracer.Tracer,
-) (uint64, error) {
-	accTfdt = patchAlacFragment(frag, accTfdt)
-	if err := s.sendSeekFragKey(i, rw); err != nil {
-		return accTfdt, err
-	}
-	if err := alacstream.DecryptFragment(frag, tracks, rw); err != nil {
-		return accTfdt, fmt.Errorf("cbcs seek: decrypt fragment %d: %w", i, err)
-	}
-	if err := frag.Encode(outBuf); err != nil {
-		return accTfdt, fmt.Errorf("cbcs seek: encode fragment %d: %w", i, err)
-	}
-	if err := outBuf.Flush(); err != nil {
-		return accTfdt, fmt.Errorf("cbcs seek: flush fragment %d: %w", i, err)
-	}
-	if i == s.startFrag {
-		tr.RecordPlaybackReady()
-	}
-	return accTfdt, nil
-}
 
 func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) error {
 	dlCtx, cancel := context.WithCancelCause(ctx)
@@ -556,9 +613,9 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 		return fmt.Errorf("cbcs seek: dial: %w", err)
 	}
 	tr.RecordCBCSDialConnected()
-	defer alacstream.Close(conn)
+	dc := newDRMConn(ctx, s.dialer, conn)
+	defer dc.close()
 
-	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	inBuf := bufio.NewReader(stalled)
 	outBuf := bufio.NewWriter(w)
 
@@ -590,7 +647,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 		return err
 	}
 
-	if err := s.sendInitialKey(rw); err != nil {
+	if err := s.sendInitialKey(dc.rw); err != nil {
 		return err
 	}
 
@@ -603,9 +660,55 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 			break
 		}
 		offset = newOffset
-		accumulatedTfdt, err = s.streamKeptFragment(ctx, i, frag, accumulatedTfdt, rw, outBuf, tracks, tr)
-		if err != nil {
+
+		// Proactive reconnect: refresh the DRM socket before it goes stale.
+		if dc.refreshIfNeeded() {
+			if err := s.sendSeekFragKey(i, dc.rw); err != nil {
+				return fmt.Errorf("cbcs seek: resend key after proactive reconnect %d: %w", i, err)
+			}
+		}
+
+		accumulatedTfdt = patchAlacFragment(frag, accumulatedTfdt)
+		if err := s.sendSeekFragKey(i, dc.rw); err != nil {
 			return err
+		}
+
+		mdatBackup := make([]byte, len(frag.Mdat.Data))
+		copy(mdatBackup, frag.Mdat.Data)
+
+		if err := alacstream.DecryptFragment(frag, tracks, dc.rw); err != nil {
+			fmt.Printf("cbcs seek: decrypt fragment %d failed (%v), reconnecting DRM socket…\n", i, err)
+			alacstream.Close(dc.conn)
+
+			conn2, dialErr := s.dialer.DialCBCS(ctx)
+			if dialErr != nil {
+				return fmt.Errorf("cbcs seek: reconnect after fragment %d: %w", i, dialErr)
+			}
+			dc.conn = conn2
+			dc.rw = bufio.NewReadWriter(bufio.NewReader(conn2), bufio.NewWriter(conn2))
+			dc.fragsSinceConnect = 0
+			dc.lastUsed = time.Now()
+
+			copy(frag.Mdat.Data, mdatBackup)
+			if err := s.sendSeekFragKey(i, dc.rw); err != nil {
+				return fmt.Errorf("cbcs seek: resend key after reconnect %d: %w", i, err)
+			}
+
+			if err2 := alacstream.DecryptFragment(frag, tracks, dc.rw); err2 != nil {
+				return fmt.Errorf("cbcs seek: decrypt fragment %d after reconnect: %w", i, err2)
+			}
+			fmt.Printf("cbcs seek: fragment %d decrypted after reconnect\n", i)
+		}
+		dc.recordUse()
+
+		if err := frag.Encode(outBuf); err != nil {
+			return fmt.Errorf("cbcs seek: encode fragment %d: %w", i, err)
+		}
+		if err := outBuf.Flush(); err != nil {
+			return fmt.Errorf("cbcs seek: flush fragment %d: %w", i, err)
+		}
+		if i == s.startFrag {
+			tr.RecordPlaybackReady()
 		}
 	}
 	return nil
@@ -642,9 +745,9 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("cbcs: dial: %w", err)
 	}
 	tr.RecordCBCSDialConnected()
-	defer alacstream.Close(conn)
+	dc := newDRMConn(ctx, s.dialer, conn)
+	defer dc.close()
 
-	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	inBuf := bufio.NewReader(stalled)
 	outBuf := bufio.NewWriter(w)
 
@@ -681,12 +784,40 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		}
 		offset = newOffset
 
-		accumulatedTfdt = patchAlacFragmentSeq(frag, i, accumulatedTfdt)
-		s.sendFragKey(i, rw)
-
-		if err := alacstream.DecryptFragment(frag, tracks, rw); err != nil {
-			return fmt.Errorf("cbcs: decrypt fragment %d: %w", i, err)
+		// Proactive reconnect: refresh the DRM socket before it goes stale.
+		if dc.refreshIfNeeded() {
+			s.sendFragKey(i, dc.rw)
 		}
+
+		accumulatedTfdt = patchAlacFragmentSeq(frag, i, accumulatedTfdt)
+		s.sendFragKey(i, dc.rw)
+
+		// Snapshot mdat before decryption (in-place) so we can restore on DRM socket failure.
+		mdatBackup := make([]byte, len(frag.Mdat.Data))
+		copy(mdatBackup, frag.Mdat.Data)
+
+		if err := alacstream.DecryptFragment(frag, tracks, dc.rw); err != nil {
+			fmt.Printf("cbcs: decrypt fragment %d failed (%v), reconnecting DRM socket…\n", i, err)
+			alacstream.Close(dc.conn)
+
+			conn2, dialErr := s.dialer.DialCBCS(ctx)
+			if dialErr != nil {
+				return fmt.Errorf("cbcs: reconnect after fragment %d: %w", i, dialErr)
+			}
+			dc.conn = conn2
+			dc.rw = bufio.NewReadWriter(bufio.NewReader(conn2), bufio.NewWriter(conn2))
+			dc.fragsSinceConnect = 0
+			dc.lastUsed = time.Now()
+
+			copy(frag.Mdat.Data, mdatBackup)
+			s.sendFragKey(i, dc.rw)
+
+			if err2 := alacstream.DecryptFragment(frag, tracks, dc.rw); err2 != nil {
+				return fmt.Errorf("cbcs: decrypt fragment %d after reconnect: %w", i, err2)
+			}
+			fmt.Printf("cbcs: fragment %d decrypted after reconnect\n", i)
+		}
+		dc.recordUse()
 		if err := frag.Encode(outBuf); err != nil {
 			return fmt.Errorf("cbcs: encode fragment %d: %w", i, err)
 		}

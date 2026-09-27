@@ -133,6 +133,10 @@ func (b *mockBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	return nil, errors.New("mock: DialCBCS not implemented")
 }
 
+func (b *mockBackend) DecryptItunSamples(_ context.Context, _ uint64, _ [][]byte) ([][]byte, error) {
+	return nil, errors.New("mock: DecryptItunSamples not implemented")
+}
+
 func (b *mockBackend) Events() <-chan drm.DRMEvent { return b.events }
 
 // emitEvent sends an event from the backend; used to drive state transitions.
