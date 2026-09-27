@@ -498,9 +498,14 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// entry is needed for the common case.
 	drmBinaryPath := cfg.DRMBinaryPath
 	if drmBinaryPath == "" {
-		if abs, err := filepath.Abs("drm/drm-rootless"); err == nil {
-			if _, err := os.Stat(abs); err == nil {
-				drmBinaryPath = abs
+		// Prefer drm-native (host-native libhybris wrapper) when present;
+		// fall back to drm-rootless (proot/Android namespace).
+		for _, candidate := range []string{"drm/drm-native", "drm/drm-rootless"} {
+			if abs, err := filepath.Abs(candidate); err == nil {
+				if _, err := os.Stat(abs); err == nil {
+					drmBinaryPath = abs
+					break
+				}
 			}
 		}
 	}
@@ -885,7 +890,8 @@ func buildDRMBackend(name, drmBinaryPath, decryptAddr, m3u8Addr, mvAddr string) 
 	}
 	return drm.NewProcessBackend(drm.ProcessConfig{
 		BinaryPath:  drmBinaryPath,
-		OmitBaseDir: true, // drm-rootless resolves BaseDir relative to its cwd; absolute path breaks anisette init
+		OmitBaseDir: true, // wrapper resolves BaseDir relative to its cwd; absolute path breaks anisette init
+		UseHybris:   filepath.Base(drmBinaryPath) == "drm-native",
 		DecryptAddr: decryptAddr,
 		M3U8Addr:    m3u8Addr,
 		MVAddr:      mvAddr,

@@ -71,7 +71,7 @@ const (
 // ProcessConfig holds transport details that are internal to ProcessBackend.
 // These never appear in BackendConfig because they are meaningless to EmbeddedBackend.
 type ProcessConfig struct {
-	// BinaryPath is the path to the wrapper-rootless binary.
+	// BinaryPath is the path to the wrapper binary (drm-rootless or drm-native).
 	BinaryPath string
 
 	// OmitBaseDir skips the --base-dir flag. Set true for the real wrapper binary,
@@ -79,6 +79,15 @@ type ProcessConfig struct {
 	// filepath.Dir(BinaryPath) in launch) and breaks if given an absolute path.
 	// Leave false for mock/test binaries that need an explicit --base-dir.
 	OmitBaseDir bool
+
+	// UseHybris injects the three HYBRIS_* environment variables required by
+	// drm-native (the host-native libhybris-based wrapper). When true, the
+	// subprocess receives:
+	//   HYBRIS_LINKER_DIR      = <binaryDir>/hybris-linker
+	//   HYBRIS_LD_LIBRARY_PATH = <binaryDir>/rootfs/system/lib64
+	//   HYBRIS_ANDROID_LIB64  = <binaryDir>/rootfs/system/lib64
+	// Leave false for drm-rootless (proot/Android namespace, no hybris).
+	UseHybris bool
 
 	// DecryptAddr is the TCP address of the decryption socket.
 	// Default: "127.0.0.1:10020".
@@ -264,6 +273,15 @@ func (b *ProcessBackend) launch(ctx context.Context, args []string) error {
 
 	cmd := exec.CommandContext(procCtx, b.exe.BinaryPath, args...)
 	cmd.Dir = filepath.Dir(b.exe.BinaryPath)
+	if b.exe.UseHybris {
+		binaryDir := filepath.Dir(b.exe.BinaryPath)
+		lib64 := filepath.Join(binaryDir, "rootfs", "system", "lib64")
+		cmd.Env = append(os.Environ(),
+			"HYBRIS_LINKER_DIR="+filepath.Join(binaryDir, "hybris-linker"),
+			"HYBRIS_LD_LIBRARY_PATH="+lib64,
+			"HYBRIS_ANDROID_LIB64="+lib64,
+		)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// Own process group: wrapper-rootless forks a worker ("main") that holds
 		// the DRM ports. Placing the whole wrapper tree in its own group lets
