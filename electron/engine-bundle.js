@@ -1005,6 +1005,7 @@
         if (!slot.isConnected || !badge.isConnected) {
           _slotBadgeObs?.disconnect();
           _slotBadgeObs = null;
+          _insertBadgeIntoSlot(badge, 0);
           return;
         }
         _pinSlot();
@@ -4100,7 +4101,12 @@
       console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
       if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
         mkAudio.currentTime = videoEl.currentTime;
-      _iframePlay.call(mkAudio).then(() => console.log("[AML MV-A] mkAudio.play() resolved")).catch((e) => console.warn("[AML MV-A] mkAudio.play() rejected:", e.message));
+      const doPlay = () => _iframePlay.call(mkAudio).then(() => console.log("[AML MV-A] mkAudio.play() resolved")).catch((e) => console.warn("[AML MV-A] mkAudio.play() rejected:", e.message));
+      if (mkAudio.readyState >= 3) {
+        doPlay();
+        return;
+      }
+      mkAudio.addEventListener("canplay", doPlay, { once: true });
     };
     const onVideoPlaying = () => {
       _hideSeekSnap();
@@ -8310,17 +8316,6 @@
       const [h, s, l] = rgbToHsl(parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16));
       return paletteRoles([{ h, s, l, weight: 1 }]);
     }
-    function nowPlayingArtSrc(size = "80") {
-      try {
-        const mk = window.MusicKit?.getInstance?.();
-        if (!mk?.nowPlayingItem) return null;
-        const art = mk.nowPlayingItem.attributes?.artwork;
-        if (!art?.url) return null;
-        return art.url.replace("{w}", size).replace("{h}", size);
-      } catch (_) {
-        return null;
-      }
-    }
     async function sync() {
       if (!document.body) return;
       markPageArt();
@@ -8338,11 +8333,6 @@
         img.addEventListener("load", sync, { once: true });
         return;
       }
-      let backdropSrc = null;
-      if (!src) {
-        src = nowPlayingArtSrc("80");
-        if (!artBlurMode) backdropSrc = nowPlayingArtSrc("600");
-      }
       if (!src) {
         if (lastSrc !== null) {
           clear();
@@ -8356,7 +8346,7 @@
       const my = ++token;
       const roles = await computeRoles(src, img?.closest(".artwork-component"));
       if (my !== token || !enabled) return;
-      if (roles) apply(roles, backdropSrc || src);
+      if (roles) apply(roles, src);
       else clear();
     }
     window.addEventListener("aml:art-theme", (e) => {

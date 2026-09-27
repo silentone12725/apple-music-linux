@@ -1126,6 +1126,7 @@ function _insertBadgeIntoSlot(badge, attempt) {
         _slotBadgeObs = new MutationObserver(() => {
             if (!slot.isConnected || !badge.isConnected) {
                 _slotBadgeObs?.disconnect(); _slotBadgeObs = null;
+                _insertBadgeIntoSlot(badge, 0);
                 return;
             }
             _pinSlot();
@@ -4532,9 +4533,11 @@ async function startMVPipeline() {
         console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
         if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
             mkAudio.currentTime = videoEl.currentTime;
-        _iframePlay.call(mkAudio)
+        const doPlay = () => _iframePlay.call(mkAudio)
             .then(() => console.log('[AML MV-A] mkAudio.play() resolved'))
             .catch(e => console.warn('[AML MV-A] mkAudio.play() rejected:', e.message));
+        if (mkAudio.readyState >= 3) { doPlay(); return; }
+        mkAudio.addEventListener('canplay', doPlay, { once: true });
     };
     const onVideoPlaying = () => {
         _hideSeekSnap();       // new frames decoded — remove the freeze-frame overlay
@@ -9346,18 +9349,6 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         return _paletteRoles([{ h, s, l, weight: 1 }]);
     }
 
-    // Returns the artwork URL for the currently playing track via MusicKit, or
-    // null when nothing is playing or the API is unavailable.
-    function nowPlayingArtSrc(size = '80') {
-        try {
-            const mk = window.MusicKit?.getInstance?.();
-            if (!mk?.nowPlayingItem) return null;
-            const art = mk.nowPlayingItem.attributes?.artwork;
-            if (!art?.url) return null;
-            return art.url.replace('{w}', size).replace('{h}', size);
-        } catch (_) { return null; }
-    }
-
     async function sync() {
         if (!document.body) return;
         markPageArt();
@@ -9375,17 +9366,6 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
             return;
         }
 
-        // Priority 2: currently playing track artwork — themes every other page
-        // so the palette follows playback as you browse the library.
-        // 80px for palette extraction; 600px for the CSS-blur backdrop only in
-        // accent mode — in art-blur mode #_amlArtBlur is hidden so the large
-        // fetch is unnecessary.
-        let backdropSrc = null;
-        if (!src) {
-            src = nowPlayingArtSrc('80');
-            if (!artBlurMode) backdropSrc = nowPlayingArtSrc('600');
-        }
-
         if (!src) {
             if (lastSrc !== null) { clear(); lastSrc = null; token++; }
             return;
@@ -9395,7 +9375,7 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         const my = ++token;
         const roles = await computeRoles(src, img?.closest('.artwork-component'));
         if (my !== token || !enabled) return;
-        if (roles) apply(roles, backdropSrc || src); else clear();
+        if (roles) apply(roles, src); else clear();
     }
 
     window.addEventListener('aml:art-theme', (e) => {
