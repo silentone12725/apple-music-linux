@@ -40,12 +40,24 @@ const (
 
 // SongInfo is the minimal metadata we cache per library song.
 type SongInfo struct {
+	LibraryID   string `json:"lid"`
+	CatalogID   string `json:"cid,omitempty"`
+	Name        string `json:"name"`
+	Artist      string `json:"artist"`
+	Album       string `json:"album"`
+	AlbumID     string `json:"albumId,omitempty"`
+	DurationMs  int    `json:"ms"`
+	TrackNumber int    `json:"track,omitempty"`
+	DiscNumber  int    `json:"disc,omitempty"`
+}
+
+// AlbumInfo is the minimal metadata we cache per library album.
+type AlbumInfo struct {
 	LibraryID  string `json:"lid"`
 	CatalogID  string `json:"cid,omitempty"`
 	Name       string `json:"name"`
 	Artist     string `json:"artist"`
-	Album      string `json:"album"`
-	DurationMs int    `json:"ms"`
+	TrackCount int    `json:"trackCount"`
 }
 
 // PlaylistInfo is the minimal metadata we cache per library playlist.
@@ -185,9 +197,11 @@ func (s *Store) decrypt(data []byte) ([]byte, error) {
 
 type diskCache struct {
 	Songs     []SongInfo                 `json:"songs"`
+	Albums    []AlbumInfo                `json:"albums"`
 	Playlists []PlaylistInfo             `json:"playlists"`
 	PlTracks  map[string][]PlaylistTrack `json:"playlistTracks"`
 	SyncedAt  time.Time                  `json:"syncedAt"`
+	Revision  string                     `json:"revision,omitempty"`
 }
 
 func (s *Store) load() {
@@ -214,28 +228,55 @@ func (s *Store) load() {
 		return
 	}
 	defer tx.Rollback() //nolint:errcheck
-	for _, sg := range dc.Songs {
-		tx.Exec("INSERT OR REPLACE INTO songs(lid,cid,name,artist,album,ms) VALUES(?,?,?,?,?,?)",
-			sg.LibraryID, sg.CatalogID, sg.Name, sg.Artist, sg.Album, sg.DurationMs)
+	if err := loadTx(tx, &dc); err != nil {
+		log.Printf("[library] load: %v", err)
+		return
 	}
-	for _, pl := range dc.Playlists {
-		tx.Exec("INSERT OR REPLACE INTO playlists(lid,name,track_count) VALUES(?,?,?)",
-			pl.LibraryID, pl.Name, pl.TrackCount)
-	}
-	for plID, tracks := range dc.PlTracks {
-		for i, t := range tracks {
-			tx.Exec("INSERT OR REPLACE INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)",
-				plID, i, t.LibraryID, t.CatalogID)
-		}
-	}
-	tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('synced_at',?)",
-		dc.SyncedAt.Format(time.RFC3339))
 	if err := tx.Commit(); err != nil {
 		log.Printf("[library] load commit: %v", err)
 		return
 	}
 	log.Printf("[library] cache loaded: %d songs, %d playlists (synced %s ago)",
 		len(dc.Songs), len(dc.Playlists), time.Since(dc.SyncedAt).Round(time.Second))
+}
+
+func loadTx(tx *sql.Tx, dc *diskCache) error {
+	for _, sg := range dc.Songs {
+		if _, err := tx.Exec("INSERT OR REPLACE INTO songs(lid,cid,name,artist,album,album_id,ms,track_number,disc_number) VALUES(?,?,?,?,?,?,?,?,?)",
+			sg.LibraryID, sg.CatalogID, sg.Name, sg.Artist, sg.Album, sg.AlbumID, sg.DurationMs, sg.TrackNumber, sg.DiscNumber); err != nil {
+			return fmt.Errorf("songs: %w", err)
+		}
+	}
+	for _, al := range dc.Albums {
+		if _, err := tx.Exec("INSERT OR REPLACE INTO albums(lid,cid,name,artist,track_count) VALUES(?,?,?,?,?)",
+			al.LibraryID, al.CatalogID, al.Name, al.Artist, al.TrackCount); err != nil {
+			return fmt.Errorf("albums: %w", err)
+		}
+	}
+	for _, pl := range dc.Playlists {
+		if _, err := tx.Exec("INSERT OR REPLACE INTO playlists(lid,name,track_count) VALUES(?,?,?)",
+			pl.LibraryID, pl.Name, pl.TrackCount); err != nil {
+			return fmt.Errorf("playlists: %w", err)
+		}
+	}
+	for plID, tracks := range dc.PlTracks {
+		for i, t := range tracks {
+			if _, err := tx.Exec("INSERT OR REPLACE INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)",
+				plID, i, t.LibraryID, t.CatalogID); err != nil {
+				return fmt.Errorf("playlist_tracks: %w", err)
+			}
+		}
+	}
+	if _, err := tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('synced_at',?)",
+		dc.SyncedAt.Format(time.RFC3339)); err != nil {
+		return fmt.Errorf("meta: %w", err)
+	}
+	if dc.Revision != "" {
+		if _, err := tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('revision',?)", dc.Revision); err != nil {
+			return fmt.Errorf("meta: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) save() {
@@ -254,12 +295,15 @@ func (s *Store) save() {
 	}
 	defer rtx.Rollback() //nolint:errcheck — read tx, rollback is always safe
 	songs := s.querySongsInTx(rtx)
+	albums := queryAlbumsInTx(rtx)
 	pls := s.queryPlaylistsInTx(rtx)
 	plTracks := s.queryAllPlaylistTracksInTx(rtx)
 	syncedAt := s.querySyncedAtInTx(rtx)
-	rtx.Commit() //nolint:errcheck — read-only, no changes to commit
+	var revision string
+	rtx.QueryRow("SELECT value FROM meta WHERE key='revision'").Scan(&revision) //nolint:errcheck — absent is fine
+	rtx.Commit()                                                                //nolint:errcheck — read-only, no changes to commit
 
-	plain, err := json.Marshal(diskCache{Songs: songs, Playlists: pls, PlTracks: plTracks, SyncedAt: syncedAt})
+	plain, err := json.Marshal(diskCache{Songs: songs, Albums: albums, Playlists: pls, PlTracks: plTracks, SyncedAt: syncedAt, Revision: revision})
 	if err != nil {
 		log.Printf("[library] save marshal: %v", err)
 		return
@@ -269,8 +313,15 @@ func (s *Store) save() {
 		log.Printf("[library] save encrypt: %v", err)
 		return
 	}
-	if err := os.WriteFile(s.encPath, enc, 0o600); err != nil {
+	// Write-then-rename so a crash mid-save never leaves a truncated library.enc.
+	tmp := s.encPath + ".tmp"
+	if err := os.WriteFile(tmp, enc, 0o600); err != nil {
 		log.Printf("[library] save write: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, s.encPath); err != nil {
+		os.Remove(tmp)
+		log.Printf("[library] save rename: %v", err)
 	}
 }
 
@@ -280,7 +331,7 @@ func (s *Store) save() {
 // *InTx variants used by save() so the full dump is one consistent snapshot.
 
 func (s *Store) querySongsInTx(tx *sql.Tx) []SongInfo {
-	q := "SELECT lid,cid,name,artist,album,ms FROM songs"
+	q := "SELECT lid,cid,name,artist,album,album_id,ms,track_number,disc_number FROM songs"
 	var rows *sql.Rows
 	if tx != nil {
 		rows, _ = tx.Query(q)
@@ -294,8 +345,29 @@ func (s *Store) querySongsInTx(tx *sql.Tx) []SongInfo {
 	var out []SongInfo
 	for rows.Next() {
 		var sg SongInfo
-		rows.Scan(&sg.LibraryID, &sg.CatalogID, &sg.Name, &sg.Artist, &sg.Album, &sg.DurationMs)
+		if err := rows.Scan(&sg.LibraryID, &sg.CatalogID, &sg.Name, &sg.Artist, &sg.Album, &sg.AlbumID, &sg.DurationMs, &sg.TrackNumber, &sg.DiscNumber); err != nil {
+			log.Printf("[library] scan song: %v", err)
+			continue
+		}
 		out = append(out, sg)
+	}
+	return out
+}
+
+func queryAlbumsInTx(tx *sql.Tx) []AlbumInfo {
+	rows, err := tx.Query("SELECT lid,cid,name,artist,track_count FROM albums")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []AlbumInfo
+	for rows.Next() {
+		var al AlbumInfo
+		if err := rows.Scan(&al.LibraryID, &al.CatalogID, &al.Name, &al.Artist, &al.TrackCount); err != nil {
+			log.Printf("[library] scan album: %v", err)
+			continue
+		}
+		out = append(out, al)
 	}
 	return out
 }
@@ -515,7 +587,7 @@ func (s *Store) Ingest(p IngestPayload) {
 }
 
 func ingestSongs(tx *sql.Tx, songs []amItem) error {
-	stmt, err := tx.Prepare("INSERT INTO songs(lid,cid,name,artist,album,album_id,ms,track_number,disc_number) VALUES(?,?,?,?,?,?,?,?,?)")
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO songs(lid,cid,name,artist,album,album_id,ms,track_number,disc_number) VALUES(?,?,?,?,?,?,?,?,?)")
 	if err != nil {
 		return fmt.Errorf("ingest prepare songs: %w", err)
 	}
@@ -532,9 +604,11 @@ func ingestSongs(tx *sql.Tx, songs []amItem) error {
 		if len(item.Relationships.Albums.Data) > 0 {
 			albumID = item.Relationships.Albums.Data[0].ID
 		}
-		stmt.Exec(item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName,
+		if _, err := stmt.Exec(item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName,
 			item.Attributes.AlbumName, albumID, item.Attributes.DurationInMillis,
-			item.Attributes.TrackNumber, item.Attributes.DiscNumber)
+			item.Attributes.TrackNumber, item.Attributes.DiscNumber); err != nil {
+			return fmt.Errorf("ingest song %s: %w", item.ID, err)
+		}
 	}
 	return nil
 }
@@ -553,19 +627,23 @@ func ingestAlbums(tx *sql.Tx, albums []amItem) error {
 		if cid == "" && len(item.Relationships.Catalog.Data) > 0 {
 			cid = item.Relationships.Catalog.Data[0].ID
 		}
-		stmt.Exec(item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName, item.Attributes.TrackCount)
+		if _, err := stmt.Exec(item.ID, cid, item.Attributes.Name, item.Attributes.ArtistName, item.Attributes.TrackCount); err != nil {
+			return fmt.Errorf("ingest album %s: %w", item.ID, err)
+		}
 	}
 	return nil
 }
 
 func ingestPlaylists(tx *sql.Tx, playlists []amItem) error {
-	stmt, err := tx.Prepare("INSERT INTO playlists(lid,name,track_count) VALUES(?,?,?)")
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO playlists(lid,name,track_count) VALUES(?,?,?)")
 	if err != nil {
 		return fmt.Errorf("ingest prepare playlists: %w", err)
 	}
 	defer stmt.Close()
 	for _, item := range playlists {
-		stmt.Exec(item.ID, item.Attributes.Name, item.Attributes.TrackCount)
+		if _, err := stmt.Exec(item.ID, item.Attributes.Name, item.Attributes.TrackCount); err != nil {
+			return fmt.Errorf("ingest playlist %s: %w", item.ID, err)
+		}
 	}
 	return nil
 }
@@ -582,7 +660,9 @@ func ingestPlaylistTracks(tx *sql.Tx, tracks map[string][]amItem) error {
 			if cid == "" {
 				cid = item.Attributes.PlayParams.ID
 			}
-			stmt.Exec(plID, i, item.ID, cid)
+			if _, err := stmt.Exec(plID, i, item.ID, cid); err != nil {
+				return fmt.Errorf("ingest playlist %s track %d: %w", plID, i, err)
+			}
 		}
 	}
 	return nil
