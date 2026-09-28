@@ -22,7 +22,14 @@ func (d diskAudioCache) TailReader(assetID, qualifier string) (io.ReadCloser, bo
 	if sw == nil {
 		return nil, false
 	}
-	return streamingReadCloser{sw.NewReader()}, true
+	// The writer may commit between GetStreaming and here; a reader on a
+	// finished writer would read a closed temp file. Reporting no tail just
+	// makes the export download normally.
+	r := sw.NewReaderIfActive()
+	if r == nil {
+		return nil, false
+	}
+	return streamingReadCloser{r}, true
 }
 
 // streamingReadCloser adapts diskcache.StreamingReader (whose Close returns
