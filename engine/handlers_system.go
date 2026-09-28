@@ -97,7 +97,10 @@ func (s *APIServer) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	// Capabilities now reflect DRMManager state rather than a raw TCP probe.
 	// DRMManager.Status() gives a complete snapshot including whether FairPlay
 	// is initialised and what content types are available.
-	snap := s.dm.Status()
+	var snap drm.DRMSnapshot
+	if s.dm != nil { // nil when built without hybris_backend
+		snap = s.dm.Status()
+	}
 	cap := snap.Capabilities
 	writeJSON(w, http.StatusOK, map[string]any{
 		"lossless":   cap.ALAC,

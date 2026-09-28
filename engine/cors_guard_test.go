@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestCORSGuard(t *testing.T) {
@@ -104,5 +105,30 @@ func TestLyricsParamsValidation(t *testing.T) {
 		if w.Code != c.want {
 			t.Errorf("type %q: code %d, want %d", c.typ, w.Code, c.want)
 		}
+	}
+}
+
+func TestCircuitBreakerStates(t *testing.T) {
+	cb := newCircuitBreaker(2, 20*time.Millisecond)
+	cb.RecordFailure()
+	if cb.State() != "closed" || !cb.Allow() {
+		t.Fatal("one failure should not trip")
+	}
+	cb.RecordFailure()
+	if cb.State() != "open" || cb.Allow() {
+		t.Fatal("threshold should open the breaker")
+	}
+	time.Sleep(30 * time.Millisecond)
+	if cb.State() != "half-open" || !cb.Allow() {
+		t.Fatalf("after cooldown: state=%s", cb.State())
+	}
+	cb.RecordFailure()
+	if cb.State() != "open" {
+		t.Fatal("a failed trial must re-open")
+	}
+	time.Sleep(30 * time.Millisecond)
+	cb.RecordSuccess()
+	if cb.State() != "closed" {
+		t.Fatal("success must close")
 	}
 }

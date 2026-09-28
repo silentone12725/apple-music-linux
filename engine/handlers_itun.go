@@ -84,6 +84,9 @@ func itunDecryptToFile(ctx context.Context, s *APIServer, cdnURL string, adamID 
 // their original offsets. itun CBC preserves sample sizes so the stbl/stco
 // remain valid after decryption.
 func itunDecryptInPlace(ctx context.Context, s *APIServer, f *os.File, adamID uint64) error {
+	if s.dm == nil {
+		return fmt.Errorf("itun decrypt: DRM backend not available")
+	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek: %w", err)
 	}
@@ -96,8 +99,11 @@ func itunDecryptInPlace(ctx context.Context, s *APIServer, f *os.File, adamID ui
 	}
 
 	for _, trak := range parsed.Moov.Traks {
+		if trak.Mdia == nil || trak.Mdia.Minf == nil {
+			continue
+		}
 		handler := ""
-		if trak.Mdia != nil && trak.Mdia.Hdlr != nil {
+		if trak.Mdia.Hdlr != nil {
 			handler = trak.Mdia.Hdlr.HandlerType
 		}
 		stbl := trak.Mdia.Minf.Stbl

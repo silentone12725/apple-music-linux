@@ -4640,10 +4640,9 @@
       _prewarmScheduleRetry(`pre-warm error: ${e?.message}`);
     }
   }
-  async function _fetchAudioAnalysis(adamId, sf, token) {
+  async function _fetchAudioAnalysis(adamId, sf) {
     try {
       const params = new URLSearchParams({ sf: sf || "us" });
-      if (token) params.set("token", token);
       const r = await fetch(`${ENGINE}/api/v1/audioanalysis/${encodeURIComponent(adamId)}?${params}`);
       if (!r.ok || r.status === 204) return;
       const data = await r.json();
@@ -5413,7 +5412,7 @@
       if (!mkAudio) throw new Error("MK audio element not found");
       bridgeDuration(mk, _durationSec);
       if (sess.codec === "aac") {
-        _fetchAudioAnalysis(adamId, sf, mk.developerToken ?? "").catch(() => {
+        _fetchAudioAnalysis(adamId, sf).catch(() => {
         });
         if (!_nextAacTried && !_nextAacSession) {
           _nextAacTried = true;

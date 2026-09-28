@@ -5137,10 +5137,11 @@ async function _prewarmNextAlac() {
 // _fetchAudioAnalysis fetches crossfade/loudness timing for adamId from the
 // engine audio-analysis endpoint and stores it in _audioAnalysis.
 // Called non-blocking after session open; does not throw.
-async function _fetchAudioAnalysis(adamId, sf, token) {
+async function _fetchAudioAnalysis(adamId, sf) {
     try {
+        // No token in the URL: the engine uses the bearer token cached when the
+        // playback session was opened.
         const params = new URLSearchParams({ sf: sf || 'us' });
-        if (token) params.set('token', token);
         const r = await fetch(`${ENGINE}/api/v1/audioanalysis/${encodeURIComponent(adamId)}?${params}`);
         if (!r.ok || r.status === 204) return; // 204 = no analysis available
         const data = await r.json();
@@ -5975,7 +5976,7 @@ async function handleTrackChange(mk) {
 
         if (sess.codec === 'aac') {
             // Fetch audio analysis for smarter crossfade/gapless timing (non-blocking).
-            _fetchAudioAnalysis(adamId, sf, mk.developerToken ?? '').catch(() => {});
+            _fetchAudioAnalysis(adamId, sf).catch(() => {});
 
             // Pre-warm the next track's AAC session in the background so _amlNext()
             // can skip the /api/v1/playback round-trip on gapless advance.

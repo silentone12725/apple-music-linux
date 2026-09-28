@@ -99,10 +99,9 @@ type PlaybackRequest struct {
 	AssetID    string `json:"assetId"`
 	Storefront string `json:"storefront"`
 	// Token and MUT are optional per-request overrides for the Apple Music API
-	// bearer JWT and media-user-token. When provided they take priority over
-	// Config.AuthorizationToken and Config.MediaUserToken. This lets browser
-	// renderers (e.g. electron-playback) supply the tokens they already have
-	// from MusicKit without requiring them to be hard-coded in config.yaml.
+	// bearer JWT and media-user-token. When provided they take priority over the
+	// engine's cached token and the DRM session's media-user-token, so the
+	// renderer can supply the tokens MusicKit already has.
 	Token        string `json:"token"`
 	MUT          string `json:"mediaUserToken"`
 	Capabilities struct {
@@ -411,13 +410,19 @@ func (cb *circuitBreaker) RecordFailure() {
 }
 
 // State returns "closed", "open", or "half-open" for status reporting.
+// Half-open: the cooldown elapsed but no success has reset the counter yet,
+// so the next request is a trial and one more failure re-opens the breaker.
 func (cb *circuitBreaker) State() string {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
-	if cb.openUntil.IsZero() || time.Now().After(cb.openUntil) {
+	switch {
+	case !cb.openUntil.IsZero() && time.Now().Before(cb.openUntil):
+		return "open"
+	case cb.failures >= cb.threshold:
+		return "half-open"
+	default:
 		return "closed"
 	}
-	return "open"
 }
 
 // APIServer is the long-running HTTP daemon started by --api <port>.
@@ -432,7 +437,7 @@ type APIServer struct {
 	epoch       *epochManager       // shared engine epoch; advanced by subsystems
 	lifecycle   *engineLifecycle    // single coordinator for epoch advancement
 	events      *eventBus
-	drmReady    bool   // true when drm binary was found at startup
+	drmReady    bool   // true when a DRM backend was constructed (hybris build + drm dir found)
 	eagerStart  bool   // launch the drm binary at Start() when a session exists
 	sessionDir  string // session/credential directory guarded by sessionLock
 	sessionLock *drm.SessionLock
@@ -485,10 +490,9 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// DRM subsystem constructed first: DRMManager is passed to the PlaybackManager
 	// as a fairplay.CBCSDialer so cbcs.go uses in-process decryption via HybrisBackend.
 	// BackendConfig carries what HybrisBackend needs (BaseDir, DeviceInfo).
-	// Resolve drm binary path: use config if set, otherwise auto-discover
-	// from drm/drm-rootless relative to the working directory.
-	// The binary lives inside the repo at a canonical location so no config
-	// entry is needed for the common case.
+	// Resolve the DRM directory marker: use config if set, otherwise auto-discover
+	// drm/drm-native relative to the working directory. Only its directory is
+	// used (HybrisBackend runs in-process; nothing is executed).
 	drmBinaryPath := cfg.DRMBinaryPath
 	if drmBinaryPath == "" {
 		// Prefer drm-native (host-native libhybris wrapper) when present;
@@ -503,12 +507,9 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		}
 	}
 
-	// Derive the drm session directory from the binary path when not
-	// explicitly configured. With OmitBaseDir=true no --base-dir flag is passed,
-	// so the drm binary uses its compiled-in default:
-	//   /data/data/com.apple.android.music/files  (inside the chroot)
-	// From the host that resolves to rootfs/data/data/com.apple.android.music/files
-	// relative to the binary's parent directory.
+	// Derive the DRM session directory from the marker path when not explicitly
+	// configured: rootfs/data/data/com.apple.android.music/files next to it,
+	// the Android app's files dir inside the rootfs layout.
 	drmBaseDir := cfg.DRMBaseDir
 	if drmBaseDir == "" && drmBinaryPath != "" {
 		drmBaseDir = filepath.Join(
@@ -518,10 +519,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	drmSession := drm.NewSessionManager(drmBaseDir)
 
-	// HybrisBackend (in-process CGO, libdrm-native.so) takes priority when the
-	// shared library is co-located with drm-native — both files are deployed by
-	// build-and-deploy.sh.  Fall back to the normal backend policy otherwise.
-	//
+	// HybrisBackend (in-process CGO, libdrm-native.so) is the only backend.
 	// NewHybrisBackend returns nil when the hybris_backend build tag is absent
 	// (i.e. the binary was built without CGO DRM support). Guard against nil to
 	// avoid a panic in NewDRMManager.
@@ -562,13 +560,13 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	s.sessionDir = drmBaseDir
 
 	// Eager-start decision (executed in Start(), after the session lock is held):
-	// if a session DB exists, launch the drm binary immediately so process/fairplay
+	// if a session DB exists, initialise DRM immediately so process/fairplay
 	// state is visible without waiting for the first playback request.
 	s.eagerStart = s.drmReady && drmSession.HasSession()
 
 	// PlaybackManager receives DRMManager as the CBCSDialer for ALAC/Atmos.
-	// DRMManager.DialCBCS auto-starts the drm binary if a session exists, then
-	// opens a TCP connection for the FairPlay wire protocol.
+	// DRMManager.DialCBCS auto-starts DRM if a session exists, then returns an
+	// in-process pipe speaking the FairPlay sample wire protocol.
 	// Pass nil interfaces explicitly when DRM is unavailable — a (*DRMManager)(nil)
 	// passed as a non-nil interface would panic on first method call.
 	var cbcsDialer fairplay.CBCSDialer
@@ -626,7 +624,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 
 		// Library metadata cache — songs + playlist membership for instant queue ops.
 		libCacheDir := filepath.Join(cacheBase, "apple-music-linux")
-		if err := os.MkdirAll(libCacheDir, 0o755); err == nil {
+		if err := os.MkdirAll(libCacheDir, 0o700); err == nil { // holds library.key
 			s.libStore = library.New(libCacheDir)
 			// Auto-sync removed: the Go-side API client cannot authenticate with
 			// Apple's API (GetToken is broken; Android DRM tokens don't pair with
