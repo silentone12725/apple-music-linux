@@ -143,6 +143,11 @@ func (ix *mvDecIndexer) feed(p []byte) {
 					return
 				}
 			}
+			if ix.remaining == 0 {
+				// Header-only box (e.g. an empty "free"): complete it now. Otherwise the
+				// full header stays buffered and the loop re-reads it forever.
+				ix.endBox()
+			}
 			continue
 		}
 
@@ -164,14 +169,18 @@ func (ix *mvDecIndexer) feed(p []byte) {
 		p = p[take:]
 
 		if ix.remaining == 0 {
-			ix.finishBox()
-			// Reset for the next header.
-			ix.hdr = ix.hdr[:0]
-			ix.hdrNeed = 8
-			ix.body = nil
-			ix.collect = false
+			ix.endBox()
 		}
 	}
+}
+
+// endBox finishes the current box and resets the parser for the next header.
+func (ix *mvDecIndexer) endBox() {
+	ix.finishBox()
+	ix.hdr = ix.hdr[:0]
+	ix.hdrNeed = 8
+	ix.body = nil
+	ix.collect = false
 }
 
 // startBox is called once a box header is fully read. Returns false if the

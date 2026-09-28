@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/grafov/m3u8"
+
+	"engine/internal/m3u8safe"
 )
 
 var (
@@ -393,7 +395,7 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 		return nil, err
 	}
 
-	from, listType, err := m3u8.DecodeFrom(bytes.NewReader(body), true)
+	from, listType, err := m3u8safe.DecodeFrom(bytes.NewReader(body), true)
 	if err != nil {
 		return nil, fmt.Errorf("m3u8 decode: %w", err)
 	}
@@ -531,7 +533,7 @@ func OpenMediaCBCS(ctx context.Context, rawURL string) (*CBCSMedia, error) {
 
 	filtered := filterStreamingKeyDelivery(string(body))
 
-	from, listType, err := m3u8.DecodeFrom(strings.NewReader(filtered), true)
+	from, listType, err := m3u8safe.DecodeFrom(strings.NewReader(filtered), true)
 	if err != nil {
 		return nil, fmt.Errorf("m3u8 decode: %w", err)
 	}
@@ -650,7 +652,7 @@ func OpenMasterAuth(ctx context.Context, rawURL, token, mut string) (*Master, er
 }
 
 func parseMaster(base *url.URL, rawURL string, body []byte) (*Master, error) {
-	from, listType, err := m3u8.DecodeFrom(bytes.NewReader(body), true)
+	from, listType, err := m3u8safe.DecodeFrom(bytes.NewReader(body), true)
 	if err != nil {
 		return nil, fmt.Errorf("m3u8 decode: %w", err)
 	}

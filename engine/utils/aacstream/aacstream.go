@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/grafov/m3u8"
+
+	"engine/internal/m3u8safe"
 )
 
 type PlaybackLicense struct {
@@ -182,7 +184,7 @@ func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
 		return "", "", "", err
 	}
 	masterString := string(body)
-	from, listType, err := m3u8.DecodeFrom(strings.NewReader(masterString), true)
+	from, listType, err := m3u8safe.DecodeFrom(strings.NewReader(masterString), true)
 	if err != nil {
 		return "", "", "", err
 	}
