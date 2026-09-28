@@ -1467,7 +1467,20 @@ ipcMain.on('view:bg-blur',   (_, b) => {
         `document.documentElement.style.setProperty('--aml-bg-blur','${parseInt(b)}px')`
     ).catch(() => {});
 });
-ipcMain.on('view:tweak',      (_, k, v) => applyTweak(k, v));
+// view:tweak is the settings panel's generic pref writer, reachable from the
+// Apple Music page. Keys the main process owns (read from disk, drive theme or
+// window state) are set only through their dedicated handlers, never here.
+const _MAIN_OWNED_PREFS = new Set([
+    'customCssPath', 'themePalette', 'themePresets', 'themeMode', 'themeAppearance',
+    'themeNavBgAlpha', 'zoomFactor', 'glassBlur', 'glassOpacity', 'bgBlur',
+]);
+const _tweakKeyRe = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+function _validTweak(k, v) {
+    if (typeof k !== 'string' || !_tweakKeyRe.test(k) || _MAIN_OWNED_PREFS.has(k)) return false;
+    return v === null || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v)) ||
+        (typeof v === 'string' && v.length <= 1024);
+}
+ipcMain.on('view:tweak',      (_, k, v) => { if (_validTweak(k, v)) applyTweak(k, v); });
 ipcMain.on('view:nav-opacity', (_, v) => {
     const p = loadPrefs();
     p.themeNavBgAlpha = parseFloat(v);
