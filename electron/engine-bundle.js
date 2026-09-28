@@ -7391,7 +7391,58 @@
           }
           const startWithId = _normalizeStartId(desc);
           if (startWithId) {
-            if (desc?.startWith?.type === "music-videos" || desc?.url?.includes("/music-video/")) {
+            const swType = desc?.startWith?.type;
+            if (swType === "albums") {
+              if (_AML_DEBUG) console.log("[MK-DBG AAC] startWith type=albums, id=" + startWithId + " \u2192 fetching tracks");
+              if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
+              _externalPlayGateTimer = setTimeout(() => {
+                if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+                _aacCloseGate();
+              }, 2e4);
+              const mkInst = window.MusicKit?.getInstance?.();
+              const albumFetch = mkInst ? mkInst.api.music(`/v1/catalog/${mkInst.storefrontId}/albums/${encodeURIComponent(startWithId)}/tracks`, { limit: 100 }).then((res) => res?.data?.data || []).catch(() => []) : Promise.resolve([]);
+              return albumFetch.then((items) => {
+                const trackIds = items.map((item) => item?.id).filter((id) => id && /^\d{6,}$/.test(id));
+                if (trackIds.length > 0) {
+                  if (_AML_DEBUG) console.log("[MK-DBG AAC] album resolved: " + trackIds.length + " tracks");
+                  return _aacOwnedGoto(trackIds, trackIds[0], "albums/catalog");
+                }
+                if (_AML_DEBUG) console.log("[MK-DBG AAC] album fetch empty, passthrough");
+                const p2 = _aacMkApiSaved.setQueue.apply(mk, a);
+                if (p2?.then) p2.then(
+                  () => _AML_DEBUG && console.log("[MK-DBG AAC] album passthrough resolved"),
+                  (err) => {
+                    if (_AML_DEBUG) console.log("[MK-DBG AAC] album passthrough rejected:", err?.message || err);
+                    _aacCloseGate();
+                  }
+                );
+                return p2;
+              });
+            }
+            if (swType === "playlists") {
+              if (_AML_DEBUG) console.log("[MK-DBG AAC] startWith type=playlists, id=" + startWithId + " \u2192 resolving");
+              return _resolvePlaylistCatalogIds().then((catalogIds) => {
+                if (catalogIds.length > 1) {
+                  return _aacOwnedGoto(catalogIds, catalogIds[0], "playlists/startWith");
+                }
+                if (_AML_DEBUG) console.log("[MK-DBG AAC] playlist resolve empty, passthrough");
+                if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
+                _externalPlayGateTimer = setTimeout(() => {
+                  if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+                  _aacCloseGate();
+                }, 45e3);
+                const p2 = _aacMkApiSaved.setQueue.apply(mk, a);
+                if (p2?.then) p2.then(
+                  () => _AML_DEBUG && console.log("[MK-DBG AAC] playlists passthrough resolved"),
+                  (err) => {
+                    if (_AML_DEBUG) console.log("[MK-DBG AAC] playlists passthrough rejected:", err?.message || err);
+                    _aacCloseGate();
+                  }
+                );
+                return p2;
+              });
+            }
+            if (swType === "music-videos" || desc?.url?.includes("/music-video/")) {
               _itemTypes.set(startWithId, "music-videos");
             }
             return _aacOwnedGoto([startWithId], startWithId, "startWith");

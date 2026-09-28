@@ -117,7 +117,7 @@ sheet.replaceSync(`
     background: #1c1c1e;
   }
   body[data-aml-art-theme] #aml-bg-strip {
-    background: transparent;
+    background: var(--aml-art-page-bg, #1c1c1e);
   }
 
   /* ── Player bar clearance — pad scrollable page so content never hides under the 54px bar ── */

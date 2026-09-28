@@ -8232,12 +8232,59 @@ async function setup() {
                 // "i.XXXX") fall through to MK.
                 const startWithId = _normalizeStartId(desc);
                 if (startWithId) {
+                    // startWith.type === "albums" or "playlists" means the ID is a
+                    // container, not a playable item. Owning it would feed an album ID
+                    // to mk.setQueue({songs:[albumId]}) which silently fails and leaves
+                    // the player stuck — the user has to click multiple times before MK
+                    // retries and eventually succeeds. Pass through to MK for containers.
+                    const swType = desc?.startWith?.type;
+                    if (swType === 'albums') {
+                        if (_AML_DEBUG) console.log('[MK-DBG AAC] startWith type=albums, id=' + startWithId + ' → fetching tracks');
+                        if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
+                        _externalPlayGateTimer = setTimeout(() => { if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout)'); _aacCloseGate(); }, 20000);
+                        const mkInst = window.MusicKit?.getInstance?.();
+                        const albumFetch = mkInst
+                            ? mkInst.api.music(`/v1/catalog/${mkInst.storefrontId}/albums/${encodeURIComponent(startWithId)}/tracks`, { limit: 100 })
+                                .then(res => res?.data?.data || []).catch(() => [])
+                            : Promise.resolve([]);
+                        return albumFetch.then(items => {
+                            const trackIds = items.map(item => item?.id).filter(id => id && /^\d{6,}$/.test(id));
+                            if (trackIds.length > 0) {
+                                if (_AML_DEBUG) console.log('[MK-DBG AAC] album resolved: ' + trackIds.length + ' tracks');
+                                return _aacOwnedGoto(trackIds, trackIds[0], 'albums/catalog');
+                            }
+                            if (_AML_DEBUG) console.log('[MK-DBG AAC] album fetch empty, passthrough');
+                            const p = _aacMkApiSaved.setQueue.apply(mk, a);
+                            if (p?.then) p.then(
+                                () => _AML_DEBUG && console.log('[MK-DBG AAC] album passthrough resolved'),
+                                err => { if (_AML_DEBUG) console.log('[MK-DBG AAC] album passthrough rejected:', err?.message || err); _aacCloseGate(); }
+                            );
+                            return p;
+                        });
+                    }
+                    if (swType === 'playlists') {
+                        if (_AML_DEBUG) console.log('[MK-DBG AAC] startWith type=playlists, id=' + startWithId + ' → resolving');
+                        return _resolvePlaylistCatalogIds().then(catalogIds => {
+                            if (catalogIds.length > 1) {
+                                return _aacOwnedGoto(catalogIds, catalogIds[0], 'playlists/startWith');
+                            }
+                            if (_AML_DEBUG) console.log('[MK-DBG AAC] playlist resolve empty, passthrough');
+                            if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
+                            _externalPlayGateTimer = setTimeout(() => { if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout)'); _aacCloseGate(); }, 45000);
+                            const p = _aacMkApiSaved.setQueue.apply(mk, a);
+                            if (p?.then) p.then(
+                                () => _AML_DEBUG && console.log('[MK-DBG AAC] playlists passthrough resolved'),
+                                err => { if (_AML_DEBUG) console.log('[MK-DBG AAC] playlists passthrough rejected:', err?.message || err); _aacCloseGate(); }
+                            );
+                            return p;
+                        });
+                    }
                     // If the descriptor reveals this is a music video, register it so
                     // _isVideoId() returns true when _amlGoto runs — without this,
                     // play buttons on MV rows in search results produce catalogId=not-found
                     // and the ID never gets into _itemTypes, causing _amlGoto to treat
                     // the MV as a song and open the wrong session type.
-                    if (desc?.startWith?.type === 'music-videos' || desc?.url?.includes('/music-video/')) {
+                    if (swType === 'music-videos' || desc?.url?.includes('/music-video/')) {
                         _itemTypes.set(startWithId, 'music-videos');
                     }
                     // Single-item container. The NPIDF handler syncs MK's live queue into
