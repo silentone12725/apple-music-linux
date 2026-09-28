@@ -37,11 +37,10 @@ import (
 // cancellation still works before the 30s deadline.
 var webplaybackClient = &http.Client{Timeout: 30 * time.Second}
 
-
 // AssetFlavor identifies the DRM family and bitrate of a webplayback asset.
 // The naming convention is "<id>:<enc><bitrate>" where enc is:
 //   - ctrp = CTR/Widevine (data:;base64 key format — wrapper server compatible)
-//   - cbcp = CBCS/FairPlay (skd:// key format — requires runv2 TCP socket)
+//   - cbcp = CBCS/FairPlay (skd:// key format — decrypted via CBCSDialer)
 //   - ibhp = ?
 type AssetFlavor string
 
@@ -99,8 +98,8 @@ func NewProviderWithCBCS(dialer fairplay.CBCSDialer, acct AccountTokenSource) me
 
 type appleMusicProvider struct {
 	lp         fairplay.LicenseProvider
-	cbcsDialer fairplay.CBCSDialer  // nil = CBCS disabled
-	acct       AccountTokenSource   // nil = use web MusicKit tokens for subDownload
+	cbcsDialer fairplay.CBCSDialer // nil = CBCS disabled
+	acct       AccountTokenSource  // nil = use web MusicKit tokens for subDownload
 }
 
 func (p *appleMusicProvider) Open(ctx context.Context, req media.OpenRequest) (*media.Session, error) {
@@ -180,7 +179,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 
 	// Choose the track opener based on the DRM family.
 	// AAC uses the CTR/Widevine path (webplayback 28:ctrp256 asset).
-	// ALAC and Atmos use the CBCS/FairPlay path (catalog enhanced-HLS + TCP socket).
+	// ALAC and Atmos use the CBCS/FairPlay path (catalog enhanced-HLS + CBCSDialer).
 	var trackOpen func(context.Context) (*pipeline.Stream, error)
 	if codec == pipeline.CodecAAC {
 		trackOpen = makeSeekableTrackOpener(lp, assetID, token, mut, playlistURL, pipeline.KindAudio, codec)
@@ -424,8 +423,9 @@ func makeSeekableTrackOpenerWithAuth(
 
 // makeCBCSTrackOpener returns the Track.Open func for a FairPlay CBCS track
 // (ALAC or Atmos).  On call it parses the media playlist, builds a CBCSSource
-// that dials the wrapper's TCP socket, and returns a pipeline.Stream with no
-// additional stages — all decryption happens inside the Source.
+// that decrypts through the CBCSDialer (in-process DRM), and returns a
+// pipeline.Stream with no additional stages — all decryption happens inside
+// the Source.
 func (p *appleMusicProvider) makeCBCSTrackOpener(
 	assetID string,
 	playlistURL string,
@@ -472,6 +472,11 @@ func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, token
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// Without this, a 401 (expired token) or 5xx outage surfaced as "no song
+	// list", hiding the cause from users and from the open circuit breaker.
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("webplayback: HTTP %d", resp.StatusCode)
+	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap for API JSON
 }
 
@@ -526,9 +531,6 @@ func (p *appleMusicProvider) webplaybackAssetURL(ctx context.Context, adamID, to
 	return "", fmt.Errorf("webplayback response has no asset with flavor %q", flavor)
 }
 
-// ── subDownload API (Android lease endpoint) ──────────────────────────────────
-
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func traitSet(traits []string) map[string]bool {
@@ -556,82 +558,4 @@ func extractALACQuality(traits []string) (sampleRate, bitDepth int) {
 func fmtArtwork(template string, size int) string {
 	s := strconv.Itoa(size)
 	return strings.ReplaceAll(strings.ReplaceAll(template, "{w}", s), "{h}", s)
-}
-
-// ── Progressive MV asset selection ───────────────────────────────────────────
-
-// mvProgressiveAsset is one entry from the webplayback asset list for an MV.
-type mvProgressiveAsset struct {
-	URL         string
-	FileSize    int64
-	DownloadKey string // FairPlay CDN auth token; empty if not available
-}
-
-// selectBestProgressiveAsset picks the best CDN URL from a list of progressive
-// MV assets. Prefers mvod.itunes.apple.com; among equals takes the largest
-// FileSize. Falls back to the largest of any URL when no mvod entry exists.
-// Appends ?accessKey=<DownloadKey> when DownloadKey is set and the URL does not
-// already contain an accessKey parameter.
-// Returns ("", false) for an empty slice.
-func selectBestProgressiveAsset(assets []mvProgressiveAsset) (string, bool) {
-	if len(assets) == 0 {
-		return "", false
-	}
-	var best *mvProgressiveAsset
-	for i := range assets {
-		a := &assets[i]
-		if best == nil {
-			best = a
-			continue
-		}
-		bestMvod := strings.Contains(best.URL, "mvod.itunes.apple.com")
-		aMvod := strings.Contains(a.URL, "mvod.itunes.apple.com")
-		switch {
-		case aMvod && !bestMvod:
-			best = a
-		case bestMvod && !aMvod:
-			// keep best
-		default:
-			if a.FileSize > best.FileSize {
-				best = a
-			}
-		}
-	}
-	u := best.URL
-	if best.DownloadKey != "" && !strings.Contains(u, "accessKey=") {
-		if strings.Contains(u, "?") {
-			u += "&accessKey=" + best.DownloadKey
-		} else {
-			u += "?accessKey=" + best.DownloadKey
-		}
-	}
-	return u, true
-}
-
-// progressiveVideoSource is a pipeline.Source that streams a progressive MP4
-// directly from a CDN URL. Seeking is not supported (SourceFrom returns self
-// at t=0); the growing-file layer above handles in-range seeks.
-type progressiveVideoSource struct {
-	url string
-}
-
-func (s *progressiveVideoSource) Stream(ctx context.Context, w io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("progressive CDN returned HTTP %d", resp.StatusCode)
-	}
-	_, err = io.Copy(w, resp.Body)
-	return err
-}
-
-func (s *progressiveVideoSource) SourceFrom(_ float64) (pipeline.Source, float64) {
-	return s, 0
 }
