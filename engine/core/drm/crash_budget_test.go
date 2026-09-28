@@ -63,3 +63,16 @@ func TestLogoutReleasesRecoveryWaitersAndToleratesNilSink(t *testing.T) {
 		t.Fatal("Decrypt waiters stay parked after logout")
 	}
 }
+
+func TestChallengeKeepsReplySentRightAfterAnnouncement(t *testing.T) {
+	var a *AuthCoordinator
+	a = NewAuthCoordinator(func(DRMSnapshot) {
+		a.SubmitReply("123456") // browser answers as soon as it sees the prompt
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := a.Challenge(ctx, AuthChallenge{Type: ChallengeTwoFactor})
+	if err != nil || got != "123456" {
+		t.Fatalf("Challenge = %q, %v; the immediate reply was discarded", got, err)
+	}
+}
