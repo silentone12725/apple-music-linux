@@ -363,7 +363,7 @@ func parseMediaPlaylist(r io.ReadCloser) ([]*m3u8.MediaSegment, error) {
 // ReadInitSegment reads boxes from r until it finds a moov box.
 // Only ftyp and moov are added to the returned InitSegment; pssh and other
 // top-level boxes are consumed (advancing the reader) but discarded.
-// This mirrors runv3/stream.go:readInitSegment and handles Apple variants
+// This mirrors aacstream's init-segment reader and handles Apple variants
 // where pssh or other boxes appear before or between ftyp and moov.
 // The previous implementation read exactly 2 boxes and failed if box order
 // differed from the expected ftyp+moov sequence.

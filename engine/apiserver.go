@@ -8,7 +8,7 @@ package main
 //   - Calls the PlaybackManager
 //   - Writes HTTP responses
 //
-// No DRM material, no runv3, no HLS, no key bytes cross this file.
+// No DRM material, no HLS parsing, no key bytes cross this file.
 //
 // Route map:
 //   GET    /api/v1/status                → health check
