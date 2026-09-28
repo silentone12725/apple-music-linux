@@ -1,20 +1,5 @@
 package config
 
-// BackendPolicy selects the DRM backend and an optional automatic fallback used
-// when the preferred backend fails to start.
-//
-//	backend:
-//	  preferred: embedded   # embedded | process
-//	  fallback:  process    # process | embedded | "" (none)
-//
-// Default (unset): preferred=embedded, fallback=process — the engine prefers the
-// CGO EmbeddedBackend and transparently falls back to ProcessBackend if it can't
-// start. Set `preferred: process` to force the legacy drm-launcher backend.
-type BackendPolicy struct {
-	Preferred string `yaml:"preferred"`
-	Fallback  string `yaml:"fallback"`
-}
-
 type ConfigSet struct {
 	Storefront           string `yaml:"storefront"`
 	MediaUserToken       string `yaml:"media-user-token"`
@@ -47,15 +32,11 @@ type ConfigSet struct {
 	CleanChoice          string `yaml:"clean-choice"`
 	AppleMasterChoice    string `yaml:"apple-master-choice"`
 	MaxMemoryLimit       int    `yaml:"max-memory-limit"`
-	DecryptM3u8Port      string `yaml:"decrypt-m3u8-port"`
-	GetM3u8Port          string `yaml:"get-m3u8-port"`
-	GetMVPort            string `yaml:"get-mv-port"`
+	DecryptM3u8Port string `yaml:"decrypt-m3u8-port"`
 	// DRM binary (engine/drm package)
-	DRMBinaryPath              string        `yaml:"drm-binary-path"`      // path to drm-rootless binary
-	DRMBaseDir                 string        `yaml:"drm-base-dir"`         // mpl_db parent directory
-	UseEmbeddedBackend         bool          `yaml:"use-embedded-backend"` // DEPRECATED: use `backend.preferred`. true → prefer embedded.
-	Backend                    BackendPolicy `yaml:"backend"`              // preferred backend + automatic startup fallback
-	GetM3u8Mode                string        `yaml:"get-m3u8-mode"`
+	DRMBinaryPath string `yaml:"drm-binary-path"` // path to drm-rootless binary
+	DRMBaseDir    string `yaml:"drm-base-dir"`    // mpl_db parent directory
+	GetM3u8Mode   string `yaml:"get-m3u8-mode"`
 	GetM3u8FromDevice          bool          `yaml:"get-m3u8-from-device"`
 	AacType                    string        `yaml:"aac-type"`
 	AlacMax                    int           `yaml:"alac-max"`

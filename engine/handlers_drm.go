@@ -26,17 +26,9 @@ type backendStatus struct {
 }
 
 func (s *APIServer) handleDRMStatus(w http.ResponseWriter, r *http.Request) {
-	selected := s.backendName
-	reason := ""
-	if s.backendSel != nil {
-		if n := s.backendSel.ActiveName(); n != "" {
-			selected = n
-		}
-		reason = s.backendSel.FallbackReason()
-	}
 	resp := drmStatusResponse{
 		DRMSnapshot: s.dm.Status(),
-		Backend:     backendStatus{Selected: selected, FallbackReason: reason},
+		Backend:     backendStatus{Selected: s.backendName},
 	}
 	if since := s.lifecycle.DRMReadySince(); !since.IsZero() {
 		resp.ReadySinceMs = since.UnixMilli()

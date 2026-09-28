@@ -74,8 +74,6 @@ func main() {
 		Config.GetM3u8Mode = "hires"
 		Config.GetM3u8FromDevice = true
 		Config.DecryptM3u8Port = "127.0.0.1:10020"
-		Config.GetM3u8Port = "127.0.0.1:20020"
-		Config.GetMVPort = "127.0.0.1:40020"
 		Config.MVAudioType = "atmos"
 		Config.MVMax = 2160
 		Config.AlbumFolderFormat = "{AlbumName}"
@@ -93,15 +91,9 @@ func main() {
 	aacstream.WarmCache()
 	if api_port > 0 {
 		srv := NewAPIServer(api_port, ServerConfig{
-			DRMBinaryPath:      Config.DRMBinaryPath,
-			DRMBaseDir:         Config.DRMBaseDir,
-			BackendPreferred:   Config.Backend.Preferred,
-			BackendFallback:    Config.Backend.Fallback,
-			UseEmbeddedBackend: Config.UseEmbeddedBackend,
-			DecryptM3u8Port:    Config.DecryptM3u8Port,
-			GetM3u8Port:        Config.GetM3u8Port,
-			GetMVPort:          Config.GetMVPort,
-			ExportFloorKbps:    Config.ExportThrottleFloorKbps,
+			DRMBinaryPath:   Config.DRMBinaryPath,
+			DRMBaseDir:      Config.DRMBaseDir,
+			ExportFloorKbps: Config.ExportThrottleFloorKbps,
 		})
 		if err := srv.Start(); err != nil {
 			slog.Error("API server failed to start", "err", err)
