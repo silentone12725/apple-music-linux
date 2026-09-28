@@ -25,6 +25,12 @@ for lib in libdrm-native.so libhybris-core.so; do
         exit 1
     fi
 done
+# libdl.so is a host-built shim preloaded before the Android libs; without it
+# libstoreservicescore.so fails to dlopen and DRM is unavailable at runtime.
+if [ ! -f "$REPO/drm/rootfs/system/lib64/libdl.so" ]; then
+    echo "error: drm/rootfs/system/lib64/libdl.so missing — DRM would fail to load" >&2
+    exit 1
+fi
 
 # CGO splits CGO_LDFLAGS on spaces, and the repo path may contain one, so link
 # against the libraries through a spaceless temporary directory.

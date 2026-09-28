@@ -75,7 +75,6 @@ drm/hybris-linker/
 drm/rootfs/adi.pb
 drm/rootfs/drm-state
 drm/rootfs/mpl_db/
-drm/rootfs/system/lib64/libdl.so
 
 # ── DRM / Android container runtime state ─────────────────────────────────────
 # These files are written by the running DRM process and must not be committed.

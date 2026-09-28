@@ -56,7 +56,7 @@ fi
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -r "$ELECTRON/dist/linux-unpacked" "$UNPACKED"
-for f in engine libdrm-native.so libhybris-core.so hybris-linker rootfs/system/lib64; do
+for f in engine libdrm-native.so libhybris-core.so hybris-linker rootfs/system/lib64/libdl.so rootfs/system/lib64/libstoreservicescore.so; do
     [ -e "$UNPACKED/resources/$f" ] || { echo "Error: packaged resources/$f missing — DRM would not work"; exit 1; }
 done
 if [ -e "$UNPACKED/resources/rootfs/data" ]; then
