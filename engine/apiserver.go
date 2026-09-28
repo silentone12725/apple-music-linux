@@ -881,6 +881,9 @@ func corsPreflightHandler(next http.Handler) http.Handler {
 			return
 		}
 		setCORSHeaders(w, r)
+		// Responses carry catalog text (lyrics as XML/VTT, metadata) — never let
+		// a browser sniff them into an executable type.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

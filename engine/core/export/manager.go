@@ -64,7 +64,7 @@ type Options struct {
 type Manager struct {
 	mu       sync.RWMutex
 	jobs     map[string]*ExportJob
-	requests map[string]ExportRequest // original request per job, for Retry
+	requests map[string]ExportRequest // original request per job, for Retry — stored without credentials
 	queue    *pq.Queue[*workItem]
 	sink     EventSink
 	manager  *playback.Manager
@@ -144,9 +144,13 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 		cancel:     cancel,
 	}
 
+	// Keep credentials only in the queued work item: finished jobs can sit in
+	// the list indefinitely, and Retry is given fresh tokens anyway.
+	stored := req
+	stored.Token, stored.MUT = "", ""
 	m.mu.Lock()
 	m.jobs[job.ID] = job
-	m.requests[job.ID] = req
+	m.requests[job.ID] = stored
 	m.queue.Push(job.ID, &workItem{job: job, req: req, ctx: jobCtx}, req.Priority)
 	m.mu.Unlock()
 
@@ -154,11 +158,16 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	return job, nil
 }
 
-// Stop closes the export queue so the worker exits after its current item.
-// It does not wait, and it does not interrupt a job already running.
-// No new jobs should be enqueued after this call.
+// Stop closes the export queue and cancels every job, so a running export
+// stops downloading/transcoding during engine shutdown instead of racing it.
+// It does not wait for the worker. No new jobs should be enqueued afterwards.
 func (m *Manager) Stop() {
 	m.queue.Close()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, j := range m.jobs {
+		j.cancel()
+	}
 }
 
 // worker processes items one at a time, highest priority first.
@@ -271,10 +280,11 @@ func (m *Manager) Cancel(id string) bool {
 	return true
 }
 
-// Retry re-enqueues the original request for a failed or cancelled job.
+// Retry re-enqueues the original request for a failed or cancelled job with
+// the given current credentials (stored requests carry none).
 // Returns (newJob, true) on success, or (nil, false) if the job is unknown
 // or not in a retryable state (failed or cancelled).
-func (m *Manager) Retry(id string) (*ExportJob, bool) {
+func (m *Manager) Retry(id, token, mut string) (*ExportJob, bool) {
 	m.mu.RLock()
 	j, ok := m.jobs[id]
 	req, hasReq := m.requests[id]
@@ -290,6 +300,7 @@ func (m *Manager) Retry(id string) (*ExportJob, bool) {
 	if phase != PhaseFailed && phase != PhaseCancelled {
 		return nil, false
 	}
+	req.Token, req.MUT = token, mut
 	newJob, err := m.Enqueue(req)
 	if err != nil {
 		return nil, false
