@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -319,4 +320,20 @@ func runFFmpeg(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 		return fmt.Errorf("ffmpeg exited: %w", err)
 	}
 	return nil
+}
+
+// validToolPath reports whether p is empty (resolve from PATH) or names one of
+// the expected tools. Tool paths arrive in request bodies from the web page,
+// so they must not be able to point the exporter at an arbitrary executable.
+func validToolPath(p string, names ...string) bool {
+	if p == "" {
+		return true
+	}
+	base := filepath.Base(p)
+	for _, n := range names {
+		if base == n || strings.HasPrefix(base, n+"-") || strings.HasPrefix(base, n+".") {
+			return true
+		}
+	}
+	return false
 }

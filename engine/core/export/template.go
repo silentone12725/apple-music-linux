@@ -162,7 +162,13 @@ func sanitizePathComponent(s string) string {
 	)
 	s = forbidden.Replace(s)
 	// Strip leading/trailing whitespace per component.
-	return strings.TrimFunc(s, unicode.IsSpace)
+	s = strings.TrimFunc(s, unicode.IsSpace)
+	// A value of only dots ("." / "..") is a path element, not a name: after
+	// filepath.Clean it would walk out of the export directory.
+	if s != "" && strings.Trim(s, ".") == "" {
+		s = strings.ReplaceAll(s, ".", "．")
+	}
+	return s
 }
 
 // defaultOutputDir returns ~/Music/AML-Downloads, falling back through
