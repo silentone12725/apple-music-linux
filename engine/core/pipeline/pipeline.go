@@ -211,5 +211,9 @@ func runChain(ctx context.Context, src Source, stages []Stage, dst io.Writer) er
 			pw.Close()
 		}
 	}()
-	return stages[len(stages)-1].Process(ctx, pr, dst)
+	err := stages[len(stages)-1].Process(ctx, pr, dst)
+	// If the stage returned before draining its input (error, or it simply
+	// stopped reading), the upstream goroutine would block forever on the pipe.
+	pr.CloseWithError(io.ErrClosedPipe)
+	return err
 }

@@ -82,7 +82,8 @@ type DRMBackend interface {
 	DialCBCS(ctx context.Context) (net.Conn, error)
 
 	// Events returns a channel that emits DRMEvents as backend state changes.
-	// The channel is closed when the backend is stopped.
+	// It lives as long as the backend (it is not closed on Stop); sends are
+	// non-blocking, so events are dropped if the consumer falls behind.
 	Events() <-chan DRMEvent
 }
 
