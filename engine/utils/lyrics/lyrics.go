@@ -83,7 +83,7 @@ func getSongLyricsContext(ctx context.Context, songId string, storefront string,
 
 	obj := new(SongLyrics)
 	_ = json.Unmarshal(bodyBytes, &obj)
-	if obj.Data != nil && len(obj.Data) > 0 {
+	if len(obj.Data) > 0 {
 		if len(obj.Data[0].Attributes.Ttml) > 0 {
 			return obj.Data[0].Attributes.Ttml, nil
 		}

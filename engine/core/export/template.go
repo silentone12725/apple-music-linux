@@ -222,20 +222,6 @@ func overwritePath(path, policy string) (finalPath string, skip bool) {
 	}
 }
 
-// formatSize returns a human-readable byte size string.
-func formatSize(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for n := n / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
 // formatDuration returns "H:MM:SS" or "M:SS".
 func formatDuration(ms int) string {
 	d := time.Duration(ms) * time.Millisecond

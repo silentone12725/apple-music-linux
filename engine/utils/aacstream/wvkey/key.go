@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 
 	"github.com/go-resty/resty/v2"
@@ -68,6 +69,9 @@ func (w *Key) GetKey(ctx context.Context, licenseServerURL string, PSSH string, 
 	}
 
 	keys, err := cdm.GetLicenseKeys(licenseRequest, licenseResponse)
+	if err != nil {
+		return "", keybt, fmt.Errorf("parse license keys: %w", err)
+	}
 	command := ""
 
 	for _, key := range keys {

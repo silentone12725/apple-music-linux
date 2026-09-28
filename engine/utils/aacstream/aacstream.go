@@ -335,10 +335,6 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 			return v.([]byte), nil
 		}
 	}
-	ctx = context.WithValue(ctx, "pssh", kidBase64)
-	ctx = context.WithValue(ctx, "adamId", adamID)
-	ctx = context.WithValue(ctx, "uriPrefix", uriPrefix)
-
 	pssh, err := getPSSH("", kidBase64)
 	if err != nil {
 		return nil, fmt.Errorf("pssh: %w", err)

@@ -18,6 +18,7 @@ import (
 	"container/heap"
 	"context"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -246,18 +247,16 @@ type workItem struct {
 	enqueuedAt time.Time // for aging calculation
 }
 
-// effectiveScore adds an aging bonus so lower-priority items never starve.
-// Bonus: +0.01 per second waiting, capped at 0.5 (≈ 50 s to reach maximum).
-func (w *workItem) effectiveScore() float64 {
-	age := time.Since(w.enqueuedAt).Seconds()
-	return w.baseScore + math.Min(age*0.01, 0.5)
-}
+// maxQueueDepth bounds pending warm items. Workers yield to playback for up to
+// playbackYieldCap per item, so without a bound every context update (up to 25
+// items) would accumulate while the user listens.
+const maxQueueDepth = 512
 
 // workHeap implements heap.Interface for a max-heap ordered by baseScore.
 // baseScore is fixed at submission time; effectiveScore (aging) is not used
 // for heap ordering since dynamic scores would require O(n) re-heapify on pop.
-// With queue depth bounded at 512 and fast worker turnover, starvation is
-// negligible without aging.
+// With queue depth bounded at maxQueueDepth and fast worker turnover,
+// starvation is negligible without aging.
 type workHeap []*workItem
 
 func (h workHeap) Len() int           { return len(h) }
@@ -288,11 +287,27 @@ func newWorkQueue() *workQueue {
 	return wq
 }
 
-func (q *workQueue) push(item *workItem) {
+// push enqueues item. When the queue is full, the lowest-scored item — the new
+// one or a queued one — is evicted and returned so the caller can account for
+// it; otherwise push returns nil.
+func (q *workQueue) push(item *workItem) (evicted *workItem) {
 	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.h.Len() >= maxQueueDepth {
+		minI := 0
+		for i := range q.h {
+			if q.h[i].baseScore < q.h[minI].baseScore {
+				minI = i
+			}
+		}
+		if item.baseScore <= q.h[minI].baseScore {
+			return item
+		}
+		evicted = heap.Remove(&q.h, minI).(*workItem)
+	}
 	heap.Push(&q.h, item)
 	q.cond.Signal()
-	q.mu.Unlock()
+	return evicted
 }
 
 func (q *workQueue) pop() (*workItem, bool) {
@@ -305,13 +320,6 @@ func (q *workQueue) pop() (*workItem, bool) {
 		return nil, false // queue closed
 	}
 	return heap.Pop(&q.h).(*workItem), true
-}
-
-func (q *workQueue) close() {
-	q.mu.Lock()
-	q.done = true
-	q.cond.Broadcast()
-	q.mu.Unlock()
 }
 
 func (q *workQueue) depth() int {
@@ -482,7 +490,7 @@ func (s *Scheduler) Submit(payload ContextPayload) string {
 
 	now := time.Now()
 	for _, t := range tracks {
-		s.wq.push(&workItem{
+		evicted := s.wq.push(&workItem{
 			job:        job,
 			track:      t,
 			token:      tok,
@@ -492,6 +500,11 @@ func (s *Scheduler) Submit(payload ContextPayload) string {
 			baseScore:  scoreTrack(t),
 			enqueuedAt: now,
 		})
+		if evicted != nil {
+			evicted.job.skipCancelled()
+			s.totalCancelled.Add(1)
+			s.checkJobDone(evicted.job)
+		}
 	}
 	return job.ID
 }
@@ -966,6 +979,13 @@ func scoreTrack(t TrackItem) float64 {
 	return score
 }
 
+// Status codes must stand alone: error messages carry catalog IDs such as
+// 1440340123, which contain "401" as a substring.
+var (
+	authStatusRe     = regexp.MustCompile(`\b(401|403)\b`)
+	notFoundStatusRe = regexp.MustCompile(`\b404\b`)
+)
+
 // classifyError maps an error to a stable FailReason* constant.
 func classifyError(err error) string {
 	if err == nil {
@@ -974,9 +994,9 @@ func classifyError(err error) string {
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "unauthorized") || strings.Contains(msg, "forbidden") ||
-		strings.Contains(msg, "401") || strings.Contains(msg, "403"):
+		authStatusRe.MatchString(msg):
 		return FailReasonAuth
-	case strings.Contains(msg, "not found") || strings.Contains(msg, "404"):
+	case strings.Contains(msg, "not found") || notFoundStatusRe.MatchString(msg):
 		return FailReasonNotFound
 	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded"):
 		return FailReasonTimeout

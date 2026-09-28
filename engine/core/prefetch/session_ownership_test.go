@@ -2,6 +2,7 @@ package prefetch
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -71,5 +72,56 @@ func TestRewarmKeepsLosslessTier(t *testing.T) {
 	s.rewarm(preWarmedEntry{lossless: true, req: playback.OpenRequest{AssetID: "L", Lossless: true}})
 	if _, ok := s.TakePreWarmed("L", true); !ok {
 		t.Fatal("re-warmed lossless session was stored as AAC and rejected")
+	}
+}
+
+func TestQueueDepthBoundedAndJobsAccounted(t *testing.T) {
+	// No workers: nothing drains the queue, as when workers yield to playback.
+	s := &Scheduler{
+		pm: nil, token: func() string { return "" }, mut: func() string { return "" },
+		jobs: map[string]*WarmJob{}, dedup: map[string]bool{}, preWarmed: map[string]preWarmedEntry{},
+		wq: newWorkQueue(),
+	}
+	var p ContextPayload
+	p.Context.Reason = "album-open"
+	for i := range 25 {
+		p.Tracks = append(p.Tracks, TrackItem{AssetID: string(rune('a' + i)), Signals: TrackSignals{PlayCount: i}})
+	}
+	var ids []string
+	for range 40 { // 40 × 25 = 1000 items
+		ids = append(ids, s.Submit(p))
+	}
+	if d := s.wq.depth(); d != maxQueueDepth {
+		t.Fatalf("queue depth = %d, want %d", d, maxQueueDepth)
+	}
+	queued := map[*WarmJob]int{}
+	for _, it := range s.wq.h {
+		queued[it.job]++
+	}
+	for _, id := range ids {
+		s.mu.RLock()
+		j, live := s.jobs[id]
+		s.mu.RUnlock()
+		if !live {
+			continue // fully evicted jobs are done and pruned
+		}
+		snap := j.snapshot()
+		if snap.Cancelled+queued[j] != snap.Total {
+			t.Fatalf("job %s: cancelled %d + queued %d != total %d", id, snap.Cancelled, queued[j], snap.Total)
+		}
+	}
+}
+
+func TestClassifyErrorIgnoresDigitsInIDs(t *testing.T) {
+	for msg, want := range map[string]string{
+		"open 1440340123: connection reset by peer": FailReasonNetwork,
+		"webplayback 1440340123: HTTP 401":          FailReasonAuth,
+		"status 403 forbidden":                      FailReasonAuth,
+		"catalog 1404123: 404":                      FailReasonNotFound,
+		"asset 9403401: timeout":                    FailReasonTimeout,
+	} {
+		if got := classifyError(errors.New(msg)); got != want {
+			t.Errorf("classifyError(%q) = %s, want %s", msg, got, want)
+		}
 	}
 }

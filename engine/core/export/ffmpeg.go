@@ -66,25 +66,6 @@ func runVLCToFLAC(vlcPath, src, dst string) error {
 	return nil
 }
 
-// extractArtwork extracts the cover image from an .m4a (covr atom) to a
-// standalone image file.  Returns an error if the m4a has no video stream.
-func extractArtwork(ffmpegPath, m4aPath, outPath string) error {
-	if err := lookFFmpeg(ffmpegPath); err != nil {
-		return err
-	}
-	cmd := exec.Command(ffmpegPath,
-		"-i", m4aPath,
-		"-an", // no audio
-		"-vcodec", "copy",
-		"-y", outPath,
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("extract artwork: %w\n%s", err, out)
-	}
-	return nil
-}
-
 // tagFLAC encodes src (WAV or raw FLAC from VLC) to FLAC with ffmpeg, embeds
 // metadata tags, and optionally embeds a cover image from artPath.
 // Re-encoding (not -c copy) is required because the source may be WAV PCM and
