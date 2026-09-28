@@ -21,3 +21,25 @@ func FuzzParseMaster(f *testing.F) {
 		_, _ = parseMaster(base, base.String(), body)
 	})
 }
+
+func TestURLsFromPastEndReportsLastSegmentsStart(t *testing.T) {
+	m := &Media{SegmentURLs: []string{"s0", "s1", "s2"}, SegmentDurations: []float64{10, 10, 10}}
+	urls, actual := m.URLsFrom(999)
+	// Clamped to the last segment (index 2), then stepped back one → index 1 at 10 s.
+	if len(urls) != 2 || urls[0] != "s1" || actual != 10 {
+		t.Fatalf("urls=%v actual=%.1f, want [s1 s2] at 10.0", urls, actual)
+	}
+}
+
+func TestSelectVideoVariantWithoutAverageBandwidth(t *testing.T) {
+	m := &Master{Variants: []Variant{
+		{URL: "low", Bandwidth: 1_000_000, Codecs: "avc1", Resolution: "640x360"},
+		{URL: "high", Bandwidth: 8_000_000, Codecs: "avc1", Resolution: "1920x1080"},
+		{URL: "mid", Bandwidth: 4_000_000, Codecs: "avc1", Resolution: "1280x720"},
+	}}
+	for range 20 {
+		if got, _ := m.SelectVideoVariant(1080); got != "high" {
+			t.Fatalf("picked %q, want the highest-bandwidth variant", got)
+		}
+	}
+}

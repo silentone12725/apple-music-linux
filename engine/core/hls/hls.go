@@ -1,6 +1,6 @@
 // Package hls parses HLS playlists into typed Go structs.
 // It performs no segment downloading, no key acquisition, and no decryption.
-// It is the only engine package that imports github.com/grafov/m3u8.
+// Playlist decoding goes through internal/m3u8safe (the library can panic).
 //
 // The name reflects what this is: an HLS container parser.  If DASH or CMAF
 // support is added later, they become engine/dash and engine/cmaf — peers, not
@@ -132,9 +132,15 @@ func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs,
 	re := dimRe
 	sorted := make([]Variant, len(m.Variants))
 	copy(sorted, m.Variants)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].AverageBandwidth > sorted[j].AverageBandwidth
-	})
+	// AVERAGE-BANDWIDTH is optional; without it every variant would tie at 0 and
+	// the (unstable) sort could pick any of them, so fall back to BANDWIDTH.
+	rate := func(v Variant) uint32 {
+		if v.AverageBandwidth > 0 {
+			return v.AverageBandwidth
+		}
+		return v.Bandwidth
+	}
+	sort.SliceStable(sorted, func(i, j int) bool { return rate(sorted[i]) > rate(sorted[j]) })
 	heightOf := func(v Variant) int {
 		if v.Resolution != "" {
 			var w, h int
@@ -294,7 +300,13 @@ func (m *Media) URLsFrom(startSec float64) (urls []string, actualStart float64) 
 		idx = i + 1
 	}
 	if idx >= len(m.SegmentURLs) {
+		// Target at/after the last segment: start from the last one, and keep
+		// cumulative equal to that segment's start (the step-back below relies on it).
 		idx = max(0, len(m.SegmentURLs)-1)
+		cumulative = 0
+		for _, d := range m.SegmentDurations[:min(idx, len(m.SegmentDurations))] {
+			cumulative += d
+		}
 	}
 	// Step back one segment so the TFDT offset (segment boundary vs. HLS timestamp
 	// discrepancy) does not push the first decoded frame past seekSec. One segment
@@ -483,8 +495,8 @@ func logMediaParsed(rawURL string, med *Media, pl *m3u8.MediaPlaylist) {
 }
 
 // byteRangeURL appends a "#bytes=<offset>-<end>" fragment to url when the
-// segment declares an EXT-X-BYTERANGE (Limit > 0). DownloadSegments in
-// utils/runv3 detects this fragment and issues a Range request instead of a
+// segment declares an EXT-X-BYTERANGE (Limit > 0). The segment downloader in
+// utils/aacstream detects this fragment and issues a Range request instead of a
 // full GET, so byte-range playlists (like Apple Music AAC) start at the
 // correct position instead of always downloading from byte 0.
 func byteRangeURL(rawURL string, offset, length int64) string {
