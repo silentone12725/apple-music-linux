@@ -325,10 +325,23 @@ func (m *DRMManager) Logout(ctx context.Context) error {
 		Recovery:       RecoveryUnknown,
 	}
 	m.snapshot.Capabilities = CapabilityState{}
+	// Recovery is now Unknown: release any Decrypt waiters parked on the gate
+	// (mergeAndEmit only does this on a recovery→idle transition).
+	openGate := m.recoveryGate
+	closed := make(chan struct{})
+	close(closed)
+	m.recoveryGate = closed
 	snap := m.snapshot
 	m.mu.Unlock()
 
-	m.sink(snap)
+	select {
+	case <-openGate:
+	default:
+		close(openGate)
+	}
+	if m.sink != nil {
+		m.sink(snap)
+	}
 	return nil
 }
 

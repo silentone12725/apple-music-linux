@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/itouakirai/mp4ff/mp4"
@@ -233,38 +231,4 @@ func downloadToTemp(ctx context.Context, url string) (*os.File, error) {
 		return nil, fmt.Errorf("seek: %w", err)
 	}
 	return tmp, nil
-}
-
-// patchMdatHeader writes a valid mdat box header at the given offset.
-func patchMdatHeader(f *os.File, offset int64, payloadSize uint64) error {
-	totalSize := payloadSize + 8
-	if totalSize > 0xFFFFFFFF {
-		// Extended 64-bit size.
-		var hdr [16]byte
-		binary.BigEndian.PutUint32(hdr[0:4], 1) // marker
-		copy(hdr[4:8], []byte("mdat"))
-		binary.BigEndian.PutUint64(hdr[8:16], payloadSize+16)
-		_, err := f.WriteAt(hdr[:], offset)
-		return err
-	}
-	var hdr [8]byte
-	binary.BigEndian.PutUint32(hdr[0:4], uint32(totalSize))
-	copy(hdr[4:8], []byte("mdat"))
-	_, err := f.WriteAt(hdr[:], offset)
-	return err
-}
-
-// itunIsReady checks if the itun offline decrypt path is available for an asset.
-func (s *APIServer) itunIsReady(assetID string) (adamID uint64, cdnURL string, ready bool) {
-	adam, err := strconv.ParseUint(assetID, 10, 64)
-	if err != nil {
-		return 0, "", false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	url, _, err := s.dm.GetProgressiveMVURL(ctx, adam)
-	if err != nil || url == "" {
-		return 0, "", false
-	}
-	return adam, url, true
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 )
 
@@ -40,12 +39,3 @@ func tagWarn(tag string) string  { return colorTag(_cYellow, tag) }
 func tagErr(tag string) string   { return colorTag(_cRed, tag) }
 func tagVideo(tag string) string { return colorTag(_cPink, tag) }
 func tagAudio(tag string) string { return colorTag(_cBlue, tag) }
-
-// cprintf prints a colored line to stdout (same destination as log.Printf).
-func cprintf(color, format string, args ...any) {
-	if ttyColors {
-		fmt.Printf(color+_cBold+format+_cReset+"\n", args...)
-	} else {
-		fmt.Printf(format+"\n", args...)
-	}
-}

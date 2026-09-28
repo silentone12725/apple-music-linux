@@ -323,6 +323,9 @@ func (b *HybrisBackend) DecryptItunSamples(_ context.Context, adamID uint64, sam
 		if rc != 0 {
 			return nil, fmt.Errorf("hybris: itun decrypt failed")
 		}
+		if int(outSize) > len(out) {
+			return nil, fmt.Errorf("hybris: itun decrypt reported %d bytes for a %d-byte sample", outSize, len(out))
+		}
 		result = append(result, out[:outSize])
 	}
 	return result, nil
