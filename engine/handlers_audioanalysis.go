@@ -38,20 +38,19 @@ type AudioAnalysisResponse struct {
 }
 
 // handleAudioAnalysis serves GET /api/v1/audioanalysis/{id}.
-// Query params: sf (storefront), token (optional bearer JWT).
+// Query params: sf (storefront), token (optional bearer JWT; the engine's
+// cached token is used when absent).
 // Returns cross-fade timing data from Apple Music's audio-analysis relationship.
 // A 204 is returned when Apple returns no analysis for the track (not an error).
 func (s *APIServer) handleAudioAnalysis(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "missing id", http.StatusBadRequest)
+	sf, id, ok := s.catalogParams(w, r)
+	if !ok {
 		return
 	}
-	sf := r.URL.Query().Get("sf")
-	if sf == "" {
-		sf = "us"
-	}
 	token := strings.TrimPrefix(r.URL.Query().Get("token"), "Bearer ")
+	if token == "" {
+		token = s.token()
+	}
 	if token == "" {
 		var err error
 		token, err = ampapi.GetToken()

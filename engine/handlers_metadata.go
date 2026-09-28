@@ -13,10 +13,9 @@ import (
 )
 
 func (s *APIServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sf := r.URL.Query().Get("sf")
-	if sf == "" {
-		sf = s.storefront()
+	sf, id, ok := s.catalogParams(w, r)
+	if !ok {
+		return
 	}
 	tok := s.token()
 
@@ -86,10 +85,9 @@ func (s *APIServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleArtwork(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	sf := r.URL.Query().Get("sf")
-	if sf == "" {
-		sf = s.storefront()
+	sf, id, ok := s.catalogParams(w, r)
+	if !ok {
+		return
 	}
 	size := 500
 	fmt.Sscanf(r.URL.Query().Get("size"), "%d", &size)

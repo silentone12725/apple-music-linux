@@ -38,8 +38,10 @@ func TestCircuitBreaker_ResetsAfterTimeout(t *testing.T) {
 		t.Fatal("expected open after failure")
 	}
 	time.Sleep(20 * time.Millisecond)
-	if cb.State() != "closed" {
-		t.Fatalf("expected closed after reset window, got %q", cb.State())
+	// Cooldown over but no success yet: requests are allowed as a trial and
+	// one more failure re-opens, i.e. half-open rather than closed.
+	if cb.State() != "half-open" {
+		t.Fatalf("expected half-open after reset window, got %q", cb.State())
 	}
 	if !cb.Allow() {
 		t.Fatal("Allow must return true after reset")
