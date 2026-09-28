@@ -246,6 +246,12 @@ func (c *SegmentCache) WarmFromDisk() {
 		c.entries = make(map[string]*list.Element)
 	}
 	for _, f := range files {
+		// WarmFromDisk runs concurrently with Put at startup; a key Put already
+		// indexed must not get a second list node (double-counted size, and
+		// eviction of the orphan would delete a live file).
+		if _, ok := c.entries[f.key]; ok {
+			continue
+		}
 		el := c.lru.PushFront(&cacheEntry{key: f.key, size: f.size, atime: f.atime})
 		c.entries[f.key] = el
 		c.totalSz += f.size

@@ -17,6 +17,8 @@ import (
 	"engine/utils/config"
 
 	"github.com/grafov/m3u8"
+
+	"engine/internal/m3u8safe"
 	"github.com/itouakirai/mp4ff/mp4"
 	"log/slog"
 )
@@ -79,7 +81,7 @@ func runAttempt(ctx context.Context, dial DialFunc, adamId string, playlistUrl s
 	header := make(http.Header)
 
 	// request media playlist
-	req, err := http.NewRequest("GET", playlistUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", playlistUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -94,10 +96,10 @@ func runAttempt(ctx context.Context, dial DialFunc, adamId string, playlistUrl s
 	if err != nil {
 		return err
 	}
-	segment := segments[0]
-	if segment == nil {
+	if len(segments) == 0 || segments[0] == nil {
 		return errors.New("no segments extracted from playlist")
 	}
+	segment := segments[0]
 	if segment.Limit <= 0 {
 		return errors.New("non-byterange playlists are currently unsupported")
 	}
@@ -114,7 +116,9 @@ func runAttempt(ctx context.Context, dial DialFunc, adamId string, playlistUrl s
 
 	// request mp4 with stall detection (30s idle timeout)
 	const stallTimeout = 30 * time.Second
-	ctx, cancel := context.WithCancelCause(context.Background())
+	// Derived from the caller's ctx so cancellation stops the transfer; the
+	// cause distinguishes a stall (ErrTimeout) from caller cancellation.
+	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	req, err = http.NewRequestWithContext(ctx, "GET", fileUrl.String(), nil)
 	if err != nil {
@@ -238,9 +242,7 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 	for i := 0; ; i++ {
 		var frag *mp4.Fragment
-		rawoffset := offset
 		frag, offset, err = ReadNextFragment(inBuf, offset)
-		rawoffset = offset - rawoffset
 		if err != nil {
 			return err
 		}
@@ -250,6 +252,9 @@ func downloadAndDecryptFile(conn io.ReadWriter, in io.Reader, outfile string,
 		}
 		// print progress
 
+		if i >= len(playlistSegments) {
+			return errors.New("more fragments than playlist segments")
+		}
 		segment := playlistSegments[i]
 		if segment == nil {
 			return errors.New("segment number out of sync")
@@ -341,7 +346,7 @@ func parseMediaPlaylist(r io.ReadCloser) ([]*m3u8.MediaSegment, error) {
 		return nil, err
 	}
 
-	playlist, listType, err := m3u8.Decode(*playlistBuf, true)
+	playlist, listType, err := m3u8safe.Decode(*playlistBuf, true)
 	if err != nil {
 		return nil, err
 	}
