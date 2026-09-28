@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/itouakirai/mp4ff/mp4"
 )
 
 func TestStableCacheKeyKeepsByteRange(t *testing.T) {
@@ -34,5 +36,25 @@ func TestFetchSegmentRejects200ForRange(t *testing.T) {
 	_, err := fetchSegment(context.Background(), srv.URL+"/seg.mp4#bytes=0-99")
 	if err == nil || !strings.Contains(err.Error(), "ignored Range") {
 		t.Fatalf("err = %v, want range-ignored error", err)
+	}
+}
+
+func TestNormalizeAudioFragKeepsDecodeTime(t *testing.T) {
+	frag := mp4.NewFragment()
+	moof := &mp4.MoofBox{}
+	traf := &mp4.TrafBox{}
+	tfhd := mp4.CreateTfhd(7)
+	traf.AddChild(tfhd)
+	tfdt := mp4.CreateTfdt(441000)
+	traf.AddChild(tfdt)
+	moof.AddChild(traf)
+	frag.AddChild(moof)
+
+	normalizeAudioFrag(frag)
+	if got := frag.Moof.Traf.Tfdt.BaseMediaDecodeTime(); got != 441000 {
+		t.Fatalf("tfdt moved to %d; seek streams need absolute decode times", got)
+	}
+	if frag.Moof.Traf.Tfhd.TrackID != 1 || frag.Moof.Traf.Tfdt.Version != 1 {
+		t.Fatalf("TrackID=%d version=%d, want 1/1", frag.Moof.Traf.Tfhd.TrackID, frag.Moof.Traf.Tfdt.Version)
 	}
 }

@@ -111,14 +111,11 @@ func patchFragTfdt(frag *mp4.Fragment, accumulatedTfdt, timescale uint64) uint64
 	return accumulatedTfdt
 }
 
-// shiftFragTfdt shifts an existing tfdt box by subtracting t0 (the first
-// fragment's original BaseMediaDecodeTime), so the stream starts at t=0 while
-// preserving the correct relative timing between all fragments. This is the
-// right approach for encrypted fMP4 streams (MV audio) that already carry
-// valid Apple-provided tfdt values — unlike the accumulated fragDurationTicks
-// approach, which breaks when trun per-sample durations are not standard AAC
-// frame size (e.g. MV audio FRAG#1–16 have per-sample dur=1 instead of ~33k).
-func shiftFragTfdt(frag *mp4.Fragment, t0 int64) {
+// normalizeAudioFrag rewrites the per-fragment fields that must be constant
+// for MSE (TrackID, SampleDescriptionIndex, tfdt version 1) WITHOUT moving the
+// decode time: a seek stream starting at segment N must keep its absolute
+// tfdts so the renderer's currentTime lands inside the buffered range.
+func normalizeAudioFrag(frag *mp4.Fragment) {
 	if frag.Moof == nil || frag.Moof.Traf == nil {
 		return
 	}
@@ -128,16 +125,10 @@ func shiftFragTfdt(frag *mp4.Fragment, t0 int64) {
 			frag.Moof.Traf.Tfhd.SampleDescriptionIndex = 1
 		}
 	}
-	if frag.Moof.Traf.Tfdt == nil {
-		return
+	if frag.Moof.Traf.Tfdt != nil {
+		frag.Moof.Traf.Tfdt.SetBaseMediaDecodeTime(frag.Moof.Traf.Tfdt.BaseMediaDecodeTime())
+		frag.Moof.Traf.Tfdt.Version = 1
 	}
-	orig := int64(frag.Moof.Traf.Tfdt.BaseMediaDecodeTime())
-	shifted := orig - t0
-	if shifted < 0 {
-		shifted = 0
-	}
-	frag.Moof.Traf.Tfdt.SetBaseMediaDecodeTime(uint64(shifted))
-	frag.Moof.Traf.Tfdt.Version = 1
 }
 
 // readInitSegment reads boxes from r until it finds a moov box, returning a
@@ -324,10 +315,10 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		return fmt.Errorf("write init: %w", err)
 	}
 
-	// Video streams carry valid ELST-aligned TFDTs (media_time=T0, first TFDT=T0).
-	// Shifting them to 0 breaks Chrome's ELST→decode-time mapping and causes
-	// CHUNK_DEMUXER_ERROR_APPEND_FAILED. Audio streams have ELST media_time=0
-	// and a pre-roll TFDT, so shifting to 0 is correct for audio.
+	// Video fragments pass through untouched (their ELST-aligned TFDTs must not
+	// change or Chrome reports CHUNK_DEMUXER_ERROR_APPEND_FAILED). Audio fragments
+	// get their IDs normalised; their absolute TFDTs are kept (see
+	// normalizeAudioFrag).
 	isVideoStream := false
 	if init.Moov != nil {
 		for _, trak := range init.Moov.Traks {
@@ -361,8 +352,10 @@ func DecryptMP4Streaming(ctx context.Context, r io.Reader, key []byte, w io.Writ
 		if amlDebug {
 			logInterceptFrag(fragNum, frag, &tfdtT0, &tfdtInitialized)
 		}
+		// Debug logging must never change output: tfdtT0 above is for the
+		// log's "shifted" column only.
 		if !isVideoStream {
-			shiftFragTfdt(frag, tfdtT0)
+			normalizeAudioFrag(frag)
 		}
 
 		decErr := mp4.DecryptFragment(frag, decryptInfo, key)
