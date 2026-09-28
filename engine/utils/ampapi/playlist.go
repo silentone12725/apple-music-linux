@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -58,23 +59,14 @@ func GetPlaylistRespContext(ctx context.Context, storefront string, id string, l
 		return nil, fmt.Errorf("empty playlist response")
 	}
 
-	// Follow pagination for large playlists.
-	next := obj.Data[0].Relationships.Tracks.Next
-	for next != "" {
-		do, err := fetch("https://amp-api.music.apple.com" + next)
+	// Follow pagination for large playlists. A failed later page keeps the
+	// tracks fetched so far (partial playlist rather than none).
+	if next := obj.Data[0].Relationships.Tracks.Next; next != "" {
+		more, err := fetchTrackPages(ctx, next, token, mut)
 		if err != nil {
-			break
+			log.Printf("[ampapi] playlist %s: pagination stopped: %v", id, err)
 		}
-		defer do.Body.Close()
-		if do.StatusCode != http.StatusOK {
-			break
-		}
-		page := new(TrackResp)
-		if err := json.NewDecoder(do.Body).Decode(page); err != nil {
-			break
-		}
-		obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, page.Data...)
-		next = page.Next
+		obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, more...)
 	}
 	return obj, nil
 }
@@ -202,40 +194,15 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 	if err != nil {
 		return nil, err
 	}
-	if len(obj.Data[0].Relationships.Tracks.Next) > 0 {
-		next := obj.Data[0].Relationships.Tracks.Next
-		for {
-			req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com%s", next), nil)
-			if err != nil {
-				return nil, err
-			}
-			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-			req.Header.Set("Origin", "https://music.apple.com")
-			query := req.URL.Query()
-			query.Set("omit[resource]", "autos")
-			query.Set("include", "artists")
-			query.Set("extend", "editorialVideo,extendedAssetUrls")
-			req.URL.RawQuery = query.Encode()
-			do, err := apiClient.Do(req)
-			if err != nil {
-				return nil, err
-			}
-			defer do.Body.Close()
-			if do.StatusCode != http.StatusOK {
-				return nil, errors.New(do.Status)
-			}
-			obj2 := new(TrackResp)
-			err = json.NewDecoder(do.Body).Decode(&obj2)
-			if err != nil {
-				return nil, err
-			}
-			obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, obj2.Data...)
-			next = obj2.Next
-			if len(next) == 0 {
-				break
-			}
+	if len(obj.Data) == 0 {
+		return nil, fmt.Errorf("playlist: empty response")
+	}
+	if next := obj.Data[0].Relationships.Tracks.Next; next != "" {
+		more, err := fetchTrackPages(context.Background(), next, token, "")
+		if err != nil {
+			return nil, err
 		}
+		obj.Data[0].Relationships.Tracks.Data = append(obj.Data[0].Relationships.Tracks.Data, more...)
 	}
 	return obj, nil
 }
