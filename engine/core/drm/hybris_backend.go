@@ -52,7 +52,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime/cgo"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,10 +69,18 @@ import (
 type HybrisBackend struct {
 	mu     sync.RWMutex
 	auth   AuthSource
-	drmDir string      // directory containing drm-native + libdrm-native.so
-	handle cgo.Handle  // CGO handle passed to C callbacks (non-Go-pointer)
-	state  atomic.Int32 // 0=stopped 1=running
+	cfg    BackendConfig // config of the last successful Start (reused by Authenticate)
+	drmDir string        // directory containing drm-native + libdrm-native.so
+	state  atomic.Int32  // 0=stopped 1=running
 	events chan DRMEvent
+
+	// startMu serialises Start/Stop: drm_lib_init must never run concurrently.
+	startMu sync.Mutex
+	// ud is C memory holding this backend's registry ID, passed to C as the
+	// callback userdata. Allocated once and never freed: C may still invoke a
+	// callback after shutdown, and a stale ID then resolves to nil.
+	ud unsafe.Pointer
+	id uint64
 
 	itunMu     sync.Mutex
 	itunAdamID uint64
@@ -105,6 +112,8 @@ func (b *HybrisBackend) emit(ev DRMEvent) {
 
 // Start initialises libdrm-native in-process. Blocks until RUNNING or error.
 func (b *HybrisBackend) Start(ctx context.Context, cfg BackendConfig) error {
+	b.startMu.Lock()
+	defer b.startMu.Unlock()
 	if b.Running() {
 		return nil
 	}
@@ -119,20 +128,9 @@ func (b *HybrisBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		os.Setenv("HYBRIS_ANDROID_LIB64", lib64)
 	}
 
-	b.mu.RLock()
-	auth := b.auth
-	b.mu.RUnlock()
-
-	// Create a CGO handle so we can pass an opaque integer (not a Go pointer)
-	// as callback userdata — CGO forbids passing Go pointers containing Go pointers.
-	h := cgo.NewHandle(b)
-	b.mu.Lock()
-	b.auth = auth
-	if b.handle != 0 {
-		b.handle.Delete()
-	}
-	b.handle = h
-	b.mu.Unlock()
+	// Callback userdata is C memory holding a registry ID — never a Go pointer
+	// (CGO rules) and never a uintptr cast to unsafe.Pointer (unsafe rules).
+	ud := hybrisRegister(b)
 
 	cBase := C.CString(cfg.BaseDir)
 	defer C.free(unsafe.Pointer(cBase))
@@ -155,8 +153,6 @@ func (b *HybrisBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		defer C.free(unsafe.Pointer(cDev))
 	}
 
-	// ud is a uintptr cast to void* — not a Go pointer, safe for CGO.
-	ud := unsafe.Pointer(uintptr(h))
 	libCfg := C.drm_lib_config_t{
 		base_dir:    cBase,
 		lib64_dir:   cLib64,
@@ -170,13 +166,13 @@ func (b *HybrisBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	}
 
 	if rc := C.drm_lib_init(&libCfg); rc != 0 {
-		b.mu.Lock()
-		b.handle.Delete()
-		b.handle = 0
-		b.mu.Unlock()
+		hybrisUnregister(b)
 		return fmt.Errorf("hybris: drm_lib_init failed")
 	}
 
+	b.mu.Lock()
+	b.cfg = cfg
+	b.mu.Unlock()
 	b.state.Store(1)
 	b.emit(DRMEvent{Snapshot: DRMSnapshot{
 		State:     DRMState{Process: ProcessRunning, FairPlay: FairPlayReady, Authentication: AuthLoggedIn, Recovery: RecoveryIdle},
@@ -185,25 +181,26 @@ func (b *HybrisBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	return nil
 }
 
-// Authenticate re-initialises (shutdown + init) for credential refresh.
+// Authenticate re-initialises (shutdown + init) for credential refresh,
+// reusing the last Start config (an empty one would lose BaseDir).
 func (b *HybrisBackend) Authenticate(ctx context.Context) error {
+	b.mu.RLock()
+	cfg := b.cfg
+	b.mu.RUnlock()
 	_ = b.Stop()
-	return b.Start(ctx, BackendConfig{})
+	return b.Start(ctx, cfg)
 }
 
 // Stop shuts down the library.
 func (b *HybrisBackend) Stop() error {
+	b.startMu.Lock()
+	defer b.startMu.Unlock()
 	if !b.Running() {
 		return nil
 	}
 	C.drm_lib_shutdown()
 	b.state.Store(0)
-	b.mu.Lock()
-	if b.handle != 0 {
-		b.handle.Delete()
-		b.handle = 0
-	}
-	b.mu.Unlock()
+	hybrisUnregister(b)
 	b.emit(DRMEvent{
 		Snapshot:    DRMSnapshot{State: DRMState{Process: ProcessStopped}, Timestamp: time.Now()},
 		Intentional: true,
@@ -313,6 +310,10 @@ func (b *HybrisBackend) DecryptItunSamples(_ context.Context, adamID uint64, sam
 
 	result := make([][]byte, 0, len(samples))
 	for _, s := range samples {
+		if len(s) == 0 {
+			result = append(result, nil) // &out[0] below would panic
+			continue
+		}
 		out := make([]byte, len(s))
 		copy(out, s)
 		var outSize C.uint32_t
@@ -415,14 +416,42 @@ func readFullConn(conn net.Conn, buf []byte) (int, error) {
 
 // ── CGO callback registry ─────────────────────────────────────────────────────
 
-// hybrisBackendFromUD recovers a *HybrisBackend from the opaque userdata pointer
-// passed to CGO callbacks. The ud value is a uintptr reinterpreted as unsafe.Pointer
-// (not a true Go pointer), encoding a cgo.Handle created in Start().
+// hybrisRegistry maps callback IDs to live backends. A callback whose ID was
+// unregistered (backend stopped) resolves to nil instead of panicking the way
+// cgo.Handle.Value does for a deleted handle.
+var hybrisRegistry = struct {
+	sync.RWMutex
+	m    map[uint64]*HybrisBackend
+	next uint64
+}{m: map[uint64]*HybrisBackend{}}
+
+// hybrisRegister (re)registers b and returns its callback userdata pointer.
+func hybrisRegister(b *HybrisBackend) unsafe.Pointer {
+	hybrisRegistry.Lock()
+	defer hybrisRegistry.Unlock()
+	if b.ud == nil {
+		hybrisRegistry.next++
+		b.id = hybrisRegistry.next
+		b.ud = C.malloc(C.size_t(unsafe.Sizeof(C.uint64_t(0))))
+		*(*C.uint64_t)(b.ud) = C.uint64_t(b.id)
+	}
+	hybrisRegistry.m[b.id] = b
+	return b.ud
+}
+
+func hybrisUnregister(b *HybrisBackend) {
+	hybrisRegistry.Lock()
+	delete(hybrisRegistry.m, b.id)
+	hybrisRegistry.Unlock()
+}
+
+// hybrisBackendFromUD resolves callback userdata to its live backend, or nil.
 func hybrisBackendFromUD(ud unsafe.Pointer) *HybrisBackend {
-	h := cgo.Handle(uintptr(ud))
-	v := h.Value()
-	if v == nil {
+	if ud == nil {
 		return nil
 	}
-	return v.(*HybrisBackend)
+	id := uint64(*(*C.uint64_t)(ud))
+	hybrisRegistry.RLock()
+	defer hybrisRegistry.RUnlock()
+	return hybrisRegistry.m[id]
 }
