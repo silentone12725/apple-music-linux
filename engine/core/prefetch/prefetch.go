@@ -464,14 +464,16 @@ func (s *Scheduler) Submit(payload ContextPayload) string {
 		cancel:     cancel,
 	}
 
-	s.mu.Lock()
-	s.jobs[job.ID] = job
-	s.mu.Unlock()
-
 	if len(tracks) == 0 {
+		// Nothing to warm: never registered, so it cannot leak in s.jobs
+		// (checkJobDone, which prunes jobs, only runs for processed items).
 		cancel()
 		return job.ID
 	}
+
+	s.mu.Lock()
+	s.jobs[job.ID] = job
+	s.mu.Unlock()
 
 	tok := s.token()
 	mut := s.mut()
@@ -562,6 +564,7 @@ func (s *Scheduler) rewarm(entry preWarmedEntry) {
 	req := entry.req
 	req.Token = s.token()
 	req.MUT = s.mut()
+	req.Private = true // see warm(): prefetch must own its sessions exclusively
 	sess, err := s.pm.Open(ctx, req)
 	if err != nil {
 		return
@@ -572,6 +575,7 @@ func (s *Scheduler) rewarm(entry preWarmedEntry) {
 		s.preWarmed[entry.req.AssetID] = preWarmedEntry{
 			sessionID: sess.ID,
 			expiresAt: time.Now().Add(preWarmTTL),
+			lossless:  entry.req.Lossless, // must match req, or TakePreWarmed mismatches forever
 			req:       entry.req,
 		}
 	} else {
@@ -743,12 +747,16 @@ func (s *Scheduler) warm(item *workItem) {
 		default:
 		}
 
+		// Private: a shared Open can return the very session playback is using;
+		// the scheduler later Releases pre-warmed sessions (expiry, quality
+		// mismatch, cache clear), which would delete it from under playback.
 		sess, err := s.pm.Open(item.ctx, playback.OpenRequest{
 			AssetID:    item.track.AssetID,
 			Storefront: sf,
 			Token:      item.token,
 			MUT:        item.mut,
 			Lossless:   item.lossless,
+			Private:    true,
 		})
 		if err != nil {
 			lastErr = err
@@ -771,6 +779,7 @@ func (s *Scheduler) warm(item *workItem) {
 		// so the real POST /api/v1/playback handler can reuse it immediately,
 		// skipping its own webplayback API round-trip.
 		s.mu.Lock()
+		prev, hadPrev := s.preWarmed[item.track.AssetID]
 		s.preWarmed[item.track.AssetID] = preWarmedEntry{
 			sessionID: sess.ID,
 			expiresAt: time.Now().Add(preWarmTTL),
@@ -782,6 +791,9 @@ func (s *Scheduler) warm(item *workItem) {
 			},
 		}
 		s.mu.Unlock()
+		if hadPrev && prev.sessionID != sess.ID {
+			s.pm.Release(prev.sessionID) // superseded: private, so nobody else holds it
+		}
 
 		// Guard against a cancellation that raced with the Open completion.
 		select {

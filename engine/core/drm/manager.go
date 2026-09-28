@@ -5,8 +5,14 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// crashResetWindow: a backend that stays up this long after a start is healthy,
+// so the next crash starts a fresh MaxCrashRestarts budget (the budget counts
+// consecutive crash-loops, not crashes over the process lifetime).
+const crashResetWindow = 2 * time.Minute
 
 // DefaultRestartPolicy is used when no policy is specified.
 var DefaultRestartPolicy = RestartPolicy{
@@ -76,7 +82,8 @@ type DRMManager struct {
 
 	// crash restart state
 	crashCount   int
-	restartMu    sync.Mutex // serialises concurrent handleCrash goroutines
+	restartMu    sync.Mutex   // serialises concurrent handleCrash goroutines
+	lastStart    atomic.Int64 // UnixNano of the last successful backend start
 	shutdownCtx  context.Context
 	shutdownStop context.CancelFunc
 
@@ -232,6 +239,7 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 			return err
 		}
 	}
+	m.lastStart.Store(time.Now().UnixNano())
 	// Session DB is present — reflect that immediately so the UI shows the
 	// correct state without waiting for a wrapper-emitted event.
 	m.mergeAndEmit(DRMSnapshot{
@@ -276,6 +284,7 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 		m.setManagerState(ManagerFailed)
 		return fmt.Errorf("authenticate: %w", authErr)
 	}
+	m.lastStart.Store(time.Now().UnixNano())
 	// If a session DB already exists the wrapper resumes it silently.
 	// Reflect that immediately so the UI shows the correct state.
 	if m.session.HasSession() {
@@ -394,6 +403,9 @@ func (m *DRMManager) handleCrash() {
 
 	// crashCount is safe to access here without m.mu: restartMu serialises all
 	// handleCrash goroutines, so only one can reach this point at a time.
+	if last := m.lastStart.Load(); last != 0 && time.Since(time.Unix(0, last)) > crashResetWindow {
+		m.crashCount = 0 // healthy run since the last start: not a crash loop
+	}
 	count := m.crashCount
 	m.crashCount++
 
@@ -431,7 +443,9 @@ func (m *DRMManager) handleCrash() {
 			State:   DRMState{Process: ProcessFailed},
 			Message: fmt.Sprintf("restart failed: %v", err),
 		})
+		return
 	}
+	m.lastStart.Store(time.Now().UnixNano())
 }
 
 func (m *DRMManager) updateCapabilities() {

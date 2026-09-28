@@ -16,6 +16,7 @@ package playback
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -66,14 +67,14 @@ type openFlight struct {
 // It is the single entry point for all transport adapters; none of them need
 // to know about the apple, fairplay, hls, or pipeline packages.
 type Manager struct {
-	provider   media.Provider
-	mu         sync.RWMutex
-	sessions   map[string]*Session
-	contexts   map[string]*playContext
+	provider       media.Provider
+	mu             sync.RWMutex
+	sessions       map[string]*Session
+	contexts       map[string]*playContext
 	assetIndex     map[string]string // openKey → sessionID; secondary index for resume reuse
 	sessionToAsset map[string]string // sessionID → openKey; reverse of assetIndex for O(1) Release
-	inflightMu sync.Mutex
-	inflight   map[string]*openFlight // key: assetID+storefront+capabilities
+	inflightMu     sync.Mutex
+	inflight       map[string]*openFlight // key: assetID+storefront+capabilities
 
 	// activeStreams counts every in-flight pipeline.Run, foreground and
 	// background alike (for metrics).
@@ -241,38 +242,45 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*Session, error) {
 	}
 	key := openKey(req)
 
-	// Reuse an existing valid session for this asset+capabilities combination.
-	// Mirrors Android SVFootHillSessionController.getExistingContextKey — avoids
-	// a full DRM round-trip when the user pauses and resumes the same track.
-	if sess := m.getByAssetKey(key); sess != nil {
-		return sess, nil
-	}
+	for {
+		// Reuse an existing valid session for this asset+capabilities combination.
+		// Mirrors Android SVFootHillSessionController.getExistingContextKey — avoids
+		// a full DRM round-trip when the user pauses and resumes the same track.
+		if sess := m.getByAssetKey(key); sess != nil {
+			return sess, nil
+		}
 
-	m.inflightMu.Lock()
-	if m.inflight == nil {
-		m.inflight = make(map[string]*openFlight)
-	}
-	if fl, ok := m.inflight[key]; ok {
-		// A concurrent call is already opening this asset — join it.
-		m.inflightMu.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-fl.done:
+		m.inflightMu.Lock()
+		if m.inflight == nil {
+			m.inflight = make(map[string]*openFlight)
+		}
+		if fl, ok := m.inflight[key]; ok {
+			// A concurrent call is already opening this asset — join it.
+			m.inflightMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-fl.done:
+			}
+			// The leader's own caller went away (e.g. a skipped track's request).
+			// That cancellation is not ours: retry, possibly as the new leader.
+			if errors.Is(fl.err, context.Canceled) && ctx.Err() == nil {
+				continue
+			}
 			return fl.sess, fl.err
 		}
-	}
-	fl := &openFlight{done: make(chan struct{})}
-	m.inflight[key] = fl
-	m.inflightMu.Unlock()
+		fl := &openFlight{done: make(chan struct{})}
+		m.inflight[key] = fl
+		m.inflightMu.Unlock()
 
-	// We are the leader: open the session, then signal all waiters.
-	fl.sess, fl.err = m.openDirect(ctx, req, key)
-	close(fl.done)
-	m.inflightMu.Lock()
-	delete(m.inflight, key)
-	m.inflightMu.Unlock()
-	return fl.sess, fl.err
+		// We are the leader: open the session, then signal all waiters.
+		fl.sess, fl.err = m.openDirect(ctx, req, key)
+		close(fl.done)
+		m.inflightMu.Lock()
+		delete(m.inflight, key)
+		m.inflightMu.Unlock()
+		return fl.sess, fl.err
+	}
 }
 
 func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey string) (*Session, error) {
@@ -473,17 +481,27 @@ func (m *Manager) GetMVProgressiveInfo(id string) (url, key string, ok bool) {
 	if !found {
 		return "", "", false
 	}
-	return pctx.mvProgressiveURL, pctx.mvDownloadKey, pctx.mvProgressiveURL != ""
+	// Read under m.mu: UpdateMVProgressiveInfo writes these fields under it.
+	m.mu.RLock()
+	url, key = pctx.mvProgressiveURL, pctx.mvDownloadKey
+	m.mu.RUnlock()
+	return url, key, url != ""
 }
 
 // MVProgressiveAge returns how long ago the progressive URL/key were fetched.
 // Returns (0, false) if the session doesn't exist or has no progressive info.
 func (m *Manager) MVProgressiveAge(id string) (time.Duration, bool) {
 	_, pctx, ok := m.lookup(id)
-	if !ok || pctx.mvProgressiveURL == "" {
+	if !ok {
 		return 0, false
 	}
-	return time.Since(pctx.mvFetchedAt), true
+	m.mu.RLock()
+	url, fetchedAt := pctx.mvProgressiveURL, pctx.mvFetchedAt
+	m.mu.RUnlock()
+	if url == "" {
+		return 0, false
+	}
+	return time.Since(fetchedAt), true
 }
 
 // UpdateMVProgressiveInfo replaces the stored progressive CDN URL and
@@ -502,14 +520,25 @@ func (m *Manager) UpdateMVProgressiveInfo(id, url, key string) {
 // Release deletes a session and its private context.
 func (m *Manager) Release(id string) {
 	m.mu.Lock()
-	// O(1) reverse-map lookup to remove from assetIndex without scanning all sessions.
+	m.deleteLocked(id)
+	m.mu.Unlock()
+}
+
+// deleteLocked removes a session and every index entry pointing at it. All
+// removal paths (Release, lookup expiry, reaper) go through here so the
+// secondary maps can never outlive their session. Caller holds m.mu.
+func (m *Manager) deleteLocked(id string) {
+	// O(1) reverse-map lookup to remove from assetIndex without scanning.
 	if assetKey, ok := m.sessionToAsset[id]; ok {
-		delete(m.assetIndex, assetKey)
+		// Only drop the index entry if it still points at this session: a newer
+		// session for the same key may have replaced it.
+		if m.assetIndex[assetKey] == id {
+			delete(m.assetIndex, assetKey)
+		}
 		delete(m.sessionToAsset, id)
 	}
 	delete(m.sessions, id)
 	delete(m.contexts, id)
-	m.mu.Unlock()
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
@@ -566,9 +595,8 @@ func (m *Manager) lookup(id string) (*Session, *playContext, bool) {
 		// Upgrade to write lock and re-check before deleting — the reaper may
 		// have already removed the entry between the RUnlock and here.
 		m.mu.Lock()
-		if _, still := m.contexts[id]; still {
-			delete(m.sessions, id)
-			delete(m.contexts, id)
+		if pctx, still := m.contexts[id]; still && time.Now().After(pctx.expiry) {
+			m.deleteLocked(id)
 		}
 		m.mu.Unlock()
 		return nil, nil, false
@@ -580,21 +608,18 @@ func (m *Manager) reap() {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for range t.C {
-		now := time.Now()
-		m.mu.Lock()
-		for id, pctx := range m.contexts {
-			if now.After(pctx.expiry) {
-				delete(m.sessions, id)
-				delete(m.contexts, id)
-			}
+		m.sweepExpired(time.Now())
+	}
+}
+
+// sweepExpired removes every session expired at now, with its index entries.
+func (m *Manager) sweepExpired(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, pctx := range m.contexts {
+		if now.After(pctx.expiry) {
+			m.deleteLocked(id)
 		}
-		// Sweep asset index: remove entries pointing to sessions that no longer exist.
-		for k, sessID := range m.assetIndex {
-			if _, ok := m.sessions[sessID]; !ok {
-				delete(m.assetIndex, k)
-			}
-		}
-		m.mu.Unlock()
 	}
 }
 
