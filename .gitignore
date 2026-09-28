@@ -66,6 +66,17 @@ go.work.sum
 # config.yaml.example IS committed; the live file with tokens is not
 engine/config.yaml
 
+# ── DRM native (hybris) build artifacts ──────────────────────────────────────
+# Built from /home/daksh/Git Projects/wrapper via build-native.sh; not source.
+drm/drm-native
+drm/libdrm-native.so
+drm/libhybris-core.so
+drm/hybris-linker/
+drm/rootfs/adi.pb
+drm/rootfs/drm-state
+drm/rootfs/mpl_db/
+drm/rootfs/system/lib64/libdl.so
+
 # ── DRM / Android container runtime state ─────────────────────────────────────
 # These files are written by the running DRM process and must not be committed.
 drm/rootfs/data/data/com.apple.android.music/files/MUSIC_TOKEN

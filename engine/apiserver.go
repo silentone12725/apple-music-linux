@@ -525,15 +525,34 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	drmSession := drm.NewSessionManager(drmBaseDir)
 
+	// HybrisBackend (in-process CGO, libdrm-native.so) takes priority when the
+	// shared library is co-located with drm-native — both files are deployed by
+	// build-and-deploy.sh.  Fall back to the normal backend policy otherwise.
+	hybrisSO := ""
+	if drmBinaryPath != "" {
+		candidate := filepath.Join(filepath.Dir(drmBinaryPath), "libdrm-native.so")
+		if _, err := os.Stat(candidate); err == nil {
+			hybrisSO = candidate
+		}
+	}
+	if hybrisSO != "" && cfg.BackendPreferred == "" {
+		cfg.BackendPreferred = "hybris"
+	}
+
 	// Backend selection follows the backend policy (preferred + optional
 	// fallback). Default: prefer EmbeddedBackend (CGO launcher, no external
 	// drm-rootless binary needed at runtime) with an automatic startup
 	// fallback to ProcessBackend if Embedded can't start on this system.
-	// The benchmark (CLAUDE.md) showed no significant performance difference,
-	// so the choice is by architecture, not speed. Fallback is startup-only —
-	// no runtime hot-swap (see docs/design/backend-supervisor.md).
-	preferred, fallbackName := drm.ResolveBackendPolicy(
-		drmBinaryPath != "", cfg.BackendPreferred, cfg.BackendFallback, cfg.UseEmbeddedBackend)
+	// "hybris" is handled specially — bypass ResolveBackendPolicy since it
+	// only knows about "embedded"/"process"/"auto".
+	var preferred, fallbackName string
+	if cfg.BackendPreferred == "hybris" {
+		preferred = "hybris"
+		fallbackName = "process"
+	} else {
+		preferred, fallbackName = drm.ResolveBackendPolicy(
+			drmBinaryPath != "", cfg.BackendPreferred, cfg.BackendFallback, cfg.UseEmbeddedBackend)
+	}
 	s.backendName = preferred
 	drmBackend := buildDRMBackend(preferred, drmBinaryPath, cfg.DecryptM3u8Port, cfg.GetM3u8Port, cfg.GetMVPort)
 	if fallbackName != "" && fallbackName != preferred {
@@ -879,7 +898,10 @@ func (s *APIServer) Stop() {
 // same transport addresses; EmbeddedBackend needs the drm directory, while
 // ProcessBackend execs the drm-rootless binary at drmBinaryPath.
 func buildDRMBackend(name, drmBinaryPath, decryptAddr, m3u8Addr, mvAddr string) drm.DRMBackend {
-	if name == "embedded" {
+	switch name {
+	case "hybris":
+		return drm.NewHybrisBackend(filepath.Dir(drmBinaryPath))
+	case "embedded":
 		return drm.NewEmbeddedBackend(drm.EmbedConfig{
 			WrapperDir:  filepath.Dir(drmBinaryPath),
 			OmitBaseDir: true,
@@ -887,15 +909,16 @@ func buildDRMBackend(name, drmBinaryPath, decryptAddr, m3u8Addr, mvAddr string) 
 			M3U8Addr:    m3u8Addr,
 			MVAddr:      mvAddr,
 		})
+	default:
+		return drm.NewProcessBackend(drm.ProcessConfig{
+			BinaryPath:  drmBinaryPath,
+			OmitBaseDir: true, // wrapper resolves BaseDir relative to its cwd; absolute path breaks anisette init
+			UseHybris:   filepath.Base(drmBinaryPath) == "drm-native",
+			DecryptAddr: decryptAddr,
+			M3U8Addr:    m3u8Addr,
+			MVAddr:      mvAddr,
+		})
 	}
-	return drm.NewProcessBackend(drm.ProcessConfig{
-		BinaryPath:  drmBinaryPath,
-		OmitBaseDir: true, // wrapper resolves BaseDir relative to its cwd; absolute path breaks anisette init
-		UseHybris:   filepath.Base(drmBinaryPath) == "drm-native",
-		DecryptAddr: decryptAddr,
-		M3U8Addr:    m3u8Addr,
-		MVAddr:      mvAddr,
-	})
 }
 
 func corsPreflightHandler(next http.Handler) http.Handler {

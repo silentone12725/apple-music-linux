@@ -235,8 +235,10 @@ function ensureEngineConfig() {
         drmBin  = userBin;
         drmBase = path.join(userRootfs, 'data', 'data', 'com.apple.android.music', 'files');
     } else {
-        // Dev: binary and rootfs already live together in drm/
-        drmBin  = path.join(__dirname, '..', 'drm', 'drm-rootless');
+        // Dev: prefer drm-native (in-process hybris) when present; fall back to drm-rootless.
+        const drmNative = path.join(__dirname, '..', 'drm', 'drm-native');
+        const drmRootless = path.join(__dirname, '..', 'drm', 'drm-rootless');
+        drmBin  = existsSync(drmNative) ? drmNative : drmRootless;
         drmBase = path.join(__dirname, '..', 'drm', 'rootfs', 'data', 'data', 'com.apple.android.music', 'files');
     }
 
