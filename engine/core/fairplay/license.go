@@ -7,9 +7,9 @@
 //     bytes; they enter fairplayDecryptor and never leave it.
 //
 //  2. HLSSource — builds a pipeline.Source that downloads HLS segments.
-//     This function lives here rather than in engine/hls because utils/runv3
-//     is the authorised segment downloader and this is the only engine package
-//     permitted to import it.
+//     This function lives here rather than in engine/hls because
+//     utils/aacstream is the authorised segment downloader and, outside main,
+//     this is the only engine package permitted to import it (see archtest).
 //
 // Trust boundary: key bytes enter the unexported fairplayDecryptor struct via
 // LicenseProvider.Open and are passed directly to aacstream.DecryptMP4Streaming.
@@ -18,6 +18,7 @@ package fairplay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -50,7 +51,7 @@ type LicenseProvider interface {
 	Open(ctx context.Context, req LicenseRequest) (pipeline.Decryptor, error)
 }
 
-// New returns the default LicenseProvider backed by utils/runv3.
+// New returns the default LicenseProvider backed by utils/aacstream.
 func New() LicenseProvider { return &fpLicenseProvider{} }
 
 type fpLicenseProvider struct{}
@@ -86,7 +87,7 @@ type fairplayDecryptor struct {
 
 func (d *fairplayDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Writer) error {
 	err := aacstream.DecryptMP4Streaming(ctx, r, d.key, w)
-	if err != nil && d.kid != "" {
+	if d.kid != "" && shouldEvictKey(ctx, err) {
 		// Evict the stale cached key so the next session Open re-negotiates.
 		// Matches Android FootHillDecryptionKey.fetchKeyData(forceRefresh=true)
 		// which bypasses the key cache after a decrypt failure.
@@ -95,17 +96,26 @@ func (d *fairplayDecryptor) Decrypt(ctx context.Context, r io.Reader, w io.Write
 	return err
 }
 
+// shouldEvictKey reports whether a decrypt failure may mean a stale key. A
+// cancelled request (user skipped) or a closed downstream pipe is not a key
+// problem; evicting on those would force a licence round-trip on every skip.
+func shouldEvictKey(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrClosedPipe)
+}
+
 // ── HLS segment source ────────────────────────────────────────────────────────
 
 // HLSSource returns a pipeline.Source that downloads and concatenates HLS
-// segments using the AIMD parallel downloader from utils/runv3.
+// segments using the parallel downloader from utils/aacstream.
 //
 // urls must be [initURL, seg0, seg1, …] as returned by hls.Media.AllURLs().
 //
-// HLSSource lives in this package rather than engine/hls because utils/runv3
-// is the only authorised segment downloader, and this is the only engine
-// package permitted to import it.  The function is otherwise a pure transport
-// concern with no DRM knowledge.
+// HLSSource lives in this package rather than engine/hls because
+// utils/aacstream may only be imported here (and by main). The function is
+// otherwise a pure transport concern with no DRM knowledge.
 func HLSSource(urls []string) pipeline.Source { return &hlsSource{urls: urls} }
 
 type hlsSource struct {
