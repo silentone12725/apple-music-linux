@@ -24,12 +24,11 @@ const sessionValidityTTL = 4 * time.Hour
 //
 // SessionManager does NOT own:
 //
-//	live authenticated state — that's ProcessBackend
+//	live authenticated state — that's HybrisBackend (drm_lib_init state)
 //	Apple credentials — that's AuthCoordinator
-//	2fa.txt — that's ProcessBackend (it writes; credentialHandler reads)
 //
 // Nothing outside this type reads or deletes the files it owns.
-// ProcessBackend writes drm-state; SessionManager provides the path.
+// HybrisBackend writes drm-state; SessionManager provides the path.
 //
 // Session validity is behavioral, not purely filesystem-based. A session is
 // considered Valid only when:

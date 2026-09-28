@@ -8,7 +8,7 @@ import (
 
 // AuthCoordinator implements AuthSource and bridges the engine's intent API
 // (Login, SubmitChallenge) with the backend's credential callbacks
-// (credentialHandler in main.c via ExternalBackend or EmbeddedBackend).
+// (hybrisBridgeAuth CGO callback in HybrisBackend).
 //
 // The coordination model:
 //

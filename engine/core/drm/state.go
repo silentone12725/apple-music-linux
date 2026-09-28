@@ -47,9 +47,9 @@ func (s ManagerState) MarshalJSON() ([]byte, error) { return json.Marshal(s.Stri
 
 // ─── ProcessState — backend process health ───────────────────────────────────
 
-// ProcessState describes the health of the backend process (ExternalBackend
-// subprocess or EmbeddedBackend CGO runtime). It is independent of whether
-// the DRMManager itself is configured.
+// ProcessState describes the health of the DRM backend runtime
+// (HybrisBackend CGO library). It is independent of whether the
+// DRMManager itself is configured.
 type ProcessState int
 
 const (
