@@ -154,9 +154,15 @@ func (c *Cache) BeginPut(assetID, qualifier string) (*PutWriter, error) {
 func (pw *PutWriter) Commit() error {
 	pw.File.Close()
 	pw.committed = true
-	pw.cache.inFlight.Delete(pw.key)
-	if err := os.Rename(pw.File.Name(), pw.finalPath); err != nil {
+	// Rename BEFORE releasing the in-flight marker: once it is gone, a new
+	// BeginPut/BeginStreamingPut may O_TRUNC the same .tmp path, which would
+	// truncate this file just before it becomes the committed entry.
+	err := os.Rename(pw.File.Name(), pw.finalPath)
+	if err != nil {
 		os.Remove(pw.File.Name())
+	}
+	pw.cache.inFlight.Delete(pw.key)
+	if err != nil {
 		return err
 	}
 	go pw.cache.Evict() // async so it doesn't block the streaming response
@@ -347,23 +353,23 @@ func (sw *StreamingPutWriter) decRef() {
 // Commit renames the temp file to its final path and signals all readers that
 // writing is done. Call exactly once after all Write calls succeed.
 func (sw *StreamingPutWriter) Commit() error {
+	// Rename BEFORE releasing the in-flight/streaming markers (see PutWriter.Commit).
+	// Readers keep working across the rename: they hold the open descriptor.
+	err := os.Rename(sw.file.Name(), sw.finalPath)
+	if err != nil {
+		os.Remove(sw.file.Name())
+	}
 	sw.cache.inFlight.Delete(sw.key)
 	sw.cache.streaming.Delete(sw.key)
-	if err := os.Rename(sw.file.Name(), sw.finalPath); err != nil {
-		os.Remove(sw.file.Name())
-		sw.mu.Lock()
-		sw.done = true
-		sw.writeErr = err
-		sw.mu.Unlock()
-		sw.cond.Broadcast()
-		sw.decRef()
-		return err
-	}
 	sw.mu.Lock()
 	sw.done = true
+	sw.writeErr = err
 	sw.mu.Unlock()
 	sw.cond.Broadcast()
 	sw.decRef()
+	if err != nil {
+		return err
+	}
 	go sw.cache.Evict()
 	return nil
 }
@@ -405,19 +411,39 @@ func (sw *StreamingPutWriter) NewReaderAt(offset int64) *StreamingReader {
 	return &StreamingReader{sw: sw, pos: offset}
 }
 
-// StreamingReader implements io.ReadCloser. It blocks in Read when it has
+// NewReaderIfActive is NewReader, but returns nil once the writer has
+// committed or discarded — the temp file may already be closed or renamed.
+func (sw *StreamingPutWriter) NewReaderIfActive() *StreamingReader {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	if sw.done {
+		return nil
+	}
+	sw.refs.Add(1)
+	return &StreamingReader{sw: sw}
+}
+
+// ErrReaderAborted is returned by Read after Abort.
+var ErrReaderAborted = errors.New("streaming reader aborted")
+
+// StreamingReader implements io.ReadSeeker. It blocks in Read when it has
 // consumed all bytes written so far and resumes when the writer adds more.
 // It returns io.EOF after the writer commits and all bytes have been read.
 // It returns an error if the writer calls Discard.
 type StreamingReader struct {
-	sw  *StreamingPutWriter
-	pos int64
+	sw      *StreamingPutWriter
+	pos     int64
+	aborted bool // guarded by sw.mu
 }
 
 func (sr *StreamingReader) Read(p []byte) (int, error) {
 	sr.sw.mu.Lock()
-	for sr.pos >= sr.sw.written && !sr.sw.done {
+	for sr.pos >= sr.sw.written && !sr.sw.done && !sr.aborted {
 		sr.sw.cond.Wait()
+	}
+	if sr.aborted {
+		sr.sw.mu.Unlock()
+		return 0, ErrReaderAborted
 	}
 	avail := sr.sw.written - sr.pos
 	done := sr.sw.done
@@ -442,6 +468,42 @@ func (sr *StreamingReader) Read(p []byte) (int, error) {
 		err = nil // writer may append more data
 	}
 	return n, err
+}
+
+// Seek repositions the reader. Seeking past the written length is allowed;
+// the next Read blocks until the writer reaches that offset.
+func (sr *StreamingReader) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+	case io.SeekCurrent:
+		offset += sr.pos
+	default:
+		return sr.pos, errors.New("diskcache: StreamingReader supports SeekStart/SeekCurrent only")
+	}
+	if offset < 0 {
+		return sr.pos, errors.New("diskcache: negative seek offset")
+	}
+	sr.pos = offset
+	return offset, nil
+}
+
+// Size returns the final length once the writer has committed, else -1.
+func (sr *StreamingReader) Size() int64 {
+	sr.sw.mu.Lock()
+	defer sr.sw.mu.Unlock()
+	if sr.sw.done && sr.sw.writeErr == nil {
+		return sr.sw.written
+	}
+	return -1
+}
+
+// Abort unblocks any pending Read; subsequent Reads return ErrReaderAborted.
+// Safe to call from another goroutine.
+func (sr *StreamingReader) Abort() {
+	sr.sw.mu.Lock()
+	sr.aborted = true
+	sr.sw.mu.Unlock()
+	sr.sw.cond.Broadcast()
 }
 
 // Close releases the reader's reference to the underlying file.

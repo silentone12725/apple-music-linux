@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+
+	"engine/core/vlc"
 )
 
 func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
@@ -25,13 +28,25 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sessionId required", http.StatusBadRequest)
 		return
 	}
-	// Always load via HTTP so VLC gets a byte-range-capable response (http.ServeContent).
-	// The audio endpoint downloads the full track to disk on first access and then
-	// serves it with Accept-Ranges support — enabling accurate SetTime seeks.
-	url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
-	log.Printf("[vlc] load url=%s startMs=%d", url, req.StartMs)
-
-	if err := s.vlcPlayer.Load(url); err != nil {
+	sess, ok := s.pm.GetSession(req.SessionID)
+	if !ok {
+		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
+	src, err := s.openVLCSource(req.SessionID, sess.AssetID, sess.Codec)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if src != nil {
+		log.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
+		err = s.vlcPlayer.LoadSource(src)
+	} else {
+		url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
+		log.Printf("[vlc] load url=%s startMs=%d (no disk cache)", url, req.StartMs)
+		err = s.vlcPlayer.Load(url)
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -125,3 +140,55 @@ func (s *APIServer) handleVLCVolume(w http.ResponseWriter, r *http.Request) {
 	s.vlcPlayer.SetVolume(req.Volume)
 	w.WriteHeader(http.StatusOK)
 }
+
+// openVLCSource returns a libvlc callback source for the session's audio:
+// the committed cache file, a reader on the in-progress download, or a
+// freshly started download. Returns (nil, nil) when no cache reader can be
+// had, in which case the caller falls back to the loopback HTTP endpoint.
+func (s *APIServer) openVLCSource(id, assetID, codec string) (vlc.Source, error) {
+	if s.diskCache == nil {
+		return nil, nil
+	}
+	// A download can commit between the checks below; retry once to pick up
+	// the committed file.
+	for range 2 {
+		if f, ok := s.diskCache.Get(assetID, codec); ok {
+			fi, err := f.Stat()
+			if err != nil {
+				f.Close()
+				return nil, err
+			}
+			return &fileSource{File: f, size: fi.Size()}, nil
+		}
+		if spw := s.diskCache.GetStreaming(assetID, codec); spw != nil {
+			if r := spw.NewReaderIfActive(); r != nil {
+				return r, nil
+			}
+			continue
+		}
+		spw, err := s.diskCache.BeginStreamingPut(assetID, codec)
+		if err != nil {
+			return nil, err
+		}
+		if spw != nil {
+			r := spw.NewReader()
+			s.startCacheDownload(id, spw)
+			return r, nil
+		}
+	}
+	// A non-streaming precache holds the key; the HTTP endpoint streams uncached.
+	return nil, nil
+}
+
+// fileSource adapts a committed cache file to vlc.Source. Reads never block,
+// so Abort is a no-op.
+type fileSource struct {
+	*os.File
+	size int64
+}
+
+func (f *fileSource) Size() int64 { return f.size }
+func (f *fileSource) Abort()      {}
+func (f *fileSource) Close()      { f.File.Close() }
+
+var _ vlc.Source = (*fileSource)(nil)

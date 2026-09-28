@@ -35,8 +35,10 @@ func TestImprovement03_StreamingCacheServesBeforeCommit(t *testing.T) {
 	defer reader.Close()
 
 	firstByte := make(chan struct{})
+	drained := make(chan struct{})
 	var out bytes.Buffer
 	go func() {
+		defer close(drained)
 		buf := make([]byte, 4)
 		n, _ := reader.Read(buf) // blocks until the writer produces bytes
 		if n > 0 {
@@ -65,7 +67,7 @@ func TestImprovement03_StreamingCacheServesBeforeCommit(t *testing.T) {
 	if err := spw.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond) // let the reader drain to EOF
+	<-drained // reader hit EOF; out is no longer being written
 
 	if got := out.String(); got != "HEADTAIL" {
 		t.Fatalf("VERDICT: BROKEN — streamed content %q != %q", got, "HEADTAIL")
