@@ -52,7 +52,7 @@ const (
 	FlavorCTR64  AssetFlavor = "32:ctrp64"  // 64 kbps AAC-LC
 
 	// CBCS/FairPlay flavors — EXT-X-KEY URI="skd://itunes.apple.com/…"
-	// These require the runv2 TCP socket path (Config.DecryptM3u8Port).
+	// Decryption is handled in-process via DRMManager.DialCBCS (HybrisBackend).
 	FlavorCBCS256 AssetFlavor = "30:cbcp256" // 256 kbps AAC-LC
 	FlavorCBCS64  AssetFlavor = "34:cbcp64"  // 64 kbps AAC-LC
 )
