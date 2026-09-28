@@ -31,11 +31,12 @@ func AcquireSessionLock(dir string) (*SessionLock, error) {
 	if dir == "" {
 		return nil, nil // no session dir → nothing to guard
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700: the session dir holds the Apple account DB and token files.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("session lock: mkdir %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, "engine-session.lock")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("session lock: open %s: %w", path, err)
 	}

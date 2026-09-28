@@ -66,7 +66,12 @@ func (s *APIServer) handleExportCancel(w http.ResponseWriter, r *http.Request) {
 
 func (s *APIServer) handleExportRetry(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	job, ok := s.em.Retry(id)
+	token, mut := s.token(), s.mediaUserToken()
+	if token == "" || mut == "" {
+		http.Error(w, "not authenticated — start playback first so the engine has current tokens", http.StatusUnauthorized)
+		return
+	}
+	job, ok := s.em.Retry(id, token, mut)
 	if !ok {
 		// Distinguish not-found from wrong-state.
 		if _, exists := s.em.Get(id); !exists {

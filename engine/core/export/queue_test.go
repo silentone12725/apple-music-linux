@@ -195,7 +195,7 @@ func TestQueue_RetryKeepsPriority(t *testing.T) {
 	h.next(t)
 	a := h.enqueue(t, "a", 4)
 	h.m.Cancel(a.ID)
-	nj, ok := h.m.Retry(a.ID)
+	nj, ok := h.m.Retry(a.ID, "tok", "mut")
 	if !ok {
 		t.Fatal("Retry failed")
 	}
@@ -204,5 +204,47 @@ func TestQueue_RetryKeepsPriority(t *testing.T) {
 	}
 	h.proceed <- struct{}{}
 	h.next(t)
+	h.proceed <- struct{}{}
+}
+
+func TestQueue_CredentialsNotRetainedAndRetryUsesFresh(t *testing.T) {
+	h := newQueueHarness(t)
+	j, err := h.m.Enqueue(ExportRequest{AssetID: "x", OutputDir: t.TempDir(), Token: "old-tok", MUT: "old-mut"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item := h.next(t); item.req.Token != "old-tok" {
+		t.Fatalf("running job lost its credentials: %q", item.req.Token)
+	}
+	h.m.mu.RLock()
+	stored := h.m.requests[j.ID]
+	h.m.mu.RUnlock()
+	if stored.Token != "" || stored.MUT != "" {
+		t.Fatal("credentials retained in the stored request")
+	}
+	h.m.Cancel(j.ID) // running → cancelled
+	h.proceed <- struct{}{}
+	h.m.mu.Lock()
+	h.m.jobs[j.ID].Phase = PhaseCancelled
+	h.m.mu.Unlock()
+	if _, ok := h.m.Retry(j.ID, "new-tok", "new-mut"); !ok {
+		t.Fatal("Retry failed")
+	}
+	if item := h.next(t); item.req.Token != "new-tok" || item.req.MUT != "new-mut" {
+		t.Fatalf("retry ran with %q/%q, want fresh credentials", item.req.Token, item.req.MUT)
+	}
+	h.proceed <- struct{}{}
+}
+
+func TestStopCancelsRunningJob(t *testing.T) {
+	h := newQueueHarness(t)
+	h.enqueue(t, "long", 0)
+	item := h.next(t)
+	h.m.Stop()
+	select {
+	case <-item.ctx.Done():
+	default:
+		t.Fatal("Stop left the running job's context live")
+	}
 	h.proceed <- struct{}{}
 }

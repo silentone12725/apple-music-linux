@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -120,6 +121,8 @@ func (s *APIServer) handleArtwork(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, imgResp.Body) //nolint:errcheck
 }
 
+var lyricTypeRe = regexp.MustCompile(`^[A-Za-z-]{1,32}$`)
+
 func (s *APIServer) handleLyrics(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	sf := r.URL.Query().Get("sf")
@@ -133,6 +136,13 @@ func (s *APIServer) handleLyrics(w http.ResponseWriter, r *http.Request) {
 	lrcType := r.URL.Query().Get("type")
 	if lrcType == "" {
 		lrcType = "lyrics"
+	}
+	// These become amp-api path segments on a request carrying the user's
+	// media-user-token, so only plain single segments pass (the renderer uses
+	// "lyrics" and "syllable-lyrics").
+	if !catalogIDRe.MatchString(id) || !catalogIDRe.MatchString(sf) || !lyricTypeRe.MatchString(lrcType) {
+		http.Error(w, "invalid id, storefront or type", http.StatusBadRequest)
+		return
 	}
 
 	tok := s.token()

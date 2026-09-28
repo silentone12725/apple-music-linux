@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -62,7 +63,8 @@ func GetContext(ctx context.Context, storefront, songId, lrcType, language, lrcF
 
 func getSongLyricsContext(ctx context.Context, songId string, storefront string, token string, userToken string, lrcType string, language string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET",
-		fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/songs/%s/%s?l=%s&extend=ttmlLocalizations", storefront, songId, lrcType, language), nil)
+		fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/songs/%s/%s?l=%s&extend=ttmlLocalizations",
+			url.PathEscape(storefront), url.PathEscape(songId), url.PathEscape(lrcType), url.QueryEscape(language)), nil)
 	if err != nil {
 		return "", err
 	}

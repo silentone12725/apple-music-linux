@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -67,6 +68,41 @@ func TestCatalogParamsValidation(t *testing.T) {
 		w := httptest.NewRecorder()
 		if _, _, ok := s.catalogParams(w, r); ok != c.ok {
 			t.Errorf("id=%q sf=%q ok=%v want %v", c.id, c.sf, ok, c.ok)
+		}
+	}
+}
+
+func TestResponsesAreNosniff(t *testing.T) {
+	h := corsPreflightHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	r := httptest.NewRequest("GET", "/api/v1/lyrics/1", nil)
+	r.Host = "127.0.0.1:20025"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+}
+
+func TestLyricsParamsValidation(t *testing.T) {
+	s := &APIServer{}
+	for _, c := range []struct {
+		typ  string
+		want int
+	}{
+		{"lyrics", 0}, {"syllable-lyrics", 0}, {"../../me/library", http.StatusBadRequest}, {"a/b", http.StatusBadRequest},
+	} {
+		r := httptest.NewRequest("GET", "/api/v1/lyrics/1440833098?sf=us&type="+url.QueryEscape(c.typ), nil)
+		r.SetPathValue("id", "1440833098")
+		w := httptest.NewRecorder()
+		if c.want == 0 {
+			if !lyricTypeRe.MatchString(c.typ) {
+				t.Errorf("type %q rejected", c.typ)
+			}
+			continue
+		}
+		s.handleLyrics(w, r)
+		if w.Code != c.want {
+			t.Errorf("type %q: code %d, want %d", c.typ, w.Code, c.want)
 		}
 	}
 }
