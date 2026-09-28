@@ -1,5 +1,13 @@
 package ampapi
 
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+)
+
 type TrackResp struct {
 	Href string          `json:"href"`
 	Next string          `json:"next"`
@@ -100,4 +108,55 @@ type TrackRespData struct {
 			} `json:"data"`
 		} `json:"albums"`
 	} `json:"relationships"`
+}
+
+// maxTrackPages bounds "next"-link pagination so a looping or runaway API
+// response cannot keep a request going forever.
+const maxTrackPages = 200
+
+// apiBase is the Apple Music API origin that "next" links are relative to.
+var apiBase = "https://amp-api.music.apple.com"
+
+// fetchTrackPages follows Apple's "next" links from next and returns the
+// tracks on every following page. mut is optional ("" to omit). Each response is closed before the next
+// request (a defer inside the loop kept every page open until return).
+func fetchTrackPages(ctx context.Context, next, token, mut string) ([]TrackRespData, error) {
+	var out []TrackRespData
+	for pages := 0; next != ""; pages++ {
+		if pages >= maxTrackPages {
+			return out, fmt.Errorf("track pagination exceeded %d pages", maxTrackPages)
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", apiBase+next, nil)
+		if err != nil {
+			return out, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		if mut != "" { // user-shared playlists need the listener's token on every page
+			req.Header.Set("Media-User-Token", mut)
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("Origin", "https://music.apple.com")
+		query := req.URL.Query()
+		query.Set("omit[resource]", "autos")
+		query.Set("include", "artists")
+		query.Set("extend", "editorialVideo,extendedAssetUrls")
+		req.URL.RawQuery = query.Encode()
+		resp, err := apiClient.Do(req)
+		if err != nil {
+			return out, err
+		}
+		page := new(TrackResp)
+		if resp.StatusCode != http.StatusOK {
+			err = errors.New(resp.Status)
+		} else {
+			err = json.NewDecoder(resp.Body).Decode(page)
+		}
+		resp.Body.Close()
+		if err != nil {
+			return out, err
+		}
+		out = append(out, page.Data...)
+		next = page.Next
+	}
+	return out, nil
 }
