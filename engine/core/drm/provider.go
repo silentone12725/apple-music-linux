@@ -2,26 +2,22 @@
 //
 // Architecture:
 //
-//	PlaybackManager → DRMProvider → DRMManager → DRMBackend → (ExternalBackend | EmbeddedBackend)
+//	PlaybackManager → DRMProvider → DRMManager → DRMBackend → HybrisBackend
 //
 // DRMProvider is the only interface playback code uses. It has no knowledge
-// of wrappers, processes, ports, or transports.
+// of transports or backend implementation details.
 //
-// DRMManager implements DRMProvider and owns the full DRM lifecycle: process
-// management, authentication orchestration, session management, and
-// restart policy.
+// DRMManager implements DRMProvider and owns the full DRM lifecycle:
+// authentication orchestration, session management, and restart policy.
 //
-// DRMBackend is the swappable transport layer. Phase 1 uses ExternalBackend
-// (subprocess + TCP); Phase 2 replaces it with EmbeddedBackend (CGO). The
-// interface above DRMBackend never changes between phases.
+// DRMBackend is the backend interface. HybrisBackend is the sole implementation:
+// it loads libdrm-native.so in-process via CGO (no subprocess, no TCP).
 package drm
 
 import "context"
 
 // DRMProvider is the interface playback code uses for DRM operations.
-// It carries no knowledge of transports, ports, or backend implementations.
-// cbcs.go calls Decrypt; neither the provider nor the caller knows or cares
-// whether decryption happens over TCP or a direct C function call.
+// It carries no knowledge of transports or backend implementations.
 type DRMProvider interface {
 	// Decrypt decrypts CBCS samples for the given adamID and key URI.
 	// If the DRM backend is not running but a valid session exists, the

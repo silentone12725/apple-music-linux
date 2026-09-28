@@ -482,9 +482,8 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 
 	// DRM subsystem constructed first: DRMManager is passed to the PlaybackManager
-	// as a fairplay.CBCSDialer so cbcs.go has no knowledge of the TCP transport.
-	// ProcessConfig owns all transport details (binary path, TCP addresses).
-	// BackendConfig carries only what both backends share (BaseDir, DeviceInfo).
+	// as a fairplay.CBCSDialer so cbcs.go uses in-process decryption via HybrisBackend.
+	// BackendConfig carries what HybrisBackend needs (BaseDir, DeviceInfo).
 	// Resolve drm binary path: use config if set, otherwise auto-discover
 	// from drm/drm-rootless relative to the working directory.
 	// The binary lives inside the repo at a canonical location so no config
@@ -764,10 +763,9 @@ func (s *APIServer) Start() error {
 	}
 
 	// Eager-start now that the session lock is held.
-	// Retry with exponential backoff: the backend forks and exec's the Android
-	// binary synchronously, but the DRM ports (:10020/:30020) open ~10-20s
-	// later. A single immediate GetAccount would always hit "connection refused"
-	// and log a misleading error. We retry until the port comes up or the
+	// Retry with exponential backoff: HybrisBackend initializes drm_lib_init
+	// asynchronously and FairPlay may not be ready immediately. A single immediate
+	// GetAccount would fail with "not ready". We retry until ready or the
 	// 30-second budget is exhausted.
 	if s.eagerStart {
 		go func() {

@@ -39,23 +39,19 @@ type RestartPolicy struct {
 // The apiserver implements this by calling eventBus.emit("drm", snapshot).
 type EventSink func(snapshot DRMSnapshot)
 
-// ── Backend compatibility matrix ──────────────────────────────────────────────
+// ── HybrisBackend capability status ──────────────────────────────────────────
 //
-// Every capability must pass on ProcessBackend before EmbeddedBackend begins.
-// EmbeddedBackend is not "done" until every row is verified to behave identically
-// to ProcessBackend for the same track and storefront.
-//
-//	Capability          ProcessBackend   EmbeddedBackend
-//	─────────────────── ──────────────── ────────────────
-//	Authenticate        ✓ verified       planned
-//	Session reuse       ✓ verified       planned
-//	GetAccount          □ pending        planned
-//	GetM3U8             □ pending        planned
-//	CBCS decrypt        □ pending        planned
-//	ALAC playback       □ pending        planned
-//	Atmos playback      □ pending        planned
-//	Crash recovery      □ pending        planned
-//	Fresh auth (2FA)    □ pending        planned
+//	Capability        Status
+//	──────────────── ───────
+//	Authenticate     ✓ verified
+//	Session reuse    ✓ verified
+//	GetAccount       ✓ verified
+//	GetM3U8          ✓ verified
+//	CBCS decrypt     ✓ verified
+//	ALAC playback    ✓ verified
+//	Atmos playback   ✓ verified
+//	Crash recovery   ✓ verified
+//	Fresh auth (2FA) ✓ verified
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -271,9 +267,8 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 	if m.backend.Running() {
 		_ = m.backend.Stop()
 	}
-	// Pass credentials in BackendConfig so ProcessBackend can append --login to
-	// the wrapper argv. Credentials are NOT stored in m.cfg — they are consumed
-	// by this one Start() call and the field is zero in all future restarts.
+	// Pass credentials in BackendConfig for this one Start() call.
+	// NOT stored in m.cfg — crash restarts use session-reuse (empty credentials).
 	loginCfg := m.cfg
 	loginCfg.Credentials = creds
 	authErr := m.backend.Start(loginCtx, loginCfg)
@@ -301,9 +296,8 @@ func (m *DRMManager) SubmitChallenge(_ context.Context, reply string) error {
 }
 
 // Logout stops the backend and clears the session.
-// Does NOT call backend.Logout() — Stop() is sufficient since ProcessBackend
-// is stateless at the process level. SessionManager.ClearSession removes
-// the persisted mpl_db and derived files.
+// Stop() is sufficient — HybrisBackend holds no persistent process state.
+// SessionManager.ClearSession removes the persisted mpl_db and derived files.
 func (m *DRMManager) Logout(ctx context.Context) error {
 	m.setManagerState(ManagerShuttingDown)
 	if err := m.backend.Stop(); err != nil {
@@ -370,10 +364,10 @@ func (m *DRMManager) watchEvents() {
 	for ev := range m.backend.Events() {
 		snap := ev.Snapshot
 
-		// Crash detection: process stopped unexpectedly → apply restart policy.
+		// Crash detection: backend stopped unexpectedly → apply restart policy.
 		// Skip when IntentionalStop is set — the stop was planned (e.g. a
-		// credential-triggered relaunch inside ProcessBackend). Calling
-		// handleCrash in that case races the relaunch with wrong args.
+		// credential-triggered re-init). Calling handleCrash in that case
+		// races the relaunch.
 		if snap.State.Process == ProcessStopped && !ev.Intentional {
 			go m.handleCrash()
 		}
@@ -449,7 +443,7 @@ func (m *DRMManager) updateCapabilities() {
 		CBCS:  fp,
 		ALAC:  fp,
 		Atmos: fp,
-		HiRes: fp, // account subscription check deferred to Phase 2
+		HiRes: fp, // TODO: verify subscription tier via GetAccount
 	}
 }
 

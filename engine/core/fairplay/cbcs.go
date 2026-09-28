@@ -179,9 +179,8 @@ func (dc *drmConn) close() {
 }
 
 // CBCSDialer is the minimal interface CBCSSource requires to open a
-// FairPlay decryption connection. DRMManager implements this for Phase 1
-// (subprocess backend, TCP socket). In Phase 2 (EmbeddedBackend), the same
-// interface is implemented via an in-process net.Conn backed by CGO calls.
+// FairPlay decryption connection. In production DRMManager implements this,
+// delegating to HybrisBackend.DialCBCS which returns an in-process net.Pipe().
 //
 // Defined here (not in engine/drm) so that engine/fairplay does not import
 // engine/drm, preserving the one-way dependency: drm → fairplay is forbidden.
@@ -193,11 +192,11 @@ type CBCSDialer interface {
 }
 
 // CBCSSource returns a pipeline.Source that downloads and decrypts a FairPlay
-// CBCS-encrypted Apple Music track using the wrapper's TCP socket protocol.
+// CBCS-encrypted Apple Music track.
 //
 // The entire encrypted fMP4 is downloaded as a single file (Apple Music CBCS
 // playlists are byterange playlists pointing at one file).  Each fragment is
-// sent through the TCP socket opened by dialer for in-place decryption.
+// sent through the connection opened by dialer for in-place decryption.
 //
 // Parameters:
 //   - adamID:     Apple Music track ID — sent to the socket for key lookup

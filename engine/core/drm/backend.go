@@ -5,14 +5,11 @@ import (
 	"net"
 )
 
-// DRMBackend is the swappable transport interface.
-// Phase 1: ProcessBackend (subprocess + TCP sockets, existing wrapper binary).
-// Phase 2: EmbeddedBackend (CGO, wrapper compiled into the engine binary).
-// The interface above DRMBackend is identical in both phases.
+// DRMBackend is the swappable transport interface. The sole implementation
+// is HybrisBackend, which loads libdrm-native.so in-process via CGO.
 //
 // Neither DRMManager nor any code above it knows which backend is active.
-// Transport details (ports, file paths, connection management) are
-// entirely internal to the backend implementation.
+// Transport details are entirely internal to the backend implementation.
 //
 // Lifecycle contract:
 //
@@ -55,14 +52,7 @@ type DRMBackend interface {
 
 	// Authenticate ensures an authenticated DRM context exists. This is an
 	// intent, not a mechanism: the backend decides how to satisfy it.
-	//
-	//   ProcessBackend: restarts the subprocess. The wrapper checks mpl_db on
-	//                   startup; valid session → runs immediately; no session →
-	//                   fires credentialHandler → Challenge(ChallengeCredentials).
-	//   EmbeddedBackend (Phase 2): calls wrapper_authenticate() in-place.
-	//   Future backends: may reuse an already-authenticated runtime or delegate
-	//                   to an OS keychain. The mechanism is opaque to callers.
-	//
+	// HybrisBackend calls drm_lib_shutdown + drm_lib_init for credential refresh.
 	// After Authenticate returns nil, the backend is ready to decrypt.
 	// DRMManager.Authenticate sets credentials via AuthCoordinator before calling
 	// this, so the backend can answer Challenge(ChallengeCredentials) immediately.
@@ -88,8 +78,7 @@ type DRMBackend interface {
 	DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error)
 
 	// DialCBCS opens one CBCS decryption connection (satisfies fairplay.CBCSDialer).
-	// Phase 1: returns a TCP connection to the wrapper's port 10020.
-	// Phase 2 (EmbeddedBackend): returns an in-process net.Conn backed by CGO.
+	// HybrisBackend returns an in-process net.Pipe() backed by hybrisCBCSServe.
 	DialCBCS(ctx context.Context) (net.Conn, error)
 
 	// Events returns a channel that emits DRMEvents as backend state changes.
@@ -98,9 +87,7 @@ type DRMBackend interface {
 }
 
 // BackendConfig carries the configuration the backend needs to start.
-// It is identical for all backend implementations (ProcessBackend, EmbeddedBackend).
-// Transport-specific details (executable path, TCP addresses, ports) are owned
-// by each backend implementation and never appear here.
+// Transport-specific details are owned by each backend and never appear here.
 type BackendConfig struct {
 	// BaseDir is the directory containing mpl_db/ and derived token files.
 	// Typically: /data/data/com.apple.android.music/files (inside chroot).
@@ -111,22 +98,19 @@ type BackendConfig struct {
 	DeviceInfo string
 
 	// Credentials is the single-use Apple ID for a fresh login. When set,
-	// ProcessBackend passes --login email:password to the wrapper so that
-	// storeservicescore performs a full authentication instead of resuming
-	// the existing mpl_db session.
+	// the backend passes them to drm_lib_init for a full auth; session-reuse
+	// restarts leave this empty — mpl_db was written by the initial login.
 	//
 	// DRMManager.Authenticate() sets this for the duration of one Start() call.
-	// It is never stored in b.cfg — crash restarts always use session-reuse
-	// (no --login) because mpl_db will have been written by the initial login.
+	// It is never stored in m.cfg — crash restarts always use session-reuse.
 	Credentials Credentials
 }
 
 // ─── Authentication challenge model ──────────────────────────────────────────
 
 // AuthSource is called by the backend when authentication input is needed.
-// ProcessBackend calls Challenge when the wrapper-state file transitions to
-// LOGIN or WAITING_2FA (detected via inotify). EmbeddedBackend calls Challenge
-// directly from the CGO callback registered with credentialHandler.
+// HybrisBackend calls Challenge directly from the CGO callback registered
+// with drm_lib_config_t.auth_cb (hybrisBridgeAuth).
 type AuthSource interface {
 	// Challenge is called when the backend needs input to proceed.
 	// It blocks until SubmitChallenge is called on the AuthCoordinator

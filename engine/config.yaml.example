@@ -22,19 +22,7 @@ atmos-stream-folder: AM-Stream-Atmos
 aac-stream-folder: AM-Stream-AAC
 stream-cache-size: 500  # MB, set to 0 for unlimited
 max-memory-limit: 256 # MB
-decrypt-m3u8-port: "127.0.0.1:10020"
-get-m3u8-port: "127.0.0.1:20020"
 get-m3u8-from-device: true
-
-# DRM backend policy. `auto` picks the best available backend (today: Embedded,
-# falling back to Process if Embedded can't start on this system). As new backends
-# appear (e.g. native DRM) auto's order evolves with no config change.
-# (Benchmarks show no significant performance difference; this is an architecture
-# choice, not speed.) Set `preferred: process` to force the legacy wrapper launcher.
-# Deprecated alias: use-embedded-backend: true|false.
-backend:
-  preferred: auto   # auto | embedded | process
-  fallback: process # process | embedded | "" (only used when preferred is explicit)
 
 # set to 'true' to exit on error instead of requiring manual intervention. (for using this program in scripts)
 exit-on-error: false
