@@ -186,10 +186,12 @@ func (s *SessionManager) ReadMusicToken() string {
 	return readFile(filepath.Join(s.baseDir, "MUSIC_TOKEN"))
 }
 
+// readFile returns the file's content without surrounding whitespace: these
+// values go into HTTP headers, where a trailing newline is invalid.
 func readFile(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	return string(b)
+	return strings.TrimSpace(string(b))
 }

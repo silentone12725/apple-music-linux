@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // AuthCoordinator implements AuthSource and bridges the engine's intent API
@@ -87,18 +88,19 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		return "\x00", nil
 	}
 
+	// Drain any stale reply BEFORE announcing the challenge: draining after
+	// would discard a reply the browser sends right after the announcement.
+	select {
+	case <-a.replies:
+	default:
+	}
+
 	// Emit challenge to SSE so the browser knows to prompt the user.
 	if a.emitter != nil {
 		a.emitter(DRMSnapshot{
 			State:     DRMState{Authentication: AuthChallenging},
 			Challenge: &req,
 		})
-	}
-
-	// Drain any stale reply that might be sitting in the channel.
-	select {
-	case <-a.replies:
-	default:
 	}
 
 	// Wait for the browser to call SubmitReply.
@@ -109,3 +111,7 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		return "", ctx.Err()
 	}
 }
+
+// authChallengeTimeout bounds how long the backend waits for a 2FA/device
+// approval reply from the browser.
+const authChallengeTimeout = 5 * time.Minute

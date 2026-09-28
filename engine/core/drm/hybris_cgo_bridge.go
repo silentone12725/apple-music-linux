@@ -41,7 +41,11 @@ func hybrisBridgeAuth(ctype *C.char, buf *C.char, size C.int, ud unsafe.Pointer)
 	default:
 		ct = ChallengeCredentials
 	}
-	reply, err := auth.Challenge(context.Background(), AuthChallenge{Type: ct})
+	// Bounded: this runs on the C auth thread inside drm_lib_init, which holds
+	// the start lock; an abandoned 2FA prompt must not block DRM forever.
+	ctx, cancel := context.WithTimeout(context.Background(), authChallengeTimeout)
+	defer cancel()
+	reply, err := auth.Challenge(ctx, AuthChallenge{Type: ct})
 	if err != nil || reply == "" {
 		return
 	}
