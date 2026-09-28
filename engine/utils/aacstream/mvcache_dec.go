@@ -222,11 +222,14 @@ func MVDecCacheWriter(assetID string, maxHeight int, dst io.Writer) *decCacheWri
 		return &decCacheWriter{dst: dst}
 	}
 
-	encWriter := &cipher.StreamWriter{S: stream, W: tmp}
+	cache := &softWriter{w: &cipher.StreamWriter{S: stream, W: tmp}}
 	return &decCacheWriter{
-		// plaintext → HTTP + encrypt → file. The indexer is fed separately in
-		// Write() with exactly the bytes that reached the cache.
-		dst:       io.MultiWriter(dst, encWriter),
+		// plaintext → HTTP + encrypt → file. The cache side is fail-soft: a
+		// cache write error (disk full) must never abort the playback stream.
+		// The indexer is fed separately in Write() with exactly the bytes that
+		// reached the client.
+		dst:       io.MultiWriter(dst, cache),
+		cache:     cache,
 		tmp:       tmp,
 		assetID:   assetID,
 		maxHeight: maxHeight,
@@ -236,6 +239,7 @@ func MVDecCacheWriter(assetID string, maxHeight int, dst io.Writer) *decCacheWri
 
 type decCacheWriter struct {
 	dst       io.Writer
+	cache     *softWriter // nil when not caching
 	tmp       *os.File
 	assetID   string
 	maxHeight int
@@ -255,6 +259,11 @@ func (w *decCacheWriter) Write(p []byte) (int, error) {
 // Commit finalises the cached encrypted file. Call after a successful stream.
 func (w *decCacheWriter) Commit() {
 	if w.tmp == nil {
+		return
+	}
+	if w.cache != nil && w.cache.err != nil {
+		log.Printf("[mv-dec] cache write failed (%v) — not caching %s", w.cache.err, w.assetID)
+		w.Abort()
 		return
 	}
 	size, _ := w.tmp.Seek(0, io.SeekCurrent)
@@ -315,4 +324,21 @@ func ClearMVDecCache() error {
 	// disk I/O proportional to how much was cached.
 	go os.RemoveAll(old)
 	return nil
+}
+
+// softWriter forwards writes until the first error, then records it and
+// swallows all further writes (reporting success), so an io.MultiWriter
+// pairing it with the client connection keeps serving the client.
+type softWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (s *softWriter) Write(p []byte) (int, error) {
+	if s.err == nil {
+		if _, err := s.w.Write(p); err != nil {
+			s.err = err
+		}
+	}
+	return len(p), nil
 }

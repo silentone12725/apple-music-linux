@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/itouakirai/mp4ff/mp4"
 )
@@ -68,8 +69,9 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 			break
 		}
 	}
-	if vtrak == nil || vtrak.Mdia.Mdhd == nil {
-		return errors.New("videoes: no video track")
+	if vtrak == nil || vtrak.Tkhd == nil || vtrak.Mdia.Mdhd == nil ||
+		vtrak.Mdia.Minf == nil || vtrak.Mdia.Minf.Stbl == nil {
+		return errors.New("videoes: no usable video track")
 	}
 	videoTrackID := vtrak.Tkhd.TrackID
 	timescale := uint64(vtrak.Mdia.Mdhd.Timescale)
@@ -167,7 +169,7 @@ func DemuxFMP4ToES(ctx context.Context, r io.Reader, w io.Writer) error {
 			samples, err := frag.GetFullSamples(trex)
 			pendingMoof = nil
 			if err != nil {
-				fmt.Printf("[video-es] skipping unreadable fragment: %v\n", err)
+				log.Printf("[video-es] skipping unreadable fragment: %v", err)
 				continue
 			}
 			for i := range samples {

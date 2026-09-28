@@ -1,7 +1,10 @@
 package aacstream
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -56,5 +59,29 @@ func TestNormalizeAudioFragKeepsDecodeTime(t *testing.T) {
 	}
 	if frag.Moof.Traf.Tfhd.TrackID != 1 || frag.Moof.Traf.Tfdt.Version != 1 {
 		t.Fatalf("TrackID=%d version=%d, want 1/1", frag.Moof.Traf.Tfhd.TrackID, frag.Moof.Traf.Tfdt.Version)
+	}
+}
+
+type failAfter struct{ n int }
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	if f.n <= 0 {
+		return 0, errors.New("disk full")
+	}
+	f.n--
+	return len(p), nil
+}
+
+func TestSoftWriterKeepsClientStreamAlive(t *testing.T) {
+	var client bytes.Buffer
+	cache := &softWriter{w: &failAfter{n: 1}}
+	mw := io.MultiWriter(&client, cache)
+	for i := 0; i < 3; i++ {
+		if _, err := mw.Write([]byte("chunk")); err != nil {
+			t.Fatalf("write %d failed: %v — a cache error aborted the client stream", i, err)
+		}
+	}
+	if client.String() != "chunkchunkchunk" || cache.err == nil {
+		t.Fatalf("client=%q cacheErr=%v", client.String(), cache.err)
 	}
 }
