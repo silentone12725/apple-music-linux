@@ -1,7 +1,6 @@
 package export
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -611,10 +610,9 @@ func (m *Manager) execute(item *workItem) {
 		return
 	}
 
-	// ppCtx detaches from the request context so post-processing (tag writing,
-	// artwork embedding) completes even if the client disconnects mid-export.
-	ppCtx := context.WithoutCancel(ctx)
-	go m.runPostProcess(ppCtx, req, job, meta, tmpPath, finalPath)
+	// ctx is the job's own context (not an HTTP request's), so post-processing
+	// already survives client disconnects; keeping it lets Cancel/Stop end it.
+	go m.runPostProcess(ctx, req, job, meta, tmpPath, finalPath)
 }
 
 // downloadToTemp opens a playback session, streams to a temp file, and returns
@@ -671,16 +669,24 @@ func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *Ex
 			return "", false
 		}
 	} else {
-		var buf bytes.Buffer
-		pw := m.bw.writer(ctx, &progressWriter{w: &buf, mu: &m.mu, job: job})
-		if err := m.manager.Stream(ctx, sess.ID, pipeline.KindAudio, pw); err != nil {
+		// Stream straight to the temp file: buffering in memory held a whole
+		// track (~250 MB for hi-res ALAC) per export.
+		f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
 			m.manager.Release(sess.ID)
-			m.fail(job, fmt.Errorf("stream: %w", err))
+			m.fail(job, fmt.Errorf("create temp: %w", err))
 			return "", false
 		}
+		pw := m.bw.writer(ctx, &progressWriter{w: f, mu: &m.mu, job: job})
+		streamErr := m.manager.Stream(ctx, sess.ID, pipeline.KindAudio, pw)
 		m.manager.Release(sess.ID)
-		if err := os.WriteFile(tmpPath, buf.Bytes(), 0o644); err != nil {
-			m.fail(job, fmt.Errorf("write temp: %w", err))
+		closeErr := f.Close()
+		if streamErr == nil {
+			streamErr = closeErr
+		}
+		if streamErr != nil {
+			os.Remove(tmpPath)
+			m.fail(job, fmt.Errorf("stream: %w", streamErr))
 			return "", false
 		}
 	}
@@ -757,7 +763,7 @@ func fetchMVLyrics(ctx context.Context, sf, assetID, lang, token, mut, tmpPath s
 				ffPath = "ffmpeg"
 			}
 			if serr := addSubtitleTrack(ffPath, tmpPath, srtTmp); serr != nil {
-				fmt.Printf("export %s: subtitle embed warning: %v\n", assetID, serr)
+				log.Printf("export %s: subtitle embed warning: %v", assetID, serr)
 			}
 			os.Remove(srtTmp)
 		}
@@ -813,7 +819,7 @@ func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *Ex
 			ArtworkSize:  req.Options.ArtworkSize,
 			Lyrics:       lrcStr,
 		}); err != nil {
-			fmt.Printf("export %s: tag warning: %v\n", req.AssetID, err)
+			log.Printf("export %s: tag warning: %v", req.AssetID, err)
 		}
 	}
 
@@ -833,6 +839,11 @@ func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *Ex
 	}
 
 	// ── Phase 9: Move temp → final ────────────────────────────────────
+	if ctx.Err() != nil { // cancelled during post-processing: leave nothing behind
+		os.Remove(tmpPath) //nolint:errcheck
+		m.fail(job, ctx.Err())
+		return
+	}
 	m.advance(job, PhaseMoving, 96)
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		if err2 := copyFile(tmpPath, finalPath); err2 != nil {
@@ -912,15 +923,15 @@ func convertFLAC(req ExportRequest, meta TrackMeta, tmpPath, finalPath string) (
 	if hasVLC {
 		rawFlac := flacTmp + ".raw.flac"
 		if err := runVLCToFLAC(vlcBin, tmpPath, rawFlac); err != nil {
-			fmt.Printf("export %s: vlc transcode failed: %v — trying ffmpeg\n", req.AssetID, err)
+			log.Printf("export %s: vlc transcode failed: %v — trying ffmpeg", req.AssetID, err)
 			os.Remove(rawFlac) //nolint:errcheck
 		} else {
 			artArg := downloadArtworkToTemp(req, meta, rawFlac)
 			if tagErr := tagFLAC(ffpathFlac, rawFlac, artArg, flacTmp, meta); tagErr != nil {
-				fmt.Printf("export %s: flac tag failed: %v — retrying without art\n", req.AssetID, tagErr)
+				log.Printf("export %s: flac tag failed: %v — retrying without art", req.AssetID, tagErr)
 				os.Remove(flacTmp) //nolint:errcheck
 				if tagErr2 := tagFLAC(ffpathFlac, rawFlac, "", flacTmp, meta); tagErr2 != nil {
-					fmt.Printf("export %s: flac tag failed (no art): %v — keeping raw\n", req.AssetID, tagErr2)
+					log.Printf("export %s: flac tag failed (no art): %v — keeping raw", req.AssetID, tagErr2)
 					if renErr := os.Rename(rawFlac, flacTmp); renErr != nil {
 						os.Remove(rawFlac) //nolint:errcheck
 					}
@@ -942,7 +953,7 @@ func convertFLAC(req ExportRequest, meta TrackMeta, tmpPath, finalPath string) (
 	}
 	if !converted {
 		if err := runFFmpeg(ffpathFlac, tmpPath, "", flacTmp, meta); err != nil {
-			fmt.Printf("export %s: flac conversion failed: %v — keeping .m4a\n", req.AssetID, err)
+			log.Printf("export %s: flac conversion failed: %v — keeping .m4a", req.AssetID, err)
 			finalPath = strings.TrimSuffix(finalPath, ".flac") + ".m4a"
 		} else {
 			if !req.Options.KeepOriginal {
