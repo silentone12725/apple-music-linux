@@ -1240,8 +1240,7 @@ function createWindow() {
     let bundleInjected = false;
 
     async function injectBundles() {
-        const url = win.webContents.getURL();
-        if (!url.includes('music.apple.com') || bundleInjected) return;
+        if (_httpsHost(win.webContents.getURL()) !== 'music.apple.com' || bundleInjected) return;
         bundleInjected = true;
         console.log('[AML] Injecting bundles into world 0');
 
@@ -1267,16 +1266,11 @@ function createWindow() {
     win.webContents.on('did-frame-finish-load', injectBundles);
 
     win.webContents.on('did-navigate', () => {
-        const url = win.webContents.getURL();
-        if (url.includes('music.apple.com')) bundleInjected = false;
+        if (_httpsHost(win.webContents.getURL()) === 'music.apple.com') bundleInjected = false;
     });
 
     win.webContents.setWindowOpenHandler(({ url }) => {
-        if (url.includes('appleid.apple.com') || url.includes('idmsa.apple.com')) {
-            win.loadURL(url);
-            return { action: 'deny' };
-        }
-        if (url.startsWith('https://music.apple.com')) {
+        if (_IN_WINDOW_HOSTS.has(_httpsHost(url))) {
             win.loadURL(url);
             return { action: 'deny' };
         }
@@ -1300,6 +1294,18 @@ function createWindow() {
     });
 
     win.on('closed', () => { win = null; });
+}
+
+// Hosts allowed to load inside the privileged main window (Apple Music + sign-in).
+const _IN_WINDOW_HOSTS = new Set(['music.apple.com', 'appleid.apple.com', 'idmsa.apple.com']);
+
+// Hostname of an https:// URL, or null. Origin decisions must compare parsed
+// hostnames: substring/prefix tests also accept music.apple.com.attacker.example.
+function _httpsHost(url) {
+    try {
+        const u = new URL(url);
+        return u.protocol === 'https:' ? u.hostname : null;
+    } catch { return null; }
 }
 
 // ── Dynamic view settings ─────────────────────────────────────────────────────

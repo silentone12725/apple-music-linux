@@ -106,6 +106,12 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	if req.AssetID == "" {
 		return nil, fmt.Errorf("assetId is required")
 	}
+	if !validToolPath(req.Options.FFmpegPath, "ffmpeg") {
+		return nil, fmt.Errorf("options.ffmpegPath must name an ffmpeg binary")
+	}
+	if !validToolPath(req.Options.VLCPath, "vlc", "cvlc") {
+		return nil, fmt.Errorf("options.vlcPath must name a vlc or cvlc binary")
+	}
 	if req.OutputDir == "" {
 		req.OutputDir = defaultOutputDir()
 	}
@@ -148,7 +154,8 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	return job, nil
 }
 
-// Stop drains the export queue and waits for the worker goroutine to exit.
+// Stop closes the export queue so the worker exits after its current item.
+// It does not wait, and it does not interrupt a job already running.
 // No new jobs should be enqueued after this call.
 func (m *Manager) Stop() {
 	m.queue.Close()

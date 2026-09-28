@@ -43,6 +43,7 @@ import (
 	"net"
 	"net/http"
 	httppprof "net/http/pprof"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -864,8 +865,21 @@ func (s *APIServer) Stop() {
 }
 
 
+// corsPreflightHandler is the outermost handler. The API is unauthenticated on
+// a fixed port, so it rejects any request a foreign web page could forge:
+// a non-loopback Host (DNS rebinding) or a browser Origin outside the
+// allowlist (cross-site "simple" POSTs skip CORS preflight entirely).
+// Media elements and the Electron main process send no Origin and pass.
 func corsPreflightHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.Host) {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" && !isAllowedOrigin(origin) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
 		setCORSHeaders(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -875,13 +889,33 @@ func corsPreflightHandler(next http.Handler) http.Handler {
 	})
 }
 
+func isLoopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	return host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+// isAllowedOrigin matches origins exactly by scheme and hostname — a prefix
+// test would also accept e.g. http://localhost.attacker.example.
+func isAllowedOrigin(origin string) bool {
+	if origin == "https://music.apple.com" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Path != "" {
+		return false
+	}
+	return isLoopbackHost(u.Host)
+}
+
 // setCORSHeaders writes all CORS response headers onto w based on the request origin.
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	switch {
-	case origin == "https://music.apple.com",
-		strings.HasPrefix(origin, "http://localhost"),
-		strings.HasPrefix(origin, "http://127.0.0.1"):
+	case origin != "" && isAllowedOrigin(origin):
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	default:
 		w.Header().Set("Access-Control-Allow-Origin", "https://music.apple.com")

@@ -2,6 +2,12 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Exact-host checks: substring tests like hostname.includes('apple.com') also
+// match apple.com.attacker.example or notapple.com.
+const IS_APPLE_MUSIC = location.protocol === 'https:' && location.hostname === 'music.apple.com';
+const IS_APPLE = location.protocol === 'https:' &&
+    (location.hostname === 'apple.com' || location.hostname.endsWith('.apple.com'));
+
 // ── DRM key-system stub — must run before MusicKit.js initialises ─────────────
 // Injected as a <script> tag so it executes in world 0 synchronously at
 // document-start, before any page scripts (including musickit.js) are parsed.
@@ -9,7 +15,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // the result; our executeJavaScript bundles arrive too late to intercept that.
 // This injection runs early enough to patch the probe in place.
 ;(function injectDRMPatch() {
-    if (!location.hostname.includes('apple.com')) return;
+    if (!IS_APPLE) return;
     const patchCode = `(function(){
   if (window.__amlDRMPatch) return;
   window.__amlDRMPatch = true;
@@ -70,7 +76,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Signal that the app UI is ready to show (called from world 0 after DOM is populated).
 contextBridge.exposeInMainWorld('amlReady', () => ipcRenderer.send('app:ui-ready'));
 
-contextBridge.exposeInMainWorld('amlBridge', {
+// The bridge reaches prefs, files and the engine; expose it only to the page the
+// injected bundles run on, never to whatever origin the window navigates to.
+if (IS_APPLE_MUSIC) contextBridge.exposeInMainWorld('amlBridge', {
     isDev: !!process.defaultApp, // true when running via `electron .`, false in packaged app
     // ── Prefs / view (settings panel) ────────────────────────────────────────
     getPrefs:       ()          => ipcRenderer.invoke('prefs:get'),
@@ -175,7 +183,7 @@ function injectLosslessIcon() {
 // ── Renderer bundle injection ─────────────────────────────────────────────────
 
 function setupAppleMusicPage() {
-    if (!location.hostname.includes('apple.com')) return;
+    if (!IS_APPLE) return;
 
     injectAppleMusicStyles();
 
