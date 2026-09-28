@@ -193,3 +193,123 @@ func TestStreamingPutWriter_InFlightBlocksSecondPut(t *testing.T) {
 	}
 	spw3.Discard()
 }
+
+func TestStreamingReader_SeekPastWrittenBlocksUntilData(t *testing.T) {
+	c, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spw, _ := c.BeginStreamingPut("seek", "alac")
+	spw.Write([]byte("0123"))
+	r := spw.NewReader()
+	defer r.Close()
+	if _, err := r.Seek(6, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4)
+		n, _ := r.Read(buf)
+		got <- string(buf[:n])
+	}()
+	select {
+	case s := <-got:
+		t.Fatalf("Read returned %q before offset was written", s)
+	case <-time.After(50 * time.Millisecond):
+	}
+	spw.Write([]byte("456789"))
+	select {
+	case s := <-got:
+		if s != "6789" {
+			t.Fatalf("got %q, want %q", s, "6789")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read did not wake after data arrived")
+	}
+	spw.Commit()
+}
+
+func TestStreamingReader_AbortUnblocksRead(t *testing.T) {
+	c, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spw, _ := c.BeginStreamingPut("abort", "alac")
+	defer spw.Discard()
+	r := spw.NewReader()
+	defer r.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.Read(make([]byte, 8))
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	r.Abort()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrReaderAborted) {
+			t.Fatalf("err = %v, want ErrReaderAborted", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Abort did not unblock Read")
+	}
+}
+
+func TestStreamingPutWriter_NewReaderIfActiveAfterCommit(t *testing.T) {
+	c, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spw, _ := c.BeginStreamingPut("active", "alac")
+	if r := spw.NewReaderIfActive(); r == nil {
+		t.Fatal("nil reader while writer active")
+	} else {
+		r.Close()
+	}
+	spw.Commit()
+	if r := spw.NewReaderIfActive(); r != nil {
+		t.Fatal("non-nil reader after Commit")
+	}
+}
+
+// While a writer is committing, the key must stay claimed until the rename is
+// done — otherwise a new writer can O_TRUNC the same .tmp and corrupt the entry.
+func TestCommitKeepsKeyClaimedUntilRenamed(t *testing.T) {
+	for range 200 {
+		c, err := New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := bytes.Repeat([]byte("ALAC"), 4096)
+		spw, _ := c.BeginStreamingPut("a", "alac")
+		spw.Write(want)
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				if f, ok := c.Get("a", "alac"); ok {
+					f.Close()
+					return
+				}
+				if w2, _ := c.BeginStreamingPut("a", "alac"); w2 != nil {
+					w2.Discard() // claimed the key while the first writer still owned it
+					return
+				}
+			}
+		}()
+		spw.Commit()
+		wg.Wait()
+
+		f, ok := c.Get("a", "alac")
+		if !ok {
+			t.Fatal("committed entry missing")
+		}
+		got, _ := io.ReadAll(f)
+		f.Close()
+		if !bytes.Equal(got, want) {
+			t.Fatalf("committed entry corrupted: %d bytes, want %d", len(got), len(want))
+		}
+	}
+}

@@ -385,15 +385,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 			}
 
 			if spw, _ := s.diskCache.BeginStreamingPut(sess.AssetID, qualifier); spw != nil {
-				downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-				go func() {
-					defer cancel()
-					if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, spw); err != nil {
-						spw.Discard()
-					} else {
-						spw.Commit()
-					}
-				}()
+				s.startCacheDownload(id, spw)
 				w.Header().Set("Content-Type", "audio/mp4")
 				w.Header().Set("Accept-Ranges", "bytes")
 				reader := spw.NewReader()
@@ -412,15 +404,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		// MSE reads sequentially, so no Range handling is needed on first play; replays
 		// hit the committed file above via http.ServeContent.
 		if spw, _ := s.diskCache.BeginStreamingPut(sess.AssetID, qualifier); spw != nil {
-			downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-			go func() {
-				defer cancel()
-				if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, spw); err != nil {
-					spw.Discard()
-				} else {
-					spw.Commit()
-				}
-			}()
+			s.startCacheDownload(id, spw)
 			w.Header().Set("Content-Type", "audio/mp4")
 			reader := spw.NewReader()
 			defer reader.Close()
@@ -466,6 +450,21 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 	streamMedia(w, r, func(dst io.Writer) error {
 		return s.pm.Stream(r.Context(), id, pipeline.KindAudio, dst)
 	}, "audio/mp4")
+}
+
+// startCacheDownload fills spw from the session's audio stream in the
+// background. The context is detached from any client so the cache still
+// commits when the listener disconnects mid-track (skip).
+func (s *APIServer) startCacheDownload(id string, spw *diskcache.StreamingPutWriter) {
+	downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	go func() {
+		defer cancel()
+		if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, spw); err != nil {
+			spw.Discard()
+		} else {
+			spw.Commit()
+		}
+	}()
 }
 
 // handlePlaybackPrecache triggers a background disk-cache download for an ALAC

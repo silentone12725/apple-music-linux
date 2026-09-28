@@ -23,8 +23,9 @@ type Player struct {
 	inst    *C.libvlc_instance_t
 	mp      *C.libvlc_media_player_t
 	lastURL string
-	volume  int // 0-200; default 100
-	loadGen int // incremented on each Load; goroutines compare to detect staleness
+	volume  int            // 0-200; default 100
+	loadGen int            // incremented on each Load; goroutines compare to detect staleness
+	cur     *callbackMedia // non-nil while a LoadSource media is attached
 }
 
 // New creates a libvlc instance and media player.
@@ -56,8 +57,50 @@ func (p *Player) Load(url string) error {
 	}
 	defer C.libvlc_media_release(media)
 
+	p.detachLocked()
 	C.libvlc_media_player_set_media(p.mp, media)
 	p.lastURL = url
+	return p.playLocked()
+}
+
+// LoadSource stops any current playback and plays src directly through libvlc
+// read/seek callbacks — no loopback HTTP. The player takes ownership of src
+// and closes it when the media is replaced, stopped or the player is closed.
+func (p *Player) LoadSource(src Source) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.detachLocked()
+	cm := newCallbackMedia(src)
+	media := cm.newMedia(p.inst)
+	if media == nil {
+		cm.release()
+		return fmt.Errorf("vlc: libvlc_media_new_callbacks failed")
+	}
+	defer C.libvlc_media_release(media)
+
+	C.libvlc_media_player_set_media(p.mp, media)
+	p.cur = cm
+	p.lastURL = ""
+	return p.playLocked()
+}
+
+// detachLocked stops playback and frees the current callback source, if any.
+// Abort runs first so a Read blocked on an in-progress download returns and
+// libvlc_media_player_stop can join the input thread. The media is detached so
+// nothing can re-invoke the open callback on a released source.
+func (p *Player) detachLocked() {
+	if p.cur == nil {
+		return
+	}
+	p.cur.src.Abort()
+	C.libvlc_media_player_stop(p.mp)
+	C.libvlc_media_player_set_media(p.mp, nil)
+	p.cur.release()
+	p.cur = nil
+}
+
+func (p *Player) playLocked() error {
 	p.loadGen++
 	myGen := p.loadGen
 	vol := p.volume
@@ -81,12 +124,12 @@ func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
 	for time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 		p.mu.Lock()
-		state := C.libvlc_media_player_get_state(p.mp)
-		gen := p.loadGen
-		p.mu.Unlock()
-		if gen != myGen {
-			return // stale — new track loaded
+		if p.loadGen != myGen {
+			p.mu.Unlock()
+			return // stale — new track loaded or player closed
 		}
+		state := C.libvlc_media_player_get_state(p.mp)
+		p.mu.Unlock()
 		if state == C.libvlc_Playing {
 			break
 		}
@@ -140,6 +183,11 @@ func (p *Player) SeekURL(seekURL string, posMs int64) error {
 		for time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
 			p.mu.Lock()
+			if p.loadGen != myGen {
+				p.mu.Unlock()
+				log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
+				return
+			}
 			state := C.libvlc_media_player_get_state(p.mp)
 			pos := int64(C.libvlc_media_player_get_time(p.mp))
 			gen := p.loadGen
@@ -201,6 +249,7 @@ func (p *Player) SeekReload(posMs int64) error {
 	log.Printf("[vlc seek] ► SEND  requested=%dms  start-time=%.3fs  url=%s", posMs, float64(posMs)/1000.0, base)
 
 	p.mu.Lock()
+	p.detachLocked()
 	C.libvlc_media_player_stop(p.mp)
 	C.libvlc_media_player_set_media(p.mp, media)
 	p.lastURL = base
@@ -219,6 +268,11 @@ func (p *Player) SeekReload(posMs int64) error {
 		for time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
 			p.mu.Lock()
+			if p.loadGen != myGen {
+				p.mu.Unlock()
+				log.Printf("[vlc seek] ⚠ stale — new load fired before position confirmed")
+				return
+			}
 			state := C.libvlc_media_player_get_state(p.mp)
 			pos := int64(C.libvlc_media_player_get_time(p.mp))
 			gen := p.loadGen
@@ -268,18 +322,17 @@ func (p *Player) SetTime(posMs int64) {
 		for time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
 			p.mu.Lock()
+			if p.loadGen != myGen {
+				p.mu.Unlock()
+				return // track changed or player closed — drop seek
+			}
 			state := C.libvlc_media_player_get_state(p.mp)
-			gen := p.loadGen
-			p.mu.Unlock()
-			if gen != myGen {
-				return
-			} // track changed — drop seek
 			if state == C.libvlc_Playing || state == C.libvlc_Paused {
-				p.mu.Lock()
 				C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
 				p.mu.Unlock()
 				return
 			}
+			p.mu.Unlock()
 		}
 	}()
 }
@@ -337,6 +390,7 @@ func (p *Player) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.mp != nil {
+		p.detachLocked()
 		C.libvlc_media_player_stop(p.mp)
 	}
 }
@@ -345,7 +399,9 @@ func (p *Player) Stop() {
 func (p *Player) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.loadGen++ // background pollers see stale and never touch the released player
 	if p.mp != nil {
+		p.detachLocked()
 		C.libvlc_media_player_stop(p.mp)
 		C.libvlc_media_player_release(p.mp)
 		p.mp = nil
