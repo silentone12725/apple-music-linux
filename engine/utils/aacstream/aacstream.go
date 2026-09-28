@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/go-resty/resty/v2"
-	"google.golang.org/protobuf/proto"
 	"log"
 	"log/slog"
+
+	"github.com/go-resty/resty/v2"
+	"google.golang.org/protobuf/proto"
 
 	cdm "engine/utils/aacstream/cdm"
 	wvkey "engine/utils/aacstream/wvkey"
@@ -22,10 +23,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/grafov/m3u8"
-
-	"engine/internal/m3u8safe"
 )
 
 type PlaybackLicense struct {
@@ -113,128 +110,6 @@ func AfterRequest(response *resty.Response) ([]byte, error) {
 	}
 
 	return license, nil
-}
-
-func GetWebplayback(adamId string, authtoken string, mutoken string, mvmode bool) (string, string, string, error) {
-	url := "https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback"
-	postData := map[string]string{
-		"salableAdamId": adamId,
-	}
-	jsonData, err := json.Marshal(postData)
-	if err != nil {
-		slog.Error("GetWebplayback: encode JSON", "err", err)
-		return "", "", "", err
-	}
-	ctx30, cancel30 := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel30()
-	req, err := http.NewRequestWithContext(ctx30, "POST", url, bytes.NewBuffer([]byte(jsonData)))
-	if err != nil {
-		slog.Error("GetWebplayback: create request", "err", err)
-		return "", "", "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://music.apple.com")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-	req.Header.Set("Referer", "https://music.apple.com/")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", authtoken))
-	req.Header.Set("x-apple-music-user-token", mutoken)
-	resp, err := webplaybackClient.Do(req)
-	if err != nil {
-		slog.Error("GetWebplayback: send request", "err", err)
-		return "", "", "", err
-	}
-	defer resp.Body.Close()
-	obj := new(Songlist)
-	err = json.NewDecoder(resp.Body).Decode(&obj)
-	if err != nil {
-		slog.Error("GetWebplayback: decode JSON", "err", err)
-		return "", "", "", err
-	}
-	if len(obj.List) > 0 {
-		if mvmode {
-			return obj.List[0].HlsPlaylistUrl, "", "", nil
-		}
-		// 遍历 Assets
-		for i := range obj.List[0].Assets {
-			if obj.List[0].Assets[i].Flavor == "28:ctrp256" {
-				kidBase64, fileurl, uriPrefix, err := extractKidBase64(obj.List[0].Assets[i].URL, false)
-				if err != nil {
-					return "", "", "", err
-				}
-				return fileurl, kidBase64, uriPrefix, nil
-			}
-			continue
-		}
-	}
-	return "", "", "", errors.New("Unavailable")
-}
-
-type Songlist struct {
-	List []struct {
-		Hlsurl         string `json:"hls-key-cert-url"`
-		HlsPlaylistUrl string `json:"hls-playlist-url"`
-		Assets         []struct {
-			Flavor string `json:"flavor"`
-			URL    string `json:"URL"`
-		} `json:"assets"`
-	} `json:"songList"`
-	Status int `json:"status"`
-}
-
-func extractKidBase64(b string, mvmode bool) (string, string, string, error) {
-	// webplaybackClient, not http.DefaultClient: this is a master playlist fetch
-	// (exactly what that client documents itself as covering) and DefaultClient
-	// has no timeout, so a stalled CDN would hang key extraction indefinitely.
-	resp, err := webplaybackClient.Get(b)
-	if err != nil {
-		return "", "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", "", "", errors.New(resp.Status)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap for HLS playlist
-	if err != nil {
-		return "", "", "", err
-	}
-	masterString := string(body)
-	from, listType, err := m3u8safe.DecodeFrom(strings.NewReader(masterString), true)
-	if err != nil {
-		return "", "", "", err
-	}
-	var kidbase64 string
-	var uriPrefix string
-	var urlBuilder strings.Builder
-	if listType == m3u8.MEDIA {
-		mediaPlaylist := from.(*m3u8.MediaPlaylist)
-		if mediaPlaylist.Key != nil {
-			split := strings.Split(mediaPlaylist.Key.URI, ",")
-			uriPrefix = split[0]
-			kidbase64 = split[1]
-			lastSlashIndex := strings.LastIndex(b, "/")
-			// 截取最后一个斜杠之前的部分
-			urlBuilder.WriteString(b[:lastSlashIndex])
-			urlBuilder.WriteString("/")
-			urlBuilder.WriteString(mediaPlaylist.Map.URI)
-			//fileurl = b[:lastSlashIndex] + "/" + mediaPlaylist.Map.URI
-			if mvmode {
-				for _, segment := range mediaPlaylist.Segments {
-					if segment != nil {
-						urlBuilder.WriteString(";")
-						urlBuilder.WriteString(b[:lastSlashIndex])
-						urlBuilder.WriteString("/")
-						urlBuilder.WriteString(segment.URI)
-						//fileurl = fileurl + ";" + b[:lastSlashIndex] + "/" + segment.URI
-					}
-				}
-			}
-		} else {
-			slog.Warn("no key information found in m3u8")
-		}
-	} else {
-		slog.Warn("not a media playlist")
-	}
-	return kidbase64, urlBuilder.String(), uriPrefix, nil
 }
 
 // retryBackoff sleeps the exponential backoff for attempt and returns whether
@@ -397,6 +272,22 @@ func stableCacheKey(url string) string {
 	return url
 }
 
+// segmentStatusErr validates a segment response. A byte-range request must be
+// answered with 206: a 200 carries the whole file, which would otherwise be
+// streamed and cached as if it were the requested segment.
+func segmentStatusErr(resp *http.Response, rangeHdr string) error {
+	switch {
+	case rangeHdr != "" && resp.StatusCode == http.StatusPartialContent:
+		return nil
+	case rangeHdr == "" && resp.StatusCode == http.StatusOK:
+		return nil
+	case rangeHdr != "" && resp.StatusCode == http.StatusOK:
+		return fmt.Errorf("HTTP 200 for range %s (server ignored Range)", rangeHdr)
+	default:
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+}
+
 // fetchSegment downloads cacheKey (cache-hit → returns immediately) with up to
 // 3 retries and exponential backoff. Handles "#bytes=<off>-<end>" range fragments.
 func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
@@ -430,12 +321,12 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 			}
 			return nil, fmt.Errorf("fetch: %w", err)
 		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		if err := segmentStatusErr(resp, rangeHdr); err != nil {
 			resp.Body.Close()
 			if attempt < maxRetries-1 && ctx.Err() == nil && retryBackoff(ctx, attempt) {
 				continue
 			}
-			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+			return nil, err
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MB cap per segment
 		resp.Body.Close()
@@ -456,12 +347,9 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 // into the cache (bytes.Buffer capture). Matches ExoPlayer's InputStream.read
 // streaming model where the decoder sees bytes as soon as the CDN sends them.
 func streamMVSegmentDirect(ctx context.Context, url string, w io.Writer) error {
-	diskKey := url
-	if q := strings.IndexByte(url, '?'); q >= 0 {
-		diskKey = url[:q]
-	}
+	diskKey := stableCacheKey(url) // keeps any #bytes= range; drops rotating query params
 	if cached, ok := GetCachedMVSegment(diskKey); ok {
-		log.Printf("[mv-seg] stream cache HIT key=...%s len=%d", diskKey[len(diskKey)-20:], len(cached))
+		log.Printf("[mv-seg] stream cache HIT key=...%s len=%d", shortKey(diskKey), len(cached))
 		_, err := w.Write(cached)
 		return err
 	}
@@ -489,10 +377,10 @@ func streamMVSegmentDirect(ctx context.Context, url string, w io.Writer) error {
 			}
 			continue
 		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		if err := segmentStatusErr(resp, rangeHdr); err != nil {
 			resp.Body.Close()
 			if !mvRetry(ctx, attempt, maxRetries) {
-				return fmt.Errorf("HTTP %d", resp.StatusCode)
+				return err
 			}
 			continue
 		}
@@ -622,10 +510,7 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 			}
 
 			go func(idx int, url string, ch chan prefetchStream) {
-				diskKey := url
-				if q := strings.IndexByte(url, '?'); q >= 0 {
-					diskKey = url[:q]
-				}
+				diskKey := stableCacheKey(url) // keeps any #bytes= range
 
 				// Cache hit: serve from memory; no connection to hold open.
 				if cached, ok := GetCachedMVSegment(diskKey); ok {
@@ -669,9 +554,9 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 						}
 						continue
 					}
-					if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+					if err := segmentStatusErr(resp, rangeHdr); err != nil {
 						resp.Body.Close()
-						lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+						lastErr = err
 						resp = nil
 						if !mvRetry(ctx, attempt, 3) {
 							break
@@ -756,15 +641,12 @@ var mvBgDownloads sync.Map // diskKey → struct{}
 func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 	// Strip rotating query params (accessKey changes each session) so the disk
 	// cache key is stable across replays of the same video.
-	diskKey := url
-	if q := strings.IndexByte(url, '?'); q >= 0 {
-		diskKey = url[:q]
-	}
+	diskKey := stableCacheKey(url) // keeps any #bytes= range; drops rotating query params
 	if cached, ok := GetCachedMVSegment(diskKey); ok {
-		log.Printf("[mv-seg] cache HIT key=%s len=%d", diskKey[len(diskKey)-20:], len(cached))
+		log.Printf("[mv-seg] cache HIT key=%s len=%d", shortKey(diskKey), len(cached))
 		return cached, nil
 	}
-	log.Printf("[mv-seg] cache MISS key=%s", diskKey[len(diskKey)-20:])
+	log.Printf("[mv-seg] cache MISS key=%s", shortKey(diskKey))
 	fetchURL, rangeHdr := url, ""
 	if idx := strings.Index(url, "#bytes="); idx >= 0 {
 		fetchURL = url[:idx]
@@ -793,10 +675,10 @@ func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 			}
 			continue
 		}
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		if err := segmentStatusErr(resp, rangeHdr); err != nil {
 			resp.Body.Close()
 			if !mvRetry(ctx, attempt, maxRetries) {
-				return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+				return nil, err
 			}
 			continue
 		}
@@ -837,22 +719,22 @@ func kickMVSegmentBackground(diskKey, fetchURL, rangeHdr string) {
 		}
 		resp, err := mvHTTPClient.Do(req)
 		if err != nil {
-			log.Printf("[mv-seg] bg-dl error key=%s: %v", diskKey[len(diskKey)-20:], err)
+			log.Printf("[mv-seg] bg-dl error key=%s: %v", shortKey(diskKey), err)
 			return
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			log.Printf("[mv-seg] bg-dl HTTP %d key=%s", resp.StatusCode, diskKey[len(diskKey)-20:])
+		if err := segmentStatusErr(resp, rangeHdr); err != nil {
+			log.Printf("[mv-seg] bg-dl %v key=%s", err, diskKey)
 			return
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MB cap per MV segment
 		if err != nil {
-			log.Printf("[mv-seg] bg-dl read error key=%s: %v", diskKey[len(diskKey)-20:], err)
+			log.Printf("[mv-seg] bg-dl read error key=%s: %v", shortKey(diskKey), err)
 			return
 		}
 		if MVCacheEnabled() {
 			PutCachedMVSegment(diskKey, data)
-			log.Printf("[mv-seg] bg-dl cached key=%s len=%d", diskKey[len(diskKey)-20:], len(data))
+			log.Printf("[mv-seg] bg-dl cached key=%s len=%d", shortKey(diskKey), len(data))
 		}
 	}()
 }
@@ -1018,4 +900,12 @@ func DownloadSegmentsParallel(ctx context.Context, urls []string, w io.Writer, c
 		}
 	}
 	return nil
+}
+
+// shortKey returns the tail of a cache key for log lines.
+func shortKey(k string) string {
+	if len(k) <= 20 {
+		return k
+	}
+	return "..." + k[len(k)-20:]
 }
