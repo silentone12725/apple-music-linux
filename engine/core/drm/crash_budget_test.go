@@ -2,6 +2,7 @@ package drm
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -74,5 +75,46 @@ func TestChallengeKeepsReplySentRightAfterAnnouncement(t *testing.T) {
 	got, err := a.Challenge(ctx, AuthChallenge{Type: ChallengeTwoFactor})
 	if err != nil || got != "123456" {
 		t.Fatalf("Challenge = %q, %v; the immediate reply was discarded", got, err)
+	}
+}
+
+// The snapshot announcing FairPlay-ready must already carry the capabilities;
+// the renderer picks lossless vs AAC from each event it receives.
+func TestFairPlayReadyEventCarriesCapabilities(t *testing.T) {
+	var got []DRMSnapshot
+	stub := &crashStub{events: make(chan DRMEvent)}
+	m := NewDRMManager(stub, NewSessionManager(t.TempDir()), func(s DRMSnapshot) { got = append(got, s) },
+		BackendConfig{}, DefaultRestartPolicy)
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlayReady, Process: ProcessRunning}})
+	last := got[len(got)-1]
+	if last.State.FairPlay != FairPlayReady || !last.Capabilities.ALAC || !last.Capabilities.CBCS {
+		t.Fatalf("ready event capabilities = %+v", last.Capabilities)
+	}
+}
+
+// Concurrent emitters must deliver snapshots in state order: once any
+// delivered snapshot has ALAC, no later one may revert to false.
+func TestEmitOrderNeverRegressesCapabilities(t *testing.T) {
+	for range 200 {
+		var mu sync.Mutex
+		var seq []bool
+		stub := &crashStub{events: make(chan DRMEvent)}
+		m := NewDRMManager(stub, NewSessionManager(t.TempDir()), func(s DRMSnapshot) {
+			mu.Lock()
+			seq = append(seq, s.Capabilities.ALAC)
+			mu.Unlock()
+		}, BackendConfig{}, DefaultRestartPolicy)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); m.mergeAndEmit(DRMSnapshot{State: DRMState{Session: SessionValid}}) }()
+		go func() { defer wg.Done(); m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlayReady}}) }()
+		wg.Wait()
+		seen := false
+		for _, v := range seq {
+			if seen && !v {
+				t.Fatalf("capabilities regressed after being delivered: %v", seq)
+			}
+			seen = seen || v
+		}
 	}
 }
