@@ -25,6 +25,17 @@ func TestOpenFailureClassification(t *testing.T) {
 	}{
 		// ── Per-track content failures: must NOT trip the breaker ───────────────
 		{
+			// Catalog IDs contain status-code digits; they must not classify.
+			name:       "id containing 502 with an unrelated content error",
+			err:        errors.New("open 1502443: no playable asset"),
+			wantNotFnd: true,
+		},
+		{
+			name:        "id containing 404 with a server error",
+			err:         errors.New("webplayback 1404221: HTTP 503"),
+			wantTranspt: true,
+		},
+		{
 			name:       "mv catalog 404",
 			err:        errors.New("MV catalog lookup us/1440818980: 404 Not Found"),
 			wantNotFnd: true,
