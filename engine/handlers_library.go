@@ -68,6 +68,12 @@ func (s *APIServer) handleLibraryPlaylistTracks(w http.ResponseWriter, r *http.R
 	}
 	playlistID := r.PathValue("id")
 	tracks := s.libStore.PlaylistTracks(playlistID)
+	if tracks == nil && !catalogIDRe.MatchString(playlistID) {
+		// The live fetch interpolates the ID into a /v1/me/library path sent
+		// with the user's media-user-token.
+		http.Error(w, "invalid playlist id", http.StatusBadRequest)
+		return
+	}
 	if tracks == nil {
 		// Not in cache — attempt a live fetch if authenticated.
 		tok, tokErr := s.resolveToken()
@@ -82,10 +88,7 @@ func (s *APIServer) handleLibraryPlaylistTracks(w http.ResponseWriter, r *http.R
 			writeJSON(w, http.StatusOK, map[string]any{"tracks": []any{}, "cached": false, "error": err.Error()})
 			return
 		}
-		// Cache the result for next time.
-		if s.libStore != nil {
-			s.libStore.SetPlaylistTracks(playlistID, fetched)
-		}
+		s.libStore.SetPlaylistTracks(playlistID, fetched) // cache for next time
 		writeJSON(w, http.StatusOK, map[string]any{"tracks": fetched, "cached": false})
 		return
 	}
@@ -114,6 +117,7 @@ func (s *APIServer) handleLibraryAlbumTracks(w http.ResponseWriter, r *http.Requ
 // The JS side pushes mk.musicUserToken + the developer token at startup so
 // library sync can use the web-auth credentials instead of the Android DRM ones.
 func (s *APIServer) handleLibraryToken(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10) // 16 KB: two JWT-sized tokens
 	var body struct {
 		MusicUserToken string `json:"musicUserToken"`
 		DeveloperToken string `json:"developerToken"`
