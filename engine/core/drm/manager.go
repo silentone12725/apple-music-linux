@@ -83,6 +83,10 @@ type DRMManager struct {
 	// crash restart state
 	crashCount   int
 	restartMu    sync.Mutex   // serialises concurrent handleCrash goroutines
+	// emitMu is held from snapshot copy to sink so events reach clients in the
+	// order the state changed; copying under mu but emitting after unlocking
+	// let two goroutines deliver an older snapshot after a newer one.
+	emitMu sync.Mutex
 	lastStart    atomic.Int64 // UnixNano of the last successful backend start
 	shutdownCtx  context.Context
 	shutdownStop context.CancelFunc
@@ -315,6 +319,11 @@ func (m *DRMManager) Logout(ctx context.Context) error {
 	if err := m.session.ClearSession(); err != nil {
 		return fmt.Errorf("clear session: %w", err)
 	}
+	// emitMu only around copy+send: holding it across backend.Stop would
+	// deadlock with a login blocked on a 2FA challenge (Stop waits for Start,
+	// Start waits for the challenge, the challenge's emit waits for emitMu).
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
 	m.mu.Lock()
 	m.snapshot.State = DRMState{
 		Manager:        ManagerReady,
@@ -394,13 +403,11 @@ func (m *DRMManager) watchEvents() {
 			go m.handleCrash()
 		}
 
-		// mergeAndEmit applies all non-zero fields atomically under one lock,
-		// avoiding partial-state reads between the five old per-field updates.
+		// mergeAndEmit applies all non-zero fields atomically under one lock and
+		// derives capabilities from the merged state, so the emitted snapshot
+		// is self-consistent (updating capabilities afterwards sent the
+		// FairPlay-ready event itself with lossless=false).
 		m.mergeAndEmit(snap)
-
-		if snap.State.FairPlay == FairPlayReady {
-			m.updateCapabilities()
-		}
 	}
 }
 
@@ -461,19 +468,6 @@ func (m *DRMManager) handleCrash() {
 	m.lastStart.Store(time.Now().UnixNano())
 }
 
-func (m *DRMManager) updateCapabilities() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	fp := m.snapshot.State.FairPlay == FairPlayReady
-	// Capabilities are at the Snapshot level (derived), not inside State.
-	m.snapshot.Capabilities = CapabilityState{
-		CBCS:  fp,
-		ALAC:  fp,
-		Atmos: fp,
-		HiRes: fp, // TODO: verify subscription tier via GetAccount
-	}
-}
-
 // ── State helpers ─────────────────────────────────────────────────────────────
 
 func (m *DRMManager) setManagerState(s ManagerState) {
@@ -485,6 +479,8 @@ func (m *DRMManager) setManagerState(s ManagerState) {
 // mergeAndEmit merges non-zero fields from snap into the current snapshot,
 // updates the timestamp, and forwards to the EventSink.
 func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
 	m.mu.Lock()
 	if snap.State.Manager != 0 {
 		m.snapshot.State.Manager = snap.State.Manager
@@ -536,6 +532,16 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 			next := make(chan struct{})
 			close(next)
 			m.recoveryGate = next
+		}
+	}
+
+	if m.snapshot.State.FairPlay == FairPlayReady {
+		// Capabilities are derived at the snapshot level, not inside State.
+		m.snapshot.Capabilities = CapabilityState{
+			CBCS:  true,
+			ALAC:  true,
+			Atmos: true,
+			HiRes: true, // TODO: verify subscription tier via GetAccount
 		}
 	}
 
