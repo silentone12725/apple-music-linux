@@ -59,12 +59,26 @@ func getPSSH(contentId string, kidBase64 string) (string, error) {
 	return pssh, nil
 }
 
+// licenseParams carries the per-track values the Widevine license request
+// needs through wvkey.Key.GetKey, whose callback only receives a context.
+type licenseParams struct{ pssh, adamID, uriPrefix string }
+
+type licenseParamsKey struct{}
+
+func withLicenseParams(ctx context.Context, p licenseParams) context.Context {
+	return context.WithValue(ctx, licenseParamsKey{}, p)
+}
+
 func BeforeRequest(cl *resty.Client, ctx context.Context, url string, body []byte) (*resty.Response, error) {
+	p, ok := ctx.Value(licenseParamsKey{}).(licenseParams)
+	if !ok {
+		return nil, errors.New("widevine license request: missing track parameters in context")
+	}
 	jsondata := map[string]interface{}{
 		"challenge":      base64.StdEncoding.EncodeToString(body), // 'body' is passed in directly
 		"key-system":     "com.widevine.alpha",
-		"uri":            ctx.Value("uriPrefix").(string) + "," + ctx.Value("pssh").(string),
-		"adamId":         ctx.Value("adamId").(string),
+		"uri":            p.uriPrefix + "," + p.pssh,
+		"adamId":         p.adamID,
 		"isLibrary":      false,
 		"user-initiated": true,
 	}
@@ -335,6 +349,8 @@ func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoke
 			return v.([]byte), nil
 		}
 	}
+	ctx = withLicenseParams(ctx, licenseParams{pssh: kidBase64, adamID: adamID, uriPrefix: uriPrefix})
+
 	pssh, err := getPSSH("", kidBase64)
 	if err != nil {
 		return nil, fmt.Errorf("pssh: %w", err)
