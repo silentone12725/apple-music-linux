@@ -151,7 +151,9 @@ func TestBoxCoalescer_FlushEmitsTrailingRemainder(t *testing.T) {
 	// A complete box followed by a truncated/partial box (as a mid-stream error
 	// or a size==0 tail would leave). Flush must emit the remainder so nothing
 	// is silently dropped.
-	stream := append(box32("ftyp", []byte("iso5")), []byte("PARTIAL-TAIL")...)
+	// The tail is a moof header declaring 64 bytes of which only a few arrived.
+	partial := append([]byte{0, 0, 0, 64, 'm', 'o', 'o', 'f'}, []byte("TAIL")...)
+	stream := append(box32("ftyp", []byte("iso5")), partial...)
 
 	spy := &flushSpy{}
 	c := &boxCoalescer{w: spy}

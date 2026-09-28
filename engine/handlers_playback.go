@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,7 +106,6 @@ func (s *APIServer) stopMVGrowing(id string) {
 	}
 }
 
-
 // parseRangeStart extracts the start offset from an HTTP Range header value.
 // Handles "bytes=X-" and "bytes=X-Y". Returns 0 for unrecognised formats.
 func parseRangeStart(rangeHdr string) int64 {
@@ -120,6 +120,13 @@ func parseRangeStart(rangeHdr string) int64 {
 	return n
 }
 
+// Status codes must match as whole numbers: open errors carry catalog IDs
+// (e.g. 1502443) that contain "502" or "404" as substrings.
+var (
+	serverErrStatusRe = regexp.MustCompile(`\b50[0-4]\b`)
+	notFoundStatusRe  = regexp.MustCompile(`\b404\b`)
+)
+
 // isNotFoundFailure reports whether a session-open error is a per-track content
 // failure — the asset does not exist, or is not available in this storefront.
 // These are addressed to one track and must not be reported as a server outage.
@@ -130,15 +137,16 @@ func isNotFoundFailure(err error) bool {
 	s := strings.ToLower(err.Error())
 	// Check transport markers first: "503 Service Unavailable" is an outage, not a
 	// missing track, and must not be captured by the content patterns below.
-	for _, needle := range []string{"500", "502", "503", "504", "timeout", "connection"} {
-		if strings.Contains(s, needle) {
-			return false
-		}
+	if serverErrStatusRe.MatchString(s) || strings.Contains(s, "timeout") || strings.Contains(s, "connection") {
+		return false
+	}
+	if notFoundStatusRe.MatchString(s) {
+		return true
 	}
 	// "no such host" is DNS and belongs to isTransportFailure, so it is deliberately
 	// absent here.
 	for _, needle := range []string{
-		"404", "not found", "no playable",
+		"not found", "no playable",
 		"no video variant", "no audio alternative",
 	} {
 		if strings.Contains(s, needle) {
@@ -173,11 +181,13 @@ func isTransportFailure(err error) bool {
 	for _, needle := range []string{
 		"connection refused", "connection reset", "no such host", "network is unreachable",
 		"i/o timeout", "timeout", "eof", "tls", "dial tcp", "broken pipe",
-		"502", "503", "504", "500 internal",
 	} {
 		if strings.Contains(s, needle) {
 			return true
 		}
+	}
+	if serverErrStatusRe.MatchString(s) {
+		return true
 	}
 	// Unclassified: treat as content-level so an unknown per-track error can never
 	// lock out the whole app. A genuine outage always surfaces one of the above.
@@ -602,6 +612,10 @@ func (s *APIServer) handlePlaybackVideo(w http.ResponseWriter, r *http.Request) 
 // and yields MEDIA_ERR_SRC_NOT_SUPPORTED. Uncached sessions fall back to the
 // streaming proxy.
 func (s *APIServer) handlePlaybackVideoNativeInfo(w http.ResponseWriter, r *http.Request) {
+	if s.diskCache == nil {
+		http.Error(w, "disk cache unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	id := r.PathValue("id")
 	sess, ok := s.pm.GetSession(id)
 	if !ok {
@@ -655,6 +669,10 @@ func (s *APIServer) handlePlaybackVideoNativeInfo(w http.ResponseWriter, r *http
 // prepareMVFaststart runs in the background (when MV caching is enabled)
 // so subsequent plays hit the fast path.
 func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Request) {
+	if s.diskCache == nil {
+		http.Error(w, "disk cache unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	id := r.PathValue("id")
 	sess, ok := s.pm.GetSession(id)
 	if !ok {
@@ -773,9 +791,12 @@ func (s *APIServer) proxyProgressiveVideo(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer resp.Body.Close()
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
+	// Forward only the representation headers the <video> element needs. Copying
+	// everything would also pass hop-by-hop headers and any CDN Set-Cookie or
+	// Access-Control-* values, duplicating the engine's own CORS headers.
+	for _, k := range []string{"Content-Type", "Content-Length", "Content-Range", "Last-Modified", "ETag", "Cache-Control"} {
+		if v := resp.Header.Get(k); v != "" {
+			w.Header().Set(k, v)
 		}
 	}
 	if w.Header().Get("Content-Type") == "" {
@@ -841,6 +862,7 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 	if seekSec == 0 && aacstream.MVDecExists(assetID, sess.MVMaxHeight) {
 		log.Printf("[video-es] full play from dec-cache id=%s", id)
 		pr, pw := io.Pipe()
+		defer pr.Close() // releases the writer goroutine if the demuxer stops early
 		go func() { pw.CloseWithError(aacstream.ServeMVDec(assetID, sess.MVMaxHeight, pw)) }()
 		if err := aacstream.DemuxFMP4ToES(r.Context(), pr, esw); err != nil && r.Context().Err() == nil {
 			log.Printf("[video-es] dec-cache demux error id=%s: %v", id, err)
@@ -853,6 +875,7 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 		aacstream.MVDecIndexExists(assetID, sess.MVMaxHeight) {
 		log.Printf("[video-es] seek from dec-cache index seekSec=%.2f id=%s", seekSec, id)
 		pr, pw := io.Pipe()
+		defer pr.Close() // releases the writer goroutine if the demuxer stops early
 		go func() {
 			pw.CloseWithError(aacstream.ServeMVDecFrom(assetID, sess.MVMaxHeight, seekSec, pw))
 		}()
@@ -871,6 +894,7 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 	if st == nil {
 		// Fallback: stateless direct stream (no growing file available).
 		pr, pw := io.Pipe()
+		defer pr.Close() // releases the writer goroutine if the demuxer stops early
 		go func() {
 			var err error
 			if seekSec > 0 {
@@ -953,6 +977,7 @@ func (s *APIServer) handlePlaybackVideoES(w http.ResponseWriter, r *http.Request
 		// log.Printf("%s seek=%.3f source=network written=%d (beyond head/index not ready)",
 		// 	tagWarn("[mv-es-seek]"), seekSec, st.spw.Written())
 		pr, pw := io.Pipe()
+		defer pr.Close() // releases the writer goroutine if the demuxer stops early
 		go func() {
 			_, err := s.pm.StreamFrom(r.Context(), id, pipeline.KindVideo, seekSec, pw)
 			pw.CloseWithError(err)
@@ -1036,7 +1061,6 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 	if ffmpegPath == "" {
 		return src(dst)
 	}
-	pr, pw := io.Pipe()
 	args := []string{
 		"-loglevel", "warning",
 		"-i", "pipe:0",
@@ -1058,35 +1082,10 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 	}
 	args = append(args, "-f", "mp4", "pipe:1")
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	cmd.Stdin = pr
 	cmd.Stdout = dst
 
-	// Capture stderr line-by-line so FFmpeg warnings appear immediately in logs
-	// rather than only after the process exits (useful for mid-GOP kill diagnosis).
-	stderrR, stderrW, _ := os.Pipe()
-	cmd.Stderr = stderrW
-
-	srcErrCh := make(chan error, 1)
-	go func() {
-		err := src(pw)
-		pw.CloseWithError(err)
-		srcErrCh <- err
-	}()
-
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		sc := bufio.NewScanner(stderrR)
-		for sc.Scan() {
-			log.Printf("[ffmpeg-video] %s", sc.Text())
-		}
-	}()
-
 	t0ff := time.Now()
-	runErr := cmd.Run()
-	stderrW.Close()
-	<-stderrDone
-	stderrR.Close()
+	runErr, srcErr := runFFmpegFromSource(cmd, src, "[ffmpeg-video]")
 
 	ctxErr := ctx.Err()
 	if runErr != nil {
@@ -1101,8 +1100,7 @@ func transcodeVideoForMSE(ctx context.Context, src func(io.Writer) error, dst io
 		log.Printf("[ffmpeg-video] exited OK but ctx cancelled after %.2fs", time.Since(t0ff).Seconds())
 		return ctxErr
 	}
-	srcErr := <-srcErrCh
-	if srcErr != nil && ctx.Err() == nil {
+	if srcErr != nil {
 		return fmt.Errorf("video source: %w", srcErr)
 	}
 	return nil
@@ -1121,7 +1119,6 @@ func transcodeVideoFaststart(ctx context.Context, src func(io.Writer) error, out
 	if ffmpegPath == "" {
 		return fmt.Errorf("ffmpeg not found")
 	}
-	pr, pw := io.Pipe()
 	args := []string{
 		"-loglevel", "warning",
 		"-i", "pipe:0",
@@ -1134,40 +1131,67 @@ func transcodeVideoFaststart(ctx context.Context, src func(io.Writer) error, out
 	}
 	args = append(args, "-y", "-f", "mp4", outPath)
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	cmd.Stdin = pr
 
-	stderrR, stderrW, _ := os.Pipe()
-	cmd.Stderr = stderrW
-
-	srcErrCh := make(chan error, 1)
-	go func() {
-		err := src(pw)
-		pw.CloseWithError(err)
-		srcErrCh <- err
-	}()
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		sc := bufio.NewScanner(stderrR)
-		for sc.Scan() {
-			log.Printf("[ffmpeg-video-fs] %s", sc.Text())
-		}
-	}()
-
-	runErr := cmd.Run()
-	stderrW.Close()
-	<-stderrDone
-	stderrR.Close()
+	runErr, srcErr := runFFmpegFromSource(cmd, src, "[ffmpeg-video-fs]")
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
 	if runErr != nil {
 		return fmt.Errorf("ffmpeg faststart remux: %w", runErr)
 	}
-	if srcErr := <-srcErrCh; srcErr != nil {
+	if srcErr != nil {
 		return fmt.Errorf("video source: %w", srcErr)
 	}
 	return nil
+}
+
+// runFFmpegFromSource runs cmd with src streamed into its stdin and its stderr
+// logged line by line under logPrefix, returning FFmpeg's and the source's
+// errors.
+//
+// FFmpeg may stop reading before the source is exhausted (-t reached, an
+// error, or a context kill). The source would then block forever writing to a
+// pipe nobody reads, so once FFmpeg exits the pipe is closed to release it; a
+// source error caused by that closure is not reported. The source records its
+// error before closing the pipe, so a genuine failure that ended FFmpeg's
+// input is always seen.
+func runFFmpegFromSource(cmd *exec.Cmd, src func(io.Writer) error, logPrefix string) (runErr, srcErr error) {
+	pr, pw := io.Pipe()
+	cmd.Stdin = pr
+
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err), nil
+	}
+	cmd.Stderr = stderrW
+
+	srcErrCh := make(chan error, 1)
+	go func() {
+		err := src(pw)
+		srcErrCh <- err // before closing: FFmpeg sees EOF only after the error is recorded
+		pw.CloseWithError(err)
+	}()
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		sc := bufio.NewScanner(stderrR)
+		for sc.Scan() {
+			log.Printf("%s %s", logPrefix, sc.Text())
+		}
+	}()
+
+	runErr = cmd.Run()
+	stderrW.Close()
+	<-stderrDone
+	stderrR.Close()
+
+	select {
+	case srcErr = <-srcErrCh: // the source finished on its own; its error is real
+	default:
+		pr.CloseWithError(io.ErrClosedPipe) // FFmpeg stopped reading first: release the source
+		<-srcErrCh
+	}
+	return runErr, srcErr
 }
 
 // mvCDNClient is a dedicated HTTP client for proxying requests to Apple's
@@ -1310,6 +1334,11 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 //
 // MSE-only: used solely by the MV video path. The audio path keeps per-write
 // flushing because it can carry ALAC→VLC, which must not be touched.
+// maxCoalescedBox bounds how much a single box may be buffered. FFmpeg's
+// fragments are far smaller; a larger (or corrupt 64-bit) size switches the
+// coalescer to passthrough instead of buffering it whole in memory.
+const maxCoalescedBox = 64 << 20
+
 type boxCoalescer struct {
 	w        io.Writer
 	buf      []byte
@@ -1335,8 +1364,9 @@ func (c *boxCoalescer) Write(p []byte) (int, error) {
 			}
 			size = int(binary.BigEndian.Uint64(c.buf[8:16]))
 		}
-		if size < 8 {
-			// size==0 ("extends to EOF") or malformed: we can't frame further.
+		if size < 8 || size > maxCoalescedBox {
+			// size==0 ("extends to EOF"), malformed, or too large to buffer: we
+			// can't (or won't) frame further.
 			// Flush what we have and switch to direct passthrough so the rest of
 			// the stream is never buffered unboundedly in memory.
 			if err := c.enterPassthrough(); err != nil {
