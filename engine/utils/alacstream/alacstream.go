@@ -414,13 +414,8 @@ func ReadNextFragment(r io.Reader, offset uint64) (*mp4.Fragment, uint64, error)
 		}
 		slog.Warn("ignoring box mid-stream", "type", boxType)
 	}
-	// only 1 mdat box in fragment, meaning that the box doesn't have a preceding moof box
 	if frag.Moof == nil {
-		return nil, offset, fmt.Errorf("more than one mdat box in fragment (box ends @ offset %d)", offset)
-	}
-	if frag.Moof.Mfhd != nil {
-		// Try to force incrementing sequence numbers!
-		// But we don't track the sequence number here...
+		return nil, offset, fmt.Errorf("mdat without a preceding moof (box ends @ offset %d)", offset)
 	}
 	return frag, offset, nil
 }
@@ -461,6 +456,9 @@ func TransformInit(init *mp4.InitSegment) (map[uint32]mp4.DecryptTrackInfo, erro
 	}
 	// remove encryption-related sbgp and sgpd
 	for _, trak := range init.Moov.Traks {
+		if trak.Mdia == nil || trak.Mdia.Minf == nil || trak.Mdia.Minf.Stbl == nil {
+			continue
+		}
 		stbl := trak.Mdia.Minf.Stbl
 		stbl.Children, _ = FilterSbgpSgpd(stbl.Children)
 	}
@@ -603,6 +601,11 @@ func cbcsDecryptSample(sample []byte, conn *bufio.ReadWriter,
 		if ss.BytesOfProtectedData <= 0 {
 			continue
 		}
+		// Sizes come from the file: a malformed senc must be an error, not a
+		// slice panic that takes down the engine from a stream goroutine.
+		if uint64(pos)+uint64(ss.BytesOfProtectedData) > uint64(len(sample)) {
+			return fmt.Errorf("subsample %d exceeds sample (%d+%d > %d)", j, pos, ss.BytesOfProtectedData, len(sample))
+		}
 
 		err := cbcsDecryptRaw(sample[pos:pos+ss.BytesOfProtectedData],
 			conn, decryptBlockLen, skipBlockLen)
@@ -619,6 +622,9 @@ func cbcsDecryptSample(sample []byte, conn *bufio.ReadWriter,
 func cbcsDecryptSamples(samples []mp4.FullSample, conn *bufio.ReadWriter,
 	tenc *mp4.TencBox, senc *mp4.SencBox) error {
 
+	if len(senc.SubSamples) != 0 && len(senc.SubSamples) < len(samples) {
+		return fmt.Errorf("senc has %d subsample entries for %d samples", len(senc.SubSamples), len(samples))
+	}
 	for i := range samples {
 		var subSamplePatterns []mp4.SubSamplePattern
 		if len(senc.SubSamples) != 0 {
@@ -636,7 +642,13 @@ func DecryptFragment(frag *mp4.Fragment, tracks map[uint32]mp4.DecryptTrackInfo,
 	moof := frag.Moof
 	var bytesRemoved uint64 = 0
 
+	if moof == nil {
+		return fmt.Errorf("fragment has no moof")
+	}
 	for _, traf := range moof.Trafs {
+		if traf.Tfhd == nil {
+			return fmt.Errorf("traf without tfhd")
+		}
 		ti, ok := tracks[traf.Tfhd.TrackID]
 		if !ok {
 			return fmt.Errorf("could not find decryption info for track %d", traf.Tfhd.TrackID)
@@ -646,6 +658,9 @@ func DecryptFragment(frag *mp4.Fragment, tracks map[uint32]mp4.DecryptTrackInfo,
 			continue
 		}
 
+		if ti.Sinf.Schm == nil || ti.Sinf.Schi == nil || ti.Sinf.Schi.Tenc == nil {
+			return fmt.Errorf("track %d: incomplete sinf (schm/schi/tenc)", traf.Tfhd.TrackID)
+		}
 		schemeType := ti.Sinf.Schm.SchemeType
 		if schemeType != "cbcs" {
 			return fmt.Errorf("scheme type %s not supported", schemeType)
