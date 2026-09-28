@@ -46,7 +46,6 @@ import "C"
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -346,75 +345,25 @@ func (b *HybrisBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	return client, nil
 }
 
-// hybrisCBCSServe is the server half of the in-process CBCS pipe.
-// Wire protocol (same as drm/process.go's Decrypt call + handle() in main.c):
-//
-//	→ uint8 adamIDLen + []byte adamID
-//	→ uint8 uriLen   + []byte uri
-//	→ loop: [uint32LE size][bytes sample]  (size=0 to end)
-//	← loop: []byte decrypted sample (same size)
+// hybrisCBCSServe is the server half of the in-process CBCS pipe: the
+// protocol lives in serveCBCS; this supplies the native key/decrypt calls.
 func hybrisCBCSServe(ctx context.Context, conn net.Conn) error {
-	var hdr [1]byte
-	if _, err := readFullConn(conn, hdr[:]); err != nil {
-		return err
-	}
-	adamBuf := make([]byte, hdr[0])
-	if _, err := readFullConn(conn, adamBuf); err != nil {
-		return err
-	}
-	if _, err := readFullConn(conn, hdr[:]); err != nil {
-		return err
-	}
-	uriBuf := make([]byte, hdr[0])
-	if _, err := readFullConn(conn, uriBuf); err != nil {
-		return err
-	}
-
-	cAdam := C.CString(string(adamBuf))
-	cURI := C.CString(string(uriBuf))
-	defer C.free(unsafe.Pointer(cAdam))
-	defer C.free(unsafe.Pointer(cURI))
-
-	kdCtx := C.drm_lib_open_kd_ctx(cAdam, cURI)
-	if kdCtx == nil {
-		return fmt.Errorf("hybris cbcs: open_kd_ctx failed")
-	}
-
-	var sizeBuf [4]byte
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	return serveCBCS(ctx, conn, func(adamID, uri string) (func([]byte), error) {
+		cAdam := C.CString(adamID)
+		cURI := C.CString(uri)
+		defer C.free(unsafe.Pointer(cAdam))
+		defer C.free(unsafe.Pointer(cURI))
+		kdCtx := C.drm_lib_open_kd_ctx(cAdam, cURI)
+		if kdCtx == nil {
+			return nil, fmt.Errorf("hybris cbcs: open_kd_ctx failed for %s", uri)
 		}
-		if _, err := readFullConn(conn, sizeBuf[:]); err != nil {
-			return err
-		}
-		size := binary.LittleEndian.Uint32(sizeBuf[:])
-		if size == 0 {
-			return nil
-		}
-		sample := make([]byte, size)
-		if _, err := readFullConn(conn, sample); err != nil {
-			return err
-		}
-		if truncLen := int(size) & ^0xf; truncLen > 0 {
-			C.drm_lib_decrypt(kdCtx, (*C.uint8_t)(unsafe.Pointer(&sample[0])), C.uint32_t(truncLen))
-		}
-		if _, err := conn.Write(sample); err != nil {
-			return err
-		}
-	}
-}
-
-func readFullConn(conn net.Conn, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := conn.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
+		return func(sample []byte) {
+			// CBCS pattern: only whole 16-byte blocks are encrypted.
+			if n := len(sample) &^ 0xf; n > 0 {
+				C.drm_lib_decrypt(kdCtx, (*C.uint8_t)(unsafe.Pointer(&sample[0])), C.uint32_t(n))
+			}
+		}, nil
+	})
 }
 
 // ── CGO callback registry ─────────────────────────────────────────────────────
