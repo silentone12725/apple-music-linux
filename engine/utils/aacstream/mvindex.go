@@ -418,6 +418,32 @@ func (m *MVLiveIndex) FragByIndex(n int, written int64) (MVFragEntry, bool) {
 	return f, true
 }
 
+// FragOffByIndex returns the byte offset of fragment n's moof box as soon as it has
+// been indexed, even when its End boundary is not yet known (End==0 while the fragment
+// is still being written). started=false means fragment n hasn't appeared in the index yet.
+// Use this to begin streaming a fragment response before the next moof is parsed.
+func (m *MVLiveIndex) FragOffByIndex(n int) (off int64, started bool) {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	if n < 0 || n >= len(m.ix.frags) {
+		return 0, false
+	}
+	return m.ix.frags[n].Off, true
+}
+
+// FragEndByIndex returns the end boundary of fragment n once it is known (End > 0).
+// End becomes non-zero when the next moof is parsed (or Finalize is called for the last frag).
+// Returns (0, false) while the fragment is still open.
+func (m *MVLiveIndex) FragEndByIndex(n int) (end int64, known bool) {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	if n < 0 || n >= len(m.ix.frags) {
+		return 0, false
+	}
+	end = m.ix.frags[n].End
+	return end, end > 0
+}
+
 // FragCount returns the current number of indexed fragments (may grow while producer runs).
 func (m *MVLiveIndex) FragCount() int {
 	m.ix.mu.RLock()

@@ -427,6 +427,26 @@ func (m *Manager) GetSeekStart(id string, kind pipeline.StreamKind, startSec flo
 	return actual, true
 }
 
+// GetSegmentTimings returns the cumulative HLS segment start times for the
+// given stream if its Source implements pipeline.SegmentTimingSource.
+// Entry i is the presentation start time (seconds) of HLS segment i.
+// Returns (nil, false) if the session/stream doesn't exist or lacks timing data.
+func (m *Manager) GetSegmentTimings(id string, kind pipeline.StreamKind) ([]float64, bool) {
+	_, pctx, ok := m.lookup(id)
+	if !ok {
+		return nil, false
+	}
+	stream, ok := pctx.streams[kind]
+	if !ok {
+		return nil, false
+	}
+	ts, ok := stream.Source.(pipeline.SegmentTimingSource)
+	if !ok {
+		return nil, false
+	}
+	return ts.SegmentTimings(), true
+}
+
 // GetProgressiveURL returns the raw CDN URL for the video stream if its
 // underlying Source implements pipeline.URLSource (i.e. it is an mvod
 // progressive source). Returns ("", false) for HLS-based streams.

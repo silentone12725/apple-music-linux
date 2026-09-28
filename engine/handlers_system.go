@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"engine/core/drm"
 )
 
 func (s *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +176,10 @@ func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// clients can answer "why did generation jump?" without a separate query.
 	epochInfo := s.epoch.Current()
 
-	drmSnap := s.dm.Status()
+	var drmSnap drm.DRMSnapshot
+	if s.dm != nil {
+		drmSnap = s.dm.Status()
+	}
 	cap := drmSnap.Capabilities
 	snapshotState := map[string]any{
 		"drm": map[string]any{
