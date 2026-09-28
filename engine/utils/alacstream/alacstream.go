@@ -21,6 +21,9 @@ import (
 	"log/slog"
 )
 
+// DialFunc opens a CBCS decryption connection.  In production, pass DRMManager.DialCBCS.
+type DialFunc func(ctx context.Context) (net.Conn, error)
+
 const prefetchKey = "skd://itunes.apple.com/P000000000/s1/e1"
 
 var ErrTimeout = errors.New("response timed out")
@@ -56,11 +59,11 @@ func (b *TimedResponseBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func Run(adamId string, playlistUrl string, outfile string, Config config.ConfigSet) error {
+func Run(ctx context.Context, dial DialFunc, adamId string, playlistUrl string, outfile string, Config config.ConfigSet) error {
 	const maxRetries = 3
 	var err error
 	for attempt := range maxRetries {
-		err = runAttempt(adamId, playlistUrl, outfile, Config)
+		err = runAttempt(ctx, dial, adamId, playlistUrl, outfile, Config)
 		if err == nil {
 			return nil
 		}
@@ -72,7 +75,7 @@ func Run(adamId string, playlistUrl string, outfile string, Config config.Config
 	return err
 }
 
-func runAttempt(adamId string, playlistUrl string, outfile string, Config config.ConfigSet) error {
+func runAttempt(ctx context.Context, dial DialFunc, adamId string, playlistUrl string, outfile string, Config config.ConfigSet) error {
 	header := make(http.Header)
 
 	// request media playlist
@@ -144,8 +147,7 @@ func runAttempt(adamId string, playlistUrl string, outfile string, Config config
 	}
 
 	totalLen := do.ContentLength
-	addr := Config.DecryptM3u8Port
-	conn, err := net.Dial("tcp", addr)
+	conn, err := dial(ctx)
 	if err != nil {
 		return err
 	}

@@ -73,7 +73,6 @@ func main() {
 		Config.EmbedLrc = true
 		Config.GetM3u8Mode = "hires"
 		Config.GetM3u8FromDevice = true
-		Config.DecryptM3u8Port = "127.0.0.1:10020"
 		Config.MVAudioType = "atmos"
 		Config.MVMax = 2160
 		Config.AlbumFolderFormat = "{AlbumName}"
