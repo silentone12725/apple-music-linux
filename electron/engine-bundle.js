@@ -1336,7 +1336,7 @@
           break;
         }
         chunks++;
-        if (ms.readyState !== "open" || audio.error) throw new Error(`MediaSource closed or audio error: ms=${ms.readyState} err=${audio.error?.code}`);
+        if (ms.readyState === "closed" || audio.error) throw new Error(`MediaSource closed or audio error: ms=${ms.readyState} err=${audio.error?.code}`);
         _cacheAudioChunk(localSessionId, value);
         if (sb.buffered.length > 0 && audio.currentTime > sb.buffered.start(0) + BACKWARD_SECS + 1) {
           await _sbEvictPlayed(ms, sb, audio, BACKWARD_SECS);
@@ -1344,7 +1344,7 @@
         await _throttleForward(ms, sb, audio, signal, FORWARD_SECS);
         await _sbWaitUpdate(sb, chunks);
         if (signal.aborted) throw new Error("aborted");
-        if (ms.readyState !== "open" || audio.error) throw new Error(`MediaSource closed or audio error [post-wait]: ms=${ms.readyState} err=${audio.error?.code}`);
+        if (ms.readyState === "closed" || audio.error) throw new Error(`MediaSource closed or audio error [post-wait]: ms=${ms.readyState} err=${audio.error?.code}`);
         await _appendWithRetry(sb, value, ms, audio, signal, BACKWARD_SECS, chunks);
       }
       await _sbWaitUpdate(sb, chunks);
@@ -1625,9 +1625,6 @@
     const mkAudio = document.createElement("audio");
     mkAudio.style.display = "none";
     document.body.appendChild(mkAudio);
-    mkAudio.addEventListener("play", () => console.log(`[AML MV-A] mkAudio play event ct=${mkAudio.currentTime.toFixed(2)} muted=${mkAudio.muted} vol=${mkAudio.volume}`));
-    mkAudio.addEventListener("playing", () => console.log(`[AML MV-A] mkAudio playing event ct=${mkAudio.currentTime.toFixed(2)}`));
-    mkAudio.addEventListener("pause", () => console.log(`[AML MV-A] mkAudio pause event ct=${mkAudio.currentTime.toFixed(2)}`));
     mkAudio.addEventListener("error", () => console.error(`[AML MV-A] mkAudio error code=${mkAudio.error?.code} msg=${mkAudio.error?.message}`));
     let ms = new MediaSource();
     let msBlobUrl = URL.createObjectURL(ms);
@@ -1840,13 +1837,11 @@
     };
     if (nativeVidEl) {
       nativeVidEl.play = function() {
-        console.log(`[AML MV] nativeVidEl.play() intercepted \u2192 myVid.paused=${myVid?.paused} _bufPaused=${_bufPaused} _avStarted=${_avStarted}`);
         if (!_avStarted) return Promise.resolve();
         if (_wcVideo ? mkAudio?.paused : myVid?.paused) mvPlay();
         return Promise.resolve();
       };
       nativeVidEl.pause = function() {
-        console.log(`[AML MV] nativeVidEl.pause() intercepted \u2192 forwarding to mvPause`);
         if (_avStarted) mvPause();
       };
     }
@@ -2556,14 +2551,12 @@
             _bufSpinner.style.display = "none";
             if (_userPaused) {
               mkAudio.muted = false;
-              console.log(`[AML MV buf:resume-held] lead=${lead.toFixed(2)}s \u2014 user paused, not auto-resuming`);
             } else {
               _mvGateOpen = _avStarted;
               mkAudio.currentTime = videoEl.currentTime;
               mkAudio.muted = false;
               _iframePlay.call(videoEl).catch(() => {
               });
-              console.log(`[AML MV buf:resume] lead=${lead.toFixed(2)}s ct=${videoEl.currentTime.toFixed(2)}`);
             }
           } else {
             if (!videoEl.paused) {
@@ -2605,7 +2598,6 @@
               _abortMV("buf-timeout");
               return;
             }
-            console.debug(`[AML MV buf:waiting] lead=${lead.toFixed(2)}s (need ${BUF_HIGH}s to resume)`);
           }
         } else if (videoEl.paused && lead < BUF_LOW && pipeCtrl.signal.aborted && !_abortCtrl.signal.aborted) {
           if (!_pipeRestarted) {
@@ -2635,7 +2627,6 @@
               _iframePlay.call(videoEl).catch(() => {
               });
             } else {
-              console.debug(`[AML MV buf:ok] lead=${lead.toFixed(2)}s`);
             }
           }
         }
@@ -2714,7 +2705,6 @@
         const bufAfter = _mvaBufStr();
         const grew = bufBefore !== bufAfter;
         window.__amlCaptureChunk?.("mv-audio", chunk, value, bufBefore, bufAfter, grew);
-        console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${bufAfter} +${elapsed}s bufGrew=${grew}`);
         if (!grew && chunk > 1)
           console.warn(`[INTERCEPT] chunk#${chunk} DID NOT grow buffer! Encrypted fragment rejected by browser MSE.`);
         return { chunk, shouldBreak: false };
@@ -2727,7 +2717,6 @@
           audioSb.appendBuffer(value);
           await _waitAudIdle();
           const chunk = chunkIn + 1;
-          console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} +${elapsed}s (retry)`);
           return { chunk, shouldBreak: false };
         } else if (e.name === "QuotaExceededError") {
           console.warn(`[AML MV-A] QuotaExceeded chunk#${chunkIn} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} \u2014 evicting`);
@@ -2738,7 +2727,6 @@
             audioSb.appendBuffer(value);
             await _waitAudIdle();
             const chunk = chunkIn + 1;
-            console.log(`[AML MV-A] chunk#${chunk} size=${value.byteLength} t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()} +${elapsed}s (post-evict)`);
             return { chunk, shouldBreak: false };
           } catch (_) {
             return { chunk: chunkIn, shouldBreak: false };
@@ -2749,7 +2737,7 @@
       }
     }
     const runAudioPipe = async (signal) => {
-      console.log(`[AML MV-A] fetch start t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)} url=${audioUrl}`);
+      console.log(`[AML MV-A] fetch start t=${_mvaTs()} ct=${mkAudio.currentTime.toFixed(3)}`);
       const t0 = performance.now();
       const resp = await fetch(audioUrl, { signal });
       if (!resp.ok) throw new Error(`audio ${resp.status}`);
@@ -2775,16 +2763,39 @@
       try {
         while (true) {
           const { done, value } = await reader.read();
-          if (done) {
-            console.log(`[AML MV-A] stream done t=${_mvaTs()} chunk#${chunk} ct=${mkAudio.currentTime.toFixed(3)} buf=${_mvaBufStr()}`);
-            break;
-          }
+          if (done) break;
           if (signal.aborted || audioMs.readyState !== "open") break;
           const elapsed = ((performance.now() - t0) / 1e3).toFixed(2);
           await _waitAudIdle();
           if (signal.aborted || audioMs.readyState !== "open") break;
           const bufBefore = _mvaBufStr();
-          console.log(`[INTERCEPT PRE-APPEND] chunk#${chunk + 1} size=${value.byteLength} bufBefore=${bufBefore} ${_parseBoxHeader(value)}`);
+          if (chunk === 0) {
+            try {
+              audioSb.appendBuffer(value);
+              await _waitAudIdle();
+              if (audioSb.buffered.length > 0) {
+                const hls_base = audioSb.buffered.start(0);
+                if (hls_base > 0.5) {
+                  const bufEnd = audioSb.buffered.end(audioSb.buffered.length - 1);
+                  audioSb.remove(hls_base, bufEnd + 1e-3);
+                  await _waitAudIdle();
+                  if (audioMs.readyState === "open") audioSb.abort();
+                  audioSb.timestampOffset = -hls_base;
+                  console.log(`[AML MV-A] timestampOffset=${(-hls_base).toFixed(2)}s (HLS base=${hls_base.toFixed(2)}s)`);
+                  audioSb.appendBuffer(value);
+                  await _waitAudIdle();
+                }
+              }
+            } catch (e) {
+              console.warn(`[AML MV-A] offset-probe failed (${e.name}: ${e.message}) \u2014 fallback: sync ct`);
+              await _waitAudIdle().catch(() => {
+              });
+              if (audioSb.buffered.length > 0 && mkAudio.currentTime < audioSb.buffered.start(0))
+                mkAudio.currentTime = audioSb.buffered.start(0);
+            }
+            chunk = 1;
+            continue;
+          }
           const r = await appendAudioChunk(value, chunk, elapsed, bufBefore, signal, evictAudio);
           if (r.shouldBreak) break;
           chunk = r.chunk;
@@ -2973,30 +2984,14 @@
       try {
         while (true) {
           await _awaitBufferHeadroom(signal);
-          if (signal.aborted || ms.readyState !== "open") {
-            console.log(`[AML MV-pipe] break-backpressure chunk#${chunkN} signal.aborted=${signal.aborted}`);
-            break;
-          }
+          if (signal.aborted || ms.readyState !== "open") break;
           const { done, value } = await reader.read();
-          if (done) {
-            console.log(`[AML MV-pipe] done after ${chunkN} chunks buf=${_bufRanges(videoSb)}`);
-            break;
-          }
-          if (signal.aborted || ms.readyState !== "open") {
-            console.log(`[AML MV-pipe] break chunk#${chunkN} signal.aborted=${signal.aborted} msState=${ms.readyState}`);
-            break;
-          }
-          const box = _boxName(value);
-          const bufBefore = _bufRanges(videoSb);
+          if (done) break;
+          if (signal.aborted || ms.readyState !== "open") break;
           await _waitVidIdle();
-          if (signal.aborted || ms.readyState !== "open") {
-            console.log(`[AML MV-pipe] break-after-idle chunk#${chunkN} box=${box} signal.aborted=${signal.aborted}`);
-            break;
-          }
+          if (signal.aborted || ms.readyState !== "open") break;
           if (!await _appendWithQuota(value, signal)) break;
           chunkN++;
-          if (chunkN <= 6 || chunkN % 20 === 0)
-            console.log(`[AML MV-pipe] appended chunk#${chunkN} size=${value.byteLength} box=${box} lead=${_leadAhead().toFixed(1)}s bufBefore=${bufBefore}`);
         }
       } finally {
         reader.cancel().catch(() => {
@@ -3357,14 +3352,11 @@
             if (done) break;
             const r = await reader.read();
             if (r.done) {
-              console.log(`[AML MV-WC] stream done gen=${myGen} chunk#${chunkN} queued=${queue.length}`);
               done = true;
               continue;
             }
             if (!live()) break;
             chunkN++;
-            if (chunkN <= 5 || chunkN % 100 === 0)
-              console.log(`[AML MV-WC] chunk#${chunkN} size=${r.value.byteLength} buf=${buf.length} decQ=${myDec.decodeQueueSize} queued=${queue.length} ct=${mkAudio.currentTime.toFixed(2)}`);
             const nb = new Uint8Array(buf.length + r.value.length);
             nb.set(buf);
             nb.set(r.value, buf.length);
@@ -3912,7 +3904,7 @@
             if (sig.aborted || gen !== fetchGeneration) break;
             sb.appendBuffer(data);
             await waitUpdateEnd();
-            if (gen !== fetchGeneration) break;
+            if (sig.aborted || gen !== fetchGeneration) break;
             if (sb.buffered.length > 0)
               _vsegBufferedSec = sb.buffered.end(sb.buffered.length - 1);
             nextSeg++;
@@ -4222,10 +4214,7 @@
         const mka = getMKAudio();
         if (mka && mka !== mkAudio) mka.dispatchEvent(new Event(type, { bubbles: false }));
       };
-      mkAudio.addEventListener("playing", () => {
-        console.log(`[AML MV-WC] mkAudio playing ct=${mkAudio.currentTime.toFixed(2)} \u2192 clearing loading`);
-        _wcDispatch("playing");
-      });
+      mkAudio.addEventListener("playing", () => _wcDispatch("playing"));
       mkAudio.addEventListener("play", () => _wcDispatch("playing"));
       mkAudio.addEventListener("pause", () => _wcDispatch("pause"));
     }
@@ -4930,10 +4919,11 @@
     if (pipeCtrl.signal.aborted) return;
     const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : 0;
     console.warn("[AML MSE] pipe error \u2014 recovering from", bufEnd.toFixed(1) + "s:", err.message);
-    if (ms.readyState !== "open") {
-      console.error("[AML MSE] ms=" + ms.readyState + ", no recovery");
+    if (ms.readyState === "closed") {
+      console.error("[AML MSE] ms=closed, no recovery");
       return;
     }
+    if (ms.readyState === "ended") console.warn("[AML MSE] ms=ended (Chrome decode-error path) \u2014 attempting resume");
     try {
       const resumeUrl = bufEnd > 1 ? `${myStreamBase}&t=${bufEnd.toFixed(3)}` : myStreamBase;
       const resp = await fetch(resumeUrl, { signal: pipeCtrl.signal });

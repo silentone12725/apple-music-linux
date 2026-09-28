@@ -49,24 +49,18 @@ test('Improvement09: JS MV re-inject cache removed', () => {
         'removed; backward seeks re-fetch from the engine (?t=) served from its disk cache.');
 });
 
-// ── #10 VA-API hardware video decode is disabled ──
+// ── #10 VA-API hardware video decode ──
 //
-// Proposal: adaptively enable HW decode for high-res MV. This confirms it is
-// currently force-disabled and that any change is a real behavior switch.
-test('Improvement10: VA-API decode disabled — and WHY it is unsafe to flip', () => {
-    const disabled = /Vaapi(Video)?Decoder/.test(MAIN);
-    assert.ok(disabled, 'expected VaapiVideoDecoder in a disable-features switch');
-    // The decisive fact: VA-API was disabled specifically to STOP the same
-    // CHUNK_DEMUXER_ERROR_APPEND_FAILED (code=3) we build retry machinery for.
-    const rationale = /VA-?API[\s\S]{0,400}CHUNK_DEMUXER_ERROR_APPEND_FAILED/.test(MAIN);
-    assert.ok(rationale, 'expected the documented code=3 rationale next to the VA-API disable');
-    // And there is no runtime fallback / per-GPU allowlist to make flipping safe.
-    const hasFallback = /Vaapi[\s\S]{0,600}(fallback|allowlist|gpuAllow|decodeError)/i.test(MAIN);
-    assert.equal(hasFallback, false, 'no VA-API runtime fallback present (as expected)');
-    console.log('VERDICT #10: DO NOT IMPLEMENT — VA-API is force-disabled precisely because the ' +
-        'Chrome 138 Linux VA-API→FFmpeg mid-stream fallback is the DOCUMENTED CAUSE of the ' +
-        'CHUNK_DEMUXER_ERROR_APPEND_FAILED (code=3) failures. Re-enabling it reintroduces the exact ' +
-        'bug the retry machinery mitigates. Software decode is the deliberate, correct choice here.');
+// History: VA-API was first force-disabled because Chrome 138's mid-stream
+// VA-API→FFmpeg fallback caused CHUNK_DEMUXER_ERROR on MSE video. Commit 94ad3cc
+// re-enabled it once MV moved to native <video src>/WebCodecs: with no MSE
+// video there is no ChunkDemuxer for the fallback to break. This pins that
+// decision and its rationale so a future MSE-video path revisits it.
+test('Improvement10: VA-API enabled only because MV video never uses MSE', () => {
+    const enabled = /appendSwitch\('enable-features',[\s\S]{0,600}VaapiVideoDecoder/.test(MAIN);
+    assert.ok(enabled, 'expected VaapiVideoDecoder in the enable-features switch');
+    const rationale = /VA-?API[\s\S]{0,400}CHUNK_DEMUXER_ERROR[\s\S]{0,200}MSE/.test(MAIN);
+    assert.ok(rationale, 'expected the MSE/CHUNK_DEMUXER rationale next to the VA-API enable');
 });
 
 // ── #11 & #12 — NOT function-testable (documented, deliberately skipped) ──

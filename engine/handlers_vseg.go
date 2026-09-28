@@ -41,6 +41,10 @@ type vsegSession struct {
 	idx    *aacstream.MVLiveIndex
 	cancel context.CancelFunc
 
+	// ephemeral producers are never committed to the disk cache (seek producers,
+	// and a base producer started while another session still writes the key).
+	ephemeral bool
+
 	mu   sync.RWMutex
 	done bool
 	err  error // nil = clean EOF; non-nil = producer failed
@@ -81,6 +85,7 @@ func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) 
 	if err != nil {
 		return nil, fmt.Errorf("begin streaming put: %w", err)
 	}
+	ephemeral := false
 	if spw == nil {
 		// Another goroutine is already writing this asset; wait for their state to appear.
 		if v, ok := mvVsegStates.Load(id); ok {
@@ -90,14 +95,21 @@ func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) 
 			state.mu.Unlock()
 			return active, nil
 		}
-		return nil, fmt.Errorf("vseg streaming put already in-flight for assetID=%s but session not found", assetID)
+		// A different session (e.g. an earlier play of the same MV) still owns
+		// the cache key. Produce into a private, uncached file instead of failing.
+		spw, err = s.diskCache.BeginStreamingPut(assetID, fmt.Sprintf("mv-vseg-dup-%d", time.Now().UnixNano()))
+		if err != nil || spw == nil {
+			return nil, fmt.Errorf("vseg streaming put for assetID=%s: %v", assetID, err)
+		}
+		ephemeral = true
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	base := &vsegSession{
-		spw:    spw,
-		idx:    aacstream.NewMVLiveIndex(),
-		cancel: cancel,
+		spw:       spw,
+		idx:       aacstream.NewMVLiveIndex(),
+		cancel:    cancel,
+		ephemeral: ephemeral,
 	}
 	state := &vsegState{base: base, active: base}
 
@@ -122,17 +134,25 @@ func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) 
 // startSec==0 streams from the beginning (committed to disk cache on success).
 // startSec>0 streams from the nearest HLS segment boundary (ephemeral; always discarded).
 func (s *APIServer) runVsegProducer(ctx context.Context, id, assetID string, startSec float64, vs *vsegSession) {
-	// Launch FFmpeg: re-encode to H.264 baseline with -bf 0 to eliminate B-frames
-	// (ChunkDemuxer rejects B-frame H.264 in MSE). CRF 18 is visually lossless.
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-loglevel", "error",
-		"-i", "pipe:0",
-		"-map", "0:v:0",
-		"-c:v", "libx264", "-preset", "medium", "-crf", "18", "-bf", "0",
-		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
-		"-f", "mp4",
-		"pipe:1",
-	)
+	// Select codec args based on the stream's codec string.
+	// H.264 (avc1/avc3): stream-copy — no encode latency, first fragment out in ~50ms.
+	// HEVC/unknown: transcode to H.264 baseline with -bf 0 (Chrome Linux has no HEVC MSE
+	// decoder without a patched Electron build).
+	var vArgs []string
+	if sess, ok := s.pm.GetSession(id); ok {
+		c := extractVideoCodec(sess.Capabilities.VideoCodec)
+		if strings.HasPrefix(c, "avc1") || strings.HasPrefix(c, "avc3") {
+			vArgs = []string{"-c:v", "copy"}
+		}
+	}
+	if vArgs == nil {
+		vArgs = []string{"-c:v", "libx264", "-preset", "fast", "-crf", "23", "-bf", "0"}
+	}
+
+	ffArgs := []string{"-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-map", "0:v:0"}
+	ffArgs = append(ffArgs, vArgs...)
+	ffArgs = append(ffArgs, "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
+	cmd := exec.CommandContext(ctx, "ffmpeg", ffArgs...)
 
 	ffIn, err := cmd.StdinPipe()
 	if err != nil {
@@ -199,8 +219,8 @@ func (s *APIServer) runVsegProducer(ctx context.Context, id, assetID string, sta
 	if producerErr != nil {
 		log.Printf("[vseg] producer error id=%s: %v", id, producerErr)
 		vs.spw.Discard()
-	} else if startSec > 0 {
-		// Seek producers are ephemeral: always discard rather than caching a partial stream.
+	} else if startSec > 0 || vs.ephemeral {
+		// Ephemeral producers: always discard rather than caching a partial stream.
 		log.Printf("[vseg] seek producer done id=%s startSec=%.3f written=%d frags=%d", id, startSec, totalWritten, vs.idx.FragCount())
 		vs.spw.Discard()
 	} else {
@@ -265,7 +285,7 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: cancel}
+	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: cancel, ephemeral: true}
 
 	// Update active in the existing state (base keeps running).
 	var state *vsegState
@@ -339,16 +359,10 @@ func (s *APIServer) handlePlaybackVsegInit(w http.ResponseWriter, r *http.Reques
 			}
 			return
 		}
-		// Block until the writer advances.
-		wake := vs.spw.NewReaderAt(vs.spw.Written())
-		buf := make([]byte, 1)
-		_, readErr := wake.Read(buf)
-		wake.Close()
-		if readErr != nil && readErr != io.EOF {
-			http.Error(w, "read error waiting for init segment", http.StatusInternalServerError)
-			return
-		}
-		if ctx.Err() != nil {
+		if err := waitForGrowth(ctx, vs.spw, vs.spw.Written()); err != nil {
+			if ctx.Err() == nil {
+				http.Error(w, "read error waiting for init segment", http.StatusInternalServerError)
+			}
 			return
 		}
 	}
@@ -385,16 +399,14 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	log.Printf("[vseg/seg] id=%s n=%d", id, n)
 
+	// Phase 1: wait until fragment n is indexed (Off known). This happens as soon as FFmpeg
+	// writes the moof header for fragment n — well before the mdat payload is written.
+	var fragOff int64
 	for {
-		written := vs.spw.Written()
-		if frag, ready := vs.idx.FragByIndex(n, written); ready {
-			size := frag.End - frag.Off
-			rd := vs.spw.NewReaderAt(frag.Off)
-			defer rd.Close()
-			w.Header().Set("Content-Type", "video/mp4")
-			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-			_, _ = io.Copy(w, io.LimitReader(rd, size))
-			return
+		off, started := vs.idx.FragOffByIndex(n)
+		if started {
+			fragOff = off
+			break
 		}
 		vs.mu.RLock()
 		done, vsErr := vs.done, vs.err
@@ -409,16 +421,91 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
-		// Block until more bytes arrive.
-		wake := vs.spw.NewReaderAt(written)
-		buf := make([]byte, 1)
-		_, readErr := wake.Read(buf)
-		wake.Close()
-		if readErr != nil && readErr != io.EOF {
-			http.Error(w, "read error waiting for segment", http.StatusInternalServerError)
+		if err := waitForGrowth(ctx, vs.spw, vs.spw.Written()); err != nil {
+			if ctx.Err() == nil {
+				http.Error(w, "read error waiting for segment", http.StatusInternalServerError)
+			}
 			return
 		}
-		if ctx.Err() != nil {
+	}
+
+	// Phase 2: stream response. Fragment n is indexed; start sending bytes immediately
+	// without waiting for fragment n+1's moof (which would set End). We stream up to
+	// (written - safeMargin) bytes at a time so we never accidentally cross the fragment
+	// boundary into the next moof header. Once End is known, we flush the exact remainder.
+	//
+	// safeStreamMargin: bytes held back at the write frontier. Any moof header is at most
+	// a few hundred bytes; 4 KiB is comfortably above that.
+	const safeStreamMargin = 4096
+
+	fl, hasFlusher := w.(http.Flusher)
+	w.Header().Set("Content-Type", "video/mp4")
+	// Omit Content-Length — chunked transfer encoding lets the browser start decoding
+	// fragment bytes as they arrive rather than buffering the full fragment first.
+
+	rd := vs.spw.NewReaderAt(fragOff)
+	defer rd.Close()
+
+	var sent int64
+	buf := make([]byte, 32<<10)
+
+	for {
+		written := vs.spw.Written()
+
+		// If End is now known, flush the exact remaining bytes and return.
+		if end, known := vs.idx.FragEndByIndex(n); known {
+			remaining := (end - fragOff) - sent
+			if remaining > 0 {
+				_, _ = io.CopyN(w, rd, remaining)
+			}
+			if hasFlusher {
+				fl.Flush()
+			}
+			return
+		}
+
+		// End not yet known. Send bytes up to (written - safeMargin) to stay clear
+		// of the write frontier where the next moof might be partially written.
+		safeBytes := (written - fragOff) - sent - safeStreamMargin
+		if safeBytes > 0 {
+			toRead := safeBytes
+			if toRead > int64(len(buf)) {
+				toRead = int64(len(buf))
+			}
+			n2, _ := rd.Read(buf[:toRead])
+			if n2 > 0 {
+				_, _ = w.Write(buf[:n2])
+				sent += int64(n2)
+				if hasFlusher {
+					fl.Flush()
+				}
+			}
+			continue // re-check End before blocking
+		}
+
+		// Nothing safe to send yet — block until more bytes arrive or producer finishes.
+		vs.mu.RLock()
+		done, vsErr := vs.done, vs.err
+		vs.mu.RUnlock()
+		if done {
+			if vsErr != nil {
+				return
+			}
+			// Finalize has been called; End should now be set.
+			if end, known := vs.idx.FragEndByIndex(n); known {
+				remaining := (end - fragOff) - sent
+				if remaining > 0 {
+					_, _ = io.CopyN(w, rd, remaining)
+				}
+				if hasFlusher {
+					fl.Flush()
+				}
+			}
+			return
+		}
+
+		// Other wait errors are re-checked via vs.done on the next iteration.
+		if waitForGrowth(ctx, vs.spw, written); ctx.Err() != nil {
 			return
 		}
 	}
@@ -552,6 +639,22 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Slow path: base hasn't reached tSec yet — start a parallel seek producer.
+	// Use the HLS segment timing table (available immediately from the parsed playlist)
+	// to compute actualStart for any position in the video without waiting for the
+	// base producer. startVsegSessionFrom calls SourceFrom(tSec) → URLsFromExact
+	// which uses the same table, so actual will match what we log here.
+	if timings, ok := s.pm.GetSegmentTimings(id, pipeline.KindVideo); ok && len(timings) > 0 {
+		best := timings[0]
+		for _, t := range timings {
+			if t <= tSec {
+				best = t
+			} else {
+				break
+			}
+		}
+		log.Printf("[vseg/seek] table lookup id=%s tSec=%.3f → actualStart=%.3f", id, tSec, best)
+	}
+
 	actual, startErr := s.startVsegSessionFrom(id, sess.AssetID, tSec)
 	if startErr != nil {
 		log.Printf("[vseg/seek] startVsegSessionFrom error id=%s: %v", id, startErr)
@@ -571,4 +674,23 @@ func extractVideoCodec(codecs string) string {
 		codecs = codecs[:i]
 	}
 	return strings.TrimSpace(codecs)
+}
+
+// waitForGrowth blocks until the writer has passed offset from or finished, or
+// until ctx ends (client disconnect) — whichever comes first. Returns ctx's
+// error when cancelled, or a writer failure other than a clean end.
+func waitForGrowth(ctx context.Context, spw *diskcache.StreamingPutWriter, from int64) error {
+	wake := spw.NewReaderAt(from)
+	defer wake.Close()
+	stop := context.AfterFunc(ctx, wake.Abort)
+	defer stop()
+	var b [1]byte
+	_, err := wake.Read(b[:])
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil && err != io.EOF {
+		return err
+	}
+	return nil
 }
