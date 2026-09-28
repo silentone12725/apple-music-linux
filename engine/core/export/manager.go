@@ -149,9 +149,13 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	stored := req
 	stored.Token, stored.MUT = "", ""
 	m.mu.Lock()
+	if !m.queue.Push(job.ID, &workItem{job: job, req: req, ctx: jobCtx}, req.Priority) {
+		m.mu.Unlock()
+		cancel()
+		return nil, fmt.Errorf("export queue is closed")
+	}
 	m.jobs[job.ID] = job
 	m.requests[job.ID] = stored
-	m.queue.Push(job.ID, &workItem{job: job, req: req, ctx: jobCtx}, req.Priority)
 	m.mu.Unlock()
 
 	m.emit(job, 0, "")
