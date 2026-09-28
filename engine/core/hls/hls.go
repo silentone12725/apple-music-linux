@@ -317,6 +317,52 @@ func (m *Media) URLsFrom(startSec float64) (urls []string, actualStart float64) 
 	return out, cumulative
 }
 
+// URLsFromExact is like URLsFrom but does not step back one segment.
+// Use this for sources (e.g. vseg) where FFmpeg resets timestamps from zero at
+// the HLS segment boundary, so no TFDT-overlap context is needed.
+func (m *Media) URLsFromExact(startSec float64) (urls []string, actualStart float64) {
+	if len(m.SegmentDurations) == 0 || startSec <= 0 {
+		return m.AllURLs(), 0
+	}
+	var cumulative float64
+	idx := 0
+	for i, d := range m.SegmentDurations {
+		if cumulative+d > startSec {
+			idx = i
+			break
+		}
+		cumulative += d
+		idx = i + 1
+	}
+	if idx >= len(m.SegmentURLs) {
+		idx = max(0, len(m.SegmentURLs)-1)
+		cumulative = 0
+		for _, d := range m.SegmentDurations[:idx] {
+			cumulative += d
+		}
+	}
+	out := make([]string, 0, 1+(len(m.SegmentURLs)-idx))
+	if m.InitURL != "" {
+		out = append(out, m.InitURL)
+	}
+	out = append(out, m.SegmentURLs[idx:]...)
+	log.Printf("[hls] URLsFromExact startSec=%.3f nSegs=%d → idx=%d actualStart=%.3f",
+		startSec, len(m.SegmentURLs), idx, cumulative)
+	return out, cumulative
+}
+
+// CumulativeSegmentTimes returns the presentation start time of each segment.
+// Entry i is the cumulative sum of durations[0..i-1], so entry 0 is always 0.
+func (m *Media) CumulativeSegmentTimes() []float64 {
+	out := make([]float64, len(m.SegmentDurations))
+	var cum float64
+	for i, d := range m.SegmentDurations {
+		out[i] = cum
+		cum += d
+	}
+	return out
+}
+
 // OpenMediaAuth is like OpenMedia but adds Apple Music auth headers.
 // Use this for media playlists at play.itunes.apple.com that require authentication.
 func OpenMediaAuth(ctx context.Context, rawURL, token, mut string) (*Media, error) {
@@ -464,7 +510,6 @@ type CBCSMedia struct {
 	// SegmentDurations holds the declared duration (seconds) of each segment,
 	// in playlist order. Used by CBCSSeekableSource to compute seek offsets.
 	SegmentDurations []float64
-
 }
 
 // OpenMediaCBCS fetches and parses a FairPlay CBCS media playlist.

@@ -26,8 +26,12 @@ type backendStatus struct {
 }
 
 func (s *APIServer) handleDRMStatus(w http.ResponseWriter, r *http.Request) {
+	var snap drm.DRMSnapshot
+	if s.dm != nil {
+		snap = s.dm.Status()
+	}
 	resp := drmStatusResponse{
-		DRMSnapshot: s.dm.Status(),
+		DRMSnapshot: snap,
 		Backend:     backendStatus{Selected: s.backendName},
 	}
 	if since := s.lifecycle.DRMReadySince(); !since.IsZero() {
@@ -68,7 +72,11 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 		}
 	}()
 	// Return immediately; authentication completion arrives via SSE.
-	writeJSON(w, http.StatusAccepted, s.dm.Status())
+	var snap drm.DRMSnapshot
+	if s.dm != nil {
+		snap = s.dm.Status()
+	}
+	writeJSON(w, http.StatusAccepted, snap)
 }
 
 func (s *APIServer) handleDRMChallenge(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +92,10 @@ func (s *APIServer) handleDRMChallenge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reply required", http.StatusBadRequest)
 		return
 	}
+	if s.dm == nil {
+		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
+		return
+	}
 	if err := s.dm.SubmitChallenge(r.Context(), req.Reply); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -92,6 +104,10 @@ func (s *APIServer) handleDRMChallenge(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleDRMLogout(w http.ResponseWriter, r *http.Request) {
+	if s.dm == nil {
+		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
+		return
+	}
 	if err := s.dm.Logout(r.Context()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -100,6 +116,10 @@ func (s *APIServer) handleDRMLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleDRMClearSession(w http.ResponseWriter, r *http.Request) {
+	if s.dm == nil {
+		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
+		return
+	}
 	if err := s.dm.ClearSession(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

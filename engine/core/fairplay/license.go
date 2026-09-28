@@ -150,8 +150,14 @@ func (s *hlsMVVideoSource) Stream(ctx context.Context, w io.Writer) error {
 }
 
 func (s *hlsMVVideoSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
-	urls, actual := s.media.URLsFrom(startSec)
+	// URLsFromExact: no step-back since FFmpeg resets timestamps from 0 at each
+	// HLS segment boundary, so no TFDT-overlap context is needed.
+	urls, actual := s.media.URLsFromExact(startSec)
 	return &hlsMVVideoRaw{urls: urls}, actual
+}
+
+func (s *hlsMVVideoSource) SegmentTimings() []float64 {
+	return s.media.CumulativeSegmentTimes()
 }
 
 type hlsMVVideoRaw struct{ urls []string }

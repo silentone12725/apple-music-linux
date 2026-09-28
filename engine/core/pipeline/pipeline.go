@@ -75,6 +75,17 @@ type SeekableSource interface {
 	SourceFrom(startSec float64) (source Source, actualStart float64)
 }
 
+// SegmentTimingSource is an optional extension of SeekableSource that exposes
+// the complete HLS segment timing table.  SegmentTimings returns the cumulative
+// presentation start time (seconds) of each HLS segment: entry i is the wall-
+// clock start of segment i, so entry 0 is always 0.
+// Callers can use this to compute actualStart for any seek position without
+// waiting for the base producer to index past that point.
+type SegmentTimingSource interface {
+	SeekableSource
+	SegmentTimings() []float64
+}
+
 // URLSource is an optional extension of Source for sources backed by a direct
 // CDN URL (e.g. progressiveVideoSource). Exposing the URL lets the engine
 // forward browser Range headers straight to the CDN instead of buffering the

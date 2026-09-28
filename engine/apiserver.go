@@ -520,34 +520,44 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// HybrisBackend (in-process CGO, libdrm-native.so) takes priority when the
 	// shared library is co-located with drm-native — both files are deployed by
 	// build-and-deploy.sh.  Fall back to the normal backend policy otherwise.
-	s.backendName = "hybris"
-	drmBackend := drm.NewHybrisBackend(filepath.Dir(drmBinaryPath))
-	slog.Info("DRM backend", "name", "hybris")
-
-	s.dm = drm.NewDRMManager(
-		drmBackend,
-		drmSession,
-		func(snap drm.DRMSnapshot) {
-			s.lifecycle.OnDRMStateChanged(snap.State.Session.String())
-			if snap.State.FairPlay == drm.FairPlayReady {
-				s.lifecycle.OnFairPlayReady(func() {
-					// Fired ~5min before the expected 24h FairPlay session expiry.
-					// Emit a drm.refresh_due SSE event so the JS can pre-warm a
-					// session while the current one is still valid — avoiding the
-					// losslessWait stall that would otherwise happen after expiry.
-					s.events.emit("drm.refresh_due", map[string]any{
-						"readySinceMs": s.lifecycle.DRMReadySince().UnixMilli(),
-						"refreshAtMs":  s.lifecycle.DRMReadySince().Add(drmSessionTTL - drmRefreshLeadTime).UnixMilli(),
+	//
+	// NewHybrisBackend returns nil when the hybris_backend build tag is absent
+	// (i.e. the binary was built without CGO DRM support). Guard against nil to
+	// avoid a panic in NewDRMManager.
+	var drmBackend drm.DRMBackend
+	if drmBinaryPath != "" {
+		drmBackend = drm.NewHybrisBackend(filepath.Dir(drmBinaryPath))
+	}
+	if drmBackend != nil {
+		s.backendName = "hybris"
+		slog.Info("DRM backend", "name", "hybris")
+		s.dm = drm.NewDRMManager(
+			drmBackend,
+			drmSession,
+			func(snap drm.DRMSnapshot) {
+				s.lifecycle.OnDRMStateChanged(snap.State.Session.String())
+				if snap.State.FairPlay == drm.FairPlayReady {
+					s.lifecycle.OnFairPlayReady(func() {
+						// Fired ~5min before the expected 24h FairPlay session expiry.
+						// Emit a drm.refresh_due SSE event so the JS can pre-warm a
+						// session while the current one is still valid — avoiding the
+						// losslessWait stall that would otherwise happen after expiry.
+						s.events.emit("drm.refresh_due", map[string]any{
+							"readySinceMs": s.lifecycle.DRMReadySince().UnixMilli(),
+							"refreshAtMs":  s.lifecycle.DRMReadySince().Add(drmSessionTTL - drmRefreshLeadTime).UnixMilli(),
+						})
 					})
-				})
-			}
-			s.events.emit("drm", snap)
-		},
-		drm.BackendConfig{BaseDir: drmBaseDir},
-		drm.DefaultRestartPolicy,
-	)
+				}
+				s.events.emit("drm", snap)
+			},
+			drm.BackendConfig{BaseDir: drmBaseDir},
+			drm.DefaultRestartPolicy,
+		)
+	} else {
+		slog.Warn("DRM backend unavailable (hybris_backend build tag not set or libdrm-native.so absent); DRM features disabled")
+	}
 	s.session = drmSession
-	s.drmReady = drmBinaryPath != ""
+	s.drmReady = drmBackend != nil
 	s.sessionDir = drmBaseDir
 
 	// Eager-start decision (executed in Start(), after the session lock is held):
@@ -558,7 +568,15 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// PlaybackManager receives DRMManager as the CBCSDialer for ALAC/Atmos.
 	// DRMManager.DialCBCS auto-starts the drm binary if a session exists, then
 	// opens a TCP connection for the FairPlay wire protocol.
-	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(s.dm, &drmAccountAdapter{s.dm}))
+	// Pass nil interfaces explicitly when DRM is unavailable — a (*DRMManager)(nil)
+	// passed as a non-nil interface would panic on first method call.
+	var cbcsDialer fairplay.CBCSDialer
+	var acctSource apple.AccountTokenSource
+	if s.dm != nil {
+		cbcsDialer = s.dm
+		acctSource = &drmAccountAdapter{s.dm}
+	}
+	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(cbcsDialer, acctSource))
 
 	// Prefetch scheduler — credentials are resolved lazily at Submit time
 	// so token rotations are picked up automatically.
@@ -828,7 +846,9 @@ func (s *APIServer) Stop() {
 	}
 	// Stop the wrapper process first so it doesn't keep running as an orphan.
 	// Session files are NOT cleared — they persist for the next server start.
-	s.dm.Shutdown()
+	if s.dm != nil {
+		s.dm.Shutdown()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s.srv.Shutdown(ctx) //nolint:errcheck
