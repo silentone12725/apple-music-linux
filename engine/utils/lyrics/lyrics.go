@@ -78,7 +78,7 @@ func getSongLyricsContext(ctx context.Context, songId string, storefront string,
 		return "", err
 	}
 	defer do.Body.Close()
-	bodyBytes, err := io.ReadAll(do.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(do.Body, 8<<20))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response body: %v", err)
 	}
@@ -91,7 +91,8 @@ func getSongLyricsContext(ctx context.Context, songId string, storefront string,
 		}
 		return obj.Data[0].Attributes.TtmlLocalizations, nil
 	} else {
-		return "", fmt.Errorf("failed to get lyrics: HTTP %d - %s", do.StatusCode, string(bodyBytes))
+		// The error reaches the HTTP client: report the status, not Apple's body.
+		return "", fmt.Errorf("failed to get lyrics: HTTP %d", do.StatusCode)
 	}
 }
 
@@ -148,6 +149,18 @@ func containsCJK(s string) bool {
 	return false
 }
 
+// ttmlRoot returns the <tt> and <body> elements, or an error for TTML that
+// lacks them (empty or malformed lyrics) instead of a nil dereference.
+func ttmlRoot(doc *etree.Document) (tt, body *etree.Element, err error) {
+	if tt = doc.FindElement("tt"); tt == nil {
+		return nil, nil, errors.New("no <tt> element")
+	}
+	if body = tt.FindElement("body"); body == nil {
+		return nil, nil, errors.New("no <body> in TTML")
+	}
+	return tt, body, nil
+}
+
 func TtmlToLrc(ttml string) (string, error) {
 	parsedTTML := etree.NewDocument()
 	err := parsedTTML.ReadFromString(ttml)
@@ -155,8 +168,12 @@ func TtmlToLrc(ttml string) (string, error) {
 		return "", err
 	}
 
+	tt, body, err := ttmlRoot(parsedTTML)
+	if err != nil {
+		return "", err
+	}
 	var lrcLines []string
-	timingAttr := parsedTTML.FindElement("tt").SelectAttr("itunes:timing")
+	timingAttr := tt.SelectAttr("itunes:timing")
 	if timingAttr != nil {
 		if timingAttr.Value == "Word" {
 			lrc, err := conventSyllableTTMLToLRC(ttml)
@@ -175,7 +192,7 @@ func TtmlToLrc(ttml string) (string, error) {
 	}
 
 	itunesMeta := itunesMetadataElem(parsedTTML)
-	for _, item := range parsedTTML.FindElement("tt").FindElement("body").ChildElements() {
+	for _, item := range body.ChildElements() {
 		for _, lyric := range item.ChildElements() {
 			beginAttr := lyric.SelectAttr("begin")
 			if beginAttr == nil {
@@ -224,27 +241,24 @@ func elementChildText(el *etree.Element) string {
 	return strings.Join(parts, "")
 }
 
-// parseLRCBeginTime parses an Apple TTML begin attribute to (m, s, cs) for LRC.
-func parseLRCBeginTime(v string) (m, s, ms int, err error) {
-	var h int
-	if strings.Contains(v, ":") {
-		_, err = fmt.Sscanf(v, "%d:%d:%d.%d", &h, &m, &s, &ms)
-		if err != nil {
-			_, err = fmt.Sscanf(v, "%d:%d.%d", &m, &s, &ms)
-			if err != nil {
-				_, err = fmt.Sscanf(v, "%d:%d", &m, &s)
-			}
-			h = 0
-		}
-	} else {
-		_, err = fmt.Sscanf(v, "%d.%d", &s, &ms)
-	}
+// parseLRCBeginTime parses an Apple TTML time value to (minutes, seconds,
+// centiseconds) for LRC. Fractions are read by digit position via
+// parseTtmlMs, so "12.5" is 12.50 s (not 12.05 or 12.00).
+func parseLRCBeginTime(v string) (m, s, cs int, err error) {
+	total, err := ttmlTimeMs(v)
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	m += h * 60
-	ms /= 10
-	return m, s, ms, nil
+	return total / 60000, (total / 1000) % 60, (total % 1000) / 10, nil
+}
+
+// ttmlTimeMs validates and parses a TTML time value to milliseconds.
+func ttmlTimeMs(v string) (int, error) {
+	v = strings.TrimSuffix(strings.TrimSpace(v), "s")
+	if v == "" || strings.IndexFunc(v, unicode.IsDigit) < 0 {
+		return 0, fmt.Errorf("invalid TTML time %q", v)
+	}
+	return parseTtmlMs(v), nil
 }
 
 // itunesMetadataElem finds the <iTunesMetadata> element in a TTML document.
@@ -321,16 +335,12 @@ func ttmlToSubtitle(ttml, format string) (string, error) {
 	if err := doc.ReadFromString(ttml); err != nil {
 		return "", err
 	}
-	tt := doc.FindElement("tt")
-	if tt == nil {
-		return "", errors.New("no <tt> element")
+	tt, body, err := ttmlRoot(doc)
+	if err != nil {
+		return "", err
 	}
 	if attr := tt.SelectAttr("itunes:timing"); attr != nil && attr.Value == "None" {
 		return "", nil // untimed lyrics — no subtitle possible
-	}
-	body := tt.FindElement("body")
-	if body == nil {
-		return "", errors.New("no <body> in TTML")
 	}
 
 	var entries []string
@@ -382,35 +392,24 @@ func ttmlToSubtitle(ttml, format string) (string, error) {
 }
 
 // parseTtmlMs parses an Apple TTML time value to milliseconds.
-// Handles: "HH:MM:SS.mmm", "MM:SS.mmm", "SS.mmm", and variants without fractions.
+// Handles "HH:MM:SS.mmm", "MM:SS.mmm", "SS.mmm", an optional "s" suffix, and
+// variants without fractions. The fraction is read by digit position
+// ("1.5" = 1500 ms). Malformed components count as 0.
 func parseTtmlMs(t string) int {
-	dotIdx := strings.LastIndex(t, ".")
-	intPart := t
-	fracStr := ""
-	if dotIdx >= 0 {
-		intPart = t[:dotIdx]
-		fracStr = t[dotIdx+1:]
+	t = strings.TrimSuffix(strings.TrimSpace(t), "s")
+	intPart, fracStr, _ := strings.Cut(t, ".")
+	total := 0
+	for _, p := range strings.Split(intPart, ":") {
+		n, _ := strconv.Atoi(p)
+		total = total*60 + n
 	}
-
-	var h, m, s int
-	n, _ := fmt.Sscanf(intPart, "%d:%d:%d", &h, &m, &s)
-	if n < 3 {
-		n2, _ := fmt.Sscanf(intPart, "%d:%d", &m, &s)
-		if n2 < 2 {
-			s, _ = strconv.Atoi(intPart)
-		}
-	}
-
-	totalMs := (h*3600 + m*60 + s) * 1000
+	ms := total * 1000
 	if fracStr != "" {
 		fracStr += strings.Repeat("0", max(0, 3-len(fracStr)))
-		if len(fracStr) > 3 {
-			fracStr = fracStr[:3]
-		}
-		ms, _ := strconv.Atoi(fracStr)
-		totalMs += ms
+		f, _ := strconv.Atoi(fracStr[:3])
+		ms += f
 	}
-	return totalMs
+	return ms
 }
 
 func msToSubTime(ms int, sep byte) string {
@@ -429,8 +428,12 @@ func conventSyllableTTMLToLRC(ttml string) (string, error) {
 		return "", err
 	}
 	itunesMeta := itunesMetadataElem(parsedTTML)
+	_, body, err := ttmlRoot(parsedTTML)
+	if err != nil {
+		return "", err
+	}
 	var lrcLines []string
-	divs := parsedTTML.FindElement("tt").FindElement("body").FindElements("div")
+	divs := body.FindElements("div")
 	for _, div := range divs {
 		for _, item := range div.ChildElements() {
 			var lrcSyllables []string
@@ -444,9 +447,9 @@ func conventSyllableTTMLToLRC(ttml string) (string, error) {
 					}
 					continue
 				}
-				lyric := lyrics.(*etree.Element)
-				if lyric.SelectAttr("begin") == nil {
-					continue
+				lyric, ok := lyrics.(*etree.Element)
+				if !ok || lyric.SelectAttr("begin") == nil {
+					continue // comments, processing instructions, untimed spans
 				}
 				beginTime, err := parseSyllableTime(lyric.SelectAttrValue("begin", ""), i)
 				if err != nil {
@@ -485,29 +488,17 @@ func conventSyllableTTMLToLRC(ttml string) (string, error) {
 // parseSyllableTime formats a TTML time value into an LRC/syllable timestamp string.
 // newLine=0 → "[mm:ss.cs]<mm:ss.cs>", newLine=-1 → "[mm:ss.cs]", else → "<mm:ss.cs>".
 func parseSyllableTime(timeValue string, newLine int) (string, error) {
-	var h, m, s, ms int
-	var err error
-	if strings.Contains(timeValue, ":") {
-		_, err = fmt.Sscanf(timeValue, "%d:%d:%d.%d", &h, &m, &s, &ms)
-		if err != nil {
-			_, err = fmt.Sscanf(timeValue, "%d:%d.%d", &m, &s, &ms)
-			h = 0
-		}
-	} else {
-		_, err = fmt.Sscanf(timeValue, "%d.%d", &s, &ms)
-	}
+	m, sec, cs, err := parseLRCBeginTime(timeValue)
 	if err != nil {
 		return "", err
 	}
-	m += h * 60
-	ms /= 10
 	switch newLine {
 	case 0:
-		return fmt.Sprintf("[%02d:%02d.%02d]<%02d:%02d.%02d>", m, s, ms, m, s, ms), nil
+		return fmt.Sprintf("[%02d:%02d.%02d]<%02d:%02d.%02d>", m, sec, cs, m, sec, cs), nil
 	case -1:
-		return fmt.Sprintf("[%02d:%02d.%02d]", m, s, ms), nil
+		return fmt.Sprintf("[%02d:%02d.%02d]", m, sec, cs), nil
 	default:
-		return fmt.Sprintf("<%02d:%02d.%02d>", m, s, ms), nil
+		return fmt.Sprintf("<%02d:%02d.%02d>", m, sec, cs), nil
 	}
 }
 
