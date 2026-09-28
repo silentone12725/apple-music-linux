@@ -220,8 +220,14 @@ sudo apt install vlc nodejs npm
 **Rebuild the Go engine:**
 
 ```bash
+# CGO + the hybris_backend tag are required for DRM (lossless, hi-res, MVs);
+# without them the engine builds fine but silently falls back to AAC.
+# CGO's -L cannot take a path with spaces, hence the symlink.
+ln -sfT "$PWD/drm" /tmp/aml-drm
 cd engine
-go build -o ../electron/dist/resources/engine .
+CGO_ENABLED=1 CGO_LDFLAGS='-L/tmp/aml-drm -Wl,-rpath,$ORIGIN' \
+  go build -tags hybris_backend -o ../electron/dist/resources/engine .
+cp ../drm/libdrm-native.so ../drm/libhybris-core.so ../electron/dist/resources/
 ```
 
 ## Build

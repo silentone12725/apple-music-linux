@@ -16,8 +16,9 @@
     "abstract-socket@2.1.1": true
   },
   "scripts": {
-    "dist": "electron-builder --linux AppImage",
-    "build:engine": "npx esbuild src/engine-playback.js --bundle --format=iife --outfile=engine-bundle.js && cp engine-bundle.js dist/linux-unpacked/resources/engine-bundle.js"
+    "dist": "npm run build:go && npm run build:engine && electron-builder --linux AppImage",
+    "build:engine": "npx esbuild src/engine-playback.js --bundle --format=iife --outfile=engine-bundle.js && cp engine-bundle.js dist/linux-unpacked/resources/engine-bundle.js",
+    "build:go": "bash ../scripts/build-engine.sh dist/resources"
   },
   "desktopName": "apple-music-linux.desktop",
   "devDependencies": {
@@ -44,8 +45,16 @@
         "to": "engine"
       },
       {
-        "from": "../drm/drm-rootless",
-        "to": "drm"
+        "from": "dist/resources/libdrm-native.so",
+        "to": "libdrm-native.so"
+      },
+      {
+        "from": "dist/resources/libhybris-core.so",
+        "to": "libhybris-core.so"
+      },
+      {
+        "from": "../drm/hybris-linker",
+        "to": "hybris-linker"
       },
       {
         "from": "../drm/rootfs",
@@ -72,7 +81,9 @@
       "executableName": "apple-music-linux",
       "artifactName": "apple-music-linux.AppImage",
       "syncDesktopName": true,
-      "mimeTypes": ["x-scheme-handler/aml"]
+      "mimeTypes": [
+        "x-scheme-handler/aml"
+      ]
     }
   }
 }

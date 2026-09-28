@@ -10,7 +10,7 @@ process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, createReadStream, readdirSync } from 'fs';
+import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, symlinkSync, rmSync, createWriteStream, createReadStream, readdirSync } from 'fs';
 import { readFile as readFileAsync, writeFile as writeFileAsync } from 'fs/promises';
 import os from 'os';
 import net from 'net';
@@ -198,31 +198,51 @@ const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
 const ENGINE_PORT = 20025;
 
 // ── User DRM dir setup ────────────────────────────────────────────────────────
-// ProcessBackend sets cmd.Dir = dirname(drmBinaryPath), so the binary must
-// live next to rootfs/. In dev this is drm/ in the repo. In packaged AppImage
-// the bundled rootfs is read-only, so we copy it once to a writable user dir
-// and put a launcher script there as the "binary".
+// DRM runs in-process (HybrisBackend, libdrm-native.so next to the engine).
+// The engine takes its DRM directory from dirname(drm-binary-path) and expects
+// the dev layout there:
+//   <dir>/rootfs/system/lib64   Android libs
+//   <dir>/rootfs/data/...       writable session (mpl_db, tokens)
+//   <dir>/hybris-linker/        Android linker shim
+// The packaged bundle is read-only, so build that layout in a user dir: link
+// the bundle's read-only parts (rootfs/system, rootfs/etc, hybris-linker) and
+// keep only rootfs/data writable there. The drm-native path is only a
+// directory marker — nothing is executed.
 function ensureUserDRM() {
-    const userDir    = path.join(CONFIG_DIR, 'drm');
-    const userBin    = path.join(userDir, 'drm-rootless');
-    const userRootfs = path.join(userDir, 'rootfs');
-    const realBin    = path.join(process.resourcesPath, 'drm');
+    const userDir       = path.join(CONFIG_DIR, 'drm');
+    const userRootfs    = path.join(userDir, 'rootfs');
     const bundledRootfs = path.join(process.resourcesPath, 'rootfs');
 
     mkdirSync(userDir, { recursive: true });
 
-    // Copy rootfs if the Android binary or its shared libs are missing
-    // (handles stale installs that got the dir created but not system/bin/ or lib64/).
-    const userMain   = path.join(userRootfs, 'system', 'bin', 'main');
-    const userLib64  = path.join(userRootfs, 'system', 'lib64');
-    if ((!existsSync(userMain) || !existsSync(userLib64)) && existsSync(bundledRootfs)) {
-        execFileSync('cp', ['-a', bundledRootfs, userDir], { stdio: 'ignore' });
+    // Link, never copy, the read-only rootfs parts: a copy made by an older
+    // release goes stale when the bundle changes (e.g. a new Android lib such
+    // as libdl.so), and dlopen then fails. Relinked every launch because an
+    // AppImage mounts at a new /tmp/.mount_* path each run. rmSync removes the
+    // app-managed copy/link from earlier launches; it never follows a symlink.
+    mkdirSync(path.join(userRootfs, 'data', 'data', 'com.apple.android.music', 'files'), { recursive: true });
+    for (const sub of ['system', 'etc']) {
+        const target = path.join(bundledRootfs, sub);
+        if (!existsSync(target)) continue;
+        const link = path.join(userRootfs, sub);
+        try {
+            rmSync(link, { recursive: true, force: true });
+            symlinkSync(target, link, 'dir');
+        } catch (e) { console.error(`[AML] rootfs/${sub} link failed — DRM may be unavailable:`, e.message); }
     }
 
-    // Launcher script: ProcessBackend cwd = userDir → binary finds rootfs there.
-    writeFileSync(userBin, `#!/bin/sh\nexec "${realBin}" "$@"\n`, { mode: 0o755 });
+    const linkerLink = path.join(userDir, 'hybris-linker');
+    try { unlinkSync(linkerLink); } catch {}
+    const bundledLinker = path.join(process.resourcesPath, 'hybris-linker');
+    if (existsSync(bundledLinker)) {
+        try { symlinkSync(bundledLinker, linkerLink, 'dir'); }
+        catch (e) { console.error('[AML] hybris-linker link failed — DRM will be unavailable:', e.message); }
+    }
 
-    return { userBin, userRootfs };
+    // Launcher script left by pre-hybris installs (subprocess DRM).
+    try { unlinkSync(path.join(userDir, 'drm-rootless')); } catch {}
+
+    return { drmMarker: path.join(userDir, 'drm-native'), userRootfs };
 }
 
 function ensureEngineConfig() {
@@ -231,8 +251,8 @@ function ensureEngineConfig() {
 
     let drmBin, drmBase;
     if (app.isPackaged) {
-        const { userBin, userRootfs } = ensureUserDRM();
-        drmBin  = userBin;
+        const { drmMarker, userRootfs } = ensureUserDRM();
+        drmBin  = drmMarker;
         drmBase = path.join(userRootfs, 'data', 'data', 'com.apple.android.music', 'files');
     } else {
         // Dev: prefer drm-native (in-process hybris) when present; fall back to drm-rootless.
