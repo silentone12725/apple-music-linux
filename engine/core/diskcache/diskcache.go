@@ -411,6 +411,42 @@ func (sw *StreamingPutWriter) NewReaderAt(offset int64) *StreamingReader {
 	return &StreamingReader{sw: sw, pos: offset}
 }
 
+// NewFromCommitted wraps an already-committed cache entry as a finished
+// StreamingPutWriter so it can be served through the same byte-level read path
+// as an in-progress write. The writer holds one reference; call Release when
+// the caller is done with it. Do NOT call Commit or Discard on the result.
+func (c *Cache) NewFromCommitted(assetID, qualifier string) (*StreamingPutWriter, error) {
+	path := filepath.Join(c.dir, c.filename(assetID, qualifier))
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	sw := &StreamingPutWriter{
+		file:      f,
+		finalPath: path,
+		key:       c.filename(assetID, qualifier),
+		cache:     c,
+	}
+	sw.cond = sync.NewCond(&sw.mu)
+	sw.mu.Lock()
+	sw.written = info.Size()
+	sw.done = true
+	sw.mu.Unlock()
+	sw.refs.Store(1)
+	return sw, nil
+}
+
+// Release releases the writer's own reference without touching the underlying
+// file on disk. Use this in place of Commit or Discard on a StreamingPutWriter
+// returned by NewFromCommitted. The file descriptor is closed when refs reach zero
+// (i.e. after all readers have also closed).
+func (sw *StreamingPutWriter) Release() { sw.decRef() }
+
 // NewReaderIfActive is NewReader, but returns nil once the writer has
 // committed or discarded — the temp file may already be closed or renamed.
 func (sw *StreamingPutWriter) NewReaderIfActive() *StreamingReader {

@@ -2890,8 +2890,9 @@ async function startMVPipeline() {
     // Why mute instead of pause mkAudio:
     //   MK owns that element; pausing it triggers state=3 which can cause
     //   track-skip under sustained stalls. Muting keeps MK in "playing" state.
-    const BUF_LOW  = 2.0; // pause when lead falls below this
-    const BUF_HIGH = 10.0; // resume only when lead rises above this (8s hysteresis gap, matches Android PLAYER_BUFFER_REBUFFER_MS)
+    const BUF_LOW      = 2.0;  // pause when lead falls below this
+    const BUF_HIGH     = 10.0; // resume only when lead rises above this (8s hysteresis gap, matches Android PLAYER_BUFFER_REBUFFER_MS)
+    const SEEK_PRE_BUF = 4.0;  // vseg: minimum buffer lead before resuming after a seek
 
     let _dynBufTimer  = null;
     let _bufPaused    = false; // true while hidden-paused for buffering
@@ -4426,10 +4427,24 @@ async function startMVPipeline() {
 
         myVid.addEventListener('seeked', () => {
             _seekHandlerActive = false;
-            _bufSpinner.style.display = 'none';
             _clearSeekFreeze();
-            if (!myVid.paused && mkAudio.paused)
-                mkAudio.play().catch(() => {});
+            if (!myVid.paused && mkAudio.paused) {
+                // Wait for SEEK_PRE_BUF seconds of buffer lead before resuming audio
+                // so playback doesn't immediately stall when the SourceBuffer is thin.
+                const tryResume = () => {
+                    if (_abortCtrl?.signal.aborted) { _bufSpinner.style.display = 'none'; return; }
+                    if (myVid.paused) { _bufSpinner.style.display = 'none'; return; } // dynBuf took over
+                    if (_getVidLead() >= SEEK_PRE_BUF) {
+                        _bufSpinner.style.display = 'none';
+                        mkAudio.play().catch(() => {});
+                    } else {
+                        setTimeout(tryResume, 200);
+                    }
+                };
+                tryResume();
+            } else {
+                _bufSpinner.style.display = 'none';
+            }
         });
 
         myVid.addEventListener('canplay', () => {

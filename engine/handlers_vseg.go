@@ -219,10 +219,15 @@ func (s *APIServer) runVsegProducer(ctx context.Context, id, assetID string, sta
 	if producerErr != nil {
 		log.Printf("[vseg] producer error id=%s: %v", id, producerErr)
 		vs.spw.Discard()
-	} else if startSec > 0 || vs.ephemeral {
-		// Ephemeral producers: always discard rather than caching a partial stream.
-		log.Printf("[vseg] seek producer done id=%s startSec=%.3f written=%d frags=%d", id, startSec, totalWritten, vs.idx.FragCount())
+	} else if vs.ephemeral || ctx.Err() != nil {
+		// Ephemeral (collision fallback) or cancelled mid-stream: discard incomplete data.
+		log.Printf("[vseg] seek producer discarded id=%s startSec=%.3f written=%d (ephemeral=%v cancelled=%v)",
+			id, startSec, totalWritten, vs.ephemeral, ctx.Err() != nil)
 		vs.spw.Discard()
+	} else if startSec > 0 {
+		// Non-ephemeral seek producer ran to completion: commit for backward-seek reuse.
+		log.Printf("[vseg] seek producer done id=%s startSec=%.3f written=%d frags=%d (cached)", id, startSec, totalWritten, vs.idx.FragCount())
+		_ = vs.spw.Commit()
 	} else {
 		log.Printf("[vseg] base producer done id=%s written=%d frags=%d", id, totalWritten, vs.idx.FragCount())
 		_ = vs.spw.Commit()
@@ -265,6 +270,65 @@ func (s *APIServer) handlePlaybackVsegStop(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// setActiveVsegSession replaces the active producer in the session state.
+// It cancels the previous active producer if it was a seek producer (not base).
+// Base always keeps running.
+func setActiveVsegSession(id string, seek *vsegSession) {
+	var state *vsegState
+	if v, loaded := mvVsegStates.Load(id); loaded {
+		state = v.(*vsegState)
+	} else {
+		state = &vsegState{active: seek}
+		actual, _ := mvVsegStates.LoadOrStore(id, state)
+		state = actual.(*vsegState)
+	}
+
+	state.mu.Lock()
+	old := state.active
+	state.active = seek
+	state.mu.Unlock()
+
+	if old != nil && old != state.base {
+		old.cancel()
+	}
+}
+
+// loadCachedSeek loads a committed seek-cache entry and reconstructs its fragment
+// index by replaying the fMP4 bytes. Returns a vsegSession in done=true state,
+// ready to serve segments without starting an FFmpeg process.
+func (s *APIServer) loadCachedSeek(assetID, qualifier string) (*vsegSession, error) {
+	spw, err := s.diskCache.NewFromCommitted(assetID, qualifier)
+	if err != nil {
+		return nil, fmt.Errorf("open committed seek: %w", err)
+	}
+	fileSize := spw.Written()
+
+	f, ok := s.diskCache.Get(assetID, qualifier)
+	if !ok {
+		spw.Release()
+		return nil, fmt.Errorf("cache miss after path check")
+	}
+	defer f.Close()
+
+	idx := aacstream.NewMVLiveIndex()
+	if _, err := io.Copy(idx, f); err != nil {
+		spw.Release()
+		return nil, fmt.Errorf("index rebuild: %w", err)
+	}
+	idx.Finalize(fileSize)
+	if idx.FragCount() == 0 {
+		spw.Release()
+		return nil, fmt.Errorf("no fragments in cached seek file")
+	}
+
+	return &vsegSession{
+		spw:    spw,
+		idx:    idx,
+		cancel: spw.Release, // Release file descriptor when session is stopped
+		done:   true,
+	}, nil
+}
+
 // startVsegSessionFrom starts a new seek producer for id without cancelling base.
 // Returns the actual HLS-segment-aligned start time. Base continues running.
 func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (float64, error) {
@@ -274,43 +338,44 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 		return 0, fmt.Errorf("session %s has no seekable video stream", id)
 	}
 
-	// Use a time-unique qualifier so rapid seeks don't collide in the inFlight map.
-	qualifier := fmt.Sprintf("mv-vseg-seek-%d", time.Now().UnixNano())
+	// Deterministic qualifier: same HLS-boundary position always maps to the same
+	// cache file so completed seek producers can be reused for backward seeks.
+	qualifier := fmt.Sprintf("mv-vseg-seek-%.3f", actual)
+
+	// Fast path: a previous seek to this exact HLS boundary is already on disk.
+	if _, hit := s.diskCache.Path(assetID, qualifier); hit {
+		if seek, err := s.loadCachedSeek(assetID, qualifier); err == nil {
+			setActiveVsegSession(id, seek)
+			log.Printf("[vseg] seek cache hit id=%s actual=%.3f frags=%d", id, actual, seek.idx.FragCount())
+			return actual, nil
+		}
+	}
+
 	spw, err := s.diskCache.BeginStreamingPut(assetID, qualifier)
 	if err != nil {
 		return 0, fmt.Errorf("begin streaming put: %w", err)
 	}
+	ephemeral := false
 	if spw == nil {
-		return 0, fmt.Errorf("vseg seek put collision assetID=%s qualifier=%s", assetID, qualifier)
+		// Another goroutine is already writing this key; fall back to a unique
+		// ephemeral qualifier so this seek still works without colliding.
+		ephemeral = true
+		qualifier = fmt.Sprintf("mv-vseg-seek-eph-%d", time.Now().UnixNano())
+		spw, err = s.diskCache.BeginStreamingPut(assetID, qualifier)
+		if err != nil || spw == nil {
+			return 0, fmt.Errorf("vseg seek put fallback assetID=%s: %v", assetID, err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(s.shutdownCtx)
-	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: cancel, ephemeral: true}
+	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: cancel, ephemeral: ephemeral}
 
-	// Update active in the existing state (base keeps running).
-	var state *vsegState
-	if v, loaded := mvVsegStates.Load(id); loaded {
-		state = v.(*vsegState)
-	} else {
-		state = &vsegState{active: seek}
-		actual2, _ := mvVsegStates.LoadOrStore(id, state)
-		state = actual2.(*vsegState)
-	}
-
-	state.mu.Lock()
-	old := state.active
-	state.active = seek
-	state.mu.Unlock()
-
-	// Cancel any previous seek producer but NOT the base.
-	if old != nil && old != state.base {
-		old.cancel()
-	}
+	setActiveVsegSession(id, seek)
 
 	// Pass the original startSec, not actual: StreamFrom calls URLsFrom internally
 	// (which steps back one segment for overlap). Passing actual would step back twice.
 	go s.runVsegProducer(ctx, id, assetID, startSec, seek)
-	log.Printf("[vseg] seek producer started id=%s startSec=%.3f actual=%.3f", id, startSec, actual)
+	log.Printf("[vseg] seek producer started id=%s startSec=%.3f actual=%.3f ephemeral=%v", id, startSec, actual, ephemeral)
 	return actual, nil
 }
 
@@ -631,6 +696,40 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 						old.cancel()
 					}
 					log.Printf("[vseg/seek] instant from base id=%s tSec=%.3f fragN=%d fragT=%.3f", id, tSec, fragN, frag.T)
+					writeJSON(w, http.StatusOK, map[string]any{"n": fragN, "t": frag.T})
+					return
+				}
+			}
+		}
+	}
+
+	// Active-seek fast path: if there is already a seek producer whose indexed
+	// range covers tSec, reuse it directly without starting a new FFmpeg process.
+	// This handles forward seeks within the current producer's range and backward
+	// seeks to positions it has already encoded past.
+	if v, ok := mvVsegStates.Load(id); ok {
+		state := v.(*vsegState)
+		state.mu.Lock()
+		active := state.active
+		base := state.base
+		state.mu.Unlock()
+		if active != nil && active != base {
+			fragN, frag, hasIt := active.idx.FragIndexForTime(tSec, active.spw.Written())
+			if hasIt {
+				active.mu.RLock()
+				activeDone := active.done
+				active.mu.RUnlock()
+				activePast := activeDone
+				if !activePast {
+					for _, ft := range active.idx.AllFragTimings() {
+						if ft.T > tSec {
+							activePast = true
+							break
+						}
+					}
+				}
+				if activePast {
+					log.Printf("[vseg/seek] instant from active seek id=%s tSec=%.3f fragN=%d fragT=%.3f", id, tSec, fragN, frag.T)
 					writeJSON(w, http.StatusOK, map[string]any{"n": fragN, "t": frag.T})
 					return
 				}
