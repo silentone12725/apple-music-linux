@@ -9,10 +9,6 @@ import (
 	"net/url"
 )
 
-func GetMusicVideoResp(storefront string, id string, language string, token string) (*MusicVideoResp, error) {
-	return GetMusicVideoRespContext(context.Background(), storefront, id, language, token)
-}
-
 func GetMusicVideoRespContext(ctx context.Context, storefront string, id string, language string, token string) (*MusicVideoResp, error) {
 	var err error
 	if token == "" {
@@ -27,7 +23,7 @@ func GetMusicVideoRespContext(ctx context.Context, storefront string, id string,
 		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://music.apple.com")
 	query := url.Values{}
 	//query.Set("omit[resource]", "autos")

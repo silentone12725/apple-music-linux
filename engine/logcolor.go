@@ -38,4 +38,3 @@ func tagInfo(tag string) string  { return colorTag(_cCyan, tag) }
 func tagWarn(tag string) string  { return colorTag(_cYellow, tag) }
 func tagErr(tag string) string   { return colorTag(_cRed, tag) }
 func tagVideo(tag string) string { return colorTag(_cPink, tag) }
-func tagAudio(tag string) string { return colorTag(_cBlue, tag) }

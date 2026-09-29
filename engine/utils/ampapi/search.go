@@ -84,7 +84,7 @@ func Search(storefront, term, types, language, token string, limit, offset int) 
 		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://music.apple.com")
 
 	query := url.Values{}

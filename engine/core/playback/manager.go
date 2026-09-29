@@ -16,6 +16,8 @@ package playback
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +29,6 @@ import (
 	"engine/core/apple"
 	"engine/core/media"
 	"engine/core/pipeline"
-	"engine/internal/randid"
 )
 
 const sessionTTL = 4 * time.Hour
@@ -623,4 +624,8 @@ func (m *Manager) sweepExpired(now time.Time) {
 	}
 }
 
-func newID() string { return randid.New() }
+func newID() string {
+	b := make([]byte, 8)
+	rand.Read(b) //nolint:errcheck
+	return hex.EncodeToString(b)
+}

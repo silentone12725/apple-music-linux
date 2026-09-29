@@ -17,6 +17,8 @@ package prefetch
 import (
 	"container/heap"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"math"
 	"regexp"
 	"sort"
@@ -26,7 +28,6 @@ import (
 	"time"
 
 	"engine/core/playback"
-	"engine/internal/randid"
 	"engine/internal/ring"
 )
 
@@ -1008,4 +1009,8 @@ func classifyError(err error) string {
 	}
 }
 
-func newID() string { return randid.New() }
+func newID() string {
+	b := make([]byte, 8)
+	rand.Read(b) //nolint:errcheck
+	return hex.EncodeToString(b)
+}
