@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -111,7 +112,7 @@ const drmConnIdleTimeout = 10 * time.Second
 // decryption key on a fixed schedule (24h).  Our wrapper may have per-
 // connection resource limits; cycling the connection prevents accumulation.
 // 0 disables fragment-count-based reconnection.
-const drmConnFragLimit = 50
+const drmConnFragLimit = 5 // TEMP TEST — revert
 
 // drmConn manages a DRM decryption socket with proactive lifecycle refresh.
 // Instead of waiting for a connection to fail (reactive), it reconnects
@@ -154,7 +155,7 @@ func (dc *drmConn) refreshIfNeeded() bool {
 
 	conn2, err := dc.dialer.DialCBCS(dc.ctx)
 	if err != nil {
-		fmt.Printf("cbcs: proactive reconnect (%s) failed: %v, continuing with current connection\n", reason, err)
+		log.Printf("cbcs: proactive reconnect (%s) failed: %v, continuing with current connection", reason, err)
 		return false
 	}
 
@@ -163,7 +164,7 @@ func (dc *drmConn) refreshIfNeeded() bool {
 	dc.rw = bufio.NewReadWriter(bufio.NewReader(conn2), bufio.NewWriter(conn2))
 	dc.fragsSinceConnect = 0
 	dc.lastUsed = time.Now()
-	fmt.Printf("cbcs: proactive reconnect (%s) succeeded\n", reason)
+	log.Printf("cbcs: proactive reconnect (%s) succeeded", reason)
 	return true
 }
 
@@ -259,14 +260,14 @@ func (s *cbcsSource) Stream(ctx context.Context, w io.Writer) error {
 		}
 		if tw.wrote > 0 {
 			// Bytes already sent — cannot retry cleanly.
-			fmt.Printf("cbcs: attempt %d failed after %d bytes written — not retrying: %v\n",
+			log.Printf("cbcs: attempt %d failed after %d bytes written — not retrying: %v",
 				attempt+1, tw.wrote, err)
 			return err
 		}
 		if attempt < maxRetries-1 {
 			tr.RecordRetry()
 			wait := time.Duration(1<<attempt) * time.Second
-			fmt.Printf("cbcs: attempt %d failed (%v), retrying in %v…\n", attempt+1, err, wait)
+			log.Printf("cbcs: attempt %d failed (%v), retrying in %v…", attempt+1, err, wait)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -657,7 +658,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 		return fmt.Errorf("cbcs seek: transform init: %w", err)
 	}
 	if err := alacstream.SanitizeInit(init); err != nil {
-		fmt.Printf("cbcs seek: warning: sanitize init: %v\n", err)
+		log.Printf("cbcs seek: warning: sanitize init: %v", err)
 	}
 	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
@@ -704,7 +705,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 		copy(mdatBackup, frag.Mdat.Data)
 
 		if err := alacstream.DecryptFragment(frag, tracks, dc.rw); err != nil {
-			fmt.Printf("cbcs seek: decrypt fragment %d failed (%v), reconnecting DRM socket…\n", i, err)
+			log.Printf("cbcs seek: decrypt fragment %d failed (%v), reconnecting DRM socket…", i, err)
 			alacstream.Close(dc.conn)
 
 			conn2, dialErr := s.dialer.DialCBCS(ctx)
@@ -724,7 +725,7 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 			if err2 := alacstream.DecryptFragment(frag, tracks, dc.rw); err2 != nil {
 				return fmt.Errorf("cbcs seek: decrypt fragment %d after reconnect: %w", i, err2)
 			}
-			fmt.Printf("cbcs seek: fragment %d decrypted after reconnect\n", i)
+			log.Printf("cbcs seek: fragment %d decrypted after reconnect", i)
 		}
 		dc.recordUse()
 
@@ -790,7 +791,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("cbcs: transform init: %w", err)
 	}
 	if err := alacstream.SanitizeInit(init); err != nil {
-		fmt.Printf("cbcs: warning: sanitize init: %v\n", err)
+		log.Printf("cbcs: warning: sanitize init: %v", err)
 	}
 	patchMoovDuration(init, s.durationMs)
 	if err := init.Encode(outBuf); err != nil {
@@ -829,7 +830,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		copy(mdatBackup, frag.Mdat.Data)
 
 		if err := alacstream.DecryptFragment(frag, tracks, dc.rw); err != nil {
-			fmt.Printf("cbcs: decrypt fragment %d failed (%v), reconnecting DRM socket…\n", i, err)
+			log.Printf("cbcs: decrypt fragment %d failed (%v), reconnecting DRM socket…", i, err)
 			alacstream.Close(dc.conn)
 
 			conn2, dialErr := s.dialer.DialCBCS(ctx)
@@ -849,7 +850,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 			if err2 := alacstream.DecryptFragment(frag, tracks, dc.rw); err2 != nil {
 				return fmt.Errorf("cbcs: decrypt fragment %d after reconnect: %w", i, err2)
 			}
-			fmt.Printf("cbcs: fragment %d decrypted after reconnect\n", i)
+			log.Printf("cbcs: fragment %d decrypted after reconnect", i)
 		}
 		dc.recordUse()
 		if err := frag.Encode(outBuf); err != nil {
