@@ -654,6 +654,7 @@ function _applyThemeVars(palette) {
         setVar('--aml-accent-active', ${JSON.stringify(p.accentActive || '')});
         setVar('--aml-nav-text', ${navText});
         setVar('--aml-nav-text-sec', ${navTextSec});
+        setVar('--aml-bg-color', ${bg});
         let bd = document.getElementById('_amlAccentBg');
         if (!bd) {
             bd = document.createElement('div');
@@ -670,7 +671,7 @@ function _clearThemeVars() {
     nativeTheme.themeSource = 'system';
     win.webContents.executeJavaScript(`(function(){
         const r = document.documentElement;
-        ['--aml-nav-bg','--aml-nav-border','--aml-accent','--aml-accent-active','--aml-nav-text','--aml-nav-text-sec']
+        ['--aml-nav-bg','--aml-nav-border','--aml-accent','--aml-accent-active','--aml-nav-text','--aml-nav-text-sec','--aml-bg-color']
             .forEach(v => r.style.removeProperty(v));
         document.getElementById('_amlAccentBg')?.remove();
         document.getElementById('_amlCustomBg')?.remove();

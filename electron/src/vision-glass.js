@@ -114,7 +114,7 @@ sheet.replaceSync(`
     height: 72px;
     z-index: 0;
     pointer-events: none;
-    background: #1c1c1e;
+    background: var(--aml-bg-color, #1c1c1e);
   }
   body[data-aml-art-theme] #aml-bg-strip {
     background: var(--aml-art-page-bg, #1c1c1e);
