@@ -4507,7 +4507,9 @@ async function startMVPipeline() {
         // diverge by more than 350 ms (same threshold as the native-video path).
         let _vsegLastNudge = 0;
         myVid.addEventListener('timeupdate', () => {
-            if (!_avStarted || _seekHandlerActive) return;
+            // Also skip during a stall: mkAudio is muted and the 'playing' handler
+            // will snap precisely on recovery; nudging here would fight that snap.
+            if (!_avStarted || _seekHandlerActive || _vsegStalled) return;
             const drift = mkAudio.currentTime - myVid.currentTime;
             const now = performance.now();
             if (Math.abs(drift) > 0.35 && now - _vsegLastNudge > 500) {
@@ -4531,6 +4533,9 @@ async function startMVPipeline() {
             stopFetchLoop();
             fetch(`${base}`, { method: 'DELETE' }).catch(() => {});
             _vsegSb = null;
+            // If a stall was in progress when the session ended, restore mute state
+            // so the next track doesn't start with silent audio.
+            if (_vsegMutedForStall) { mkAudio.muted = false; _vsegMutedForStall = false; }
         }, { once: true });
 
         console.log('[AML vseg] setup done, waiting for sourceopen');
