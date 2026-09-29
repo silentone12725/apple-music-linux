@@ -26,7 +26,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"engine/core/apple"
 	"engine/core/media"
 	"engine/core/pipeline"
 )
@@ -193,20 +192,6 @@ type countingHeaderWriter struct {
 
 func (c countingHeaderWriter) SetHeader(k, v string) { c.hw.SetHeader(k, v) }
 
-// New returns a Manager backed by the Apple Music provider.
-// Swap apple.NewProvider() for any media.Provider to change the source.
-func New() *Manager {
-	m := &Manager{
-		provider:       apple.NewProvider(),
-		sessions:       make(map[string]*Session),
-		contexts:       make(map[string]*playContext),
-		assetIndex:     make(map[string]string),
-		sessionToAsset: make(map[string]string),
-		inflight:       make(map[string]*openFlight),
-	}
-	go m.reap()
-	return m
-}
 
 // NewWithProvider returns a Manager backed by the given provider.
 // Use this when the caller needs to configure the provider before wiring it

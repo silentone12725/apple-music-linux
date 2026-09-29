@@ -64,10 +64,3 @@ type ConfigSet struct {
 	StreamCacheSize         int `yaml:"stream-cache-size"` // MB, 0 = unlimited
 }
 
-type Counter struct {
-	Unavailable int
-	NotSong     int
-	Error       int
-	Success     int
-	Total       int
-}

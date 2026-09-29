@@ -104,7 +104,7 @@ func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) 
 		ephemeral = true
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.shutdownCtx)
 	base := &vsegSession{
 		spw:       spw,
 		idx:       aacstream.NewMVLiveIndex(),
@@ -284,7 +284,7 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 		return 0, fmt.Errorf("vseg seek put collision assetID=%s qualifier=%s", assetID, qualifier)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.shutdownCtx)
 	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: cancel, ephemeral: true}
 
 	// Update active in the existing state (base keeps running).

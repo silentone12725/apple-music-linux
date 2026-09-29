@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	api_port int
+	apiPort int
 	Config   config.ConfigSet
 )
 
@@ -85,11 +85,11 @@ func main() {
 		Config.FFmpegPath = "ffmpeg"
 		Config.StreamCacheSize = 500
 	}
-	flag.IntVar(&api_port, "api", 0, "Start local HTTP API server on given port (e.g. --api 20025)")
+	flag.IntVar(&apiPort, "api", 0, "Start local HTTP API server on given port (e.g. --api 20025)")
 	flag.Parse()
 	aacstream.WarmCache()
-	if api_port > 0 {
-		srv := NewAPIServer(api_port, ServerConfig{
+	if apiPort > 0 {
+		srv := NewAPIServer(apiPort, ServerConfig{
 			DRMBinaryPath:   Config.DRMBinaryPath,
 			DRMBaseDir:      Config.DRMBaseDir,
 			ExportFloorKbps: Config.ExportThrottleFloorKbps,

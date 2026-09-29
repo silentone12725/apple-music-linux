@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,12 +27,7 @@ func (s *APIServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if len(samples) > 0 {
 		sorted := make([]int64, len(samples))
 		copy(sorted, samples)
-		// insertion sort — at most 100 elements
-		for i := 1; i < len(sorted); i++ {
-			for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
-				sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-			}
-		}
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
 		var sum int64
 		for _, v := range sorted {
 			sum += v

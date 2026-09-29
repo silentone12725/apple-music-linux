@@ -35,10 +35,6 @@ type SongLyrics struct {
 	} `json:"data"`
 }
 
-func Get(storefront, songId, lrcType, language, lrcFormat, token, mediaUserToken string) (string, error) {
-	return GetContext(context.Background(), storefront, songId, lrcType, language, lrcFormat, token, mediaUserToken)
-}
-
 func GetContext(ctx context.Context, storefront, songId, lrcType, language, lrcFormat, token, mediaUserToken string) (string, error) {
 	if len(mediaUserToken) < 50 {
 		return "", errors.New("MediaUserToken not set")
