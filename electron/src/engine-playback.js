@@ -4448,27 +4448,24 @@ async function startMVPipeline() {
             }
         });
 
-        // Bidirectional play/pause mirroring: keep myVid and mkAudio in sync.
-        // Two guards prevent interfering with intentional decoupling:
-        //   _seekHandlerActive: seeking handler pauses mkAudio but NOT myVid (browser
-        //     handles MSE seek natively); mirror must not propagate that pause to myVid.
-        //   _bufPaused: dynBuf pauses myVid while keeping mkAudio muted (not paused),
-        //     so myVid 'pause' must not propagate to mkAudio during a buffer stall.
-        myVid.addEventListener('play',  () => {
-            if (!_seekHandlerActive && !_bufPaused && mkAudio.paused)
-                _iframePlay.call(mkAudio).catch(() => {});
-        });
-        myVid.addEventListener('pause', () => {
-            if (!_seekHandlerActive && !_bufPaused && !mkAudio.paused)
-                mkAudio.pause();
-        });
+        // mkAudio → myVid mirroring: if the user pauses/plays audio directly (e.g. via
+        // MK controls or a media key), mirror the state to myVid.
+        // myVid → mkAudio is already handled by onVideoPlay / onVideoPause (registered
+        // below at the !_wcVideo && !_nativeVideo block); adding duplicate listeners here
+        // caused a feedback loop and double play() calls.
+        // Guards:
+        //   _seekHandlerActive: seeking handler pauses mkAudio but NOT myVid; skip.
+        //   _bufPaused: dynBuf pauses myVid while mkAudio stays playing (muted); skip.
+        //   _playMirrorBusy: onVideoPlay is currently playing mkAudio; the resulting
+        //     mkAudio 'play' event must not re-trigger _iframePlay(myVid) or the
+        //     CHUNK_DEMUXER_ERROR pause/play loop doubles in frequency.
         mkAudio.addEventListener('play',  () => {
-            if (!_seekHandlerActive && !_bufPaused && myVid.paused)
-                _iframePlay.call(myVid).catch(() => {});
+            if (_seekHandlerActive || _bufPaused || _playMirrorBusy) return;
+            if (myVid.paused) _iframePlay.call(myVid).catch(() => {});
         });
         mkAudio.addEventListener('pause', () => {
-            if (!_seekHandlerActive && !_bufPaused && !myVid.paused)
-                myVid.pause();
+            if (_seekHandlerActive || _bufPaused) return;
+            if (!myVid.paused) myVid.pause();
         });
 
         myVid.addEventListener('canplay', () => {
@@ -4572,13 +4569,21 @@ async function startMVPipeline() {
         if (Date.now() < _ignoreSeekUntil) return;
         _mvVideoSeek(videoEl.currentTime).catch(() => {});
     });
+    // Set while onVideoPlay is playing mkAudio — suppresses the mkAudio 'play' →
+    // _iframePlay(myVid) mirror so it doesn't create a feedback loop when Chrome
+    // keeps re-pausing myVid (e.g. after CHUNK_DEMUXER_ERROR_APPEND_FAILED).
+    let _playMirrorBusy = false;
     const onVideoPlay  = () => {
         console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
         if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
             mkAudio.currentTime = videoEl.currentTime;
-        const doPlay = () => _iframePlay.call(mkAudio)
-            .then(() => console.log('[AML MV-A] mkAudio.play() resolved'))
-            .catch(e => console.warn('[AML MV-A] mkAudio.play() rejected:', e.message));
+        const doPlay = () => {
+            _playMirrorBusy = true;
+            return _iframePlay.call(mkAudio)
+                .then(() => console.log('[AML MV-A] mkAudio.play() resolved'))
+                .catch(e => console.warn('[AML MV-A] mkAudio.play() rejected:', e.message))
+                .finally(() => { _playMirrorBusy = false; });
+        };
         if (mkAudio.readyState >= 3) { doPlay(); return; }
         mkAudio.addEventListener('canplay', doPlay, { once: true });
     };
