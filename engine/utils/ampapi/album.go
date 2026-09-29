@@ -24,7 +24,7 @@ func GetAlbumResp(storefront string, id string, language string, token string) (
 		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://music.apple.com")
 	query := url.Values{}
 	query.Set("omit[resource]", "autos")
@@ -68,7 +68,7 @@ func GetAlbumRespContext(ctx context.Context, storefront, id, language, token st
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://music.apple.com")
 	q := url.Values{}
 	q.Set("omit[resource]", "autos")
@@ -109,7 +109,7 @@ func GetAlbumRespByHrefContext(ctx context.Context, href string, language string
 		return nil, err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://music.apple.com")
 	query := url.Values{}
 	query.Set("omit[resource]", "autos")

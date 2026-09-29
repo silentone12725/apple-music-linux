@@ -47,14 +47,7 @@ const minimalSaveDat = "2\n0\n-30\nFalse\n0\n30\nFalse\n0\n10\n7\n10\nTrue\n"
 
 // IsAvailable reports whether CavernPipeServer is available.
 // It checks $AML_CAVERN first, then PATH.
-func IsAvailable() bool {
-	if env := os.Getenv("AML_CAVERN"); env != "" {
-		_, err := os.Stat(env)
-		return err == nil
-	}
-	_, err := exec.LookPath("CavernPipeServer")
-	return err == nil
-}
+func IsAvailable() bool { return cavernBinary() != "" }
 
 // cavernBinary returns the path to the CavernPipeServer binary.
 func cavernBinary() string {

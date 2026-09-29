@@ -134,7 +134,7 @@ func fetchTrackPages(ctx context.Context, next, token, mut string) ([]TrackRespD
 		if mut != "" { // user-shared playlists need the listener's token on every page
 			req.Header.Set("Media-User-Token", mut)
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("Origin", "https://music.apple.com")
 		query := req.URL.Query()
 		query.Set("omit[resource]", "autos")
