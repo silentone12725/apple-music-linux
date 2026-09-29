@@ -1897,7 +1897,8 @@ async function startMVPipeline() {
     // Segmented CMAF path: engine re-fragments via FFmpeg, serves per-fragment fMP4 over
     // /vseg/init + /vseg/seg/N, frontend feeds a SourceBuffer. Set true to enable.
     const _vsegVideo = true;
-    let _vsegBufferedSec = 0; // furthest buffered end of vseg SourceBuffer (sec); drives buffer bar
+    let _vsegBufferedSec = 0; // furthest buffered end of vseg SourceBuffer (sec); kept for legacy callers
+    let _vsegSb = null;       // vseg SourceBuffer reference; set by _setupVsegVideo; used by _updateProgress
     let _wcCleanup = null; // set by _setupWebCodecsVideo; called from cleanup()
     // Furthest VIDEO position (sec) decoded/available in the WC pipeline — used for
     // the seek-skip guard (queue[last] ≤ _wcBufferedSec). Reset to seek target.
@@ -2810,7 +2811,11 @@ async function startMVPipeline() {
             if (_wcVideo) {
                 bFrac = Math.min(1, Math.max(0, _wcParsedSec / max));
             } else if (_vsegVideo) {
-                bFrac = Math.min(1, Math.max(0, _vsegBufferedSec / max));
+                // Read the SourceBuffer directly so the indicator reflects the real
+                // buffered state — _vsegBufferedSec can lag when the buffer is evicted
+                // or flood to full duration when the fetch loop runs without throttle.
+                if (_vsegSb?.buffered.length > 0)
+                    bFrac = Math.min(1, Math.max(0, _vsegSb.buffered.end(_vsegSb.buffered.length - 1) / max));
             } else if (_nativeVideo) {
                 // Native <video src>: read the element's own buffered ranges.
                 const nBuf = myVid.buffered;
@@ -4371,6 +4376,7 @@ async function startMVPipeline() {
             if (!codecs) { console.error('[AML vseg] no codec from manifest'); return; }
 
             sb = ms.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
+            _vsegSb = sb;
             sb.addEventListener('error', e => console.error('[AML vseg] SourceBuffer error', e));
 
             // Fetch and append init segment (blocks until engine has indexed first moof).
@@ -4468,6 +4474,49 @@ async function startMVPipeline() {
             if (!myVid.paused) myVid.pause();
         });
 
+        // Buffer stall recovery: when myVid fires 'waiting' (SourceBuffer evicted or
+        // fetch loop too slow), mute mkAudio so it doesn't play ahead of the video.
+        // On 'playing', re-sync mkAudio.currentTime and unmute.
+        // Without these handlers a long pause that causes SourceBuffer eviction lets
+        // mkAudio run seconds ahead of myVid on resume, causing A/V desync and a
+        // "haywire" time display until the two elements drift back together.
+        let _vsegStalled = false;
+        let _vsegMutedForStall = false;
+        myVid.addEventListener('waiting', () => {
+            if (!_avStarted || _seekHandlerActive || _vsegStalled) return;
+            _vsegStalled = true;
+            if (!mkAudio.muted) { mkAudio.muted = true; _vsegMutedForStall = true; }
+            _bufSpinner.style.display = 'block';
+            console.log(`[AML vseg] waiting at ct=${myVid.currentTime.toFixed(2)}`);
+        });
+        myVid.addEventListener('playing', () => {
+            _clearSeekFreeze();
+            _bufSpinner.style.display = 'none';
+            if (_vsegStalled) {
+                _vsegStalled = false;
+                const drift = mkAudio.currentTime - myVid.currentTime;
+                if (Math.abs(drift) > 0.05) {
+                    console.log(`[AML vseg] playing: snap mkAudio ${mkAudio.currentTime.toFixed(2)} → ${myVid.currentTime.toFixed(2)} (drift=${drift.toFixed(2)}s)`);
+                    mkAudio.currentTime = myVid.currentTime;
+                }
+                if (_vsegMutedForStall) { mkAudio.muted = false; _vsegMutedForStall = false; }
+            }
+        });
+
+        // Continuous A/V drift correction: nudge mkAudio back to myVid when they
+        // diverge by more than 350 ms (same threshold as the native-video path).
+        let _vsegLastNudge = 0;
+        myVid.addEventListener('timeupdate', () => {
+            if (!_avStarted || _seekHandlerActive) return;
+            const drift = mkAudio.currentTime - myVid.currentTime;
+            const now = performance.now();
+            if (Math.abs(drift) > 0.35 && now - _vsegLastNudge > 500) {
+                _vsegLastNudge = now;
+                console.log(`[AML vseg] timeupdate drift=${drift.toFixed(3)}s → snap`);
+                mkAudio.currentTime = myVid.currentTime;
+            }
+        });
+
         myVid.addEventListener('canplay', () => {
             _bufSpinner.style.display = 'none';
             _clearSeekFreeze();
@@ -4481,6 +4530,7 @@ async function startMVPipeline() {
         _abortCtrl.signal.addEventListener('abort', () => {
             stopFetchLoop();
             fetch(`${base}`, { method: 'DELETE' }).catch(() => {});
+            _vsegSb = null;
         }, { once: true });
 
         console.log('[AML vseg] setup done, waiting for sourceopen');
