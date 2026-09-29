@@ -334,6 +334,9 @@ func (b *HybrisBackend) DecryptItunSamples(_ context.Context, adamID uint64, sam
 // that speaks the same wire protocol as handle()/new_socket() in main.c
 // (sendString adamID, sendString uri, then [uint32 size][bytes]... [uint32 0]).
 func (b *HybrisBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if !b.Running() {
 		return nil, ErrNotAuthenticated
 	}

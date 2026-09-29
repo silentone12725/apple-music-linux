@@ -37,6 +37,9 @@ func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri stri
 		if err != nil {
 			return err
 		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		decrypt, err := openKey(adamID, uri)
 		if err != nil {
 			return err
