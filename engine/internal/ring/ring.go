@@ -40,9 +40,9 @@ func (b *Buffer) Snapshot() []int64 {
 	}
 	out := make([]int64, b.n)
 	start := b.pos - b.n
-	cap := len(b.samples)
+	bufLen := len(b.samples)
 	for i := range out {
-		out[i] = b.samples[(start+i)%cap]
+		out[i] = b.samples[(start+i)%bufLen]
 	}
 	return out
 }
@@ -57,9 +57,9 @@ func (b *Buffer) Stats() (avg, p95 float64) {
 	tmp := make([]int64, b.n)
 	s := tmp
 	start := b.pos - b.n
-	cap := len(b.samples)
+	bufLen := len(b.samples)
 	for i := range s {
-		s[i] = b.samples[(start+i)%cap]
+		s[i] = b.samples[(start+i)%bufLen]
 	}
 	b.mu.Unlock()
 

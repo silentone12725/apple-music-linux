@@ -32,7 +32,7 @@ func (s *APIServer) prepareItunFaststart(id, assetID string, cdnURL string, adam
 	pw.File.Close()
 
 	log.Printf("[itun-dec] start assetID=%s adamID=%d", assetID, adamID)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(s.shutdownCtx, 20*time.Minute)
 	defer cancel()
 
 	err := itunDecryptToFile(ctx, s, cdnURL, adamID, outPath)

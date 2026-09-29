@@ -68,7 +68,7 @@ func (s *APIServer) getOrStartMVGrowing(id, assetID, qualifier string) *mvGrowin
 		return nil
 	}
 	ix := aacstream.NewMVLiveIndex()
-	pctx, cancel := context.WithCancel(context.Background()) // detached from any HTTP request
+	pctx, cancel := context.WithCancel(s.shutdownCtx) // outlives HTTP requests but not the server
 	st := &mvGrowingState{spw: spw, ix: ix, cancel: cancel, done: make(chan struct{}), assetID: assetID, qualifier: qualifier}
 	mvGrowing.Store(id, st)
 	go func() {
@@ -1228,7 +1228,7 @@ func (s *APIServer) prepareMVFaststart(id, assetID string, durationSec float64) 
 	pw.File.Close() // ffmpeg writes the path itself; keep the in-flight lock via pw
 
 	log.Printf("%s prepare faststart start assetID=%s dur=%.1fs", tagVideo("[video-dl]"), assetID, durationSec)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(s.shutdownCtx, 20*time.Minute)
 	defer cancel()
 	err := transcodeVideoFaststart(ctx, func(dst io.Writer) error {
 		return s.pm.Stream(ctx, id, pipeline.KindVideo, dst)
