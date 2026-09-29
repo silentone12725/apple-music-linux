@@ -112,7 +112,7 @@ const drmConnIdleTimeout = 10 * time.Second
 // decryption key on a fixed schedule (24h).  Our wrapper may have per-
 // connection resource limits; cycling the connection prevents accumulation.
 // 0 disables fragment-count-based reconnection.
-const drmConnFragLimit = 5 // TEMP TEST — revert
+const drmConnFragLimit = 0
 
 // drmConn manages a DRM decryption socket with proactive lifecycle refresh.
 // Instead of waiting for a connection to fail (reactive), it reconnects
@@ -708,6 +708,10 @@ func (s *cbcsSkipSource) streamAttemptSkip(ctx context.Context, w io.Writer) err
 			log.Printf("cbcs seek: decrypt fragment %d failed (%v), reconnecting DRM socket…", i, err)
 			alacstream.Close(dc.conn)
 
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
 			conn2, dialErr := s.dialer.DialCBCS(ctx)
 			if dialErr != nil {
 				return fmt.Errorf("cbcs seek: reconnect after fragment %d: %w", i, dialErr)
@@ -832,6 +836,14 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 		if err := alacstream.DecryptFragment(frag, tracks, dc.rw); err != nil {
 			log.Printf("cbcs: decrypt fragment %d failed (%v), reconnecting DRM socket…", i, err)
 			alacstream.Close(dc.conn)
+
+			// If the context was cancelled (e.g. playback torn down), the pipe
+			// closed because the server goroutine exited — not a transient error.
+			// Calling DialCBCS on a cancelled context would invoke C.drm_lib_open_kd_ctx
+			// against a partially-shutdown DRM backend and crash the engine.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 
 			conn2, dialErr := s.dialer.DialCBCS(ctx)
 			if dialErr != nil {
