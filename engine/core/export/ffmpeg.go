@@ -15,8 +15,9 @@ func lookFFmpeg(p string) error {
 	return nil
 }
 
-// sanitizeMeta strips control characters that could break FFmpeg -metadata
-// key=value argument parsing (newlines allow injecting additional arguments).
+// sanitizeMeta replaces line breaks and NULs in tag values: arguments are
+// passed as argv (no shell), but multi-line or NUL-truncated tags are
+// malformed in most players.
 func sanitizeMeta(v string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == '\x00' {
@@ -246,16 +247,16 @@ func runFFmpeg(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 	)
 
 	if meta.Title != "" {
-		args = append(args, "-metadata", "title="+meta.Title)
+		args = append(args, "-metadata", "title="+sanitizeMeta(meta.Title))
 	}
 	if meta.ArtistName != "" {
-		args = append(args, "-metadata", "artist="+meta.ArtistName)
+		args = append(args, "-metadata", "artist="+sanitizeMeta(meta.ArtistName))
 	}
 	if meta.AlbumArtist != "" {
-		args = append(args, "-metadata", "album_artist="+meta.AlbumArtist)
+		args = append(args, "-metadata", "album_artist="+sanitizeMeta(meta.AlbumArtist))
 	}
 	if meta.AlbumName != "" {
-		args = append(args, "-metadata", "album="+meta.AlbumName)
+		args = append(args, "-metadata", "album="+sanitizeMeta(meta.AlbumName))
 	}
 	if meta.TrackNumber > 0 {
 		track := fmt.Sprintf("%d", meta.TrackNumber)
@@ -272,25 +273,25 @@ func runFFmpeg(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 		args = append(args, "-metadata", "disc="+disc)
 	}
 	if meta.ReleaseDate != "" {
-		args = append(args, "-metadata", "date="+meta.ReleaseDate)
+		args = append(args, "-metadata", "date="+sanitizeMeta(meta.ReleaseDate))
 	}
 	if meta.Genre != "" {
-		args = append(args, "-metadata", "genre="+meta.Genre)
+		args = append(args, "-metadata", "genre="+sanitizeMeta(meta.Genre))
 	}
 	if meta.Composer != "" {
-		args = append(args, "-metadata", "composer="+meta.Composer)
+		args = append(args, "-metadata", "composer="+sanitizeMeta(meta.Composer))
 	}
 	if meta.Copyright != "" {
-		args = append(args, "-metadata", "copyright="+meta.Copyright)
+		args = append(args, "-metadata", "copyright="+sanitizeMeta(meta.Copyright))
 	}
 	if meta.RecordLabel != "" {
-		args = append(args, "-metadata", "publisher="+meta.RecordLabel)
+		args = append(args, "-metadata", "publisher="+sanitizeMeta(meta.RecordLabel))
 	}
 	if meta.Isrc != "" {
-		args = append(args, "-metadata", "isrc="+meta.Isrc)
+		args = append(args, "-metadata", "isrc="+sanitizeMeta(meta.Isrc))
 	}
 	if meta.UPC != "" {
-		args = append(args, "-metadata", "barcode="+meta.UPC)
+		args = append(args, "-metadata", "barcode="+sanitizeMeta(meta.UPC))
 	}
 
 	args = append(args, "-y", dst)
