@@ -4436,7 +4436,8 @@ async function startMVPipeline() {
                     if (myVid.paused) { _bufSpinner.style.display = 'none'; return; } // dynBuf took over
                     if (_getVidLead() >= SEEK_PRE_BUF) {
                         _bufSpinner.style.display = 'none';
-                        mkAudio.play().catch(() => {});
+                        if (myVid.paused) _iframePlay.call(myVid).catch(() => {});
+                        _iframePlay.call(mkAudio).catch(() => {});
                     } else {
                         setTimeout(tryResume, 200);
                     }
@@ -4445,6 +4446,29 @@ async function startMVPipeline() {
             } else {
                 _bufSpinner.style.display = 'none';
             }
+        });
+
+        // Bidirectional play/pause mirroring: keep myVid and mkAudio in sync.
+        // Two guards prevent interfering with intentional decoupling:
+        //   _seekHandlerActive: seeking handler pauses mkAudio but NOT myVid (browser
+        //     handles MSE seek natively); mirror must not propagate that pause to myVid.
+        //   _bufPaused: dynBuf pauses myVid while keeping mkAudio muted (not paused),
+        //     so myVid 'pause' must not propagate to mkAudio during a buffer stall.
+        myVid.addEventListener('play',  () => {
+            if (!_seekHandlerActive && !_bufPaused && mkAudio.paused)
+                _iframePlay.call(mkAudio).catch(() => {});
+        });
+        myVid.addEventListener('pause', () => {
+            if (!_seekHandlerActive && !_bufPaused && !mkAudio.paused)
+                mkAudio.pause();
+        });
+        mkAudio.addEventListener('play',  () => {
+            if (!_seekHandlerActive && !_bufPaused && myVid.paused)
+                _iframePlay.call(myVid).catch(() => {});
+        });
+        mkAudio.addEventListener('pause', () => {
+            if (!_seekHandlerActive && !_bufPaused && !myVid.paused)
+                myVid.pause();
         });
 
         myVid.addEventListener('canplay', () => {
