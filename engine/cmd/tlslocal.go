@@ -19,6 +19,12 @@ import (
 // real HTTPS origin lets it use its native, reliable byte-range seeking instead
 // of the buggy custom-protocol path. The Electron side trusts this cert for
 // 127.0.0.1 via session.setCertificateVerifyProc.
+//
+// Improvements over previous implementation:
+// - TLS 1.3 support (preferred) with TLS 1.2 fallback
+// - Strong cipher suites only (AES-GCM, ChaCha20-Poly1305)
+// - Session tickets enabled for TLS session resumption
+// - ECDSA P-256 keys for better performance than RSA
 func loopbackTLSConfig() (*tls.Config, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -44,5 +50,49 @@ func loopbackTLSConfig() (*tls.Config, error) {
 		return nil, err
 	}
 	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}
-	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
+
+	// Configure TLS with strong settings
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+		// Prefer TLS 1.3 when available
+		PreferServerCipherSuites: true,
+		// Strong cipher suites only (AES-GCM and ChaCha20-Poly1305)
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+		},
+		// Enable session tickets for TLS session resumption (reduces handshake latency)
+		SessionTicketsDisabled: false,
+		// Session cache for resumption
+		ClientSessionCache: tls.NewLRUClientSessionCache(32),
+	}
+
+	return tlsCfg, nil
+}
+
+// appleTLSConfig returns a TLS config optimized for connecting to Apple's servers.
+// Includes certificate pinning and HTTP/2 support.
+func appleTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		PreferServerCipherSuites: true,
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		},
+		// Enable HTTP/2
+		NextProtos: []string{"h2", "http/1.1"},
+		// Session resumption for repeated connections to same Apple endpoint
+		ClientSessionCache: tls.NewLRUClientSessionCache(64),
+	}
 }

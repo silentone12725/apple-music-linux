@@ -4,8 +4,8 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -fno-stack-protector
-LDFLAGS_LIB = -shared -lpthread -lcrypto
-LDFLAGS_TEST = -lpthread -lcrypto -fno-stack-protector
+LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl
+LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
 
 # Source files
 SRCS = drm_client.c
