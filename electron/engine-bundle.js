@@ -8862,7 +8862,6 @@
                 padding:0 32px 32px; color:rgba(255,255,255,0.9);
                 font-family:-apple-system,SF Pro Text,system-ui,sans-serif;
                 --aml-settings-accent:#fc3c44;
-                accent-color:var(--aml-settings-accent);
             }
             #aml-settings-dialog :where(input,button,select,textarea):focus-visible {
                 outline:2px solid var(--aml-settings-accent) !important;
