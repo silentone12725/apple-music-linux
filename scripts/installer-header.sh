@@ -86,8 +86,9 @@ tail -c +"$PAYLOAD_START" "$0" \
 chmod +x \
     "$INSTALL_DIR/apple-music-linux" \
     "$INSTALL_DIR/chrome_crashpad_handler" \
-    "$INSTALL_DIR/resources/engine" \
-    "$INSTALL_DIR/resources/drm"
+    "$INSTALL_DIR/resources/engine"
+
+chmod -R +x "$INSTALL_DIR/resources/hybris-linker" 2>/dev/null || true
 
 # chrome-sandbox: needs setuid root for the Chromium sandbox.
 # Without it we fall back to --no-sandbox in the launcher (safe for local use).
@@ -107,15 +108,26 @@ chmod +x "$BIN_DIR/apple-music-linux"
 # ── desktop entry + icon ──────────────────────────────────────────────────────
 mkdir -p "$DESKTOP_DIR" "$ICON_DIR"
 
-cp "$INSTALL_DIR/resources/tray-icon.png" "$ICON_DIR/apple-music-linux.png" 2>/dev/null || true
+# Resolve the best app icon: bundled icon.png > tray-icon.png fallback
+APP_ICON="$INSTALL_DIR/resources/icon.png"
+if [ ! -f "$APP_ICON" ]; then
+    APP_ICON="$INSTALL_DIR/resources/tray-icon.png"
+fi
 
+# Copy to hicolor theme dir (for DEs that resolve icon names)
+cp "$APP_ICON" "$ICON_DIR/apple-music-linux.png" 2>/dev/null || true
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+
+# Use absolute path for Icon= — bypasses icon theme cache entirely,
+# guaranteed to show the correct icon regardless of DE cache state.
+# (Freedesktop spec: absolute paths are used directly, no theme lookup.)
 cat > "$DESKTOP_DIR/apple-music-linux.desktop" <<EOF
 [Desktop Entry]
 Name=Apple Music
 GenericName=Music Player
 Comment=Apple Music desktop client for Linux
 Exec=$INSTALL_DIR/apple-music-linux --no-sandbox %u
-Icon=apple-music-linux
+Icon=$APP_ICON
 Type=Application
 Categories=AudioVideo;Music;Network;
 StartupWMClass=Apple Music

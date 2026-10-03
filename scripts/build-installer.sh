@@ -49,9 +49,11 @@ else
         echo "Error: electron/dist/linux-unpacked not found. Run without --skip-eb first."
         exit 1
     fi
-    # Reused dir: refresh the engine + libs built above.
+    # Reused dir: refresh the engine + libs + icon built above.
     cp "$ELECTRON/dist/resources/engine" "$ELECTRON/dist/resources/libdrm-native.so" \
        "$ELECTRON/dist/resources/libhybris-core.so" "$ELECTRON/dist/linux-unpacked/resources/"
+    # Always sync the current icon so --skip-eb doesn't silently use a stale one.
+    [ -f "$ELECTRON/icon.png" ] && cp "$ELECTRON/icon.png" "$ELECTRON/dist/linux-unpacked/resources/icon.png"
 fi
 rm -rf "$STAGE"
 mkdir -p "$STAGE"

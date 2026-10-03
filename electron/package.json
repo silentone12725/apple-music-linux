@@ -1,6 +1,6 @@
 {
   "name": "apple-music-linux",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "description": "Apple Music desktop client for Linux",
   "license": "MIT",
   "main": "main.mjs",
@@ -71,6 +71,10 @@
       {
         "from": "../tray-icon.png",
         "to": "tray-icon.png"
+      },
+      {
+        "from": "icon.png",
+        "to": "icon.png"
       }
     ],
     "linux": {

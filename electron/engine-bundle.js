@@ -1691,6 +1691,7 @@
     const _mp4Video = false;
     const _vsegVideo = true;
     let _vsegBufferedSec = 0;
+    let _vsegSb = null;
     let _wcCleanup = null;
     let _wcBufferedSec = 0;
     let _wcParsedSec = 0;
@@ -2473,7 +2474,8 @@
         if (_wcVideo) {
           bFrac = Math.min(1, Math.max(0, _wcParsedSec / max));
         } else if (_vsegVideo) {
-          bFrac = Math.min(1, Math.max(0, _vsegBufferedSec / max));
+          if (_vsegSb?.buffered.length > 0)
+            bFrac = Math.min(1, Math.max(0, _vsegSb.buffered.end(_vsegSb.buffered.length - 1) / max));
         } else if (_nativeVideo) {
           const nBuf = myVid.buffered;
           if (nBuf && nBuf.length > 0)
@@ -2522,6 +2524,7 @@
     let _videoStalled = false;
     const BUF_LOW = 2;
     const BUF_HIGH = 10;
+    const SEEK_PRE_BUF = 4;
     let _dynBufTimer = null;
     let _bufPaused = false;
     let _userPaused = false;
@@ -3934,6 +3937,7 @@
           return;
         }
         sb = ms2.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
+        _vsegSb = sb;
         sb.addEventListener("error", (e) => console.error("[AML vseg] SourceBuffer error", e));
         const initRes = await fetch(`${base}/init`).catch(() => null);
         if (!initRes?.ok) {
@@ -3986,11 +3990,79 @@
       });
       myVid.addEventListener("seeked", () => {
         _seekHandlerActive = false;
-        _bufSpinner.style.display = "none";
         _clearSeekFreeze();
-        if (!myVid.paused && mkAudio.paused)
-          mkAudio.play().catch(() => {
-          });
+        if (!myVid.paused && mkAudio.paused) {
+          const tryResume = () => {
+            if (_abortCtrl?.signal.aborted) {
+              _bufSpinner.style.display = "none";
+              return;
+            }
+            if (myVid.paused) {
+              _bufSpinner.style.display = "none";
+              return;
+            }
+            if (_getVidLead() >= SEEK_PRE_BUF) {
+              _bufSpinner.style.display = "none";
+              if (myVid.paused) _iframePlay.call(myVid).catch(() => {
+              });
+              _iframePlay.call(mkAudio).catch(() => {
+              });
+            } else {
+              setTimeout(tryResume, 200);
+            }
+          };
+          tryResume();
+        } else {
+          _bufSpinner.style.display = "none";
+        }
+      });
+      mkAudio.addEventListener("play", () => {
+        if (_seekHandlerActive || _bufPaused || _playMirrorBusy) return;
+        if (myVid.paused) _iframePlay.call(myVid).catch(() => {
+        });
+      });
+      mkAudio.addEventListener("pause", () => {
+        if (_seekHandlerActive || _bufPaused) return;
+        if (!myVid.paused) myVid.pause();
+      });
+      let _vsegStalled = false;
+      let _vsegMutedForStall = false;
+      myVid.addEventListener("waiting", () => {
+        if (!_avStarted || _seekHandlerActive || _vsegStalled) return;
+        _vsegStalled = true;
+        if (!mkAudio.muted) {
+          mkAudio.muted = true;
+          _vsegMutedForStall = true;
+        }
+        _bufSpinner.style.display = "block";
+        console.log(`[AML vseg] waiting at ct=${myVid.currentTime.toFixed(2)}`);
+      });
+      myVid.addEventListener("playing", () => {
+        _clearSeekFreeze();
+        _bufSpinner.style.display = "none";
+        if (_vsegStalled) {
+          _vsegStalled = false;
+          const drift = mkAudio.currentTime - myVid.currentTime;
+          if (Math.abs(drift) > 0.05) {
+            console.log(`[AML vseg] playing: snap mkAudio ${mkAudio.currentTime.toFixed(2)} \u2192 ${myVid.currentTime.toFixed(2)} (drift=${drift.toFixed(2)}s)`);
+            mkAudio.currentTime = myVid.currentTime;
+          }
+          if (_vsegMutedForStall) {
+            mkAudio.muted = false;
+            _vsegMutedForStall = false;
+          }
+        }
+      });
+      let _vsegLastNudge = 0;
+      myVid.addEventListener("timeupdate", () => {
+        if (!_avStarted || _seekHandlerActive || _vsegStalled) return;
+        const drift = mkAudio.currentTime - myVid.currentTime;
+        const now = performance.now();
+        if (Math.abs(drift) > 0.35 && now - _vsegLastNudge > 500) {
+          _vsegLastNudge = now;
+          console.log(`[AML vseg] timeupdate drift=${drift.toFixed(3)}s \u2192 snap`);
+          mkAudio.currentTime = myVid.currentTime;
+        }
       });
       myVid.addEventListener("canplay", () => {
         _bufSpinner.style.display = "none";
@@ -4003,6 +4075,11 @@
         stopFetchLoop();
         fetch(`${base}`, { method: "DELETE" }).catch(() => {
         });
+        _vsegSb = null;
+        if (_vsegMutedForStall) {
+          mkAudio.muted = false;
+          _vsegMutedForStall = false;
+        }
       }, { once: true });
       console.log("[AML vseg] setup done, waiting for sourceopen");
     };
@@ -4089,11 +4166,17 @@
       _mvVideoSeek(videoEl.currentTime).catch(() => {
       });
     });
+    let _playMirrorBusy = false;
     const onVideoPlay = () => {
       console.log(`[AML MV-V] videoEl play ct=${videoEl.currentTime.toFixed(2)} mkAudio.paused=${mkAudio.paused} mkAudio.muted=${mkAudio.muted} mkAudio.volume=${mkAudio.volume} mkAudio.readyState=${mkAudio.readyState}`);
       if (Math.abs(mkAudio.currentTime - videoEl.currentTime) > 0.5)
         mkAudio.currentTime = videoEl.currentTime;
-      const doPlay = () => _iframePlay.call(mkAudio).then(() => console.log("[AML MV-A] mkAudio.play() resolved")).catch((e) => console.warn("[AML MV-A] mkAudio.play() rejected:", e.message));
+      const doPlay = () => {
+        _playMirrorBusy = true;
+        return _iframePlay.call(mkAudio).then(() => console.log("[AML MV-A] mkAudio.play() resolved")).catch((e) => console.warn("[AML MV-A] mkAudio.play() rejected:", e.message)).finally(() => {
+          _playMirrorBusy = false;
+        });
+      };
       if (mkAudio.readyState >= 3) {
         doPlay();
         return;
