@@ -267,6 +267,89 @@ int drm_https_fetch(
     int *out_status
 );
 
+/* ── Cookie Management ──────────────────────────────────────────────────────*/
+
+/**
+ * Initialize cookie jar.
+ *
+ * Loads cookies from drm/files/cookies.txt if it exists.
+ *
+ * @return  0 on success, -1 on failure
+ */
+int drm_cookie_init(void);
+
+/**
+ * Shutdown cookie jar and save cookies to disk.
+ */
+void drm_cookie_shutdown(void);
+
+/**
+ * Get cookie header value for a URL.
+ *
+ * @param url     Target URL
+ * @param out_buf Output buffer for "name=value; name2=value2" string
+ * @param buf_size Size of out_buf
+ * @return        0 on success, -1 on failure
+ */
+int drm_cookie_get_for_url(const char *url, char *out_buf, size_t buf_size);
+
+/**
+ * Parse and store Set-Cookie headers from response.
+ *
+ * @param set_cookie  Set-Cookie header value(s)
+ */
+void drm_cookie_parse_set_cookie(const char *set_cookie);
+
+/* ── JWT Token Parsing ──────────────────────────────────────────────────────*/
+
+/**
+ * Parse JWT token and extract claims.
+ *
+ * @param token       JWT token string
+ * @param out_payload Output: malloc'd JSON payload (caller must free)
+ * @param out_len     Output: payload length
+ * @return            0 on success, -1 on failure
+ */
+int drm_jwt_parse(const char *token, char **out_payload, uint32_t *out_len);
+
+/**
+ * Extract claim value from JWT payload.
+ *
+ * @param payload     JSON payload from drm_jwt_parse()
+ * @param claim       Claim name (e.g., "sub", "email", "name")
+ * @param out_value   Output: malloc'd claim value (caller must free)
+ * @return            0 on success, -1 if claim not found
+ */
+int drm_jwt_get_claim(const char *payload, const char *claim, char **out_value);
+
+/* ── Device GUID Management ─────────────────────────────────────────────────*/
+
+/**
+ * Get or generate device GUID.
+ *
+ * Loads from adi.pb if exists, otherwise generates new UUID.
+ *
+ * @param out_guid    Output: 36-char UUID string (with hyphens)
+ * @param buf_size    Size of out_guid (must be >= 37)
+ * @return            0 on success, -1 on failure
+ */
+int drm_device_guid_get(char *out_guid, size_t buf_size);
+
+/**
+ * Set device GUID (for initial configuration).
+ *
+ * @param guid        36-char UUID string (with hyphens)
+ * @return            0 on success, -1 on failure
+ */
+int drm_device_guid_set(const char *guid);
+
+/**
+ * Check if device GUID is configured.
+ *
+ * @return  1 if configured, 0 if not
+ */
+int drm_device_guid_is_configured(void);
+
 #ifdef __cplusplus
 }
 #endif

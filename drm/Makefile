@@ -3,7 +3,7 @@
 # Builds libdrm_client.so shared library and test executable
 
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -fno-stack-protector
+CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -fno-stack-protector -Wno-format-truncation
 LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl
 LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
 
