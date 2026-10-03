@@ -6,7 +6,7 @@ import (
 )
 
 // DRMBackend is the swappable transport interface. The sole implementation
-// is HybrisBackend, which loads libdrm-native.so in-process via CGO.
+// is NativeBackend, which loads libdrm_client.so in-process via CGO.
 //
 // Neither DRMManager nor any code above it knows which backend is active.
 // Transport details are entirely internal to the backend implementation.
@@ -14,7 +14,7 @@ import (
 // Lifecycle contract:
 //
 //	Start() — launch the backend. The backend determines whether authentication
-//	          is needed: if a session exists, the wrapper runs immediately;
+//	          is needed: if a session exists, it runs immediately;
 //	          if not, it fires AuthSource.Challenge(ChallengeCredentials) and
 //	          blocks until credentials are provided.
 //
@@ -24,14 +24,14 @@ import (
 // Authentication is entirely challenge-driven and backend-owned:
 //
 //	Start()
-//	  └─ wrapper → credentialHandler → Challenge(ChallengeCredentials)
+//	  └─ native DRM → credentialHandler → Challenge(ChallengeCredentials)
 //	                                        └─ AuthCoordinator → credentials
-//	  └─ wrapper → credentialHandler → Challenge(ChallengeTwoFactor)
+//	  └─ native DRM → credentialHandler → Challenge(ChallengeTwoFactor)
 //	                                        └─ AuthCoordinator → 2FA code
 //
 // The manager never decides "should we authenticate?" — that belongs to the
-// backend and ultimately to storeservicescore. The manager supplies credentials
-// (via AuthCoordinator) when asked, and signals intent by calling Start().
+// backend. The manager supplies credentials (via AuthCoordinator) when asked,
+// and signals intent by calling Start().
 type DRMBackend interface {
 	// Start launches the backend. Used for both session reuse and fresh
 	// authentication — the wrapper itself decides whether credentials are
@@ -52,7 +52,7 @@ type DRMBackend interface {
 
 	// Authenticate ensures an authenticated DRM context exists. This is an
 	// intent, not a mechanism: the backend decides how to satisfy it.
-	// HybrisBackend calls drm_lib_shutdown + drm_lib_init for credential refresh.
+	// NativeBackend calls drm_shutdown + drm_init for credential refresh.
 	// After Authenticate returns nil, the backend is ready to decrypt.
 	// DRMManager.Authenticate sets credentials via AuthCoordinator before calling
 	// this, so the backend can answer Challenge(ChallengeCredentials) immediately.
@@ -78,7 +78,7 @@ type DRMBackend interface {
 	DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error)
 
 	// DialCBCS opens one CBCS decryption connection (satisfies fairplay.CBCSDialer).
-	// HybrisBackend returns an in-process net.Pipe() backed by hybrisCBCSServe.
+	// NativeBackend returns an in-process net.Pipe() backed by nativeCBCSServe.
 	DialCBCS(ctx context.Context) (net.Conn, error)
 
 	// Events returns a channel that emits DRMEvents as backend state changes.
@@ -110,8 +110,8 @@ type BackendConfig struct {
 // ─── Authentication challenge model ──────────────────────────────────────────
 
 // AuthSource is called by the backend when authentication input is needed.
-// HybrisBackend calls Challenge directly from the CGO callback registered
-// with drm_lib_config_t.auth_cb (hybrisBridgeAuth).
+// NativeBackend calls Challenge directly from the CGO callback registered
+// with drm_config.auth_callback (nativeBridgeAuth).
 type AuthSource interface {
 	// Challenge is called when the backend needs input to proceed.
 	// It blocks until SubmitChallenge is called on the AuthCoordinator

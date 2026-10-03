@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # build-engine.sh — builds the Go engine with in-process DRM into OUT_DIR.
 #
-# The engine MUST be built with CGO and the hybris_backend tag: without it the
+# The engine MUST be built with CGO and the native_backend tag: without it the
 # DRM backend is a stub and the app silently falls back to AAC-only playback.
-# It links libdrm-native.so (which pulls in libhybris-core.so) and finds both
-# at runtime next to itself via an $ORIGIN rpath, so they are copied into
-# OUT_DIR too.
+# It links libdrm_client.so and finds it at runtime next to itself via an $ORIGIN rpath,
+# so it is copied into OUT_DIR too.
 #
 # Usage: scripts/build-engine.sh OUT_DIR [extra go build flags...]
 #   scripts/build-engine.sh electron/dist/resources
@@ -19,16 +18,9 @@ shift
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
-for lib in libdrm-native.so libhybris-core.so; do
-    if [ ! -f "$REPO/drm/$lib" ]; then
-        echo "error: drm/$lib not found — build the DRM wrapper first (see CLAUDE.md)" >&2
-        exit 1
-    fi
-done
-# libdl.so is a host-built shim preloaded before the Android libs; without it
-# libstoreservicescore.so fails to dlopen and DRM is unavailable at runtime.
-if [ ! -f "$REPO/drm/rootfs/system/lib64/libdl.so" ]; then
-    echo "error: drm/rootfs/system/lib64/libdl.so missing — DRM would fail to load" >&2
+# Check for required DRM library
+if [ ! -f "$REPO/drm/libdrm_client.so" ]; then
+    echo "error: drm/libdrm_client.so not found — build the DRM client first" >&2
     exit 1
 fi
 
@@ -36,12 +28,11 @@ fi
 # against the libraries through a spaceless temporary directory.
 LINKDIR="$(mktemp -d)"
 trap 'rm -rf "$LINKDIR"' EXIT
-ln -s "$REPO/drm/libdrm-native.so" "$LINKDIR/libdrm-native.so"
-ln -s "$REPO/drm/libhybris-core.so" "$LINKDIR/libhybris-core.so"
+ln -s "$REPO/drm/libdrm_client.so" "$LINKDIR/libdrm_client.so"
 
 cd "$REPO/engine"
 CGO_ENABLED=1 CGO_LDFLAGS="-L$LINKDIR -Wl,-rpath,\$ORIGIN" \
-    go build -tags hybris_backend "$@" -o "$OUT/engine" .
-cp "$REPO/drm/libdrm-native.so" "$REPO/drm/libhybris-core.so" "$OUT/"
+    go build -tags native_backend "$@" -o "$OUT/engine" ./cmd
+cp "$REPO/drm/libdrm_client.so" "$OUT/"
 
 echo "engine + DRM libs → $OUT"
