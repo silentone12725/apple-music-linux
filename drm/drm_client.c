@@ -466,6 +466,74 @@ cleanup:
 
 /* ── Key Context Cache Functions ────────────────────────────────────────────*/
 
+/* ── Fetch and parse FairPlay license ───────────────────────────────────────*/
+
+/**
+ * Fetch FairPlay license from key_uri and extract AES key and IV.
+ *
+ * The license response contains the decryption key in a CENC format.
+ * For CBCS scheme, the key is derived from the pssh and license response.
+ *
+ * @param key_uri  URL of the FairPlay license server
+ * @param out_key  Output buffer for 16-byte AES key
+ * @param out_iv   Output buffer for 16-byte IV
+ * @return 0 on success, -1 on error
+ */
+static int fetch_fairplay_license(const char *key_uri, uint8_t *out_key, uint8_t *out_iv)
+{
+    uint8_t *license_data = NULL;
+    uint32_t license_len = 0;
+    int status = 0;
+    
+    fprintf(stderr, "[drm] fetch_fairplay_license: fetching from %s\n", key_uri);
+    
+    /* Fetch license from key URI */
+    if (drm_https_fetch(key_uri, "GET", NULL, 0, &license_data, &license_len, &status) != 0) {
+        fprintf(stderr, "[drm] fetch_fairplay_license: HTTP fetch failed\n");
+        return -1;
+    }
+    
+    if (status != 200) {
+        fprintf(stderr, "[drm] fetch_fairplay_license: HTTP %d\n", status);
+        free(license_data);
+        return -1;
+    }
+    
+    fprintf(stderr, "[drm] fetch_fairplay_license: got %u bytes\n", license_len);
+    
+    /* 
+     * FairPlay license response parsing (simplified):
+     * The license contains the key in various boxes. For now, we use a
+     * placeholder derivation based on the license data.
+     *
+     * In production, this would parse the CENC license format:
+     * - Extract 'kdfs' (Key Delivery Message) box
+     * - Derive key using the content key ID from pssh
+     * - Extract IV from the license
+     */
+    
+    /* For now, use first 32 bytes of license as key+IV (placeholder) */
+    if (license_len >= 32) {
+        memcpy(out_key, license_data, DRM_AES_KEY_SIZE);
+        memcpy(out_iv, license_data + DRM_AES_KEY_SIZE, DRM_AES_BLOCK_SIZE);
+    } else if (license_len >= 16) {
+        memcpy(out_key, license_data, DRM_AES_KEY_SIZE);
+        /* Derive IV from key */
+        memcpy(out_iv, out_key, DRM_AES_BLOCK_SIZE);
+    } else {
+        fprintf(stderr, "[drm] fetch_fairplay_license: license too small (%u bytes)\n", license_len);
+        free(license_data);
+        return -1;
+    }
+    
+    fprintf(stderr, "[drm] fetch_fairplay_license: key=%02x%02x%02x%02x... iv=%02x%02x%02x%02x...\n",
+            out_key[0], out_key[1], out_key[2], out_key[3],
+            out_iv[0], out_iv[1], out_iv[2], out_iv[3]);
+    
+    free(license_data);
+    return 0;
+}
+
 static drm_key_context_handle_t create_key_context(const char *asset_id_str,
                                                     const char *media_uri)
 {
@@ -484,9 +552,14 @@ static drm_key_context_handle_t create_key_context(const char *asset_id_str,
         return NULL;
     }
     
-    /* Initialize with default key (would be populated from FairPlay license) */
-    memset(ctx->aes_key, 0, DRM_AES_KEY_SIZE);
-    memset(ctx->iv, 0, DRM_AES_BLOCK_SIZE);
+    /* Fetch FairPlay license to get the actual decryption key */
+    if (fetch_fairplay_license(media_uri, ctx->aes_key, ctx->iv) != 0) {
+        fprintf(stderr, "[drm] create_key_context: failed to fetch license, using zero key\n");
+        /* Fall back to zero key for debugging */
+        memset(ctx->aes_key, 0, DRM_AES_KEY_SIZE);
+        memset(ctx->iv, 0, DRM_AES_BLOCK_SIZE);
+    }
+    
     ctx->sample_number = 0;
     ctx->ref_count = 1;
     pthread_mutex_init(&ctx->lock, NULL);
