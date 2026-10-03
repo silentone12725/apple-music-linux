@@ -466,12 +466,16 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 // background. The context is detached from any client so the cache still
 // commits when the listener disconnects mid-track (skip).
 func (s *APIServer) startCacheDownload(id string, spw *diskcache.StreamingPutWriter) {
+	log.Printf("[cache] startCacheDownload START: session=%s", id)
 	downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	go func() {
 		defer cancel()
+		log.Printf("[cache] startCacheDownload calling pm.Stream: session=%s", id)
 		if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, spw); err != nil {
+			log.Printf("[cache] startCacheDownload pm.Stream ERROR: session=%s err=%v", id, err)
 			spw.Discard()
 		} else {
+			log.Printf("[cache] startCacheDownload SUCCESS: session=%s", id)
 			spw.Commit()
 		}
 	}()

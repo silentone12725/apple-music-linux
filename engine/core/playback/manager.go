@@ -349,17 +349,23 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 // Stream pipes the decrypted media for sessionID/kind to dst.
 // dst can be http.ResponseWriter, *os.File, io.PipeWriter, or anything.
 func (m *Manager) Stream(ctx context.Context, sessionID string, kind pipeline.StreamKind, dst io.Writer) error {
+	log.Printf("[playback] Stream START: session=%s kind=%s", sessionID, kind)
 	sess, pctx, ok := m.lookup(sessionID)
 	if !ok {
+		log.Printf("[playback] Stream lookup FAILED: session=%s", sessionID)
 		return fmt.Errorf("session %s not found or expired", sessionID)
 	}
 	stream, ok := pctx.streams[kind]
 	if !ok {
+		log.Printf("[playback] Stream no stream: session=%s kind=%s", sessionID, kind)
 		return fmt.Errorf("session %s has no %s stream", sessionID, kind)
 	}
+	log.Printf("[playback] Stream found stream: session=%s kind=%s source=%T", sessionID, kind, stream.Source)
 	dst, end := m.beginStream(ctx, sess, kind, dst)
 	defer end()
-	return pipeline.Run(ctx, stream, dst)
+	err := pipeline.Run(ctx, stream, dst)
+	log.Printf("[playback] Stream END: session=%s err=%v", sessionID, err)
+	return err
 }
 
 // StreamFrom starts the stream at approximately startSec seconds into the
