@@ -344,6 +344,7 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	go func() {
 		defer server.Close()
 		serveCBCS(ctx, server, func(adamID, uri string) (decrypt func([]byte), err error) {
+			log.Printf("[drm] DialCBCS: opening key context for adamID=%s uri=%s", adamID, uri)
 			cAssetID := C.CString(adamID)
 			cMediaURI := C.CString(uri)
 			kdCtx := C.drm_open_key_context(cAssetID, cMediaURI)
@@ -351,8 +352,10 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 			C.free(unsafe.Pointer(cMediaURI))
 
 			if kdCtx == nil {
+				log.Printf("[drm] DialCBCS: drm_open_key_context returned NULL for adamID=%s", adamID)
 				return nil, fmt.Errorf("failed to open key context for asset %s", adamID)
 			}
+			log.Printf("[drm] DialCBCS: key context opened successfully for adamID=%s", adamID)
 
 			return func(sample []byte) {
 				cSample := (*C.uint8_t)(unsafe.Pointer(&sample[0]))
