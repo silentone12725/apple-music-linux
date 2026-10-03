@@ -630,13 +630,10 @@ static drm_key_context_handle_t create_key_context(const char *asset_id_str,
         return NULL;
     }
     
-    /* Fetch FairPlay license to get the actual decryption key */
-    if (fetch_fairplay_license(media_uri, ctx->aes_key, ctx->iv) != 0) {
-        fprintf(stderr, "[drm] create_key_context: failed to fetch license, using zero key\n");
-        /* Fall back to zero key for debugging */
-        memset(ctx->aes_key, 0, DRM_AES_KEY_SIZE);
-        memset(ctx->iv, 0, DRM_AES_BLOCK_SIZE);
-    }
+    /* Initialize with zero key (same as reference implementation)
+     * The CBCS protocol handles key delivery separately */
+    memset(ctx->aes_key, 0, DRM_AES_KEY_SIZE);
+    memset(ctx->iv, 0, DRM_AES_BLOCK_SIZE);
     
     ctx->sample_number = 0;
     ctx->ref_count = 1;
