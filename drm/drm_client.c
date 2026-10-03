@@ -1449,6 +1449,7 @@ static struct https_connection *get_pooled_connection(const char *host, int port
         
         conn->ssl = SSL_new(g_https.ctx);
         if (!conn->ssl) {
+            fprintf(stderr, "[drm] get_pooled_connection: SSL_new failed\n");
             close(conn->sock);
             pthread_mutex_unlock(&g_https.lock);
             return NULL;
@@ -1457,12 +1458,16 @@ static struct https_connection *get_pooled_connection(const char *host, int port
         SSL_set_fd(conn->ssl, conn->sock);
         SSL_set_tlsext_host_name(conn->ssl, host);
         
-        if (SSL_connect(conn->ssl) != 1) {
+        fprintf(stderr, "[drm] get_pooled_connection: performing SSL handshake with %s:%d\n", host, port);
+        int ssl_result = SSL_connect(conn->ssl);
+        if (ssl_result != 1) {
+            fprintf(stderr, "[drm] get_pooled_connection: SSL_connect failed: %d\n", ssl_result);
             SSL_free(conn->ssl);
             close(conn->sock);
             pthread_mutex_unlock(&g_https.lock);
             return NULL;
         }
+        fprintf(stderr, "[drm] get_pooled_connection: SSL handshake successful\n");
         
         snprintf(conn->host, sizeof(conn->host), "%s", host);
         conn->port = port;
