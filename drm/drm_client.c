@@ -553,8 +553,40 @@ static int fetch_fairplay_license(const char *key_uri, uint8_t *out_key, uint8_t
     
     fprintf(stderr, "[drm] fetch_fairplay_license: fetching from %s\n", key_uri);
     
+    /* Handle skd:// URLs - convert to HTTPS */
+    char https_url[1024];
+    const char *fetch_url = key_uri;
+    
+    if (strncmp(key_uri, "skd://", 6) == 0) {
+        /* skd:// format: skd://itunes.apple.com/p<playlist_id>/c<content_id>
+         * Convert to: https://buy.itunes.apple.com/itcs/key/get?p=<playlist_id>&c=<content_id>
+         */
+        const char *path_start = key_uri + 6; /* Skip "skd://" */
+        const char *host_end = strchr(path_start, '/');
+        if (host_end) {
+            /* Extract playlist_id and content_id from path */
+            const char *p_marker = strstr(host_end, "/p");
+            const char *c_marker = strstr(host_end, "/c");
+            
+            if (p_marker && c_marker && p_marker < c_marker) {
+                int p_len = c_marker - p_marker - 2; /* -2 for "/p" */
+                int c_len = 0;
+                const char *c_start = c_marker + 2; /* +2 for "/c" */
+                while (*c_start && *c_start != '/' && *c_start != '&') c_len++, c_start++;
+                
+                if (p_len > 0 && c_len > 0) {
+                    snprintf(https_url, sizeof(https_url),
+                             "https://buy.itunes.apple.com/itcs/key/get?p=%.*s&c=%.*s",
+                             p_len, p_marker + 2, c_len, c_marker + 2);
+                    fetch_url = https_url;
+                    fprintf(stderr, "[drm] fetch_fairplay_license: converted skd:// to %s\n", fetch_url);
+                }
+            }
+        }
+    }
+    
     /* Fetch license from key URI */
-    if (drm_https_fetch(key_uri, "GET", NULL, 0, &license_data, &license_len, &status) != 0) {
+    if (drm_https_fetch(fetch_url, "GET", NULL, 0, &license_data, &license_len, &status) != 0) {
         fprintf(stderr, "[drm] fetch_fairplay_license: HTTP fetch failed\n");
         return -1;
     }
