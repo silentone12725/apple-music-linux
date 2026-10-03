@@ -16,7 +16,7 @@
     // Poll the engine's DRM status until FairPlay (or Widevine) reports ready.
     // Returns true as soon as either is ready, false after exhausting retries.
     const waitForDRM = async (maxMs = 10000) => {
-        const engine = window._amlEngineURL || 'http://127.0.0.1:9823';
+        const engine = window._amlEngineURL || 'https://127.0.0.1:20025';
         const deadline = Date.now() + maxMs;
         while (Date.now() < deadline) {
             try {

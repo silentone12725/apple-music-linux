@@ -115,6 +115,15 @@ test('ludt parser: 64-bit largesize near EOF does not throw', () => {
     assert.equal(ctx._scFindBox(dv, 0, dv.byteLength, 'ludt'), null);
 });
 
+// ── _generatePalette (theme fallback) ────────────────────────────────────────
+test('_generatePalette: invalid hex falls back to Apple Music Pink', () => {
+    const ctx = sandbox('', ['_generatePalette'], MAIN);
+    const pal = ctx._generatePalette('not-a-color', 'dark');
+    assert.equal(pal.accent, '#fc3c44');
+    assert.equal(pal.appearance, 'dark');
+    assert.match(pal.bgColor, /hsla\(/);
+});
+
 // ── _lastfmSign (Last.fm api_sig algorithm) ───────────────────────────────────
 test('_lastfmSign: sorted, secret-suffixed md5; excludes format/callback', () => {
     const ctx = sandbox('', ['_lastfmSign'], MAIN);
