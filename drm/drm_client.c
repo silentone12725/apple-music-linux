@@ -15,6 +15,9 @@
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 600
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -652,6 +655,9 @@ int drm_init(const struct drm_config *config)
     
     pthread_mutex_unlock(&g_state.lock);
     
+    /* Initialize cookie jar */
+    drm_cookie_init();
+    
     /* Notify state transition */
     call_state_callback(DRM_STATE_STARTING);
     
@@ -747,6 +753,10 @@ void drm_shutdown(void)
     free_key_context_cache();
     free_itun_cache();
     
+    /* Shutdown cookie jar and HTTPS */
+    drm_cookie_shutdown();
+    drm_https_shutdown();
+    
     g_state.initialized = 0;
     g_state.recovery_active = 0;
     
@@ -767,19 +777,53 @@ char *drm_get_account(void)
         return NULL;
     }
     
-    /* Build JSON: {"storefront_id":"…","dev_token":"…","music_token":"…"} */
+    /* Get device GUID */
+    char device_guid[37] = {0};
+    drm_device_guid_get(device_guid, sizeof(device_guid));
+    
+    /* Try to parse JWT claims from music_token */
+    char *jwt_payload = NULL;
+    uint32_t jwt_len = 0;
+    char *sub = NULL, *email = NULL, *name = NULL;
+    
+    if (drm_jwt_parse(g_state.music_token, &jwt_payload, &jwt_len) == 0) {
+        drm_jwt_get_claim(jwt_payload, "sub", &sub);
+        drm_jwt_get_claim(jwt_payload, "email", &email);
+        drm_jwt_get_claim(jwt_payload, "name", &name);
+    }
+    
+    /* Build enhanced JSON with all available metadata */
     size_t len = strlen(g_state.storefront_id) + 
                  strlen(g_state.dev_token) + 
-                 strlen(g_state.music_token) + 80;
+                 strlen(g_state.music_token) +
+                 strlen(device_guid) +
+                 (sub ? strlen(sub) : 0) +
+                 (email ? strlen(email) : 0) +
+                 (name ? strlen(name) : 0) + 200;
     
     char *buf = malloc(len);
     if (buf) {
         snprintf(buf, len,
-            "{\"storefront_id\":\"%s\",\"dev_token\":\"%s\",\"music_token\":\"%s\"}",
+            "{\"storefront_id\":\"%s\","
+            "\"dev_token\":\"%s\","
+            "\"music_token\":\"%s\","
+            "\"device_guid\":\"%s\","
+            "\"account_id\":\"%s\","
+            "\"email\":\"%s\","
+            "\"display_name\":\"%s\"}",
             g_state.storefront_id,
             g_state.dev_token,
-            g_state.music_token);
+            g_state.music_token,
+            device_guid,
+            sub ? sub : "",
+            email ? email : "",
+            name ? name : "");
     }
+    
+    free(jwt_payload);
+    free(sub);
+    free(email);
+    free(name);
     
     pthread_mutex_unlock(&g_state.lock);
     return buf;
@@ -1297,7 +1341,7 @@ int drm_https_fetch(
     }
     
     /* Build request */
-    char request[4096];
+    char request[8192];
     int req_len = snprintf(request, sizeof(request),
         "%s %s HTTP/1.1\r\n"
         "Host: %s\r\n"
@@ -1305,6 +1349,13 @@ int drm_https_fetch(
         "Accept: */*\r\n"
         "Connection: keep-alive\r\n",
         method, path, host);
+    
+    /* Add cookies if available */
+    char cookie_header[4096] = {0};
+    if (drm_cookie_get_for_url(url, cookie_header, sizeof(cookie_header)) == 0 && cookie_header[0]) {
+        req_len += snprintf(request + req_len, sizeof(request) - req_len,
+            "Cookie: %s\r\n", cookie_header);
+    }
     
     if (body_len > 0) {
         req_len += snprintf(request + req_len, sizeof(request) - req_len,
@@ -1369,6 +1420,19 @@ int drm_https_fetch(
                     }
                 }
                 
+                /* Parse Set-Cookie headers */
+                char *sc = buf;
+                while ((sc = strstr(sc, "Set-Cookie:")) != NULL && !in_body) {
+                    char *end = strchr(sc, '\n');
+                    if (!end) end = strchr(sc, '\r');
+                    if (end) {
+                        *end = '\0';
+                        drm_cookie_parse_set_cookie(sc + 11); /* Skip "Set-Cookie:" */
+                        *end = (end[0] == '\r') ? '\r' : '\n';
+                    }
+                    sc = end ? end + 1 : sc + 11;
+                }
+                
                 if (strstr(buf, "\r\n\r\n")) {
                     in_body = 1;
                 }
@@ -1407,4 +1471,574 @@ int drm_https_fetch(
     }
     
     return -1;
+}
+
+/* ── Cookie Management ──────────────────────────────────────────────────────*/
+
+#define DRM_COOKIE_MAX_ENTRIES 64
+#define DRM_COOKIE_MAX_NAME 64
+#define DRM_COOKIE_MAX_VALUE 1024
+#define DRM_COOKIE_MAX_DOMAIN 256
+
+struct drm_cookie_entry {
+    char name[DRM_COOKIE_MAX_NAME];
+    char value[DRM_COOKIE_MAX_VALUE];
+    char domain[DRM_COOKIE_MAX_DOMAIN];
+    char path[256];
+    time_t expires;
+    int secure;
+    int http_only;
+};
+
+struct drm_cookie_jar {
+    pthread_mutex_t lock;
+    struct drm_cookie_entry entries[DRM_COOKIE_MAX_ENTRIES];
+    int count;
+    char file_path[512];
+};
+
+static struct drm_cookie_jar g_cookies = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+
+static int cookie_file_exists(void)
+{
+    if (!g_cookies.file_path[0]) {
+        return 0;
+    }
+    struct stat st;
+    return stat(g_cookies.file_path, &st) == 0;
+}
+
+int drm_cookie_init(void)
+{
+    if (!g_state.base_directory) {
+        return -1;
+    }
+    
+    snprintf(g_cookies.file_path, sizeof(g_cookies.file_path),
+             "%s/cookies.txt", g_state.base_directory);
+    
+    /* Load existing cookies if file exists */
+    if (!cookie_file_exists()) {
+        return 0;
+    }
+    
+    FILE *f = fopen(g_cookies.file_path, "r");
+    if (!f) {
+        return -1;
+    }
+    
+    char line[2048];
+    while (fgets(line, sizeof(line), f) && g_cookies.count < DRM_COOKIE_MAX_ENTRIES) {
+        /* Format: name|value|domain|path|expires|secure|http_only */
+        struct drm_cookie_entry *entry = &g_cookies.entries[g_cookies.count];
+        char *ptr = line;
+        char *sep;
+        
+        /* Parse name */
+        sep = strchr(ptr, '|');
+        if (!sep) continue;
+        *sep = '\0';
+        snprintf(entry->name, sizeof(entry->name), "%s", ptr);
+        
+        ptr = sep + 1;
+        
+        /* Parse value */
+        sep = strchr(ptr, '|');
+        if (!sep) continue;
+        *sep = '\0';
+        snprintf(entry->value, sizeof(entry->value), "%s", ptr);
+        
+        ptr = sep + 1;
+        
+        /* Parse domain */
+        sep = strchr(ptr, '|');
+        if (!sep) continue;
+        *sep = '\0';
+        snprintf(entry->domain, sizeof(entry->domain), "%s", ptr);
+        
+        ptr = sep + 1;
+        
+        /* Parse path */
+        sep = strchr(ptr, '|');
+        if (!sep) continue;
+        *sep = '\0';
+        snprintf(entry->path, sizeof(entry->path), "%s", ptr);
+        
+        ptr = sep + 1;
+        
+        /* Parse expires */
+        sep = strchr(ptr, '|');
+        if (!sep) continue;
+        *sep = '\0';
+        entry->expires = atol(ptr);
+        
+        ptr = sep + 1;
+        
+        /* Parse secure */
+        sep = strchr(ptr, '|');
+        if (!sep) continue;
+        *sep = '\0';
+        entry->secure = atoi(ptr);
+        
+        ptr = sep + 1;
+        
+        /* Parse http_only */
+        sep = strchr(ptr, '|');
+        if (sep) *sep = '\0';
+        entry->http_only = atoi(ptr);
+        
+        g_cookies.count++;
+    }
+    
+    fclose(f);
+    return 0;
+}
+
+void drm_cookie_shutdown(void)
+{
+    pthread_mutex_lock(&g_cookies.lock);
+    
+    if (!cookie_file_exists() && g_cookies.count == 0) {
+        pthread_mutex_unlock(&g_cookies.lock);
+        return;
+    }
+    
+    FILE *f = fopen(g_cookies.file_path, "w");
+    if (!f) {
+        pthread_mutex_unlock(&g_cookies.lock);
+        return;
+    }
+    
+    for (int i = 0; i < g_cookies.count; i++) {
+        struct drm_cookie_entry *entry = &g_cookies.entries[i];
+        /* Skip expired cookies */
+        if (entry->expires > 0 && time(NULL) > entry->expires) {
+            continue;
+        }
+        fprintf(f, "%s|%s|%s|%s|%ld|%d|%d\n",
+                entry->name, entry->value, entry->domain, entry->path,
+                (long)entry->expires, entry->secure, entry->http_only);
+    }
+    
+    fclose(f);
+    pthread_mutex_unlock(&g_cookies.lock);
+}
+
+int drm_cookie_get_for_url(const char *url, char *out_buf, size_t buf_size)
+{
+    if (!url || !out_buf || buf_size == 0) {
+        return -1;
+    }
+    
+    /* Parse host from URL */
+    char host[256] = {0};
+    char *host_start = strstr(url, "://");
+    if (!host_start) {
+        return -1;
+    }
+    host_start += 3;
+    char *host_end = strchr(host_start, '/');
+    if (host_end) {
+        size_t len = host_end - host_start;
+        if (len >= sizeof(host)) len = sizeof(host) - 1;
+        strncpy(host, host_start, len);
+    } else {
+        strncpy(host, host_start, sizeof(host) - 1);
+    }
+    
+    out_buf[0] = '\0';
+    size_t offset = 0;
+    
+    pthread_mutex_lock(&g_cookies.lock);
+    
+    for (int i = 0; i < g_cookies.count && offset < buf_size - 10; i++) {
+        struct drm_cookie_entry *entry = &g_cookies.entries[i];
+        
+        /* Skip expired cookies */
+        if (entry->expires > 0 && time(NULL) > entry->expires) {
+            continue;
+        }
+        
+        /* Check domain match */
+        if (entry->domain[0] && strcmp(entry->domain, host) != 0) {
+            /* Check suffix match for .domain.com */
+            if (entry->domain[0] == '.') {
+                size_t domain_len = strlen(entry->domain);
+                size_t host_len = strlen(host);
+                if (host_len < domain_len - 1) continue;
+                if (strcmp(host + (host_len - domain_len + 1), entry->domain + 1) != 0) continue;
+            } else {
+                continue;
+            }
+        }
+        
+        /* Add cookie to header */
+        int written = snprintf(out_buf + offset, buf_size - offset,
+                               "%s%s=%s",
+                               offset > 0 ? "; " : "",
+                               entry->name, entry->value);
+        if (written < 0 || (size_t)written >= buf_size - offset) {
+            break;
+        }
+        offset += written;
+    }
+    
+    pthread_mutex_unlock(&g_cookies.lock);
+    return 0;
+}
+
+void drm_cookie_parse_set_cookie(const char *set_cookie)
+{
+    if (!set_cookie || !g_state.base_directory) {
+        return;
+    }
+    
+    pthread_mutex_lock(&g_cookies.lock);
+    
+    if (g_cookies.count >= DRM_COOKIE_MAX_ENTRIES) {
+        pthread_mutex_unlock(&g_cookies.lock);
+        return;
+    }
+    
+    struct drm_cookie_entry *entry = &g_cookies.entries[g_cookies.count];
+    memset(entry, 0, sizeof(*entry));
+    
+    /* Parse name=value; Domain=...; Path=...; Expires=...; Secure; HttpOnly */
+    char *ptr = strdup(set_cookie);
+    char *ptr_orig = ptr;  /* Keep original for free() */
+    if (!ptr) {
+        pthread_mutex_unlock(&g_cookies.lock);
+        return;
+    }
+    
+    /* Extract name=value */
+    char *eq = strchr(ptr, '=');
+    if (!eq) {
+        free(ptr_orig);
+        pthread_mutex_unlock(&g_cookies.lock);
+        return;
+    }
+    *eq = '\0';
+    snprintf(entry->name, sizeof(entry->name), "%s", ptr);
+    
+    ptr = eq + 1;
+    
+    /* Default path is / */
+    strncpy(entry->path, "/", sizeof(entry->path) - 1);
+    
+    /* Parse attributes */
+    char *saveptr;
+    char *token = strtok_r(ptr, ";", &saveptr);
+    while (token) {
+        char *eq2 = strchr(token, '=');
+        if (eq2) {
+            *eq2 = '\0';
+            char *key = token;
+            char *value = eq2 + 1;
+            
+            /* Trim whitespace */
+            while (*key == ' ') key++;
+            while (*value == ' ') value++;
+            
+            if (strcasecmp(key, "domain") == 0) {
+                strncpy(entry->domain, value, sizeof(entry->domain) - 1);
+            } else if (strcasecmp(key, "path") == 0) {
+                strncpy(entry->path, value, sizeof(entry->path) - 1);
+            } else if (strcasecmp(key, "expires") == 0) {
+                /* Parse date: "Wed, 09 Jun 2021 10:18:14 GMT" */
+                struct tm tm = {0};
+                if (strptime(value, "%a, %d %b %Y %H:%M:%S GMT", &tm) == NULL) {
+                    /* Try alternative format */
+                    strptime(value, "%a, %d-%b-%Y %H:%M:%S GMT", &tm);
+                }
+                entry->expires = mktime(&tm);
+            } else if (strcasecmp(key, "max-age") == 0) {
+                entry->expires = time(NULL) + atoi(value);
+            }
+        } else if (token) {
+            if (strcasecmp(token, "secure") == 0) {
+                entry->secure = 1;
+            } else if (strcasecmp(token, "httponly") == 0) {
+                entry->http_only = 1;
+            }
+        }
+        
+        token = strtok_r(NULL, ";", &saveptr);
+    }
+    
+    /* Set cookie value */
+    /* Find end of value (first ; or end of string) */
+    char *semi = strchr(eq + 1, ';');
+    if (semi) {
+        *semi = '\0';
+    }
+    /* Trim trailing whitespace */
+    char *end = eq + strlen(eq + 1) - 1;
+    while (end > eq && (*end == ' ' || *end == '\r' || *end == '\n')) {
+        *end-- = '\0';
+    }
+    strncpy(entry->value, eq + 1, sizeof(entry->value) - 1);
+    
+    g_cookies.count++;
+    
+    free(ptr_orig);
+    pthread_mutex_unlock(&g_cookies.lock);
+}
+
+/* ── JWT Token Parsing ──────────────────────────────────────────────────────*/
+
+static char jwt_base64_decode_char(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return 64; /* padding */
+}
+
+int drm_jwt_parse(const char *token, char **out_payload, uint32_t *out_len)
+{
+    if (!token || !out_payload || !out_len) {
+        return -1;
+    }
+    
+    /* Find second dot (header.payload.signature) */
+    char *first_dot = strchr(token, '.');
+    if (!first_dot) {
+        return -1;
+    }
+    char *second_dot = strchr(first_dot + 1, '.');
+    if (!second_dot) {
+        return -1;
+    }
+    
+    /* Calculate payload length */
+    size_t encoded_len = second_dot - (first_dot + 1);
+    
+    /* Base64 decode (approximate size) */
+    size_t decoded_len = (encoded_len / 4) * 3;
+    char *decoded = malloc(decoded_len + 1);
+    if (!decoded) {
+        return -1;
+    }
+    
+    const char *encoded = first_dot + 1;
+    size_t out_idx = 0;
+    
+    for (size_t i = 0; i < encoded_len; i += 4) {
+        uint8_t b0 = jwt_base64_decode_char(encoded[i]);
+        uint8_t b1 = jwt_base64_decode_char(encoded[i + 1]);
+        uint8_t b2 = jwt_base64_decode_char(encoded[i + 2]);
+        uint8_t b3 = jwt_base64_decode_char(encoded[i + 3]);
+        
+        uint8_t c0 = (b0 << 2) | (b1 >> 4);
+        uint8_t c1 = ((b1 & 0x0F) << 4) | (b2 >> 2);
+        uint8_t c2 = ((b2 & 0x03) << 6) | b3;
+        
+        if (out_idx < decoded_len) decoded[out_idx++] = c0;
+        if (out_idx < decoded_len && b2 != 64) decoded[out_idx++] = c1;
+        if (out_idx < decoded_len && b3 != 64) decoded[out_idx++] = c2;
+    }
+    
+    decoded[out_idx] = '\0';
+    
+    *out_payload = decoded;
+    *out_len = (uint32_t)out_idx;
+    
+    return 0;
+}
+
+int drm_jwt_get_claim(const char *payload, const char *claim, char **out_value)
+{
+    if (!payload || !claim || !out_value) {
+        return -1;
+    }
+    
+    /* Simple JSON parsing for "claim": "value" or "claim": number */
+    char search[256];
+    snprintf(search, sizeof(search), "\"%s\"", claim);
+    
+    char *pos = strstr(payload, search);
+    if (!pos) {
+        return -1;
+    }
+    
+    pos += strlen(search);
+    
+    /* Skip whitespace and colon */
+    while (*pos == ' ' || *pos == ':') pos++;
+    
+    /* Skip whitespace */
+    while (*pos == ' ') pos++;
+    
+    if (*pos == '"') {
+        /* String value */
+        pos++;
+        char *end = strchr(pos, '"');
+        if (!end) {
+            return -1;
+        }
+        size_t len = end - pos;
+        *out_value = strndup(pos, len);
+    } else {
+        /* Number or boolean */
+        char *end = pos;
+        while (*end && *end != ',' && *end != '}' && *end != ' ') end++;
+        size_t len = end - pos;
+        *out_value = strndup(pos, len);
+    }
+    
+    return 0;
+}
+
+/* ── Device GUID Management ─────────────────────────────────────────────────*/
+
+static int generate_uuid(char *out_uuid, size_t buf_size)
+{
+    if (!out_uuid || buf_size < 37) {
+        return -1;
+    }
+    
+    uint8_t uuid[16];
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0 || read(fd, uuid, 16) != 16) {
+        /* Fallback to time-based if /dev/urandom fails */
+        if (fd >= 0) close(fd);
+        time_t t = time(NULL);
+        uuid[0] = (t >> 24) & 0xFF;
+        uuid[1] = (t >> 16) & 0xFF;
+        uuid[2] = (t >> 8) & 0xFF;
+        uuid[3] = t & 0xFF;
+        for (int i = 4; i < 16; i++) {
+            uuid[i] = rand() % 256;
+        }
+    } else {
+        close(fd);
+    }
+    
+    /* Set version (4) and variant (1) */
+    uuid[6] = (uuid[6] & 0x0F) | 0x40;
+    uuid[8] = (uuid[8] & 0x3F) | 0x80;
+    
+    snprintf(out_uuid, buf_size,
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             uuid[0], uuid[1], uuid[2], uuid[3],
+             uuid[4], uuid[5], uuid[6], uuid[7],
+             uuid[8], uuid[9], uuid[10], uuid[11],
+             uuid[12], uuid[13], uuid[14], uuid[15]);
+    
+    return 0;
+}
+
+static char *get_adi_path(void)
+{
+    static char path[512];
+    if (!g_state.base_directory) {
+        return NULL;
+    }
+    snprintf(path, sizeof(path), "%s/adi.pb", g_state.base_directory);
+    return path;
+}
+
+int drm_device_guid_get(char *out_guid, size_t buf_size)
+{
+    if (!out_guid || buf_size < 37) {
+        return -1;
+    }
+    
+    char *adi_path = get_adi_path();
+    if (!adi_path) {
+        return generate_uuid(out_guid, buf_size);
+    }
+    
+    /* Try to load from adi.pb */
+    /* adi.pb is a protobuf, but we'll store GUID as first 36 bytes for simplicity */
+    FILE *f = fopen(adi_path, "rb");
+    if (f) {
+        fread(out_guid, 1, 36, f);
+        fclose(f);
+        if (out_guid[0] && out_guid[8] == '-' && out_guid[13] == '-' &&
+            out_guid[18] == '-' && out_guid[23] == '-') {
+            out_guid[36] = '\0';
+            return 0;
+        }
+    }
+    
+    /* Generate new GUID if not found or invalid */
+    return generate_uuid(out_guid, buf_size);
+}
+
+int drm_device_guid_set(const char *guid)
+{
+    if (!guid || strlen(guid) != 36) {
+        return -1;
+    }
+    
+    char *adi_path = get_adi_path();
+    if (!adi_path) {
+        return -1;
+    }
+    
+    /* Ensure directory exists */
+    char dir_path[512];
+    strncpy(dir_path, g_state.base_directory, sizeof(dir_path) - 1);
+    
+    FILE *f = fopen(adi_path, "wb");
+    if (!f) {
+        return -1;
+    }
+    
+    /* Write GUID as first 36 bytes */
+    fwrite(guid, 1, 36, f);
+    
+    /* Write rest of adi.pb structure (minimal valid protobuf) */
+    /* This is a simplified structure - real adi.pb has more fields */
+    uint8_t adi_data[] = {
+        0x0a, 0x18, /* field 1, length 24 */
+        0x61, 0x70, 0x70, 0x6c, 0x65, 0x2d, 0x6d, 0x75, 0x73, 0x69, 0x63, 0x2d,
+        0x6c, 0x69, 0x6e, 0x75, 0x78, 0x2d, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74,
+        0x12, 0x08, /* field 2, length 8 */
+        0x31, 0x30, 0x2e, 0x30, 0x2e, 0x30, 0x2e, 0x31,
+    };
+    fwrite(adi_data, 1, sizeof(adi_data), f);
+    
+    fclose(f);
+    return 0;
+}
+
+int drm_device_guid_is_configured(void)
+{
+    char *adi_path = get_adi_path();
+    if (!adi_path) {
+        return 0;
+    }
+    
+    struct stat st;
+    if (stat(adi_path, &st) != 0) {
+        return 0;
+    }
+    
+    /* Check if file has valid GUID */
+    FILE *f = fopen(adi_path, "rb");
+    if (!f) {
+        return 0;
+    }
+    
+    char guid[37] = {0};
+    if (fread(guid, 1, 36, f) != 36) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    
+    /* Validate GUID format */
+    if (guid[0] && guid[8] == '-' && guid[13] == '-' &&
+        guid[18] == '-' && guid[23] == '-') {
+        return 1;
+    }
+    
+    return 0;
 }
