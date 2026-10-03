@@ -599,6 +599,12 @@ static int fetch_fairplay_license(const char *key_uri, uint8_t *out_key, uint8_t
     
     fprintf(stderr, "[drm] fetch_fairplay_license: got %u bytes\n", license_len);
     
+    /* Debug: print first 64 bytes of response */
+    if (license_len > 0) {
+        fprintf(stderr, "[drm] fetch_fairplay_license: body=%.*s\n", 
+                license_len < 64 ? license_len : 64, (char*)license_data);
+    }
+    
     /* Parse license and extract key/IV */
     int ret = parse_fairplay_license(license_data, license_len, out_key, out_iv);
     
