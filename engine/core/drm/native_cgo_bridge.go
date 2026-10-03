@@ -10,6 +10,7 @@ import "C"
 
 import (
 	"runtime"
+	"runtime/cgo"
 	"unsafe"
 )
 
@@ -29,5 +30,25 @@ func nativeBridgeState(cState *C.char, ud unsafe.Pointer) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	// State changes are emitted via eventCh
+	// Get the state channel from userdata
+	if ud == nil {
+		return
+	}
+	
+	// Convert unsafe.Pointer to uintptr, then to cgo.Handle
+	handle := cgo.Handle(uintptr(ud))
+	stateCh, ok := handle.Value().(chan string)
+	if !ok {
+		return
+	}
+	
+	// Convert C string to Go string
+	state := C.GoString(cState)
+	
+	// Send to channel (non-blocking)
+	select {
+	case stateCh <- state:
+	default:
+		// Channel full, ignore
+	}
 }
