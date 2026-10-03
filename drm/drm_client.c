@@ -1598,15 +1598,23 @@ int drm_https_fetch(
         while (1) {
             int n = SSL_read(conn->ssl, buf, sizeof(buf) - 1);
             if (n <= 0) {
+                fprintf(stderr, "[drm] https_fetch: SSL_read returned %d\n", n);
                 break;
             }
             buf[n] = '\0';
             
+            /* Debug: print first response chunk */
+            if (status_code == 0 && !in_body) {
+                fprintf(stderr, "[drm] https_fetch: received response: %.*s\n", n < 200 ? n : 200, buf);
+            }
+            
             /* Parse status line */
             if (!in_body && status_code == 0) {
                 if (sscanf(buf, "HTTP/1.%*d %d", &status_code) != 1) {
+                    fprintf(stderr, "[drm] https_fetch: failed to parse status line\n");
                     continue;
                 }
+                fprintf(stderr, "[drm] https_fetch: status code %d\n", status_code);
                 *out_status = status_code;
             }
             
@@ -1616,6 +1624,7 @@ int drm_https_fetch(
                     char *cl = strstr(buf, "Content-Length:");
                     if (cl) {
                         content_length = atoi(cl + 17);
+                        fprintf(stderr, "[drm] https_fetch: content-length %d\n", content_length);
                     }
                 }
                 
@@ -1634,6 +1643,7 @@ int drm_https_fetch(
                 
                 if (strstr(buf, "\r\n\r\n")) {
                     in_body = 1;
+                    fprintf(stderr, "[drm] https_fetch: headers end, entering body\n");
                 }
             }
             
@@ -1664,11 +1674,13 @@ int drm_https_fetch(
         }
         
         /* Success */
+        fprintf(stderr, "[drm] https_fetch: returning %d bytes with status %d\n", response_len, status_code);
         *out_data = response;
         *out_len = response_len;
         return 0;
     }
     
+    fprintf(stderr, "[drm] https_fetch: all attempts failed\n");
     return -1;
 }
 
