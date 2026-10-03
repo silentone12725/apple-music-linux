@@ -1030,14 +1030,19 @@ drm_key_context_handle_t drm_open_key_context(
     const char *media_uri)
 {
     if (!asset_id_str || !media_uri) {
+        fprintf(stderr, "[drm] drm_open_key_context: null params (asset=%s, uri=%s)\n",
+                asset_id_str ? asset_id_str : "NULL", media_uri ? media_uri : "NULL");
         return NULL;
     }
+    
+    fprintf(stderr, "[drm] drm_open_key_context: asset_id=%s media_uri=%s\n", asset_id_str, media_uri);
     
     pthread_mutex_lock(&g_state.lock);
     int initialized = g_state.initialized;
     pthread_mutex_unlock(&g_state.lock);
     
     if (!initialized) {
+        fprintf(stderr, "[drm] drm_open_key_context: not initialized\n");
         return NULL;
     }
     
@@ -1056,6 +1061,7 @@ drm_key_context_handle_t drm_open_key_context(
             pthread_mutex_lock(&entry->ctx->lock);
             entry->ctx->ref_count++;
             pthread_mutex_unlock(&entry->ctx->lock);
+            fprintf(stderr, "[drm] drm_open_key_context: found in cache (ref_count=%d)\n", entry->ctx->ref_count);
             pthread_mutex_unlock(&g_state.lock);
             return entry->ctx;
         }
@@ -1065,6 +1071,7 @@ drm_key_context_handle_t drm_open_key_context(
     /* Create new context */
     drm_key_context_handle_t ctx = create_key_context(asset_id_str, media_uri);
     if (!ctx) {
+        fprintf(stderr, "[drm] drm_open_key_context: create_key_context failed\n");
         pthread_mutex_unlock(&g_state.lock);
         return NULL;
     }
@@ -1078,6 +1085,7 @@ drm_key_context_handle_t drm_open_key_context(
         entry->next = g_state.key_context_cache[bucket];
         g_state.key_context_cache[bucket] = entry;
         g_state.key_context_count++;
+        fprintf(stderr, "[drm] drm_open_key_context: added to cache (total=%d)\n", g_state.key_context_count);
     }
     
     pthread_mutex_unlock(&g_state.lock);
