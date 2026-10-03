@@ -8697,8 +8697,13 @@
     function buildAccountSection(drm, onRefresh) {
       const { wrap, body } = makeSection("Engine Account");
       const drmState = drm?.state ?? drm ?? {};
+      const managerOk = drmState?.manager === "ready";
       const processOk = drmState?.process === "running";
-      const isSignedIn = processOk && drmState?.session === "valid" || drmState?.authentication === "logged_in" || drmState?.fairplay === "ready" || drm?.capabilities?.cbcs === true;
+      const authOk = drmState?.authentication === "logged_in";
+      const fairplayOk = drmState?.fairplay === "ready";
+      const sessionOk = drmState?.session === "valid";
+      const cbcsOk = drm?.capabilities?.cbcs === true;
+      const isSignedIn = cbcsOk || fairplayOk || authOk && processOk;
       function renderState() {
         body.innerHTML = "";
         const row = document.createElement("div");
@@ -8713,7 +8718,13 @@
         if (!isSignedIn) {
           const sub = document.createElement("div");
           sub.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;";
-          sub.textContent = "Sign in to enable lossless and hi-res playback";
+          if (!managerOk) {
+            sub.textContent = "DRM engine not ready. Check engine logs.";
+          } else if (!processOk) {
+            sub.textContent = "DRM backend not loaded. Restart the app.";
+          } else {
+            sub.textContent = "Sign in to enable lossless and hi-res playback";
+          }
           text.appendChild(sub);
         }
         row.appendChild(text);

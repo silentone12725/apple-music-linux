@@ -9757,14 +9757,25 @@ window.amlGetQueueInfo = function () {
     function buildAccountSection(drm, onRefresh) {
         const { wrap, body } = makeSection('Engine Account');
         const drmState = drm?.state ?? drm ?? {};
-        // session:valid only means mpl_db credentials exist — it stays true even
-        // when the DRM process has failed (stale cache). Only count it when the
-        // process is actually running. authentication/fairplay/cbcs are live signals.
+        // Determine sign-in status from multiple signals:
+        // - manager: "ready" means DRMManager is healthy
+        // - process: "running" means NativeBackend is loaded
+        // - authentication: "logged_in" means credentials are valid
+        // - fairplay: "ready" means FairPlay license is active
+        // - session: "valid" means mpl_db credentials exist
+        // - capabilities.cbcs: true means CBCS decryption is available
+        const managerOk = drmState?.manager === 'ready';
         const processOk = drmState?.process === 'running';
-        const isSignedIn = (processOk && drmState?.session === 'valid')
-            || drmState?.authentication === 'logged_in'
-            || drmState?.fairplay === 'ready'
-            || drm?.capabilities?.cbcs === true;
+        const authOk = drmState?.authentication === 'logged_in';
+        const fairplayOk = drmState?.fairplay === 'ready';
+        const sessionOk = drmState?.session === 'valid';
+        const cbcsOk = drm?.capabilities?.cbcs === true;
+        
+        // User is considered signed in if:
+        // 1. CBCS is explicitly available (most reliable), OR
+        // 2. FairPlay is ready, OR
+        // 3. Authentication is logged_in AND process is running
+        const isSignedIn = cbcsOk || fairplayOk || (authOk && processOk);
 
         function renderState() {
             body.innerHTML = '';
@@ -9780,7 +9791,14 @@ window.amlGetQueueInfo = function () {
             if (!isSignedIn) {
                 const sub = document.createElement('div');
                 sub.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.38);margin-top:2px;';
-                sub.textContent = 'Sign in to enable lossless and hi-res playback';
+                // Provide more specific guidance based on what's missing
+                if (!managerOk) {
+                    sub.textContent = 'DRM engine not ready. Check engine logs.';
+                } else if (!processOk) {
+                    sub.textContent = 'DRM backend not loaded. Restart the app.';
+                } else {
+                    sub.textContent = 'Sign in to enable lossless and hi-res playback';
+                }
                 text.appendChild(sub);
             }
             row.appendChild(text);
