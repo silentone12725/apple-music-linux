@@ -1324,6 +1324,11 @@ int drm_https_init(int use_http2)
         return -1;
     }
     
+    /* Load system CA certificates */
+    if (SSL_CTX_load_verify_locations(g_https.ctx, "/etc/ssl/certs/ca-certificates.crt", NULL) != 1) {
+        fprintf(stderr, "[drm] https_init: warning: could not load CA certificates\n");
+    }
+    
     /* Set minimum TLS version to 1.2 */
     SSL_CTX_set_min_proto_version(g_https.ctx, TLS1_2_VERSION);
     
