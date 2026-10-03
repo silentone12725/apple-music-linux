@@ -53,7 +53,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/cgo"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -65,15 +67,21 @@ type nativeBackend struct {
 	authSrc AuthSource
 	eventCh chan DRMEvent
 	running bool
+	// Global state callback channel for C callbacks
+	stateCh   chan string
+	stateHandle cgo.Handle
 }
 
 // NewNativeBackend creates a new native DRM backend
 // drmDir is the directory containing libdrm_client.so and files/ folder with credentials
 func NewNativeBackend(drmDir string) DRMBackend {
-	return &nativeBackend{
+	b := &nativeBackend{
 		drmDir:  drmDir,
 		eventCh: make(chan DRMEvent, 16),
+		stateCh: make(chan string, 16),
 	}
+	b.stateHandle = cgo.NewHandle(b.stateCh)
+	return b
 }
 
 // Start launches the native DRM backend
@@ -124,7 +132,8 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		auth_callback:    (C.drm_auth_callback_t)(C.nativeBridgeAuth),
 		auth_user_data:   nil,
 		state_callback:   (C.drm_state_callback_t)(C.nativeBridgeState),
-		state_user_data:  nil,
+		// Pass stateCh as userdata via cgo.Handle
+		state_user_data: unsafe.Pointer(uintptr(b.stateHandle)),
 	}
 
 	// Pass credentials if provided
@@ -154,6 +163,27 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	}
 
 	b.running = true
+	
+	// Emit initial state event to notify DRMManager that backend is running
+	select {
+	case b.eventCh <- DRMEvent{
+		Snapshot: DRMSnapshot{
+			State: DRMState{
+				Process:        ProcessRunning,
+				Manager:        ManagerReady,
+				Authentication: AuthLoggedIn,
+				FairPlay:       FairPlayInitializing,
+				Session:        SessionValid,
+				Recovery:       RecoveryIdle,
+			},
+			Timestamp: time.Now(),
+			Message:   "native backend initialized",
+		},
+	}:
+	default:
+		// Event channel full, ignore
+	}
+	
 	return nil
 }
 
@@ -344,7 +374,29 @@ func (b *nativeBackend) authLoop() {
 	// Auth is handled via callbacks
 }
 
-// stateLoop processes state changes
+// stateLoop processes state changes from C callbacks
 func (b *nativeBackend) stateLoop() {
-	// State changes are emitted via eventCh
+	for state := range b.stateCh {
+		// Parse state string and emit event
+		result := ParseStateFile(state)
+		
+		snap := DRMSnapshot{
+			State: DRMState{
+				Process:        result.Process,
+				FairPlay:       result.FairPlay,
+				Authentication: result.Auth,
+				Recovery:       result.Recovery,
+			},
+			Timestamp: time.Now(),
+			Message:   fmt.Sprintf("state change: %s", state),
+		}
+		
+		select {
+		case b.eventCh <- DRMEvent{
+			Snapshot: snap,
+		}:
+		default:
+			// Event channel full, ignore
+		}
+	}
 }
