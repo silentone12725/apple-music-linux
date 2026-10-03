@@ -314,6 +314,7 @@ type cbcsSeekableSource struct {
 }
 
 func (s *cbcsSeekableSource) Stream(ctx context.Context, w io.Writer) error {
+	log.Printf("[cbcs] SeekableSource.Stream START: adamID=%s fileURL=%s", s.adamID, s.media.FileURL)
 	src := &cbcsSource{
 		adamID:     s.adamID,
 		dialer:     s.dialer,
@@ -321,7 +322,9 @@ func (s *cbcsSeekableSource) Stream(ctx context.Context, w io.Writer) error {
 		keyURIs:    s.media.KeyURIs,
 		durationMs: s.durationMs,
 	}
-	return src.Stream(ctx, w)
+	err := src.Stream(ctx, w)
+	log.Printf("[cbcs] SeekableSource.Stream END: adamID=%s err=%v", s.adamID, err)
+	return err
 }
 
 func (s *cbcsSeekableSource) SourceFrom(startSec float64) (pipeline.Source, float64) {
