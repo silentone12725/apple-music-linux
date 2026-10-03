@@ -1536,6 +1536,7 @@ int drm_https_fetch(
     for (int attempt = 0; attempt < HTTPS_RETRY_ATTEMPTS; attempt++) {
         struct https_connection *conn = get_pooled_connection(host, port);
         if (!conn) {
+            fprintf(stderr, "[drm] https_fetch: no connection available (attempt %d/%d)\n", attempt + 1, HTTPS_RETRY_ATTEMPTS);
             if (attempt < HTTPS_RETRY_ATTEMPTS - 1) {
                 usleep(100000 * (attempt + 1)); /* 100ms, 200ms, ... */
                 continue;
@@ -1543,8 +1544,12 @@ int drm_https_fetch(
             return -1;
         }
         
+        fprintf(stderr, "[drm] https_fetch: sending request to %s:%d (attempt %d/%d)\n", host, port, attempt + 1, HTTPS_RETRY_ATTEMPTS);
+        
         /* Send request */
-        if (SSL_write(conn->ssl, request, req_len) <= 0) {
+        int written = SSL_write(conn->ssl, request, req_len);
+        if (written <= 0) {
+            fprintf(stderr, "[drm] https_fetch: SSL_write failed: %d\n", written);
             continue;
         }
         
