@@ -1623,7 +1623,7 @@ int drm_https_fetch(
                 if (content_length < 0) {
                     char *cl = strstr(buf, "Content-Length:");
                     if (cl) {
-                        content_length = atoi(cl + 17);
+                        content_length = atoi(cl + 15);  // "Content-Length:" is 15 chars
                         fprintf(stderr, "[drm] https_fetch: content-length %d\n", content_length);
                     }
                 }
