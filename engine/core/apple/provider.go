@@ -51,7 +51,7 @@ const (
 	FlavorCTR64  AssetFlavor = "32:ctrp64"  // 64 kbps AAC-LC
 
 	// CBCS/FairPlay flavors — EXT-X-KEY URI="skd://itunes.apple.com/…"
-	// Decryption is handled in-process via DRMManager.DialCBCS (HybrisBackend).
+	// Decryption is handled in-process via DRMManager.DialCBCS (NativeBackend).
 	FlavorCBCS256 AssetFlavor = "30:cbcp256" // 256 kbps AAC-LC
 	FlavorCBCS64  AssetFlavor = "34:cbcp64"  // 64 kbps AAC-LC
 )

@@ -45,7 +45,7 @@ type RestartPolicy struct {
 // The apiserver implements this by calling eventBus.emit("drm", snapshot).
 type EventSink func(snapshot DRMSnapshot)
 
-// ── HybrisBackend capability status ──────────────────────────────────────────
+// ── NativeBackend capability status ──────────────────────────────────────────
 //
 //	Capability        Status
 //	──────────────── ───────
@@ -309,7 +309,7 @@ func (m *DRMManager) SubmitChallenge(_ context.Context, reply string) error {
 }
 
 // Logout stops the backend and clears the session.
-// Stop() is sufficient — HybrisBackend holds no persistent process state.
+// Stop() is sufficient — NativeBackend holds no persistent process state.
 // SessionManager.ClearSession removes the persisted mpl_db and derived files.
 func (m *DRMManager) Logout(ctx context.Context) error {
 	m.setManagerState(ManagerShuttingDown)
