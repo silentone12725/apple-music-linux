@@ -247,6 +247,7 @@ type cbcsSource struct {
 // cancellation interrupts the wait.  This is a deliberate adaptation — not
 // proven to be equivalent in all scenarios.
 func (s *cbcsSource) Stream(ctx context.Context, w io.Writer) error {
+	log.Printf("[cbcs] Stream START: adamID=%s fileURL=%s", s.adamID, s.fileURL)
 	const maxRetries = 3
 	// Track whether any bytes reached w. Retrying after a partial write
 	// would corrupt the output stream (D7 in behavioral-parity-audit.md).
@@ -254,8 +255,10 @@ func (s *cbcsSource) Stream(ctx context.Context, w io.Writer) error {
 	var err error
 	tr := tracer.FromContext(ctx)
 	for attempt := range maxRetries {
+		log.Printf("[cbcs] Stream attempt %d", attempt+1)
 		err = s.streamAttempt(ctx, tw)
 		if err == nil {
+			log.Printf("[cbcs] Stream SUCCESS")
 			return nil
 		}
 		if tw.wrote > 0 {
