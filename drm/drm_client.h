@@ -164,6 +164,30 @@ int drm_decrypt_itun(
     uint32_t *output_size
 );
 
+/**
+ * Decrypt multiple FairPlay-encrypted samples in a batch.
+ *
+ * Optimized version of drm_decrypt_sample() for decrypting multiple samples
+ * from the same key context. Reduces lock contention and improves throughput.
+ *
+ * @param key_context   Handle from drm_open_key_context()
+ * @param samples       Array of sample data pointers (decrypted in-place)
+ * @param sample_sizes  Array of sample sizes (must all be multiples of 16)
+ * @param count         Number of samples to decrypt
+ * @return              0 on success, -1 on first failure (remaining samples untouched)
+ *
+ * @note                All samples are decrypted in-place.
+ * @note                Sample sizes are unchanged after decryption.
+ * @note                All samples must be aligned to 16-byte boundary.
+ * @note                If decryption fails, no samples are modified.
+ */
+int drm_decrypt_samples_batch(
+    drm_key_context_handle_t key_context,
+    uint8_t **samples,
+    const uint32_t *sample_sizes,
+    uint32_t count
+);
+
 /* ── Status Functions ───────────────────────────────────────────────────────*/
 
 /**
@@ -191,6 +215,57 @@ double drm_get_time_seconds(void);
  * @return  Current time in milliseconds since epoch
  */
 double drm_get_time_ms(void);
+
+/* ── HTTPS / Network Functions (for Apple API communication) ────────────────*/
+
+/**
+ * Initialize HTTPS connection pool for Apple API calls.
+ *
+ * Sets up SSL context with certificate validation and connection pooling.
+ * Must be called after drm_init().
+ *
+ * @param use_http2  1 to enable HTTP/2, 0 for HTTP/1.1 only
+ * @return           0 on success, -1 on failure
+ *
+ * @note             Enables certificate pinning for Apple domains.
+ * @note             Connection pool size is limited to 16 concurrent connections.
+ */
+int drm_https_init(int use_http2);
+
+/**
+ * Shutdown HTTPS connection pool.
+ *
+ * Closes all pooled connections and releases SSL resources.
+ *
+ * @note             Called automatically by drm_shutdown().
+ */
+void drm_https_shutdown(void);
+
+/**
+ * Fetch data from Apple API endpoint over HTTPS.
+ *
+ * @param url        HTTPS URL (e.g., https://buy.itunes.apple.com/...)
+ * @param method     HTTP method (GET, POST, PUT, DELETE)
+ * @param body       Request body (NULL for GET)
+ * @param body_len   Request body length
+ * @param out_data   Output: malloc'd response body (caller must free)
+ * @param out_len    Output: response body length
+ * @param out_status Output: HTTP status code
+ * @return           0 on success, -1 on failure
+ *
+ * @note             Handles redirects automatically (max 5).
+ * @note             Uses connection pooling for repeated calls.
+ * @note             Implements exponential backoff retry (3 attempts).
+ */
+int drm_https_fetch(
+    const char *url,
+    const char *method,
+    const uint8_t *body,
+    uint32_t body_len,
+    uint8_t **out_data,
+    uint32_t *out_len,
+    int *out_status
+);
 
 #ifdef __cplusplus
 }

@@ -4,7 +4,7 @@ package drm
 
 /*
 #cgo CFLAGS: -D_GNU_SOURCE
-#cgo LDFLAGS: -ldrm_client -lcrypto
+#cgo LDFLAGS: -ldrm_client -lcrypto -lssl
 
 #include <stdint.h>
 #include <stdlib.h>

@@ -8,9 +8,12 @@
  * Implements FairPlay IV derivation per spec (P4).
  */
 
-/* Enable POSIX extensions for strdup */
+/* Enable POSIX extensions for strdup and usleep */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
 #endif
 
 #include <stdio.h>
@@ -22,6 +25,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <time.h>
 #include <openssl/aes.h>
 #include <openssl/evp.h>
 
@@ -988,6 +992,58 @@ int drm_decrypt_itun(
                                       sample_data, input_size, output_size);
 }
 
+/* ── drm_decrypt_samples_batch (Performance Optimization) ───────────────────*/
+
+/**
+ * Batch decrypt multiple samples with reduced lock contention.
+ * Pre-allocates IV buffer and processes samples in a single lock acquisition.
+ */
+int drm_decrypt_samples_batch(
+    drm_key_context_handle_t key_context,
+    uint8_t **samples,
+    const uint32_t *sample_sizes,
+    uint32_t count)
+{
+    if (!key_context || !samples || !sample_sizes || count == 0) {
+        return -1;
+    }
+    
+    /* Validate all sample sizes first (must be 16-byte aligned) */
+    for (uint32_t i = 0; i < count; i++) {
+        if (!samples[i] || sample_sizes[i] % DRM_AES_BLOCK_SIZE != 0) {
+            return -1;
+        }
+    }
+    
+    /* Get starting sample number with single lock acquisition */
+    pthread_mutex_lock(&key_context->lock);
+    uint64_t start_sample_num = key_context->sample_number;
+    key_context->sample_number += count;
+    pthread_mutex_unlock(&key_context->lock);
+    
+    /* Pre-allocate IV buffer */
+    uint8_t iv[DRM_AES_BLOCK_SIZE];
+    
+    /* Decrypt all samples */
+    for (uint32_t i = 0; i < count; i++) {
+        /* Derive IV for this sample */
+        derive_iv(key_context->iv, start_sample_num + i, iv);
+        
+        /* Perform decryption */
+        int ret = aes128_cbc_decrypt(key_context->aes_key, iv,
+                                      samples[i], sample_sizes[i]);
+        if (ret != 0) {
+            /* On failure, rewind sample number to maintain consistency */
+            pthread_mutex_lock(&key_context->lock);
+            key_context->sample_number -= (count - i);
+            pthread_mutex_unlock(&key_context->lock);
+            return -1;
+        }
+    }
+    
+    return 0;
+}
+
 /* ── drm_is_recovery_active (REQ-4.9) ───────────────────────────────────────*/
 
 int drm_is_recovery_active(void)
@@ -997,4 +1053,358 @@ int drm_is_recovery_active(void)
     pthread_mutex_unlock(&g_state.lock);
     
     return active;
+}
+
+/* ── HTTPS / Network Support ────────────────────────────────────────────────*/
+
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <string.h>
+
+/* Connection pool for HTTPS requests */
+#define HTTPS_POOL_SIZE 16
+#define HTTPS_MAX_REDIRECTS 5
+#define HTTPS_RETRY_ATTEMPTS 3
+#define HTTPS_TIMEOUT_SEC 30
+
+struct https_connection {
+    SSL *ssl;
+    int sock;
+    char host[256];
+    int port;
+    time_t last_used;
+};
+
+struct https_state {
+    pthread_mutex_t lock;
+    SSL_CTX *ctx;
+    struct https_connection pool[HTTPS_POOL_SIZE];
+    int pool_count;
+    int use_http2;
+};
+
+static struct https_state g_https = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+};
+
+/* Certificate pins for Apple domains (SPKI SHA-256) — TODO: implement pinning */
+
+static int https_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
+{
+    if (preverify_ok) {
+        return 1;
+    }
+    
+    X509 *cert = X509_STORE_CTX_get_current_cert(ctx);
+    if (cert) {
+        /* Get server name from SSL */
+        /* For simplicity, accept if chain is valid */
+    }
+    
+    return preverify_ok;
+}
+
+int drm_https_init(int use_http2)
+{
+    SSL_library_init();
+    SSL_load_error_strings();
+    OpenSSL_add_all_algorithms();
+    
+    g_https.ctx = SSL_CTX_new(TLS_client_method());
+    if (!g_https.ctx) {
+        fprintf(stderr, "[drm] https_init: SSL_CTX_new failed\n");
+        return -1;
+    }
+    
+    /* Set minimum TLS version to 1.2 */
+    SSL_CTX_set_min_proto_version(g_https.ctx, TLS1_2_VERSION);
+    
+    /* Prefer server cipher suites */
+    SSL_CTX_set_options(g_https.ctx, SSL_OP_LEGACY_SERVER_CONNECT);
+    SSL_CTX_set_options(g_https.ctx, SSL_OP_NO_COMPRESSION);
+    
+    /* Set cipher suites (strong only) */
+    SSL_CTX_set_cipher_list(g_https.ctx,
+        "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
+        "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
+        "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305");
+    
+    /* Set verification callback */
+    SSL_CTX_set_verify(g_https.ctx, SSL_VERIFY_PEER, https_verify_callback);
+    
+    /* Enable HTTP/2 if requested */
+    g_https.use_http2 = use_http2;
+    if (use_http2) {
+        SSL_CTX_set_alpn_protos(g_https.ctx, (const unsigned char*)"h2 HTTP/1.1", 9);
+    }
+    
+    g_https.pool_count = 0;
+    
+    fprintf(stderr, "[drm] https_init: initialized (HTTP/2=%d)\n", use_http2);
+    return 0;
+}
+
+void drm_https_shutdown(void)
+{
+    pthread_mutex_lock(&g_https.lock);
+    
+    /* Close all pooled connections */
+    for (int i = 0; i < g_https.pool_count; i++) {
+        struct https_connection *conn = &g_https.pool[i];
+        if (conn->ssl) {
+            SSL_shutdown(conn->ssl);
+            SSL_free(conn->ssl);
+        }
+        if (conn->sock >= 0) {
+            close(conn->sock);
+        }
+    }
+    g_https.pool_count = 0;
+    
+    if (g_https.ctx) {
+        SSL_CTX_free(g_https.ctx);
+        g_https.ctx = NULL;
+    }
+    
+    pthread_mutex_unlock(&g_https.lock);
+    
+    EVP_cleanup();
+    ERR_free_strings();
+    
+    fprintf(stderr, "[drm] https_shutdown: completed\n");
+}
+
+static int create_socket(const char *host, int port)
+{
+    struct addrinfo hints, *res, *p;
+    int sock = -1;
+    
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    
+    if (getaddrinfo(host, port_str, &hints, &res) != 0) {
+        return -1;
+    }
+    
+    for (p = res; p != NULL; p = p->ai_next) {
+        sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sock < 0) {
+            continue;
+        }
+        
+        if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) {
+            break;
+        }
+        close(sock);
+        sock = -1;
+    }
+    
+    freeaddrinfo(res);
+    return sock;
+}
+
+static struct https_connection *get_pooled_connection(const char *host, int port)
+{
+    pthread_mutex_lock(&g_https.lock);
+    
+    /* Try to find existing connection */
+    for (int i = 0; i < g_https.pool_count; i++) {
+        struct https_connection *conn = &g_https.pool[i];
+        if (strcmp(conn->host, host) == 0 && conn->port == port) {
+            if (conn->ssl && SSL_is_init_finished(conn->ssl)) {
+                conn->last_used = time(NULL);
+                pthread_mutex_unlock(&g_https.lock);
+                return conn;
+            }
+        }
+    }
+    
+    /* Create new connection if pool has space */
+    if (g_https.pool_count < HTTPS_POOL_SIZE) {
+        struct https_connection *conn = &g_https.pool[g_https.pool_count];
+        
+        conn->sock = create_socket(host, port);
+        if (conn->sock < 0) {
+            pthread_mutex_unlock(&g_https.lock);
+            return NULL;
+        }
+        
+        conn->ssl = SSL_new(g_https.ctx);
+        if (!conn->ssl) {
+            close(conn->sock);
+            pthread_mutex_unlock(&g_https.lock);
+            return NULL;
+        }
+        
+        SSL_set_fd(conn->ssl, conn->sock);
+        SSL_set_tlsext_host_name(conn->ssl, host);
+        
+        if (SSL_connect(conn->ssl) != 1) {
+            SSL_free(conn->ssl);
+            close(conn->sock);
+            pthread_mutex_unlock(&g_https.lock);
+            return NULL;
+        }
+        
+        snprintf(conn->host, sizeof(conn->host), "%s", host);
+        conn->port = port;
+        conn->last_used = time(NULL);
+        g_https.pool_count++;
+        
+        pthread_mutex_unlock(&g_https.lock);
+        return conn;
+    }
+    
+    pthread_mutex_unlock(&g_https.lock);
+    return NULL;
+}
+
+int drm_https_fetch(
+    const char *url,
+    const char *method,
+    const uint8_t *body,
+    uint32_t body_len,
+    uint8_t **out_data,
+    uint32_t *out_len,
+    int *out_status)
+{
+    if (!url || !method || !out_data || !out_len || !out_status) {
+        return -1;
+    }
+    
+    /* Parse URL */
+    char scheme[16], host[256], path[1024];
+    int port = 443;
+    
+    if (sscanf(url, "%15[^:]://%255[^:/]%*[:]/%1023[^\n]", scheme, host, path) < 3) {
+        /* Try without path */
+        if (sscanf(url, "%15[^:]://%255[^:/]", scheme, host) < 2) {
+            return -1;
+        }
+        strcpy(path, "/");
+    }
+    
+    if (strcmp(scheme, "https") != 0) {
+        return -1;
+    }
+    
+    /* Build request */
+    char request[4096];
+    int req_len = snprintf(request, sizeof(request),
+        "%s %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: AppleMusicLinux/1.0\r\n"
+        "Accept: */*\r\n"
+        "Connection: keep-alive\r\n",
+        method, path, host);
+    
+    if (body_len > 0) {
+        req_len += snprintf(request + req_len, sizeof(request) - req_len,
+            "Content-Length: %u\r\n\r\n", body_len);
+    } else {
+        req_len += snprintf(request + req_len, sizeof(request) - req_len,
+            "\r\n");
+    }
+    
+    /* Retry loop with exponential backoff */
+    for (int attempt = 0; attempt < HTTPS_RETRY_ATTEMPTS; attempt++) {
+        struct https_connection *conn = get_pooled_connection(host, port);
+        if (!conn) {
+            if (attempt < HTTPS_RETRY_ATTEMPTS - 1) {
+                usleep(100000 * (attempt + 1)); /* 100ms, 200ms, ... */
+                continue;
+            }
+            return -1;
+        }
+        
+        /* Send request */
+        if (SSL_write(conn->ssl, request, req_len) <= 0) {
+            continue;
+        }
+        
+        if (body_len > 0) {
+            if (SSL_write(conn->ssl, body, body_len) <= 0) {
+                continue;
+            }
+        }
+        
+        /* Read response */
+        char buf[8192];
+        uint8_t *response = NULL;
+        uint32_t response_len = 0;
+        int response_capacity = 0;
+        int in_body = 0;
+        int content_length = -1;
+        int status_code = 0;
+        
+        while (1) {
+            int n = SSL_read(conn->ssl, buf, sizeof(buf) - 1);
+            if (n <= 0) {
+                break;
+            }
+            buf[n] = '\0';
+            
+            /* Parse status line */
+            if (!in_body && status_code == 0) {
+                if (sscanf(buf, "HTTP/1.%*d %d", &status_code) != 1) {
+                    continue;
+                }
+                *out_status = status_code;
+            }
+            
+            /* Parse headers */
+            if (!in_body) {
+                if (content_length < 0) {
+                    char *cl = strstr(buf, "Content-Length:");
+                    if (cl) {
+                        content_length = atoi(cl + 17);
+                    }
+                }
+                
+                if (strstr(buf, "\r\n\r\n")) {
+                    in_body = 1;
+                }
+            }
+            
+            /* Append body */
+            if (in_body) {
+                char *body_start = strstr(buf, "\r\n\r\n");
+                if (body_start) {
+                    body_start += 4;
+                    int body_avail = n - (body_start - buf);
+                    
+                    if ((uint32_t)response_capacity < response_len + body_avail) {
+                        response_capacity = response_capacity ? response_capacity * 2 : 4096;
+                        response = realloc(response, response_capacity);
+                        if (!response) {
+                            break;
+                        }
+                    }
+                    
+                    memcpy(response + response_len, body_start, body_avail);
+                    response_len += body_avail;
+                    
+                    if (content_length >= 0 && response_len >= (uint32_t)content_length) {
+                        response_len = content_length;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        /* Success */
+        *out_data = response;
+        *out_len = response_len;
+        return 0;
+    }
+    
+    return -1;
 }
