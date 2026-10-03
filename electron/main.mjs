@@ -253,13 +253,13 @@ function ensureEngineConfig() {
     if (app.isPackaged) {
         const { drmMarker, userRootfs } = ensureUserDRM();
         drmBin  = drmMarker;
-        drmBase = path.join(userRootfs, 'data', 'data', 'com.apple.android.music', 'files');
+        drmBase = path.join(__dirname, '..', 'drm', 'files');
     } else {
         // Dev: prefer drm-native (in-process hybris) when present; fall back to drm-rootless.
         const drmNative = path.join(__dirname, '..', 'drm', 'drm-native');
         const drmRootless = path.join(__dirname, '..', 'drm', 'drm-rootless');
         drmBin  = existsSync(drmNative) ? drmNative : drmRootless;
-        drmBase = path.join(__dirname, '..', 'drm', 'rootfs', 'data', 'data', 'com.apple.android.music', 'files');
+        drmBase = path.join(__dirname, '..', 'drm', 'files');
     }
 
     if (!existsSync(cfgPath)) {
@@ -315,8 +315,8 @@ async function killStaleEngine(port) {
 
     // Kill the lock-file owner and remove the lock unconditionally.
     const drmFilesDir = app.isPackaged
-        ? path.join(CONFIG_DIR, 'drm', 'rootfs', 'data', 'data', 'com.apple.android.music', 'files')
-        : path.join(__dirname, '..', 'drm', 'rootfs', 'data', 'data', 'com.apple.android.music', 'files');
+        ? path.join(CONFIG_DIR, 'drm', 'files')
+        : path.join(__dirname, '..', 'drm', 'files');
     const lockPath = path.join(drmFilesDir, 'engine-session.lock');
     try {
         const pidStr = readFileSync(lockPath, 'utf8').trim();
@@ -576,7 +576,7 @@ async function _getSystemAccent() {
 }
 
 function _generatePalette(hex, appearance = 'dark') {
-    hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#0A84FF';
+    hex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : '#fc3c44';
     const r = parseInt(hex.slice(1,3),16)/255, g = parseInt(hex.slice(3,5),16)/255, b = parseInt(hex.slice(5,7),16)/255;
     const max = Math.max(r,g,b), min = Math.min(r,g,b), l = (max+min)/2;
     const d = max-min, s = d === 0 ? 0 : d/(1-Math.abs(2*l-1));
@@ -1004,7 +1004,7 @@ function createWindow() {
         /* Hover highlight */
         li.contextual-menu-item:hover > span.contextual-menu-item__option-wrapper,
         li.contextual-menu-item:focus-within > span.contextual-menu-item__option-wrapper {
-            background: #0A84FF !important;
+            background: #fc3c44 !important;
             color: #fff !important;
         }
 
@@ -1269,7 +1269,7 @@ function createWindow() {
         // Vision is independent. Combine into one executeJavaScript call to avoid
         // 4 separate round-trips adding ~2-3s of sequential injection delay.
         const combined = [
-            `window._amlEngineURL='http://127.0.0.1:${ENGINE_PORT}';`,
+            `window._amlEngineURL='https://127.0.0.1:${ENGINE_PORT}';`,
             sseCode    ? `try{${sseCode}}catch(e){console.error('[AML sse]',e.message)}`    : '',
             visionCode ? `try{${visionCode}}catch(e){console.error('[AML vision]',e.message)}` : '',
             cacheCode  ? `try{${cacheCode}}catch(e){console.error('[AML cache]',e.name,e.message,e.stack)}`  : '',
@@ -2411,7 +2411,7 @@ function createTray() {
 }
 
 // Register before app.ready — required by Electron's privileged scheme API.
-// aml-video:// proxies to the local engine over http://127.0.0.1:ENGINE_PORT,
+// aml-video:// proxies to the local engine over https://127.0.0.1:ENGINE_PORT,
 // bypassing Chrome's mixed-content auto-upgrade which blocks <video src="http://...">
 // on HTTPS pages even for loopback addresses.
 protocol.registerSchemesAsPrivileged([{
@@ -2544,7 +2544,7 @@ app.whenReady().then(() => {
     s.protocol.handle('aml-video', async (request) => {
         try {
             const u = new URL(request.url);
-            const engineUrl = `http://127.0.0.1:${ENGINE_PORT}${u.pathname}${u.search}`;
+            const engineUrl = `https://127.0.0.1:${ENGINE_PORT}${u.pathname}${u.search}`;
 
             // For a committed cache file, serve it DIRECTLY from disk with proper
             // Range → 206 handling. Proxying byte ranges through electronNet.fetch

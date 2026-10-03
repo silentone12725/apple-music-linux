@@ -9890,6 +9890,15 @@ window.amlGetQueueInfo = function () {
                 box-shadow:0 32px 80px rgba(0,0,0,0.8),0 0 0 0.5px rgba(255,255,255,0.07);
                 padding:0 32px 32px; color:rgba(255,255,255,0.9);
                 font-family:-apple-system,SF Pro Text,system-ui,sans-serif;
+                --aml-settings-accent:#fc3c44;
+                accent-color:var(--aml-settings-accent);
+            }
+            #aml-settings-dialog :where(input,button,select,textarea):focus-visible {
+                outline:2px solid var(--aml-settings-accent) !important;
+                outline-offset:2px;
+            }
+            #aml-settings-dialog :where(input[type="range"],input[type="checkbox"],input[type="radio"]) {
+                accent-color:var(--aml-settings-accent) !important;
             }
             #aml-settings-close {
                 position:sticky; top:18px; float:right; z-index:10;
