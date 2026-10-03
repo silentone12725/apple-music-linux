@@ -76,6 +76,10 @@ drm/rootfs/adi.pb
 drm/rootfs/drm-state
 drm/rootfs/mpl_db/
 
+# ── DRM client (native backend) build artifacts ───────────────────────────────
+# Built from drm/ via make; not source.
+drm/libdrm_client.so
+
 # ── DRM / Android container runtime state ─────────────────────────────────────
 # These files are written by the running DRM process and must not be committed.
 drm/rootfs/data/data/com.apple.android.music/files/MUSIC_TOKEN
@@ -90,6 +94,19 @@ drm/rootfs/data/data/com.apple.android.music/files/531EA4BB8D4B206263577F83ADB39
 drm/rootfs/data/data/com.apple.android.music/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA
 drm/rootfs/home/
 drm/rootfs/tmp/
+
+# ── DRM client credentials (native backend) ───────────────────────────────────
+# These files are written by the running DRM client and must not be committed.
+drm/files/MUSIC_TOKEN
+drm/files/STOREFRONT_ID
+drm/files/adi.pb
+drm/files/fsi.pdat
+drm/files/IC-Info.sids
+drm/files/engine-session.lock
+drm/files/mpl_db/
+drm/files/drm-state
+drm/files/531EA4BB8D4B206263577F83ADB3948181F99DA3
+drm/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA
 
 # ── Wrapper / Android container runtime state ─────────────────────────────────
 # These files are written by the running wrapper and must not be committed.
