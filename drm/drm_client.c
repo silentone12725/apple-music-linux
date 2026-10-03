@@ -800,6 +800,13 @@ int drm_init(const struct drm_config *config)
     
     pthread_mutex_unlock(&g_state.lock);
     
+    /* Initialize HTTPS */
+    if (drm_https_init(0) != 0) {
+        fprintf(stderr, "[drm] drm_init: HTTPS init failed\n");
+        call_state_callback(DRM_STATE_FAILED);
+        return -1;
+    }
+    
     /* Initialize cookie jar */
     drm_cookie_init();
     
@@ -1508,6 +1515,13 @@ int drm_https_fetch(
     if (drm_cookie_get_for_url(url, cookie_header, sizeof(cookie_header)) == 0 && cookie_header[0]) {
         req_len += snprintf(request + req_len, sizeof(request) - req_len,
             "Cookie: %s\r\n", cookie_header);
+    }
+    
+    /* Add Authorization header if music token is available and this is a license request */
+    if (g_state.music_token && strstr(url, "itcs/key/get") != NULL) {
+        req_len += snprintf(request + req_len, sizeof(request) - req_len,
+            "Authorization: Bearer %s\r\n", g_state.music_token);
+        fprintf(stderr, "[drm] https_fetch: adding music token for license request\n");
     }
     
     if (body_len > 0) {
