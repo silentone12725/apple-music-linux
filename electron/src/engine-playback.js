@@ -23,11 +23,11 @@ import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbTo
 if (window.__amlEngineInjected) throw new Error('[AML] double-injection guard');
 window.__amlEngineInjected = true;
 
-const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
-// HTTPS origin for MV <video src> (engine serves TLS on port+1). A real HTTPS
-// origin avoids the mixed-content block AND the custom-protocol seek bug
+const ENGINE = window._amlEngineURL || 'https://127.0.0.1:20025';
+// HTTPS origin for MV <video src> (engine serves TLS on the same port).
+// A real HTTPS origin avoids the mixed-content block AND the custom-protocol seek bug
 // (electron#38749) → Chrome's native byte-range seeking works.
-const ENGINE_HTTPS = ENGINE.replace(/^http:\/\/(127\.0\.0\.1|localhost):(\d+)/, (_, host, port) => `https://${host}:${Number(port) + 1}`);
+const ENGINE_HTTPS = ENGINE;
 const _AML_DEBUG = !!(window.amlBridge?.isDev) || localStorage.getItem('_AML_DEBUG') === '1';
 
 // ── Last.fm API credentials ────────────────────────────────────────────────────

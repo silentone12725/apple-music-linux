@@ -8,7 +8,7 @@
  * This module never makes scheduling decisions itself.
  */
 
-const ENGINE = window._amlEngineURL || 'http://127.0.0.1:20025';
+const ENGINE = window._amlEngineURL || 'https://127.0.0.1:20025';
 const PLAY_COUNTS_KEY = 'aml_play_counts';
 const MAX_STORED_TRACKS = 200;
 

@@ -169,8 +169,8 @@
   // src/engine-playback.js
   if (window.__amlEngineInjected) throw new Error("[AML] double-injection guard");
   window.__amlEngineInjected = true;
-  var ENGINE = window._amlEngineURL || "http://127.0.0.1:20025";
-  var ENGINE_HTTPS = ENGINE.replace(/^http:\/\/(127\.0\.0\.1|localhost):(\d+)/, (_, host, port) => `https://${host}:${Number(port) + 1}`);
+  var ENGINE = window._amlEngineURL || "https://127.0.0.1:20025";
+  var ENGINE_HTTPS = ENGINE;
   var _AML_DEBUG = !!window.amlBridge?.isDev || localStorage.getItem("_AML_DEBUG") === "1";
   var LASTFM_API_KEY = "de5f164dcf024dc00e0aab05ba464d17";
   var LASTFM_API_SECRET = "c03db782a5d29db42da06edcbf76d89a";
