@@ -472,6 +472,19 @@ cleanup:
  * Parse FairPlay license response and extract AES key and IV.
  *
  * The FairPlay license response is a binary format containing:
+ * - License header (metadata)
+ * - Encrypted content key
+ * - Key ID for identification
+ *
+ * For CBCS scheme, we extract the AES-128 key directly from the license.
+ *
+ * @param license_data  Raw license response bytes
+ * @param license_len   Length of license data
+ * @param out_key       Output buffer for 16-byte AES key
+ * @param out_iv        Output buffer for 16-byte IV
+ * @return 0 on success, -1 on error
+ */
+
 /* License fetching functions removed - using zero key like reference implementation */
 
 static drm_key_context_handle_t create_key_context(const char *asset_id_str,
