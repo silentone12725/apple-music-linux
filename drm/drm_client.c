@@ -1387,6 +1387,8 @@ static int create_socket(const char *host, int port)
     struct addrinfo hints, *res, *p;
     int sock = -1;
     
+    fprintf(stderr, "[drm] create_socket: resolving %s:%d\n", host, port);
+    
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -1395,18 +1397,22 @@ static int create_socket(const char *host, int port)
     snprintf(port_str, sizeof(port_str), "%d", port);
     
     if (getaddrinfo(host, port_str, &hints, &res) != 0) {
+        fprintf(stderr, "[drm] create_socket: getaddrinfo failed for %s:%d\n", host, port);
         return -1;
     }
     
     for (p = res; p != NULL; p = p->ai_next) {
         sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (sock < 0) {
+            fprintf(stderr, "[drm] create_socket: socket() failed\n");
             continue;
         }
         
         if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) {
+            fprintf(stderr, "[drm] create_socket: connected to %s:%d\n", host, port);
             break;
         }
+        fprintf(stderr, "[drm] create_socket: connect() failed\n");
         close(sock);
         sock = -1;
     }
