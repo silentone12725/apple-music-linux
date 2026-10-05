@@ -168,6 +168,5 @@ drm/native/*.o
 drm/drm_hybris.o
 drm/corefp_probe
 drm/embedded_blobs/
-drm/drm-rootless/
 drm/files/
 drm/*.o

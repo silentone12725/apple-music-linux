@@ -255,10 +255,8 @@ function ensureEngineConfig() {
         drmBin  = drmMarker;
         drmBase = path.join(__dirname, '..', 'drm', 'files');
     } else {
-        // Dev: prefer drm-native (in-process hybris) when present; fall back to drm-rootless.
-        const drmNative = path.join(__dirname, '..', 'drm', 'drm-native');
-        const drmRootless = path.join(__dirname, '..', 'drm', 'drm-rootless');
-        drmBin  = existsSync(drmNative) ? drmNative : drmRootless;
+        // Dev: the repo's own drm/ directory — it holds libdrm_client.so, rootfs/ and files/.
+        drmBin  = path.join(__dirname, '..', 'drm');
         drmBase = path.join(__dirname, '..', 'drm', 'files');
     }
 

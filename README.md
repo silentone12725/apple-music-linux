@@ -253,7 +253,7 @@ electron/src/vision-glass.js      — glass UI and CSS injected into the webview
 electron/main.mjs                 — Electron main process (IPC, MPRIS, tray, themes)
 electron/preload.cjs              — IPC bridge exposed to the renderer
 engine/                           — Go HTTP server (audio sessions, DRM, cache, VLC)
-drm/                              — Android DRM environment (rootless)
+drm/                              — DRM client (libdrm_client.so), vendored wrapper and Android runtime
 ```
 
 ## References

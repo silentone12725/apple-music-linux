@@ -33,7 +33,7 @@ type ConfigSet struct {
 	AppleMasterChoice    string `yaml:"apple-master-choice"`
 	MaxMemoryLimit       int    `yaml:"max-memory-limit"`
 	// DRM binary (engine/drm package)
-	DRMBinaryPath string `yaml:"drm-binary-path"` // path to drm-rootless binary
+	DRMBinaryPath string `yaml:"drm-binary-path"` // directory holding libdrm_client.so, rootfs/ and files/
 	DRMBaseDir    string `yaml:"drm-base-dir"`    // mpl_db parent directory
 	GetM3u8Mode   string `yaml:"get-m3u8-mode"`
 	GetM3u8FromDevice          bool          `yaml:"get-m3u8-from-device"`
