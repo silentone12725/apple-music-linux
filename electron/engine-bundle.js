@@ -174,6 +174,21 @@
   function needsVlcStop(prevMode, nextMode) {
     return prevMode === "alac" && nextMode !== "alac";
   }
+  async function leaveLossless({ live, nextMode, stop, timeoutMs = 2e3 }) {
+    if (!needsVlcStop(live ? "alac" : null, nextMode)) return { stopped: false, ok: true };
+    let timer;
+    const timeout = new Promise((res) => {
+      timer = setTimeout(() => res(false), timeoutMs);
+    });
+    try {
+      const ok = await Promise.race([Promise.resolve().then(stop).then(() => true), timeout]);
+      return { stopped: true, ok };
+    } catch (_) {
+      return { stopped: true, ok: false };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   // src/engine-playback.js
   if (window.__amlEngineInjected) throw new Error("[AML] double-injection guard");
@@ -676,6 +691,7 @@
   var _wcStallPaused = false;
   var _wcAudioHold = false;
   var _activeMvControls = null;
+  var _vlcLive = false;
   var _prevMs = null;
   var _prevSb = null;
   var _engineCaps = { lossless: false, atmos: false };
@@ -5546,7 +5562,6 @@
     _directPlayAdamId = null;
     _directPlayGen = 0;
     const myGen = ++_generation;
-    const _prevMode = _vlcMode ? "alac" : null;
     _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `htc:${_htcAdamId ?? "?"}`);
     const adamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
@@ -5584,16 +5599,24 @@
         });
         return;
       }
-      if (needsVlcStop(_prevMode, playbackMode(sess))) {
-        fetch(`${ENGINE}/api/v1/vlc/stop`, { method: "POST" }).catch(() => {
-        });
-      }
       _sessionId = sess.sessionId;
       _durationSec = (sess.durationMs ?? 0) / 1e3;
       _videoCodec = sess.capabilities?.videoCodec || null;
       _mvVideoHeights = sess.videoHeights ?? [];
       _audioAnalysis = null;
       console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+      {
+        const left = await leaveLossless({
+          live: _vlcLive,
+          nextMode: playbackMode(sess),
+          stop: () => fetch(`${ENGINE}/api/v1/vlc/stop`, { method: "POST" })
+        });
+        if (left.stopped) {
+          if (left.ok) _vlcLive = false;
+          else console.warn("[AML Handoff] libvlc stop did not complete; continuing");
+          if (genStale(myGen)) return;
+        }
+      }
       showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
       _broadcastNowPlaying();
       _abortCtrl = new AbortController();
@@ -5622,6 +5645,7 @@
         setPlayState(PLAY_STATE.STREAMING, `htc:aac:${adamId}`);
         await _setupMSEPath(mkAudio, sess, mk, ctrl, t0);
       } else {
+        _vlcLive = true;
         setPlayState(PLAY_STATE.STREAMING, `htc:alac:${adamId}`);
         await _setupVLCPath(mkAudio, sess, adamId, ctrl, t0);
       }
@@ -7893,7 +7917,12 @@
           }
           stopVLCPoll();
           unbridgeDuration();
-          fetch(ENGINE + "/api/v1/vlc/stop", { method: "POST" }).catch(() => {
+          const _vlcStopped = leaveLossless({
+            live: true,
+            nextMode: "aac",
+            stop: () => fetch(ENGINE + "/api/v1/vlc/stop", { method: "POST" })
+          }).then((r) => {
+            if (r.ok) _vlcLive = false;
           });
           deleteSession(_sessionId);
           _sessionId = null;
@@ -7923,7 +7952,7 @@
           _allowCDNTransition = false;
           _pendingExternalClickCatalogId = null;
           _pendingExternalClickQueueIdx = -1;
-          return _origSQ.apply(mk, a);
+          return _vlcStopped.then(() => _origSQ.apply(mk, a));
         };
         mk.changeToMediaAtIndex = (idx) => {
           console.log("[VLC-MK] mk.changeToMediaAtIndex(" + idx + ")");

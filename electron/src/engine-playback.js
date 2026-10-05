@@ -19,7 +19,7 @@
 import { mp4ParseBoxes as _mp4ParseBoxes } from './engine/mp4parse.js';
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
-import { playbackMode, needsVlcStop } from './engine/handoff.js';
+import { playbackMode, leaveLossless } from './engine/handoff.js';
 
 if (window.__amlEngineInjected) throw new Error('[AML] double-injection guard');
 window.__amlEngineInjected = true;
@@ -603,6 +603,7 @@ let _wcAudioHold      = false; // true while the WebCodecs path is waiting for i
 // Active WC MV control surface — set while a WebCodecs MV session is live so that
 // global interceptors (mk.play/pause, mk.seekToTime, MPRIS) drive the right clock.
 let _activeMvControls = null;
+let _vlcLive = false; // libvlc may be playing: set when a track starts on the ALAC path, cleared once stopped
 // Last completed MSE session — kept alive until new track's MSE takes over so
 // the user can seek within the just-ended track before the next one loads.
 let _prevMs           = null;
@@ -6088,7 +6089,6 @@ async function handleTrackChange(mk) {
     _directPlayGen    = 0;
 
     const myGen = ++_generation;
-    const _prevMode = _vlcMode ? 'alac' : null; // the reset below clears _vlcMode
     _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `htc:${_htcAdamId ?? '?'}`);
 
@@ -6146,18 +6146,27 @@ async function handleTrackChange(mk) {
             return;
         }
 
-        // Leaving the lossless path: the engine session is released by the reset, but libvlc
-        // keeps playing until told to stop.
-        if (needsVlcStop(_prevMode, playbackMode(sess))) {
-            fetch(`${ENGINE}/api/v1/vlc/stop`, { method: 'POST' }).catch(() => {});
-        }
-
         _sessionId      = sess.sessionId;
         _durationSec    = (sess.durationMs ?? 0) / 1000;
         _videoCodec     = sess.capabilities?.videoCodec || null;
         _mvVideoHeights = sess.videoHeights ?? [];
         _audioAnalysis  = null; // reset; async fetch below may populate it
         console.log(`[AML Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now()-t0)/1000).toFixed(2)}s`);
+
+        // Leaving the lossless path: releasing the session does not stop libvlc, so stop it and
+        // wait for the engine to confirm before the next path starts. _vlcLive survives a
+        // superseded track change, so the stop is never lost.
+        {
+            const left = await leaveLossless({
+                live: _vlcLive, nextMode: playbackMode(sess),
+                stop: () => fetch(`${ENGINE}/api/v1/vlc/stop`, { method: 'POST' }),
+            });
+            if (left.stopped) {
+                if (left.ok) _vlcLive = false;
+                else console.warn('[AML Handoff] libvlc stop did not complete; continuing');
+                if (genStale(myGen)) return;
+            }
+        }
 
         showQualityBadge(sess.codec, sess.sampleRate, sess.bitDepth, sess.spatialAudio);
         _broadcastNowPlaying(); // Discord presence + Last.fm now-playing/scrobble + resume snapshot
@@ -6194,6 +6203,7 @@ async function handleTrackChange(mk) {
             setPlayState(PLAY_STATE.STREAMING, `htc:aac:${adamId}`);
             await _setupMSEPath(mkAudio, sess, mk, ctrl, t0);
         } else {
+            _vlcLive = true;
             setPlayState(PLAY_STATE.STREAMING, `htc:alac:${adamId}`);
             await _setupVLCPath(mkAudio, sess, adamId, ctrl, t0);
         }
@@ -8842,8 +8852,11 @@ async function setup() {
                 stopVLCPoll();
                 unbridgeDuration();
                 // Stop VLC subprocess immediately so it doesn't compete with MK's incoming media.
-                // Fire-and-forget — we don't await this; the subprocess halts on its own.
-                fetch(ENGINE + '/api/v1/vlc/stop', { method: 'POST' }).catch(() => {});
+                // Awaited below, before MK's setQueue runs, so VLC is silent when MK's media starts.
+                const _vlcStopped = leaveLossless({
+                    live: true, nextMode: 'aac',
+                    stop: () => fetch(ENGINE + '/api/v1/vlc/stop', { method: 'POST' }),
+                }).then(r => { if (r.ok) _vlcLive = false; });
                 deleteSession(_sessionId);
                 _sessionId = null; _currentAssetId = null; _durationSec = 0;
                 showQualityBadge(null);
@@ -8862,7 +8875,7 @@ async function setup() {
                 _mkApiSaved            = null;
                 _allowCDNTransition    = false;
                 _pendingExternalClickCatalogId = null; _pendingExternalClickQueueIdx = -1;
-                return _origSQ.apply(mk, a);
+                return _vlcStopped.then(() => _origSQ.apply(mk, a));
             };
             mk.changeToMediaAtIndex = (idx) => {
                 console.log('[VLC-MK] mk.changeToMediaAtIndex(' + idx + ')');
