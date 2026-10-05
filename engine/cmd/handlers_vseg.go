@@ -525,8 +525,10 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 		// this point, any moof inside the bytes we are about to send would already have
 		// been indexed (the frontier is capped at what the indexer has parsed).
 		frontier := vs.spw.Written()
+		indexerBehind := false
 		if parsed := vs.idx.ParsedBytes(); parsed < frontier {
 			frontier = parsed
+			indexerBehind = true
 		}
 
 		// Exact end known: flush the remainder and return.
@@ -578,6 +580,18 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 				}
 			}
 			return
+		}
+
+		// The indexer is still catching up with bytes that are already written. Parsing
+		// them can reveal this fragment's end without any new write, and waiting for
+		// growth would then stall until the producer's next burst — so poll briefly.
+		if indexerBehind {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Millisecond):
+			}
+			continue
 		}
 
 		// Other wait errors are re-checked via vs.done on the next iteration.
