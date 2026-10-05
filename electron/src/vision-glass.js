@@ -102,33 +102,12 @@ sheet.replaceSync(`
   /* ── Vignette removal — content-scope-bar has a dark solid + gradient that shows as black bar when inactive ── */
   [class*="content-scope-bar"] { background: transparent !important; }
 
-  /* ── Footer removal ── */
-  footer, [class*="footer-wrapper"] { display: none !important; }
-
-  /* ── Background continuity strip — fills the gap below content ── */
-  #aml-bg-strip {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 72px;
-    z-index: 0;
-    pointer-events: none;
-    background: var(--aml-bg-color, #1c1c1e);
-  }
-  body[data-aml-art-theme] #aml-bg-strip {
-    background: var(--aml-art-page-bg, #1c1c1e);
-  }
-  /* Blur and Accented Blur draw the wallpaper / artwork behind the whole window, so a solid
-     strip would show as a band across it: it is not shown in those modes. */
-  body[data-aml-mode="blur"] #aml-bg-strip,
-  body[data-aml-mode="art-blur"] #aml-bg-strip,
-  body[data-aml-art-blur] #aml-bg-strip {
-    display: none !important;
-  }
-
-  /* ── Player bar clearance — pad scrollable page so content never hides under the 54px bar ── */
-  [class*="scrollable-page"] { padding-bottom: 72px !important; }
+  /* ── Footer: hide its content, keep its box ──
+     The footer's own padding is Apple's clearance for the player bar, so the box stays and
+     only its children go; its background is made transparent so the themed page (solid,
+     Blur or Accented Blur) shows through instead of Apple's native colour. */
+  footer { background: transparent !important; }
+  footer > *, [class*="footer-wrapper"] { display: none !important; }
 
   /* ── Songs library column header bar — glass-themed instead of solid dark ── */
   [class*="library-track--header"] {
@@ -434,20 +413,6 @@ sheet.replaceSync(`
   }
 `);
 document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-
-// ── Background continuity strip ──────────────────────────────────────────────
-(function mountBgStrip() {
-    if (document.getElementById('aml-bg-strip')) return;
-    const div = document.createElement('div');
-    div.id = 'aml-bg-strip';
-    const attach = () => {
-        if (!document.getElementById('aml-bg-strip') && document.body)
-            document.body.appendChild(div);
-    };
-    if (document.body) attach();
-    else new MutationObserver((_, obs) => { if (document.body) { attach(); obs.disconnect(); } })
-        .observe(document.documentElement, { childList: true });
-})();
 
 // ── Event-driven art tinting ──────────────────────────────────────────────────
 // Instead of polling every 2 seconds, watch for the player thumbnail img
