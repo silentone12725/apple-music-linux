@@ -2897,7 +2897,11 @@ async function startMVPipeline() {
     //   track-skip under sustained stalls. Muting keeps MK in "playing" state.
     const BUF_LOW      = 2.0;  // pause when lead falls below this
     const BUF_HIGH     = 10.0; // resume only when lead rises above this (8s hysteresis gap, matches Android PLAYER_BUFFER_REBUFFER_MS)
-    const SEEK_PRE_BUF = 4.0;  // vseg: minimum buffer lead before resuming after a seek
+    // vseg: video buffer lead needed before audio restarts after a seek. The video is
+    // already playing by then (the seek producer fills the buffer at about real time), so
+    // waiting for a multi-second lead only delays the audio; the 'waiting'/'playing'
+    // handlers mute and re-sync it if the video then stalls.
+    const SEEK_PRE_BUF = 0.4;
 
     let _dynBufTimer  = null;
     let _bufPaused    = false; // true while hidden-paused for buffering

@@ -2524,7 +2524,7 @@
     let _videoStalled = false;
     const BUF_LOW = 2;
     const BUF_HIGH = 10;
-    const SEEK_PRE_BUF = 4;
+    const SEEK_PRE_BUF = 0.4;
     let _dynBufTimer = null;
     let _bufPaused = false;
     let _userPaused = false;
