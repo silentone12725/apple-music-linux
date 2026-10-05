@@ -1288,6 +1288,15 @@ function createWindow() {
         if (_httpsHost(win.webContents.getURL()) === 'music.apple.com') bundleInjected = false;
     });
 
+    // A link or script must not take the privileged window to a site that isn't Apple's:
+    // it keeps its session and (on the Apple origin) the bridge. Apple hosts, including the
+    // sign-in and authorisation subdomains, navigate freely; anything else opens in the browser.
+    win.webContents.on('will-navigate', (event, url) => {
+        if (_navigationAllowed(url)) return;
+        event.preventDefault();
+        if (_httpsHost(url)) shell.openExternal(url);
+    });
+
     win.webContents.setWindowOpenHandler(({ url }) => {
         if (_IN_WINDOW_HOSTS.has(_httpsHost(url))) {
             win.loadURL(url);
@@ -1411,6 +1420,60 @@ function applyPersistedViewSettings() {
     }
 }
 
+// ── IPC sender check ─────────────────────────────────────────────────────────
+// Every channel below is meant for the main Apple Music window — and only for the page
+// itself on the Apple origin (the preload exposes amlBridge nowhere else). The mini player
+// sends just the three transport channels. Registering through these wrappers makes that a
+// rule instead of a convention: a stray frame, a window opened later, or any other renderer
+// that obtained an ipcRenderer cannot reach the privileged handlers.
+const _MINI_CHANNELS = new Set(['miniplayer:toggle', 'miniplayer:expand', 'miniplayer:cmd']);
+function _senderAllowed(event, channel) {
+    const wc = event.sender;
+    if (win && !win.isDestroyed() && wc === win.webContents) {
+        return _httpsHost(event.senderFrame?.url) === 'music.apple.com';
+    }
+    return _MINI_CHANNELS.has(channel) && miniWin && !miniWin.isDestroyed() && wc === miniWin.webContents;
+}
+const _ipcHandle = ipcMain.handle.bind(ipcMain);
+const _ipcOn = ipcMain.on.bind(ipcMain);
+ipcMain.handle = (channel, fn) => _ipcHandle(channel, (event, ...args) => {
+    if (!_senderAllowed(event, channel)) {
+        console.warn(`[AML] refused IPC invoke ${channel} from ${event.senderFrame?.url || 'unknown'}`);
+        throw new Error('forbidden');
+    }
+    return fn(event, ...args);
+});
+ipcMain.on = (channel, fn) => _ipcOn(channel, (event, ...args) => {
+    if (!_senderAllowed(event, channel)) {
+        console.warn(`[AML] refused IPC message ${channel} from ${event.senderFrame?.url || 'unknown'}`);
+        return;
+    }
+    fn(event, ...args);
+});
+
+// Argument checks for the handlers a page can reach: a compromised page must not be able to
+// fill the disk, smuggle path separators into a dialog's default name, or poison prefs.
+function _str(v, max = 256) { return typeof v === 'string' && v.length > 0 && v.length <= max; }
+function _safeName(v) { return String(v).replace(/[^\w .()-]/g, '_').slice(0, 64) || 'preset'; }
+const _PALETTE_KEYS = new Set(['accent', 'bgColor', 'navBg', 'navBorder', 'accentActive', 'appearance']);
+const _COLOR_RE = /^[#a-zA-Z0-9(),.%\s/-]{1,64}$/;
+function _paletteEntryOk(key, value) {
+    if (!_PALETTE_KEYS.has(key) || typeof value !== 'string') return false;
+    return key === 'appearance' ? /^[a-z]{1,16}$/.test(value) : _COLOR_RE.test(value);
+}
+const _STORE_VALUE_MAX = 256 * 1024;   // bytes of JSON per stored value
+const _STORE_KEYS_MAX = 2000;
+function _storeValueOk(value) {
+    let size;
+    try { size = JSON.stringify(value)?.length; } catch { return false; }   // not serialisable
+    return size !== undefined && size <= _STORE_VALUE_MAX;
+}
+// May the privileged window navigate to this URL itself? Apple's own hosts only.
+function _navigationAllowed(url) {
+    const host = _httpsHost(url);
+    return !!host && (host === 'apple.com' || host.endsWith('.apple.com'));
+}
+
 // ── IPC: prefs + view controls (used by settings panel) ─────────────────────
 ipcMain.handle('prefs:get', () => loadPrefs());
 
@@ -1434,7 +1497,9 @@ ipcMain.handle('store:read',  async (_, key) => {
 });
 ipcMain.handle('store:write', async (_, key, value) => {
     if (typeof key !== 'string' || !_storeKeyRe.test(key)) return;
+    if (!_storeValueOk(value)) return;
     const store = await _storeLoad();
+    if (!(key in store) && Object.keys(store).length >= _STORE_KEYS_MAX) return;
     store[key] = value;
     _storeDirty = true;
     _storeFlush();
@@ -1456,6 +1521,7 @@ ipcMain.handle('dialog:choose-download-dir', async () => {
 const _VALID_PREF_KEYS = new Set(['debug', 'persistLimitMB', 'persistTTLDays', 'prewarmLimitMB']);
 ipcMain.on('pref:set', (_, k, v) => {
     if (!_VALID_PREF_KEYS.has(k)) return; // allowlist: ignore unknown keys
+    if (k === 'debug' ? typeof v !== 'boolean' : !(Number.isFinite(v) && v >= 0 && v <= 1e7)) return;
     const p = loadPrefs(); p[k] = v; savePrefs(p);
 });
 ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));
@@ -1543,6 +1609,7 @@ ipcMain.on('theme:set-mode', async (_, mode) => {
 });
 
 ipcMain.on('theme:set-palette', (_, key, value) => {
+    if (!_paletteEntryOk(key, value)) return;
     const p = loadPrefs();
     if (!p.themePalette) p.themePalette = {};
     p.themePalette[key] = value;
@@ -1573,6 +1640,7 @@ ipcMain.handle('theme:import-css', async () => {
 });
 
 ipcMain.handle('theme:save-preset', (_, name) => {
+    if (!_str(name, 64)) return loadPrefs().themePresets || [];
     const p = loadPrefs();
     p.themePresets = (p.themePresets || []).filter(x => x.name !== name);
     p.themePresets.push({ name, palette: p.themePalette });
@@ -1581,6 +1649,7 @@ ipcMain.handle('theme:save-preset', (_, name) => {
 });
 
 ipcMain.on('theme:delete-preset', (_, name) => {
+    if (!_str(name, 64)) return;
     const p = loadPrefs();
     p.themePresets = (p.themePresets || []).filter(x => x.name !== name);
     savePrefs(p);
@@ -1598,6 +1667,7 @@ const _builtinPresets = {
 };
 
 ipcMain.on('theme:apply-preset', (_, name) => {
+    if (!_str(name, 64)) return;
     const p = loadPrefs();
     const palette = _builtinPresets[name]
         ? _builtinPresets[name](p.themeAppearance || 'dark')
@@ -1609,10 +1679,11 @@ ipcMain.on('theme:apply-preset', (_, name) => {
 });
 
 ipcMain.handle('theme:export-preset', async (_, name) => {
+    if (!_str(name, 64)) return false;
     const p = loadPrefs();
     const preset = (p.themePresets || []).find(x => x.name === name) || { name: 'current', palette: p.themePalette };
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
-        defaultPath: `aml-theme-${preset.name}.json`,
+        defaultPath: `aml-theme-${_safeName(preset.name)}.json`,
         filters: [{ name: 'JSON', extensions: ['json'] }],
     });
     if (canceled || !filePath) return false;
@@ -1639,9 +1710,11 @@ ipcMain.handle('theme:import-preset', async () => {
 });
 
 // ── EQ file I/O ──────────────────────────────────────────────────────────────
-ipcMain.handle('eq:save-file', async (_, { filename, content }) => {
+ipcMain.handle('eq:save-file', async (_, arg) => {
+    const { filename, content } = arg || {};
+    if (typeof content !== 'string' || content.length > 5 * 1024 * 1024) return false;
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
-        defaultPath: filename,
+        defaultPath: _safeName(path.basename(String(filename || 'eq.txt'))),
         filters: [
             { name: 'EqualizerAPO config', extensions: ['txt'] },
             { name: 'JSON', extensions: ['json'] },
@@ -1653,10 +1726,14 @@ ipcMain.handle('eq:save-file', async (_, { filename, content }) => {
     return true;
 });
 
-ipcMain.handle('eq:open-file', async (_, { filters } = {}) => {
+ipcMain.handle('eq:open-file', async (_, arg) => {
+    const { filters } = arg || {};
+    const okFilters = Array.isArray(filters) && filters.length <= 8 && filters.every(f =>
+        _str(f?.name, 64) && Array.isArray(f.extensions) && f.extensions.length <= 16 &&
+        f.extensions.every(e => typeof e === 'string' && /^[A-Za-z0-9*]{1,10}$/.test(e)));
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
         properties: ['openFile'],
-        filters: filters || [
+        filters: okFilters ? filters : [
             { name: 'EqualizerAPO / text / JSON', extensions: ['txt', 'json', 'csv'] },
             { name: 'All files', extensions: ['*'] },
         ],
@@ -2083,10 +2160,10 @@ let _lastfmPendingToken = null;
 
 ipcMain.handle('lastfm:set-credentials', async (_, c) => {
     const store = await _storeLoad();
-    if (typeof c?.apiKey === 'string') store.lastfm_api_key = c.apiKey.trim();
+    if (typeof c?.apiKey === 'string' && c.apiKey.length <= 128) store.lastfm_api_key = c.apiKey.trim();
     // Only overwrite the secret when a non-empty one is provided — a blank field
     // means "keep the saved secret".
-    if (typeof c?.secret === 'string' && c.secret.trim()) store.lastfm_secret = c.secret.trim();
+    if (typeof c?.secret === 'string' && c.secret.trim() && c.secret.length <= 128) store.lastfm_secret = c.secret.trim();
     _storeDirty = true; _storeFlush();
     return { ok: true };
 });
@@ -2215,6 +2292,7 @@ async function _lbSubmit(body) {
 }
 
 ipcMain.handle('lb:set-token', async (_, token) => {
+    if (token != null && !(typeof token === 'string' && token.length <= 256)) return { ok: false };
     const store = await _storeLoad();
     store.lb_token = (token || '').trim();
     _storeDirty = true; _storeFlush();
@@ -2523,7 +2601,20 @@ app.whenReady().then(() => {
     app.setPath('userData', path.join(CONFIG_DIR, 'electron-session'));
 
     const s = session.fromPartition('persist:apple-music');
-    s.setPermissionRequestHandler((wc, perm, cb) => cb(true));
+    // This session loads remote pages, so the default of "yes to everything" would hand a
+    // compromised page the camera, microphone, location, USB and the clipboard. Deny the
+    // capabilities Apple Music has no use for; everything else it asks for is still granted.
+    const DENIED_PERMISSIONS = new Set([
+        'media', 'geolocation', 'midi', 'midiSysex', 'hid', 'serial', 'usb', 'bluetooth',
+        'display-capture', 'clipboard-read', 'idle-detection', 'fileSystem', 'window-management',
+        'openExternal', 'speaker-selection', 'storage-access', 'top-level-storage-access',
+    ]);
+    s.setPermissionRequestHandler((wc, perm, cb) => {
+        const deny = DENIED_PERMISSIONS.has(perm);
+        if (deny) console.warn(`[AML] denied permission request: ${perm}`);
+        cb(!deny);
+    });
+    s.setPermissionCheckHandler((wc, perm) => !DENIED_PERMISSIONS.has(perm));
 
     // Trust the engine's self-signed loopback cert so <video src="https://127.0.0.1:PORT/…">
     // loads. This lets MV video use a real HTTPS origin → Chrome's native, reliable
