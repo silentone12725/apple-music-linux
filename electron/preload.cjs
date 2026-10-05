@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld('amlReady', () => ipcRenderer.send('app:ui-ready
 // injected bundles run on, never to whatever origin the window navigates to.
 if (IS_APPLE_MUSIC) contextBridge.exposeInMainWorld('amlBridge', {
     isDev: !!process.defaultApp, // true when running via `electron .`, false in packaged app
+    debug: process.argv.includes('--aml-debug=1'), // app was started from a terminal (see DEBUG_OUTPUT in main.mjs)
     // ── Prefs / view (settings panel) ────────────────────────────────────────
     getPrefs:       ()          => ipcRenderer.invoke('prefs:get'),
     setPref:        (k, v)      => ipcRenderer.send('pref:set', k, v),

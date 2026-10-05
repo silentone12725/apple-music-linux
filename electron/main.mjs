@@ -13,6 +13,7 @@ import path from 'path';
 import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, symlinkSync, rmSync, createWriteStream, createReadStream, readdirSync } from 'fs';
 import { readFile as readFileAsync, writeFile as writeFileAsync } from 'fs/promises';
 import os from 'os';
+import { isatty } from 'tty';
 import net from 'net';
 import crypto from 'crypto';
 
@@ -196,6 +197,11 @@ const _vlcDir     = app.isPackaged ? _vlcPkgDir : (existsSync(_vlcDevDir) ? _vlc
 
 const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
 const ENGINE_PORT = 20025;
+
+// Debug output (verbose renderer logging and a log file) is on whenever the app was started
+// from a terminal, where someone can read it, or with AML_DEBUG=1. A launcher-started app has
+// no terminal and stays quiet. There is no setting for it.
+const DEBUG_OUTPUT = process.env.AML_DEBUG === '1' || [0, 1, 2].some((fd) => { try { return isatty(fd); } catch { return false; } });
 
 // ── User DRM dir setup ────────────────────────────────────────────────────────
 // DRM runs in-process (HybrisBackend, libdrm-native.so next to the engine).
@@ -768,8 +774,7 @@ async function refreshBlurBg() {
 }
 
 function setupDebugLogging(win) {
-    const { debug: debugPref = false } = loadPrefs();
-    if (!process.env.AML_DEVTOOLS && !debugPref) return;
+    if (!DEBUG_OUTPUT && !process.env.AML_DEVTOOLS) return;
     const logsDir = path.join(CONFIG_DIR, 'logs');
     mkdirSync(logsDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -779,7 +784,9 @@ function setupDebugLogging(win) {
     console.log   = (...a) => { origLog(...a);   _write('LOG  ', a); };
     console.error = (...a) => { origError(...a); _write('ERROR', a); };
     console.warn  = (...a) => { origWarn(...a);  _write('WARN ', a); };
-    win.webContents.openDevTools({ mode: 'detach' });
+    // A DevTools window is only opened on request (AML_DEVTOOLS); debug output alone must not
+    // pop up a window every time the app is started from a terminal.
+    if (process.env.AML_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' });
     win.webContents.on('console-message', (event) => {
         const msg = event.message ?? event;
         if (typeof msg === 'string') console.log('[renderer]', msg);
@@ -804,6 +811,7 @@ function createWindow() {
             sandbox: _hasSandbox,
             partition: 'persist:apple-music',
             devTools: !app.isPackaged,
+            additionalArguments: DEBUG_OUTPUT ? ['--aml-debug=1'] : [],
         },
     });
 
@@ -864,8 +872,8 @@ function createWindow() {
         clearTimeout(showFallback);
         showWindow();
     });
-    // DevTools: open when AML_DEVTOOLS env var is set OR when debug pref is true.
-    // Toggle via AML Settings → Developer → Enable debug mode (persists across restarts).
+    // Debug logging: on when started from a terminal or with AML_DEBUG=1; DevTools only with
+    // AML_DEVTOOLS (see DEBUG_OUTPUT).
     setupDebugLogging(win);
 
     // Prefer bundles from resourcesPath (outside ASAR) so they can be updated
@@ -1518,10 +1526,10 @@ ipcMain.handle('dialog:choose-download-dir', async () => {
     });
     return { canceled, filePaths };
 });
-const _VALID_PREF_KEYS = new Set(['debug', 'persistLimitMB', 'persistTTLDays', 'prewarmLimitMB']);
+const _VALID_PREF_KEYS = new Set(['persistLimitMB', 'persistTTLDays', 'prewarmLimitMB']);
 ipcMain.on('pref:set', (_, k, v) => {
     if (!_VALID_PREF_KEYS.has(k)) return; // allowlist: ignore unknown keys
-    if (k === 'debug' ? typeof v !== 'boolean' : !(Number.isFinite(v) && v >= 0 && v <= 1e7)) return;
+    if (!(Number.isFinite(v) && v >= 0 && v <= 1e7)) return;
     const p = loadPrefs(); p[k] = v; savePrefs(p);
 });
 ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));

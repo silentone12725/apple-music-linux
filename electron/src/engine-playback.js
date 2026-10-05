@@ -28,7 +28,7 @@ const ENGINE = window._amlEngineURL || 'https://127.0.0.1:20025';
 // A real HTTPS origin avoids the mixed-content block AND the custom-protocol seek bug
 // (electron#38749) → Chrome's native byte-range seeking works.
 const ENGINE_HTTPS = ENGINE;
-const _AML_DEBUG = !!(window.amlBridge?.isDev) || localStorage.getItem('_AML_DEBUG') === '1';
+const _AML_DEBUG = !!(window.amlBridge?.isDev || window.amlBridge?.debug) || localStorage.getItem('_AML_DEBUG') === '1';
 
 // ── Last.fm API credentials ────────────────────────────────────────────────────
 // Last.fm's API guidelines for native desktop applications require the key and
@@ -11678,17 +11678,6 @@ window.amlGetQueueInfo = function () {
         return wrap;
     }
 
-    function _buildDevSection(prefs) {
-        const { wrap, body: devBody } = makeSection('Developer');
-        const debugToggle = document.createElement('input');
-        debugToggle.type = 'checkbox';
-        debugToggle.checked = !!(prefs.debug);
-        debugToggle.style.cssText = 'width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;';
-        debugToggle.onchange = () => { window.amlBridge?.setPref('debug', debugToggle.checked); };
-        devBody.appendChild(makeRow('Enable debug mode', debugToggle, 'Opens DevTools and full console on next launch', true));
-        return wrap;
-    }
-
     // ── Settings data pre-loader ───────────────────────────────────────────
     // Fetches DRM, tools and prefs in the background so they are ready before
     // the user clicks the cog.  openSettings() consumes the cached promise
@@ -11807,7 +11796,6 @@ window.amlGetQueueInfo = function () {
         dlg.appendChild(scrobbleWrap);
         dlg.appendChild(historyWrap);
         dlg.appendChild(libraryWrap);
-        dlg.appendChild(_buildDevSection(prefs));
     }
 
     // ── Settings cog + downloads button next to account row ───────────────
