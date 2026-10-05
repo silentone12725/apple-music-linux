@@ -7,7 +7,7 @@ const bundle = readFileSync(new URL('../vision-bundle.js', import.meta.url), 'ut
 
 test('footer keeps its box (player-bar clearance) and only its content is hidden', () => {
   assert.ok(!/(^|\n)\s*footer\s*,[^{]*\{\s*display:\s*none/.test(src), 'footer element must not be display:none');
-  assert.match(src, /footer\s*\{\s*background:\s*transparent\s*!important/);
+  assert.match(src, /footer\s*\{\s*background:\s*var\(--joe-color,\s*transparent\)\s*!important/);
   assert.match(src, /footer\s*>\s*\*[^{]*\{\s*display:\s*none\s*!important/);
 });
 

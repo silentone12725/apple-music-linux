@@ -104,9 +104,10 @@ sheet.replaceSync(`
 
   /* ── Footer: hide its content, keep its box ──
      The footer's own padding is Apple's clearance for the player bar, so the box stays and
-     only its children go; its background is made transparent so the themed page (solid,
-     Blur or Accented Blur) shows through instead of Apple's native colour. */
-  footer { background: transparent !important; }
+     only its children go. Apple paints the page colour (--joe-color) on the header wrapper's
+     ::after, which ends where main ends, so the footer takes the same colour to continue it
+     (transparent on pages that have none). Its own backdrop blur is dropped. */
+  footer { background: var(--joe-color, transparent) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
   footer > * { display: none !important; }
 
   /* ── Songs library column header bar — glass-themed instead of solid dark ── */
