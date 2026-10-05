@@ -318,7 +318,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 - [MusicKit JS](https://developer.apple.com/documentation/musickitjs) — Apple's web playback SDK, loaded from music.apple.com
 
 **Go engine**
-- [apple-music-engine](https://github.com/silentone12725/apple-music-engine-dev) — the engine's development repository
+- [musickit-sdk-linux](https://github.com/silentone12725/musickit-sdk-linux) — the engine as a standalone SDK: a local HTTP API for Apple Music playback, FairPlay DRM, lossless audio, lyrics and downloads
 - [mp4ff](https://github.com/Eyevinn/mp4ff) (via the itouakirai fork) and [go-mp4tag](https://github.com/zhaarey/go-mp4tag) — MP4 parsing and tagging
 - [grafov/m3u8](https://github.com/grafov/m3u8) — HLS playlists
 - [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — the encrypted library cache
