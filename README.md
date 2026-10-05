@@ -66,7 +66,6 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 - Light and dark mode support
 
 <div align="center">
-  <img src="assets/screenshots/Accented-preview.png" alt="Accented theme preview" width="49%"/>
   <img src="assets/screenshots/Features.png" alt="Features" width="49%"/>
 </div>
 
