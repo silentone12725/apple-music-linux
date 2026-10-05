@@ -202,7 +202,6 @@ type countingHeaderWriter struct {
 
 func (c countingHeaderWriter) SetHeader(k, v string) { c.hw.SetHeader(k, v) }
 
-
 // NewWithProvider returns a Manager backed by the given provider.
 // Use this when the caller needs to configure the provider before wiring it
 // (e.g. passing a CBCS socket address to apple.NewProviderWithCBCS).

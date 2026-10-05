@@ -67,10 +67,10 @@ func TestVLCSyncStutter(t *testing.T) {
 	time.Sleep(2 * time.Second) // extra settle time
 
 	const (
-		interval    = 100 * time.Millisecond
-		testDur     = 15 * time.Second
-		warnThresh  = 15 * time.Millisecond // CGO call blocked this long → pipeline flush
-		correction  = int64(30)             // ms of simulated drift to correct each tick
+		interval   = 100 * time.Millisecond
+		testDur    = 15 * time.Second
+		warnThresh = 15 * time.Millisecond // CGO call blocked this long → pipeline flush
+		correction = int64(30)             // ms of simulated drift to correct each tick
 	)
 
 	type sample struct {

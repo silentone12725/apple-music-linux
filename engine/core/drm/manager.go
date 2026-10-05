@@ -81,12 +81,12 @@ type DRMManager struct {
 	mu       sync.RWMutex
 
 	// crash restart state
-	crashCount   int
-	restartMu    sync.Mutex   // serialises concurrent handleCrash goroutines
+	crashCount int
+	restartMu  sync.Mutex // serialises concurrent handleCrash goroutines
 	// emitMu is held from snapshot copy to sink so events reach clients in the
 	// order the state changed; copying under mu but emitting after unlocking
 	// let two goroutines deliver an older snapshot after a newer one.
-	emitMu sync.Mutex
+	emitMu       sync.Mutex
 	lastStart    atomic.Int64 // UnixNano of the last successful backend start
 	shutdownCtx  context.Context
 	shutdownStop context.CancelFunc

@@ -18,7 +18,7 @@ import (
 
 var (
 	apiPort int
-	Config   config.ConfigSet
+	Config  config.ConfigSet
 )
 
 func loadConfig() error {

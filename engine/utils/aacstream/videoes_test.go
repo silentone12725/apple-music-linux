@@ -131,7 +131,7 @@ func TestAvcHasIDR(t *testing.T) {
 		}
 		return b
 	}
-	idr := []byte{0x65, 0x88, 0x84}   // nal_unit_type 5 = IDR slice
+	idr := []byte{0x65, 0x88, 0x84}    // nal_unit_type 5 = IDR slice
 	nonIDR := []byte{0x41, 0x9a, 0x00} // type 1 = non-IDR slice
 	sps := []byte{0x67, 0x64, 0x00}    // type 7 = SPS
 	cases := []struct {

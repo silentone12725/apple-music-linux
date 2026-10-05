@@ -33,34 +33,33 @@ type ConfigSet struct {
 	AppleMasterChoice    string `yaml:"apple-master-choice"`
 	MaxMemoryLimit       int    `yaml:"max-memory-limit"`
 	// DRM binary (engine/drm package)
-	DRMBinaryPath string `yaml:"drm-binary-path"` // directory holding libdrm_client.so, rootfs/ and files/
-	DRMBaseDir    string `yaml:"drm-base-dir"`    // mpl_db parent directory
-	GetM3u8Mode   string `yaml:"get-m3u8-mode"`
-	GetM3u8FromDevice          bool          `yaml:"get-m3u8-from-device"`
-	AacType                    string        `yaml:"aac-type"`
-	AlacMax                    int           `yaml:"alac-max"`
-	AtmosMax                   int           `yaml:"atmos-max"`
-	LimitMax                   int           `yaml:"limit-max"`
-	UseSongInfoForPlaylist     bool          `yaml:"use-songinfo-for-playlist"`
-	DlAlbumcoverForPlaylist    bool          `yaml:"dl-albumcover-for-playlist"`
-	MVAudioType                string        `yaml:"mv-audio-type"`
-	MVMax                      int           `yaml:"mv-max"`
-	ConvertAfterDownload       bool          `yaml:"convert-after-download"`
-	ConvertFormat              string        `yaml:"convert-format"`
-	ConvertKeepOriginal        bool          `yaml:"convert-keep-original"`
-	ConvertSkipIfSourceMatch   bool          `yaml:"convert-skip-if-source-matches"`
-	FFmpegPath                 string        `yaml:"ffmpeg-path"`
-	ConvertExtraArgs           string        `yaml:"convert-extra-args"`
-	ConvertWithMetadata        bool          `yaml:"convert-with-metadata"`
-	ConvertWarnLossyToLossless bool          `yaml:"convert-warn-lossy-to-lossless"`
-	ConvertSkipLossyToLossless bool          `yaml:"convert-skip-lossy-to-lossless"`
-	ConvertCheckBadALAC        bool          `yaml:"convert-check-bad-alac"`
-	ConvertDeleteBadALAC       bool          `yaml:"convert-delete-bad-alac"`
-	ALACFix                    bool          `yaml:"alac-fix"`
-	ExitOnError                bool          `yaml:"exit-on-error"`
+	DRMBinaryPath              string `yaml:"drm-binary-path"` // directory holding libdrm_client.so, rootfs/ and files/
+	DRMBaseDir                 string `yaml:"drm-base-dir"`    // mpl_db parent directory
+	GetM3u8Mode                string `yaml:"get-m3u8-mode"`
+	GetM3u8FromDevice          bool   `yaml:"get-m3u8-from-device"`
+	AacType                    string `yaml:"aac-type"`
+	AlacMax                    int    `yaml:"alac-max"`
+	AtmosMax                   int    `yaml:"atmos-max"`
+	LimitMax                   int    `yaml:"limit-max"`
+	UseSongInfoForPlaylist     bool   `yaml:"use-songinfo-for-playlist"`
+	DlAlbumcoverForPlaylist    bool   `yaml:"dl-albumcover-for-playlist"`
+	MVAudioType                string `yaml:"mv-audio-type"`
+	MVMax                      int    `yaml:"mv-max"`
+	ConvertAfterDownload       bool   `yaml:"convert-after-download"`
+	ConvertFormat              string `yaml:"convert-format"`
+	ConvertKeepOriginal        bool   `yaml:"convert-keep-original"`
+	ConvertSkipIfSourceMatch   bool   `yaml:"convert-skip-if-source-matches"`
+	FFmpegPath                 string `yaml:"ffmpeg-path"`
+	ConvertExtraArgs           string `yaml:"convert-extra-args"`
+	ConvertWithMetadata        bool   `yaml:"convert-with-metadata"`
+	ConvertWarnLossyToLossless bool   `yaml:"convert-warn-lossy-to-lossless"`
+	ConvertSkipLossyToLossless bool   `yaml:"convert-skip-lossy-to-lossless"`
+	ConvertCheckBadALAC        bool   `yaml:"convert-check-bad-alac"`
+	ConvertDeleteBadALAC       bool   `yaml:"convert-delete-bad-alac"`
+	ALACFix                    bool   `yaml:"alac-fix"`
+	ExitOnError                bool   `yaml:"exit-on-error"`
 	// ExportThrottleFloorKbps is the minimum export (download) rate in KiB/s
 	// while playback is streaming. 0 = engine default (128 KiB/s).
 	ExportThrottleFloorKbps int `yaml:"export-throttle-floor-kbps"`
 	StreamCacheSize         int `yaml:"stream-cache-size"` // MB, 0 = unlimited
 }
-

@@ -34,17 +34,17 @@ func nativeBridgeState(cState *C.char, ud unsafe.Pointer) {
 	if ud == nil {
 		return
 	}
-	
+
 	// Convert unsafe.Pointer to uintptr, then to cgo.Handle
 	handle := cgo.Handle(uintptr(ud))
 	stateCh, ok := handle.Value().(chan string)
 	if !ok {
 		return
 	}
-	
+
 	// Convert C string to Go string
 	state := C.GoString(cState)
-	
+
 	// Send to channel (non-blocking)
 	select {
 	case stateCh <- state:
