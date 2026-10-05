@@ -7,67 +7,76 @@ the project's Releases page.
 
 ## 1.4.0 - 2026-10-06
 
-301 commits since 1.3.0. Full notes: releases/v1.4.0.md
+A major release: 304 commits across 689 files since 1.3.0. Grouped by area because of its
+size; every change is listed in releases/v1.4.0.md, together with the complete commit list.
 
-### Added
-- In-process DRM: a native backend (libdrm_client.so, via cgo) drives Apple's Android libraries
-  through libhybris, with lease recovery inside the engine. Replaces the subprocess/TCP backends.
-- ALAC plays in-process through libvlc callbacks, serves while it downloads, and can seek during
-  the download.
-- Music videos: a segmented CMAF video path (the default), fragment-level seeking with an FFmpeg
-  fallback, a seekable decrypted-track cache with a fragment index, and a seek cache with
-  pre-buffering.
-- Export scheduling: a priority queue, an AIMD throttle so exports yield to playback, reuse of
-  playback bytes, private sessions, and a configurable throttle floor.
-- Discord Rich Presence, Last.fm and ListenBrainz scrobbling, and a mini player.
-- Album-art palette theming, an Accented Blur mode and a blurred artwork backdrop.
-- MPRIS2 repeat/loop status, a live AAC position, and the remaining standards gaps.
-- Optional AML_WIDEVINE_DIR for supplying a Widevine device identity (the built-in default still
-  works), AML_DEBUG=1 and AML_DEVTOOLS, and an opt-in AML_MV_PROGRESSIVE=1.
-- The installer puts the apple-music-linux command in ~/.local/bin (the XDG location).
-- Opt-in live checks of the real playback pipeline (engine/cmd/playback_live_test.go and
-  itun_live_test.go), and drm/android-libs.txt listing the Android runtime exactly.
+### DRM and key handling
+- **DRM moved in-process.** The subprocess and TCP backends (ProcessBackend, drm-rootless, the TCP sockets) were removed in stages: first a hybris-backed backend, then an in-process cgo backend, then a clean-room native backend (libdrm_client.so) that drives Apple's Android libraries through libhybris. FairPlay keys are derived through a vendored host-native wrapper (lease management and recovery, key contexts, an exception barrier so a C++ exception cannot abort the engine). Packaged builds ship the in-process DRM.
+- **Lease recovery** runs inside the engine: decrypts queue during recovery instead of failing, the RUNNING-to-idle state transition is fixed, DRM start is serialised, a nil DRM manager is guarded, logout is fixed, the 2FA reply race and the authentication wait are bounded, and session values are trimmed.
+- **The DRM client** (HTTPS with HTTP/2 option, cookie jar, JWT parsing, device GUID persistence, license fetch, skd:// to HTTPS conversion for license requests, system CA certificates, FairPlay license parsing) was rebuilt and audited: 22 findings fixed, an RFC 6265 cookie jar, HTTP/1.1 framing and size caps, timeouts, redirect and retry rules, TLS server-name verification, optional SPKI pinning (AML_TLS_PINS), and hi-res availability that follows a switch (AML_DISABLE_HIRES) instead of being hard-coded.
+- **Android runtime.** The stripped ICU libraries load under hybris (the __register_atfork import is retargeted), the libdl.so shim is tracked, the DRM library builds against the in-tree libhybris-core.so, and the runtime shrank from 99 libraries (116 MiB) to the 25 in drm/android-libs.txt (65 MiB): libandroid.so and libOpenSLES.so are empty stubs because Apple's libraries import nothing from them. The unused embedding of those libraries inside libdrm_client.so was removed (64 MB to 1 MB).
+- **Content keys.** A content-key cache, format fields, session reuse and audio analysis were ported from Android Apple Music 6.5.2; cached keys survive a cancelled stream; in-process ALAC decryption survives key switches and reconnects; malformed CBCS fragments return errors instead of panicking; the FairPlay license pool is pre-warmed at startup; Widevine license parameters are carried by a typed context key; and a Widevine device identity can be supplied with AML_WIDEVINE_DIR (the built-in default still works).
+- **Itun (progressive music-video) decryption**: the offline pipeline and proactive URL refresh were added, then wired to the real wrapper calls. The engine now obtains the real progressive URL, but Apple's response carries no sinf for it, so it cannot be decrypted yet (see Known limitations).
 
-### Changed
-- The Android runtime shrank from 99 libraries (116 MiB) to the 25 it needs (65 MiB):
-  libandroid.so and libOpenSLES.so, which Apple's libraries list but import nothing from, are
-  empty stubs built from drm/stubs/empty_stub.c.
-- libdrm_client.so went from 64 MB to 1 MB: the unused embedding of the Android libraries was
-  removed (only libhybris-core.so is embedded). Installer about 112 MB, AppImage about 160 MB
-  (1.3.0: 122 MB and 181 MB).
-- The installer and npm run dist rebuild every component and verify the package against the fresh
-  build; esbuild is a declared dependency. The Android runtime and hybris-linker/q.so are tracked
-  with Git LFS. The installer is now named apple-music-linux.run, without the version.
-- Debug output (renderer log forwarding, a log file, verbose logging) is on whenever the app is
-  started from a terminal; a DevTools window needs AML_DEVTOOLS.
-- Faster starts: the track being started downloads first, no idle DRM reconnects, the default key
-  context is opened at startup, music-video playlists open in parallel, the segment lookahead is
-  fixed and playback waits for a 3 s buffer, and the power-profile and library-token updates are
-  event-driven.
-- The lossless toggle now really disables lossless; the quality dropdowns need a DRM sign-in.
+### Lossless and AAC playback
+- **ALAC plays in-process through libvlc callbacks**: libvlc reads from the disk cache or the in-progress download, with no loopback HTTP and no subprocess. A first play serves while it downloads (the Android RandomAccessFile model), and seeking works during the download through Range-from-writer. A cache-commit race and an engine crash after VLC passthrough teardown were fixed.
+- **Faster starts.** The track being started downloads first (other downloads and the next track's pre-warm wait for its first 3 MiB, instead of splitting the CDN link); idle streams no longer trigger a DRM reconnect; the default key context is opened at startup; and the power-profile and library-token updates are event-driven instead of polled.
+- **AAC**: cache misses stream while downloading instead of waiting for the full file, the MSE buffer window is capped (240 s / 120 s, was 900 s), and an AAC time-to-first-byte benchmark was added.
+- **Quality settings**: the lossless toggle really disables lossless, and the lossless and music-video quality dropdowns stay disabled until you are signed in.
+- **Library**: a JS-driven sync into an encrypted SQLite store that persists across restarts, auto-sync as soon as web sign-in completes (no DRM needed), a local cache by default for library tracks, and hardened key handling and server limits.
+- **Queue and navigation**: a session history queue with sliding-window navigation, error dialogs suppressed during transitions, external play buttons that switch tracks during ALAC/VLC playback, library song IDs (a.DIGITS), lazy-queue and inter-playlist jumps, station batches synced into the queue (including queueItemsDidChange), a queue cascade on a null nowPlayingItemDidChange prevented, VLC track-click navigation, IPv4 forcing, and a stale singleflight cleanup no longer deleting a live session.
+- **Prefetch** yields to active playback and uses Apple's fade and retry policy; the engine periodically returns idle heap to the OS.
 
-### Fixed
-- Music-video stalls and desyncs: fragments streaming past their end, dead-pipe and code=3
-  recovery, A/V drift after long pauses, and audio restarting late after a seek.
-- Races, leaks and unbounded reads found by two audit passes and by fuzzing; panics on malformed
-  CBCS, MP4 and playlist data now return errors.
-- Track switching during ALAC/VLC playback, library song IDs, lazy-queue jumps and station batches.
+### Music videos
+- **Segmented CMAF video ("vseg") is the default backend**: HLS segments are decrypted and re-fragmented through FFmpeg and streamed into MSE as fragments become ready. It replaced a series of experiments this cycle: an mp4box.js MSE path, a native video element over localhost HTTPS with a faststart cache and a growing-file index, a progressive pipeline, and a WebCodecs path (an engine demux endpoint, a full pipeline, then demoted to a shadow path). HLS CBCS decryption is always used for video; the iTunes FairPlay CDN path was removed.
+- **Seeking**: seeks go through the HLS segment table; a fragment-level path fetches and decrypts only the fragment holding the target (about 1.4 s against 2.8 s for a whole segment on the real CDN) with an automatic FFmpeg fallback; the from-0 download is parked while a seek producer works, because CDN bandwidth is shared; and a seekable decrypted-track cache with a fragment index, a seek cache with pre-buffering, a freeze-frame overlay during a seek past the buffer, and audio that restarts as soon as the video plays after a seek were added.
+- **Startup**: segment 0 streams directly while the rest prefetch in parallel; audio and video playlists open concurrently; the segment lookahead was fixed (a bandwidth estimate taken from the 1.4 KB init segment had clamped prefetch to one connection, leaving the link idle about a second at every segment boundary); fragment-aligned flush coalescing; and playback waits for a 3 s buffer before starting.
+- **Stability**: fragments no longer stream past their end into the next moof; recovery from dead pipes, code=3 decode errors (ExoPlayer-style: in place first, then skip past), and starvation deadlocks; a re-entrancy guard on Chrome's seeking events; A/V desync and the seek bar after long pauses; MPRIS resume; duplicate listeners; play/pause mirroring between audio and video; the MSE buffer bounded without dropping chunks; the vseg cache file kept open after the producer commits; and polling instead of blocking when the fragment indexer lags.
+- **Smaller fixes**: MV ids registered so play buttons work on search rows, banner navigation separated from play-button playback, MV navigation links skipped by the interceptor, audio stopped on exit, and an EC-3 decode crash on first native play.
 
-### Security
-- The engine rejects non-loopback Host headers and cross-site requests, and verifies the DRM
-  client's TLS server names (optional SPKI pinning).
-- The Electron app validates IPC senders and arguments, applies a permission policy and a
-  navigation guard, and accepts only identifier keys and primitive values from page settings writes.
+### Downloads and exports
+- A **priority queue** with FIFO ties and race-free cancellation, an **AIMD throttle** so exports yield to playback without stopping, a configurable throttle floor, and a priority endpoint.
+- Exports **reuse playback bytes** (the committed cache, then the live tail), use **private sessions** so releasing an export can never delete a playback session, stream to disk, honour cancel, and stop on shutdown; playback streams are classed foreground or background.
+- A retry countdown, a manual retry override, a catalog search panel, a Copy Link intercept, library playlists, temp-file isolation and artwork retry in the downloads view.
 
-### Removed
-- The subprocess and TCP DRM backends, the AML_EMBED_LIBS embedding mode, and the "Enable debug
-  mode" setting.
+### Integrations
+- **Discord Rich Presence**, **Last.fm** and **ListenBrainz** scrobbling, and a frameless **mini player**.
+- **MPRIS2**: repeat/loop status, a live position for AAC, and the remaining standards gaps closed.
+- A reliable quit: VLC stops immediately on engine shutdown and the quit time is hard-capped.
 
-### Known issues
-- Music-video progressive (itun) streams are not used: Apple's response carries no sinf for them,
-  so they cannot be decrypted. Music videos stay on HLS.
-- Music videos can stall when the link is near or below the stream's bitrate; there is no adaptive
-  quality yet.
+### Theme and interface
+- **Album-art palette theming** across every major surface, an **Accented Blur** mode that uses the wallpaper blur plus a palette tint, a blurred artwork backdrop built from 600 px artwork, and the theme following the currently playing track on all pages; several attempts at a background strip below the content were tried and reverted.
+- **Settings**: frosted-glass dropdowns, backdrop blur and HIG polish, a compact toggle (reverted to plain checkboxes), a persisted Accented Blur choice, DRM, tools and prefs pre-loaded so the panel opens instantly, a global accent colour no longer forced on the dialog, and a corrected DRM status indicator.
+- Search-row, sidebar-item and detail-header fixes, the "Also available in the iTunes Store" button hidden everywhere, a new app icon with shape variants, and loose project files reorganised.
+- VA-API hardware video decode is used where available, with a leaner disk cache and tray show/hide fixed.
+
+### Security and hardening
+- The engine rejects cross-site requests (an exact Origin check, with Host checked for DNS rebinding) and accepts request-supplied tool paths only for ffmpeg, vlc and cvlc.
+- The Electron app checks IPC senders, applies a permission policy and a navigation guard, validates IPC arguments, and accepts only identifier keys and primitive values from the page's settings writes (view:tweak).
+- HTTP clients were hardened and unbounded reads capped; communications, key logging, CORS and permissions were tightened; retained tokens are dropped and the lyrics proxy hardened; playlist and MP4 parsing were fuzzed and fixed; library key handling and server limits were hardened.
+- Two audit passes ("security/stability audit fixes", then a proofread of the HLS, pipeline, export, DRM, handlers, apple provider and aacstream packages) fixed races, goroutine and pipe leaks, an FFmpeg source hang, export tail races, MV cache-key collisions, range responses, past-end seek starts, token body caps and nil guards.
+
+### Engine and API
+- The engine's apiserver was split into domain handlers, packages were renamed (engine/engine to engine/core, arbitrary names to ones that reflect their function), complexity-reducing helpers were extracted, hot-path allocations and a file-descriptor leak were removed, three hot paths (HLS, AutoEQ, prefetch) were made cheaper, and 2,140 lines of unreachable code were deleted.
+- New personalised-feed endpoints (recommendations, heavy rotation, recently played) ship dormant, and a client-side Web Audio EQ is included but unused.
+- Debug logging is gated behind AML_DEBUG, fmt output moved to slog, and time-stamp handling no longer changes with AML_DEBUG.
+
+### Build, packaging and tooling
+- **A verified build.** The installer script rebuilds the DRM library, the engine, the renderer bundles and the VLC subset on every run, refuses to continue if the Android runtime does not match drm/android-libs.txt, and checks that the packaged engine, DRM libraries and renderer bundles are byte-identical to the fresh build. npm run dist uses the same inputs, esbuild is a declared dependency, and the Android runtime and the hybris linker are tracked with Git LFS. Bundle drift is guarded by a test, and the renderer is built as an esbuild module pipeline with extracted modules.
+- **Smaller packages**: installer about 112 MB and AppImage about 160 MB (1.3.0: 122 MB and 181 MB).
+- **Installer**: named apple-music-linux.run (the version is inside, so releases/latest/download links keep working); the apple-music-linux command goes in ~/.local/bin (the XDG location) without editing any shell startup file, and --uninstall removes only what it installed.
+- **Debug output follows how you start the app**: from a terminal (or with AML_DEBUG=1) it turns on the renderer log forwarding, a log file and verbose logging. The "Enable debug mode" setting is gone; a DevTools window opens only with AML_DEVTOOLS.
+- Opt-in live checks of the real playback pipeline decrypt and decode ALAC, AAC, Atmos and music-video streams (comparable byte for byte between Android runtimes), plus a live check of the itun path.
+- Repository cleanup: generated output, one-off reverse-engineering tools, UI captures and stale benchmark reports were removed, a clean script was added, and the go.work follows the engine's Go version.
+
+### Known limitations
+- **Music-video progressive (itun) streams are not used.** The real progressive URL is a roughly 4 Mbit/s file (about 9 for the HLS rendition) but is itun-encrypted and Apple's response carries no sinf for it, so it cannot be decrypted; music videos stay on HLS. It is opt-in with AML_MV_PROGRESSIVE=1 for testing.
+- Music videos can stall when the link is near or below the stream's bitrate (about 8 to 10 Mbit/s); there is no adaptive quality yet. Lowering the maximum video height in Settings should help.
+
+### Breaking changes
+- The subprocess and TCP DRM backends, the AML_EMBED_LIBS embedding mode and the "Enable debug mode" setting are gone.
+- DRM state now lives under ~/.config/apple-music-linux/drm. If lossless or music videos are unavailable after upgrading, sign in again from AML Settings.
+- The installer file is now apple-music-linux.run (no version in the name), and the command is installed to ~/.local/bin with no shell startup file edited.
 
 ## 1.3.0 - 2026-08-11
 
