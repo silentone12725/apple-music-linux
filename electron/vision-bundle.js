@@ -119,6 +119,13 @@ sheet.replaceSync(`
   body[data-aml-art-theme] #aml-bg-strip {
     background: var(--aml-art-page-bg, #1c1c1e);
   }
+  /* Blur and Accented Blur draw the wallpaper / artwork behind the whole window, so a solid
+     strip would show as a band across it: it is not shown in those modes. */
+  body[data-aml-mode="blur"] #aml-bg-strip,
+  body[data-aml-mode="art-blur"] #aml-bg-strip,
+  body[data-aml-art-blur] #aml-bg-strip {
+    display: none !important;
+  }
 
   /* ── Player bar clearance — pad scrollable page so content never hides under the 54px bar ── */
   [class*="scrollable-page"] { padding-bottom: 72px !important; }
