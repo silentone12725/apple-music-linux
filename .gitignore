@@ -70,7 +70,6 @@ engine/config.yaml
 # Built from /home/daksh/Git Projects/wrapper via build-native.sh; not source.
 drm/drm-native
 drm/libdrm-native.so
-drm/libhybris-core.so
 drm/hybris-linker/
 drm/rootfs/adi.pb
 drm/rootfs/drm-state

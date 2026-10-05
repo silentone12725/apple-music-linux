@@ -12,9 +12,9 @@ HYBRIS_CFLAGS = $(CFLAGS) -Wno-clobbered -Wno-maybe-uninitialized -Wno-pedantic
 LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -lm -lstdc++ -Wl,--no-as-needed -lcurl -Wl,--as-needed -Wl,-z,relro,-z,now
 LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
 
-# vseg paths for hybris backend (override on command line if needed)
-VSEG_DRM ?= /home/daksh/Git\ Projects/apple-music-linux-vseg/drm
-HYBRIS_CORE ?= $(VSEG_DRM)/libhybris-core.so
+# libhybris-core.so (Git LFS) lives beside the sources; override on the command line to
+# build against another copy.
+HYBRIS_CORE ?= libhybris-core.so
 
 # Android library directory (embedded into the .so at build time)
 LIB64 = rootfs/system/lib64
