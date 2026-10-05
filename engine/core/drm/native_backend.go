@@ -313,6 +313,7 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 				fpState = FairPlayReady
 				log.Printf("[drm] hybris FairPlay init: ok")
 				b.fpOnce.Do(func() { close(b.fpReady) })
+				go b.warmDefaultKeyContext()
 			} else {
 				log.Printf("[drm] hybris FairPlay init: failed (rc=%d) — key exchange may fail", int(fpret))
 				fpState = FairPlayFailed
@@ -562,6 +563,31 @@ func (b *nativeBackend) DecryptItunSamples(ctx context.Context, adamID uint64, s
 
 	return decrypted, nil
 }
+
+// defaultKeyURI is the key every ALAC init segment names; its context is shared by all tracks.
+const defaultKeyURI = "skd://itunes.apple.com/P000000000/s1/e1"
+
+// warmDefaultKeyContext opens the shared default key context as soon as FairPlay is up.
+// The first open costs about 5 s inside the Android library; the library caches contexts
+// by (asset, URI), so doing it here means the first track's CBCS dial finds it instead of
+// paying that during playback startup. The context is deliberately kept open.
+func (b *nativeBackend) warmDefaultKeyContext() {
+	leave, err := b.enter(b.currentGen()) // waits for Start to release b.mu
+	if err != nil {
+		return
+	}
+	defer leave()
+	cAssetID := C.CString("0")
+	cMediaURI := C.CString(defaultKeyURI)
+	defer C.free(unsafe.Pointer(cAssetID))
+	defer C.free(unsafe.Pointer(cMediaURI))
+	start := time.Now()
+	ok := C.drm_open_key_context(cAssetID, cMediaURI) != nil
+	log.Printf("[drm] default key context warmed in %s (ok=%v)", time.Since(start).Round(time.Millisecond), ok)
+}
+
+// InProcess marks DialCBCS connections as in-process pipes (see DRMManager.InProcess).
+func (b *nativeBackend) InProcess() bool { return true }
 
 // DialCBCS opens a CBCS decryption connection
 func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {

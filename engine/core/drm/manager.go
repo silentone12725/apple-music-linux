@@ -371,6 +371,14 @@ func (m *DRMManager) DialCBCS(ctx context.Context) (net.Conn, error) {
 	return m.backend.DialCBCS(ctx)
 }
 
+// InProcess reports whether CBCS connections are in-process pipes (the native backend),
+// which lets the decrypt loop skip idle-based reconnects. Satisfies the optional
+// interface fairplay checks on its dialer.
+func (m *DRMManager) InProcess() bool {
+	ip, ok := m.backend.(interface{ InProcess() bool })
+	return ok && ip.InProcess()
+}
+
 // Shutdown stops the backend process without clearing the session.
 // Call this on clean server exit so the session DB persists for the next start.
 // Unlike Logout, Shutdown does not remove mpl_db or any session files.

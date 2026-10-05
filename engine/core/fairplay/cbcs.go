@@ -119,6 +119,7 @@ const drmConnFragLimit = 0
 // before failure is expected — after idle periods or after N fragments.
 type drmConn struct {
 	dialer            CBCSDialer
+	inProcess         bool // connection is an in-process pipe: it cannot go stale from idleness
 	ctx               context.Context
 	conn              net.Conn
 	rw                *bufio.ReadWriter
@@ -127,12 +128,14 @@ type drmConn struct {
 }
 
 func newDRMConn(ctx context.Context, dialer CBCSDialer, conn net.Conn) *drmConn {
+	ip, _ := dialer.(inProcessDialer)
 	return &drmConn{
-		dialer:   dialer,
-		ctx:      ctx,
-		conn:     conn,
-		rw:       bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)),
-		lastUsed: time.Now(),
+		dialer:    dialer,
+		inProcess: ip != nil && ip.InProcess(),
+		ctx:       ctx,
+		conn:      conn,
+		rw:        bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)),
+		lastUsed:  time.Now(),
 	}
 }
 
@@ -144,6 +147,13 @@ func (dc *drmConn) refreshIfNeeded() bool {
 	idle := time.Since(dc.lastUsed)
 	fragLimitHit := drmConnFragLimit > 0 && dc.fragsSinceConnect >= drmConnFragLimit
 
+	// An in-process pipe has no socket for a peer to drop, so idleness proves nothing, and
+	// a reconnect is expensive: it opens fresh key contexts in the Android library (seconds
+	// the first time). A stream starved of network data for 10 s used to pay that on
+	// resume, right when the track was already late.
+	if dc.inProcess && !fragLimitHit {
+		return false
+	}
 	if idle < drmConnIdleTimeout && !fragLimitHit {
 		return false
 	}
@@ -191,6 +201,10 @@ type CBCSDialer interface {
 	// The connection must be closed after the last fragment is sent.
 	DialCBCS(ctx context.Context) (net.Conn, error)
 }
+
+// inProcessDialer is optionally implemented by a CBCSDialer whose connections are
+// in-process pipes rather than sockets to another process.
+type inProcessDialer interface{ InProcess() bool }
 
 // CBCSSource returns a pipeline.Source that downloads and decrypts a FairPlay
 // CBCS-encrypted Apple Music track.
