@@ -383,15 +383,48 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 	}
 
 	ctx, cancel := context.WithCancel(s.shutdownCtx)
+	ctx = aacstream.WithSeekPriority(ctx)
 	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: pinnedCancel(spw, cancel), ephemeral: ephemeral}
 
 	setActiveVsegSession(id, seek)
+	holdBackgroundUntilPlayable(ctx, seek)
 
 	// Pass the original startSec, not actual: StreamFrom calls URLsFrom internally
 	// (which steps back one segment for overlap). Passing actual would step back twice.
 	go s.runVsegProducer(ctx, id, assetID, startSec, seek)
 	log.Printf("[vseg] seek producer started id=%s startSec=%.3f actual=%.3f ephemeral=%v", id, startSec, actual, ephemeral)
 	return actual, nil
+}
+
+// Background (from-0) downloads wait for the seek producer to get playable, bounded so
+// a stuck seek can never park them for good.
+const (
+	seekHoldMax       = 12 * time.Second
+	seekHoldFragments = 4 // fragments produced before the from-0 download may resume
+)
+
+// holdBackgroundUntilPlayable parks the from-0 producer's downloads until the seek
+// producer has produced enough fragments to start playing, finished, or been cancelled.
+func holdBackgroundUntilPlayable(ctx context.Context, seek *vsegSession) {
+	release := aacstream.HoldBackground(seekHoldMax)
+	go func() {
+		defer release()
+		t := time.NewTicker(50 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				seek.mu.RLock()
+				done := seek.done
+				seek.mu.RUnlock()
+				if done || seek.idx.FragCount() >= seekHoldFragments {
+					return
+				}
+			}
+		}
+	}()
 }
 
 // handlePlaybackVsegInit serves the ftyp+moov init segment.

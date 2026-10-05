@@ -389,7 +389,7 @@ func streamMVSegmentDirect(ctx context.Context, url string, w io.Writer) error {
 		if MVCacheEnabled() {
 			dst = io.MultiWriter(w, &cacheBuf)
 		}
-		_, copyErr := io.Copy(dst, resp.Body)
+		_, copyErr := io.Copy(dst, gate(ctx, resp.Body))
 		resp.Body.Close()
 		if copyErr != nil {
 			// Never retry after io.Copy has started — partial bytes are already in w.
@@ -512,6 +512,14 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 			go func(idx int, url string, ch chan prefetchStream) {
 				diskKey := stableCacheKey(url) // keeps any #bytes= range
 
+				// A seek producer is fetching the segment the player waits on: don't
+				// open another connection against the same CDN bandwidth meanwhile.
+				if err := waitBackground(ctx); err != nil {
+					<-sem
+					ch <- prefetchStream{err: err}
+					return
+				}
+
 				// Cache hit: serve from memory; no connection to hold open.
 				if cached, ok := GetCachedMVSegment(diskKey); ok {
 					log.Printf("[dl] mv#%d prefetch cache HIT len=%d", idx, len(cached))
@@ -614,7 +622,7 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 			dst = io.MultiWriter(w, &cacheBuf)
 		}
 
-		n, copyErr := io.Copy(dst, r.body)
+		n, copyErr := io.Copy(dst, gate(ctx, r.body))
 		// Signal goroutine to close the body and release sem.
 		if r.done != nil {
 			close(r.done)
