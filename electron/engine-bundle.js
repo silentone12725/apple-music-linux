@@ -166,6 +166,15 @@
     };
   }
 
+  // src/engine/handoff.js
+  function playbackMode(sess) {
+    if (sess?.capabilities?.video) return "mv";
+    return sess?.codec === "aac" ? "aac" : "alac";
+  }
+  function needsVlcStop(prevMode, nextMode) {
+    return prevMode === "alac" && nextMode !== "alac";
+  }
+
   // src/engine-playback.js
   if (window.__amlEngineInjected) throw new Error("[AML] double-injection guard");
   window.__amlEngineInjected = true;
@@ -5537,6 +5546,7 @@
     _directPlayAdamId = null;
     _directPlayGen = 0;
     const myGen = ++_generation;
+    const _prevMode = _vlcMode ? "alac" : null;
     _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `htc:${_htcAdamId ?? "?"}`);
     const adamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
@@ -5573,6 +5583,10 @@
           }, 5e3);
         });
         return;
+      }
+      if (needsVlcStop(_prevMode, playbackMode(sess))) {
+        fetch(`${ENGINE}/api/v1/vlc/stop`, { method: "POST" }).catch(() => {
+        });
       }
       _sessionId = sess.sessionId;
       _durationSec = (sess.durationMs ?? 0) / 1e3;

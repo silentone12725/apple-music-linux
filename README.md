@@ -101,8 +101,7 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 
 ## Roadmap
 
-- **Playback handoff** — clean transitions between AAC, lossless, and music video modes without stalls, double-plays, or state leaks
-- **Notifications** — now-playing OSD with artwork on track change
+- **Playback handoff** — verify transitions between AAC, lossless, and music video modes on real playback (stalls, double-plays, state leaks); leaving lossless now stops libvlc, with tests
 - **arm64 support** — packaging and wrapper binary for Apple Silicon / Raspberry Pi
 - **EQ Studio** — per-headphone parametric EQ from autoeq.app (engine ready, UI coming)
 

@@ -19,6 +19,7 @@
 import { mp4ParseBoxes as _mp4ParseBoxes } from './engine/mp4parse.js';
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
+import { playbackMode, needsVlcStop } from './engine/handoff.js';
 
 if (window.__amlEngineInjected) throw new Error('[AML] double-injection guard');
 window.__amlEngineInjected = true;
@@ -6087,6 +6088,7 @@ async function handleTrackChange(mk) {
     _directPlayGen    = 0;
 
     const myGen = ++_generation;
+    const _prevMode = _vlcMode ? 'alac' : null; // the reset below clears _vlcMode
     _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `htc:${_htcAdamId ?? '?'}`);
 
@@ -6142,6 +6144,12 @@ async function handleTrackChange(mk) {
                 setTimeout(() => { if (_sessionId !== sess.sessionId) deleteSession(sess.sessionId); }, 5000);
             });
             return;
+        }
+
+        // Leaving the lossless path: the engine session is released by the reset, but libvlc
+        // keeps playing until told to stop.
+        if (needsVlcStop(_prevMode, playbackMode(sess))) {
+            fetch(`${ENGINE}/api/v1/vlc/stop`, { method: 'POST' }).catch(() => {});
         }
 
         _sessionId      = sess.sessionId;
