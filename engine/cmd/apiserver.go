@@ -61,6 +61,7 @@ import (
 	"engine/core/prefetch"
 	"engine/core/vlc"
 	"engine/internal/ring"
+	"engine/utils/ampapi"
 )
 
 // artworkClient is used for proxying artwork and catalog API responses.
@@ -73,7 +74,6 @@ var artworkClient = &http.Client{
 		MaxIdleConnsPerHost: 10,
 	},
 }
-
 
 // drmAccountAdapter adapts *drm.DRMManager to apple.AccountTokenSource so the
 // apple package stays decoupled from the drm package's concrete types.
@@ -441,11 +441,11 @@ type APIServer struct {
 	eagerStart  bool   // launch the drm binary at Start() when a session exists
 	sessionDir  string // session/credential directory guarded by sessionLock
 	sessionLock *drm.SessionLock
-	backendName string // configured backend name ("native")
-	scheduler   *prefetch.Scheduler  // background cache-warming scheduler
-	diskCache   *diskcache.Cache     // per-track decrypted audio disk cache
-	libStore    *library.Store       // local library metadata cache (songs, playlists)
-	vlcPlayer   *vlc.Player          // nil when libvlc is not available
+	backendName string              // configured backend name ("native")
+	scheduler   *prefetch.Scheduler // background cache-warming scheduler
+	diskCache   *diskcache.Cache    // per-track decrypted audio disk cache
+	libStore    *library.Store      // local library metadata cache (songs, playlists)
+	vlcPlayer   *vlc.Player         // nil when libvlc is not available
 
 	tokenMu     sync.RWMutex
 	cachedToken string // bearer token cached from the most recent browser request
@@ -465,8 +465,8 @@ type APIServer struct {
 // ServerConfig holds infrastructure values resolved once at startup.
 // All fields are optional: zero values fall back to sensible defaults.
 type ServerConfig struct {
-	DRMBinaryPath      string
-	DRMBaseDir         string
+	DRMBinaryPath string
+	DRMBaseDir    string
 	// ExportFloorKbps is the minimum export rate (KiB/s) while playback
 	// streams; 0 selects the export package default.
 	ExportFloorKbps int
@@ -521,7 +521,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// NativeBackend (in-process CGO, libdrm_client.so) is the DRM backend.
 	// NewNativeBackend returns nil when the native_backend build tag is absent.
 	var drmBackend drm.DRMBackend
-	var drmDir string  // directory containing libdrm_client.so and files/
+	var drmDir string // directory containing libdrm_client.so and files/
 	if drmBinaryPath != "" {
 		drmDir = drmBinaryPath
 	}
@@ -725,6 +725,12 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("GET /api/v1/catalog/playlists/{id}", cors(s.handleCatalogPlaylist))
 	mux.HandleFunc("GET /api/v1/catalog/artists/{id}", cors(s.handleCatalogArtist))
 
+	// Personalised feeds (dormant: no bundled frontend uses them; see
+	// handlers_recommendations.go and docs/api.md).
+	mux.HandleFunc("GET /api/v1/recommendations", cors(s.recommendationsHandler(ampapi.KindRecommendations)))
+	mux.HandleFunc("GET /api/v1/recommendations/heavy-rotation", cors(s.recommendationsHandler(ampapi.KindHeavyRotation)))
+	mux.HandleFunc("GET /api/v1/recommendations/recently-played", cors(s.recommendationsHandler(ampapi.KindRecentlyPlayed)))
+
 	// VLC player — libvlc-backed playback for ALAC/Atmos that the browser cannot decode.
 	// Routes are no-ops when libvlc is not installed; frontend falls back to MSE.
 	s.vlcPlayer, _ = vlc.New() // nil if libvlc unavailable
@@ -856,7 +862,6 @@ func (s *APIServer) Stop() {
 		s.sessionLock = nil
 	}
 }
-
 
 // corsPreflightHandler is the outermost handler. The API is unauthenticated on
 // a fixed port, so it rejects any request a foreign web page could forge:
