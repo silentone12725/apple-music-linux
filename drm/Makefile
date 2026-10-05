@@ -222,9 +222,20 @@ $(TEST_REAL_TARGET): $(TEST_REAL_SRC) $(TARGET)
 
 # ── Utility targets ───────────────────────────────────────────────────────────
 
-clean:
-	rm -f $(OBJS) $(HYBRIS_OBJS) $(NATIVE_OBJS) $(TARGET) $(TEST_TARGET) $(TEST_REAL_TARGET)
+# Compiler output only: objects, the generated embedded-blob sources, probe and test
+# binaries. The built library stays, so `make clean-objs` after a build keeps what you ship.
+clean-objs:
+	rm -f $(OBJS) $(HYBRIS_OBJS) $(NATIVE_OBJS) $(TEST_TARGET) $(TEST_REAL_TARGET) $(PROBE_TARGET)
 	rm -rf $(BLOBS_DIR)
+
+# Everything `make` produced, including the library itself.
+clean: clean-objs
+	rm -f $(TARGET)
+
+# Build the library, then drop everything it was built from (the blobs alone are ~400 MB).
+# The next `make` regenerates them.
+release: $(TARGET)
+	$(MAKE) clean-objs
 
 # Remove ICU build outputs so they are rebuilt from source on next make.
 clean-icu:
@@ -282,5 +293,5 @@ coverage: LDFLAGS_LIB += --coverage
 coverage: LDFLAGS_TEST += --coverage
 coverage: clean all
 
-.PHONY: all clean clean-icu install uninstall test test-https test-realworld test-all \
+.PHONY: all clean clean-objs release clean-icu install uninstall test test-https test-realworld test-all \
         analyze format-check format valgrind-test coverage probe gen-blobs build-icu

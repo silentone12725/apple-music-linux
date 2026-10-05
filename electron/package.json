@@ -17,6 +17,8 @@
   },
   "scripts": {
     "dist": "npm run build:go && npm run build:engine && electron-builder --linux AppImage",
+    "postdist": "rm -f dist/builder-debug.yml dist/builder-effective-config.yaml",
+    "clean": "bash ../scripts/clean.sh",
     "build:engine": "npx esbuild src/engine-playback.js --bundle --format=iife --outfile=engine-bundle.js && cp engine-bundle.js dist/linux-unpacked/resources/engine-bundle.js",
     "build:go": "bash ../scripts/build-engine.sh dist/resources"
   },

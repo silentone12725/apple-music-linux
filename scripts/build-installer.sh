@@ -11,18 +11,27 @@
 # Usage:
 #   ./scripts/build-installer.sh           # full build
 #   ./scripts/build-installer.sh --skip-eb # reuse existing electron/dist/linux-unpacked
+#   ./scripts/build-installer.sh --clean   # afterwards also delete electron/dist/linux-unpacked
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SKIP_EB=0
-for arg in "$@"; do [ "$arg" = "--skip-eb" ] && SKIP_EB=1; done
+CLEAN=0
+for arg in "$@"; do
+    case "$arg" in
+        --skip-eb) SKIP_EB=1 ;;
+        --clean)   CLEAN=1 ;;
+    esac
+done
 
 # ── version ───────────────────────────────────────────────────────────────────
 VERSION=$(node -p "require('$REPO/electron/package.json').version")
 STAGE="$REPO/.installer-stage"
 OUT="$REPO/dist"
 UNPACKED="$STAGE/linux-unpacked"
+# The staging copy is several hundred MB: remove it whether the build succeeds or fails.
+trap 'rm -rf "$STAGE"' EXIT
 
 echo "Building Apple Music Linux $VERSION installer..."
 
@@ -96,6 +105,11 @@ chmod +x "$OUTFILE"
 
 # ── cleanup ───────────────────────────────────────────────────────────────────
 rm -rf "$STAGE"
+if [ "$CLEAN" = 1 ]; then
+    # electron-builder's unpacked output is an intermediate: the .run holds everything in it.
+    rm -rf "$ELECTRON/dist/linux-unpacked" "$ELECTRON/dist/"builder-*.y*ml
+    echo "Removed electron/dist/linux-unpacked (--clean)"
+fi
 
 SIZE=$(du -sh "$OUTFILE" | cut -f1)
 echo ""

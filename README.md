@@ -233,17 +233,28 @@ cp ../drm/libdrm-native.so ../drm/libhybris-core.so ../electron/dist/resources/
 ## Build
 
 ```bash
-# AppImage
+make -C drm                           # DRM client library (drm/libdrm_client.so)
 cd electron
-bash build.sh
-NODE_ENV=production npm run dist
-# → dist/apple-music-linux.AppImage
-
-# .run SFX installer (requires the AppImage first)
-cd ..
-bash build-installer.sh
-# → dist/apple-music-linux.run
+bash build.sh                         # bundle the audio-only VLC subset → dist/resources/vlc
+NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
+cd .. && scripts/build-installer.sh   # .run installer → dist/apple-music-linux-<version>.run
 ```
+
+### Cleaning
+
+Builds leave intermediates behind (the DRM library alone generates ~400 MB of embedded-blob sources).
+
+```bash
+scripts/clean.sh --dry-run         # see what would go
+scripts/clean.sh                   # intermediates: objects, embedded blobs, probe/test binaries, staging
+scripts/clean.sh --dist            # + packaged output (dist/, AppImage, electron/dist/linux-unpacked)
+make -C drm release                # build the library, then drop what it was built from
+scripts/build-installer.sh --clean # build the installer, then drop electron/dist/linux-unpacked
+```
+
+`scripts/clean.sh --all` also removes the built library and `electron/dist/resources` — the engine
+`npx electron .` runs — so rebuild with `make -C drm` and `npm run build:go` afterwards. Your Apple session
+(`drm/files`) and `drm/rootfs` are never touched.
 
 ## Project structure
 
