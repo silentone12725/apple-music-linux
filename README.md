@@ -237,7 +237,7 @@ make -C drm                           # DRM client library (drm/libdrm_client.so
 cd electron
 bash build.sh                         # bundle the audio-only VLC subset → dist/resources/vlc
 NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
-cd .. && scripts/build-installer.sh   # .run installer → dist/apple-music-linux-<version>.run
+cd .. && scripts/build-installer.sh   # .run installer → dist/apple-music-linux.run
 ```
 
 ### Cleaning

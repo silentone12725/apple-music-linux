@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-installer.sh — builds dist/apple-music-linux-<version>.run
+# build-installer.sh — builds dist/apple-music-linux.run (the version is inside, not in the name)
 #
 # Every component is rebuilt from source on each run, then the packaged result is checked
 # against the fresh build, so the installer cannot silently carry a stale engine, DRM
@@ -169,7 +169,9 @@ done
 
 mkdir -p "$OUT"
 HEADER="$REPO/scripts/installer-header.sh"
-OUTFILE="$OUT/apple-music-linux-$VERSION.run"
+OUTFILE="$OUT/apple-music-linux.run"
+# an older build named after its version would sit beside the new file and be mistaken for it
+rm -f "$OUT"/apple-music-linux-*.run
 
 # Write header with version substituted
 sed "s/__VERSION__/$VERSION/g" "$HEADER" > "$OUTFILE"
