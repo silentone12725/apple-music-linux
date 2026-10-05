@@ -7766,16 +7766,25 @@ async function setup() {
             // contains one we set the queue to just the target under its own descriptor
             // key. Context is not lost for long: the NPIDF sync folds MK's live queue
             // back into the active container on the next track load.
-            const hasVideo = targetIsVideo || allIds.some(_isVideoId);
-            if (hasVideo) {
-                const desc = targetIsVideo
-                    ? { musicVideo: targetSongId }
-                    : { song: targetSongId };
+            // A song target does not need the single-item fallback: drop the videos from the
+            // list and queue the songs normally. Using a bare {song:id} descriptor let MK
+            // append the whole album and jump to its first track, so clicking track 6 of an
+            // album played track 1 whenever a music video had been played earlier.
+            const songIds = targetIsVideo ? allIds : allIds.filter(id => !_isVideoId(id));
+            const songIdx = targetIsVideo ? -1 : songIds.indexOf(targetSongId);
+            if (targetIsVideo) {
+                const desc = { musicVideo: targetSongId };
                 console.log('[AML] _amlGoto mixed/MV session — targeted setQueue ' + JSON.stringify(desc));
                 _amlGotoTarget = 0;
                 _amlGotoTargetId = targetSongId ?? null;
                 await mk.setQueue(desc).catch(() => {});
                 await mk.changeToMediaAtIndex(0).catch(() => {});
+            } else if (songIdx >= 0 && songIds.length !== allIds.length) {
+                console.log('[AML] _amlGoto mixed session — songs only, idx=' + songIdx + ' of ' + songIds.length);
+                _amlGotoTarget = songIdx;
+                _amlGotoTargetId = targetSongId ?? null;
+                await mk.setQueue({ songs: songIds }).catch(() => {});
+                await mk.changeToMediaAtIndex(songIdx).catch(() => {});
             } else {
                 const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
                 _amlGotoTarget = targetIdx;
@@ -8492,6 +8501,26 @@ async function setup() {
                     // the MV as a song and open the wrong session type.
                     if (swType === 'music-videos' || desc?.url?.includes('/music-video/')) {
                         _itemTypes.set(startWithId, 'music-videos');
+                    }
+                    // A row click inside an album arrives as {url: .../album/<slug>/<id>, startWith:
+                    // {id, type:'songs'}}. Queuing just that track makes MK expand the queue to
+                    // the whole album afterwards and reset to position 0, so clicking track 6
+                    // played track 1. Seed the container with the album's tracks instead and
+                    // start at the clicked one (the same shape the albums branches use).
+                    const albumUrlId = typeof desc?.url === 'string' ? desc.url.match(/\/album\/[^/?#]+\/(\d{6,})/)?.[1] : null;
+                    const mkInstAlbum = window.MusicKit?.getInstance?.();
+                    if (albumUrlId && mkInstAlbum?.storefrontId) {
+                        if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
+                        _externalPlayGateTimer = setTimeout(() => { if (_AML_DEBUG) console.log('[AML click] AAC CDN gate reset (safety timeout)'); _aacCloseGate(); }, 20000);
+                        return mkInstAlbum.api.music(`/v1/catalog/${mkInstAlbum.storefrontId}/albums/${encodeURIComponent(albumUrlId)}/tracks`, { limit: 100 })
+                            .then(res => res?.data?.data || []).catch(() => [])
+                            .then(items => {
+                                const trackIds = items.map(item => item?.id).filter(id => id && /^\d{6,}$/.test(id));
+                                if (trackIds.includes(startWithId)) {
+                                    return _aacOwnedGoto(trackIds, startWithId, 'album/startWith');
+                                }
+                                return _aacOwnedGoto([startWithId], startWithId, 'startWith');
+                            });
                     }
                     // Single-item container. The NPIDF handler syncs MK's live queue into
                     // the active container on every track load, so the rest of the context
