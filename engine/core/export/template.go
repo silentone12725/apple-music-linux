@@ -77,13 +77,13 @@ func renderTemplate(t FilenameTemplate, v templateVar) string {
 			value = v.Album
 		case "track_number", "track":
 			if format != "" {
-				value = fmt.Sprintf("%"+format, v.TrackNumber)
+				value = formatNumber(format, v.TrackNumber)
 			} else {
 				value = strconv.Itoa(v.TrackNumber)
 			}
 		case "disc_number", "disc":
 			if format != "" {
-				value = fmt.Sprintf("%"+format, v.DiscNumber)
+				value = formatNumber(format, v.DiscNumber)
 			} else {
 				value = strconv.Itoa(v.DiscNumber)
 			}
@@ -121,6 +121,20 @@ func renderTemplate(t FilenameTemplate, v templateVar) string {
 		path = path + "." + v.Ext
 	}
 	return path
+}
+
+// numberFormatRe is the whole of what a template may ask for: an optional zero flag
+// and a width of at most two digits, then "d" (so "d", "2d", "02d").
+var numberFormatRe = regexp.MustCompile(`^0?[0-9]{0,2}d$`)
+
+// formatNumber applies a template's number format. The format arrives from the client,
+// so anything beyond zero-padding falls back to plain decimal instead of reaching
+// fmt (where a verb like %[9]d or a huge width does unexpected things).
+func formatNumber(format string, n int) string {
+	if numberFormatRe.MatchString(format) {
+		return fmt.Sprintf("%"+format, n)
+	}
+	return strconv.Itoa(n)
 }
 
 // slugify converts a string to a URL-safe lowercase slug (spaces → hyphens,

@@ -173,3 +173,61 @@ func TestEventBus_ConcurrentEmitAndSubscribe(t *testing.T) {
 		<-done
 	}
 }
+
+// A consumer that stops reading must be disconnected, not silently dropped from: it
+// would otherwise keep a stale view believing it is current. Other subscribers are
+// unaffected, and the bus never blocks.
+func TestEventBus_SlowConsumerIsDisconnected(t *testing.T) {
+	b := newTestBus()
+	_, slow, _, _ := b.subscribeAndReplay(-1)
+	_, fast, _, _ := b.subscribeAndReplay(-1)
+
+	got := 0
+	for i := 0; i < 200; i++ { // the subscription buffer holds 64
+		b.emit("tick", nil)
+		select {
+		case <-fast:
+			got++
+		default:
+			t.Fatalf("fast subscriber missed event %d", i)
+		}
+	}
+	if got != 200 {
+		t.Fatalf("fast subscriber got %d events, want 200", got)
+	}
+
+	delivered := 0
+	for range slow { // the channel must end (closed), not block forever
+		delivered++
+	}
+	if delivered == 0 || delivered > 64 {
+		t.Fatalf("slow subscriber drained %d buffered events, want 1..64 before the close", delivered)
+	}
+
+	b.mu.Lock()
+	n := len(b.clients)
+	b.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d subscribers left, want only the fast one", n)
+	}
+}
+
+// After an engine restart event IDs start over, so a client's Last-Event-ID can be
+// larger than anything the new bus ever issued. That must read as "resync", not as an
+// empty replay.
+func TestEventBus_LastEventIDFromBeforeARestartIsTruncated(t *testing.T) {
+	b := newTestBus()
+	b.emit("a", nil)
+	b.emit("b", nil)
+
+	_, _, replay, truncated := b.subscribeAndReplay(500)
+	if !truncated || len(replay) != 0 {
+		t.Fatalf("truncated=%v replay=%d, want truncated with no replay", truncated, len(replay))
+	}
+	if _, _, replay, truncated = b.subscribeAndReplay(1); truncated || len(replay) != 1 {
+		t.Fatalf("a current Last-Event-ID must still replay normally (truncated=%v, replay=%d)", truncated, len(replay))
+	}
+	if _, _, _, truncated = newTestBus().subscribeAndReplay(0); truncated {
+		t.Fatal("a fresh bus and Last-Event-ID 0 must not be flagged")
+	}
+}

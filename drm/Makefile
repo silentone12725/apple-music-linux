@@ -245,6 +245,10 @@ test: $(TEST_TARGET)
 	@echo "Running acceptance tests..."
 	@LD_LIBRARY_PATH=. $(TEST_TARGET); exit $$?
 
+# HTTP client and cookie jar against a local TLS server that misbehaves on purpose.
+test-https: $(TARGET)
+	@./tests/run_https_test.sh
+
 test-realworld: $(TEST_REAL_TARGET)
 	@echo "Running real-world tests..."
 	@LD_LIBRARY_PATH=. $(TEST_REAL_TARGET); exit $$?
@@ -278,5 +282,5 @@ coverage: LDFLAGS_LIB += --coverage
 coverage: LDFLAGS_TEST += --coverage
 coverage: clean all
 
-.PHONY: all clean clean-icu install uninstall test test-realworld test-all \
+.PHONY: all clean clean-icu install uninstall test test-https test-realworld test-all \
         analyze format-check format valgrind-test coverage probe gen-blobs build-icu

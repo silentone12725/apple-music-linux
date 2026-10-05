@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 )
 
 // AuthCoordinator implements AuthSource and bridges the engine's intent API
@@ -111,7 +110,3 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		return "", ctx.Err()
 	}
 }
-
-// authChallengeTimeout bounds how long the backend waits for a 2FA/device
-// approval reply from the browser.
-const authChallengeTimeout = 5 * time.Minute

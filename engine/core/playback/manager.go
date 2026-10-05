@@ -32,6 +32,9 @@ import (
 
 const sessionTTL = 4 * time.Hour
 
+// touchEvery is how often use of a session pushes its expiry back out.
+const touchEvery = 5 * time.Minute
+
 // OpenRequest carries everything the Manager needs to open a playback session.
 // Fields map directly to media.OpenRequest; the manager is a transparent relay.
 type OpenRequest struct {
@@ -92,6 +95,13 @@ type Manager struct {
 	fgBytes atomic.Int64
 	// fgNeedBps is the sum of the required rates of active Foreground streams.
 	fgNeedBps atomic.Int64
+
+	// releaseHook is told about every session that is removed — released, expired on
+	// lookup or swept by the reaper — so owners of per-session resources (producers,
+	// scratch files) can free them. Called outside m.mu.
+	hookMu      sync.Mutex
+	releaseHook func(sessionID string)
+	released    []string // removed sessions not yet reported to the hook (guarded by mu)
 }
 
 // Class tells the Manager who a stream is for. It is carried on the context
@@ -550,12 +560,44 @@ func (m *Manager) Release(id string) {
 	m.mu.Lock()
 	m.deleteLocked(id)
 	m.mu.Unlock()
+	m.drainReleased()
+}
+
+// SetReleaseHook registers fn to be called, outside the manager's lock, with the ID of
+// every session that goes away for any reason. Only one hook is kept.
+func (m *Manager) SetReleaseHook(fn func(sessionID string)) {
+	m.hookMu.Lock()
+	m.releaseHook = fn
+	m.hookMu.Unlock()
+}
+
+// drainReleased reports sessions removed since the last call to the release hook.
+func (m *Manager) drainReleased() {
+	m.mu.Lock()
+	ids := m.released
+	m.released = nil
+	m.mu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+	m.hookMu.Lock()
+	fn := m.releaseHook
+	m.hookMu.Unlock()
+	if fn == nil {
+		return
+	}
+	for _, id := range ids {
+		fn(id)
+	}
 }
 
 // deleteLocked removes a session and every index entry pointing at it. All
 // removal paths (Release, lookup expiry, reaper) go through here so the
 // secondary maps can never outlive their session. Caller holds m.mu.
 func (m *Manager) deleteLocked(id string) {
+	if _, ok := m.contexts[id]; ok {
+		m.released = append(m.released, id)
+	}
 	// O(1) reverse-map lookup to remove from assetIndex without scanning.
 	if assetKey, ok := m.sessionToAsset[id]; ok {
 		// Only drop the index entry if it still points at this session: a newer
@@ -617,7 +659,9 @@ func (m *Manager) lookup(id string) (*Session, *playContext, bool) {
 		return nil, nil, false
 	}
 	sess := m.sessions[id]
-	expired := time.Now().After(pctx.expiry)
+	now := time.Now()
+	expired := now.After(pctx.expiry)
+	stale := !expired && pctx.expiry.Sub(now) < sessionTTL-touchEvery
 	m.mu.RUnlock()
 	if expired {
 		// Upgrade to write lock and re-check before deleting — the reaper may
@@ -627,7 +671,17 @@ func (m *Manager) lookup(id string) (*Session, *playContext, bool) {
 			m.deleteLocked(id)
 		}
 		m.mu.Unlock()
+		m.drainReleased()
 		return nil, nil, false
+	}
+	if stale {
+		// Sliding expiry: a session someone keeps using must not die at a fixed deadline
+		// in the middle of a long listen. Refreshed at most once per touchEvery.
+		m.mu.Lock()
+		if p, still := m.contexts[id]; still {
+			p.expiry = time.Now().Add(sessionTTL)
+		}
+		m.mu.Unlock()
 	}
 	return sess, pctx, true
 }
@@ -643,12 +697,13 @@ func (m *Manager) reap() {
 // sweepExpired removes every session expired at now, with its index entries.
 func (m *Manager) sweepExpired(now time.Time) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for id, pctx := range m.contexts {
 		if now.After(pctx.expiry) {
 			m.deleteLocked(id)
 		}
 	}
+	m.mu.Unlock()
+	m.drainReleased()
 }
 
 func newID() string {

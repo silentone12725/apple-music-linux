@@ -137,17 +137,6 @@ func appleIPv4Dial(timeout, keepAlive time.Duration) func(context.Context, strin
 	}
 }
 
-// webplaybackClient is used for Apple webplayback API calls and master playlist
-// fetches — needs a timeout; http.DefaultClient has none.
-var webplaybackClient = &http.Client{
-	Transport: &http.Transport{
-		DialContext:         appleIPv4Dial(15*time.Second, 30*time.Second),
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     60 * time.Second,
-	},
-	Timeout: 30 * time.Second,
-}
-
 var mvHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		DialContext:           appleIPv4Dial(10*time.Second, 30*time.Second),

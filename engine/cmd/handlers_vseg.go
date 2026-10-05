@@ -104,21 +104,18 @@ func (st *vsegState) markInitKind(direct bool) (changed bool) {
 }
 
 // vsegStateFor returns the state for id, or nil.
-func vsegStateFor(id string) *vsegState {
-	if v, ok := mvVsegStates.Load(id); ok {
+func (s *APIServer) vsegStateFor(id string) *vsegState {
+	if v, ok := s.vsegStates.Load(id); ok {
 		return v.(*vsegState)
 	}
 	return nil
 }
 
-// mvVsegStates stores active vseg states keyed by session ID.
-var mvVsegStates sync.Map // sessionID → *vsegState
-
 // ensureVsegSession returns an existing active session or creates a new vsegState
 // with a base (from-0) producer and returns it. Idempotent — concurrent callers
 // on the same session ID get the same active session.
 func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) {
-	if v, ok := mvVsegStates.Load(id); ok {
+	if v, ok := s.vsegStates.Load(id); ok {
 		state := v.(*vsegState)
 		state.mu.Lock()
 		active := state.active
@@ -133,7 +130,7 @@ func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) 
 	ephemeral := false
 	if spw == nil {
 		// Another goroutine is already writing this asset; wait for their state to appear.
-		if v, ok := mvVsegStates.Load(id); ok {
+		if v, ok := s.vsegStates.Load(id); ok {
 			state := v.(*vsegState)
 			state.mu.Lock()
 			active := state.active
@@ -158,7 +155,7 @@ func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) 
 	}
 	state := &vsegState{base: base, active: base}
 
-	actual, loaded := mvVsegStates.LoadOrStore(id, state)
+	actual, loaded := s.vsegStates.LoadOrStore(id, state)
 	if loaded {
 		// Another goroutine stored a state first; discard ours.
 		cancel()
@@ -289,8 +286,8 @@ func (s *APIServer) vsegFinishWithErr(id string, vs *vsegSession, err error) {
 }
 
 // stopVsegSession cancels all vseg producers (base and active) for the session.
-func stopVsegSession(id string) {
-	if v, ok := mvVsegStates.LoadAndDelete(id); ok {
+func (s *APIServer) stopVsegSession(id string) {
+	if v, ok := s.vsegStates.LoadAndDelete(id); ok {
 		state := v.(*vsegState)
 		state.mu.Lock()
 		base := state.base
@@ -311,22 +308,22 @@ func stopVsegSession(id string) {
 // when the UI exits before the full-session DELETE fires.
 func (s *APIServer) handlePlaybackVsegStop(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stopVsegSession(id)
+	s.stopVsegSession(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // setActiveVsegSession replaces the active producer in the session state.
 // It cancels the previous active producer if it was a seek producer (not base).
 // Base always keeps running.
-func setActiveVsegSession(id string, seek *vsegSession) {
+func (s *APIServer) setActiveVsegSession(id string, seek *vsegSession) {
 	var state *vsegState
-	if v, loaded := mvVsegStates.Load(id); loaded {
+	if v, loaded := s.vsegStates.Load(id); loaded {
 		state = v.(*vsegState)
 	} else {
 		// Leave active unset: seeding it with `seek` made the swap below cancel the
 		// session it was installing.
 		state = &vsegState{}
-		actual, _ := mvVsegStates.LoadOrStore(id, state)
+		actual, _ := s.vsegStates.LoadOrStore(id, state)
 		state = actual.(*vsegState)
 	}
 
@@ -392,7 +389,7 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 	// Fast path: a previous seek to this exact HLS boundary is already on disk.
 	if _, hit := s.diskCache.Path(assetID, qualifier); hit {
 		if seek, err := s.loadCachedSeek(assetID, qualifier); err == nil {
-			setActiveVsegSession(id, seek)
+			s.setActiveVsegSession(id, seek)
 			log.Printf("[vseg] seek cache hit id=%s actual=%.3f frags=%d", id, actual, seek.idx.FragCount())
 			return actual, nil
 		}
@@ -418,7 +415,7 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 	ctx = aacstream.WithSeekPriority(ctx)
 	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: pinnedCancel(spw, cancel), ephemeral: ephemeral}
 
-	setActiveVsegSession(id, seek)
+	s.setActiveVsegSession(id, seek)
 	holdBackgroundUntilPlayable(ctx, seek)
 
 	// Pass the original startSec, not actual: StreamFrom calls URLsFrom internally
@@ -468,7 +465,7 @@ func (s *APIServer) startVsegSessionDirect(id, assetID string, startSec float64)
 		spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: pinnedCancel(spw, cancel),
 		ephemeral: true, direct: true,
 	}
-	setActiveVsegSession(id, vs)
+	s.setActiveVsegSession(id, vs)
 	holdBackgroundUntilPlayable(ctx, vs)
 	go s.runVsegDirectProducer(ctx, id, src, vs)
 
@@ -802,7 +799,7 @@ func (s *APIServer) handlePlaybackVsegManifest(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	raw, loaded := mvVsegStates.Load(id)
+	raw, loaded := s.vsegStates.Load(id)
 	if !loaded {
 		// Producer not yet started — return an empty-but-valid manifest.
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -871,7 +868,7 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 	// went past tSec), or that the base producer is done. Without this, FragIndexForTime
 	// returns the last available fragment (e.g. T=25s) even when tSec=164s, causing the
 	// frontend to jump to the wrong position.
-	if v, ok := mvVsegStates.Load(id); ok {
+	if v, ok := s.vsegStates.Load(id); ok {
 		state := v.(*vsegState)
 		state.mu.Lock()
 		base := state.base
@@ -918,7 +915,7 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 	// range covers tSec, reuse it directly without starting a new FFmpeg process.
 	// This handles forward seeks within the current producer's range and backward
 	// seeks to positions it has already encoded past.
-	if v, ok := mvVsegStates.Load(id); ok {
+	if v, ok := s.vsegStates.Load(id); ok {
 		state := v.(*vsegState)
 		state.mu.Lock()
 		active := state.active
@@ -957,7 +954,7 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 		info, dErr := s.startVsegSessionDirect(id, sess.AssetID, tSec)
 		if dErr == nil {
 			reinit := false
-			if st := vsegStateFor(id); st != nil {
+			if st := s.vsegStateFor(id); st != nil {
 				reinit = st.markInitKind(true)
 			}
 			log.Printf("[vseg/seek] direct id=%s t=%.3f startSec=%.3f tsOffset=%.3f reinit=%v", id, tSec, info.StartSec, info.TsOffset, reinit)
@@ -996,7 +993,7 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 	// Return immediately — the producer runs in the background.
 	// The frontend drains its SourceBuffer and restarts the fetch loop from seg/0.
 	reinit := false
-	if st := vsegStateFor(id); st != nil {
+	if st := s.vsegStateFor(id); st != nil {
 		reinit = st.markInitKind(false)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"n": 0, "t": actual, "reinit": reinit})

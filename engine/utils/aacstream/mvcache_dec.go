@@ -21,8 +21,10 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -48,25 +50,33 @@ var (
 	mvDecInFlt = map[string]struct{}{} // assetIDs currently being written
 )
 
-func init() {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
-	}
-	mvDecDir = filepath.Join(base, mvDecDirName)
-	os.MkdirAll(mvDecDir, 0700)
+var mvDecOnce sync.Once
 
-	// Account for existing cached files. The directory holds at most ~10-20 large
-	// files (bounded by the 2 GB segment cache limit), so the walk is fast enough
-	// to do synchronously — avoiding a race with ClearMVDecCache's Store(0).
-	var total int64
-	filepath.Walk(mvDecDir, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(info.Name(), ".enc") {
-			total += info.Size()
+// mvDecDirPath returns the encrypted MV cache directory. It is created, and the size of
+// what is already in it counted, on first use rather than at import.
+func mvDecDirPath() string {
+	mvDecOnce.Do(func() {
+		if mvDecDir == "" {
+			base, err := os.UserCacheDir()
+			if err != nil {
+				base = os.TempDir()
+			}
+			mvDecDir = filepath.Join(base, mvDecDirName)
 		}
-		return nil
+		os.MkdirAll(mvDecDir, 0700)
+
+		// Account for existing cached files. The directory holds at most ~10-20 large
+		// files (bounded by the 2 GB segment cache limit), so the walk is fast.
+		var total int64
+		filepath.Walk(mvDecDir, func(_ string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() && strings.HasSuffix(info.Name(), ".enc") {
+				total += info.Size()
+			}
+			return nil
+		})
+		mvDecTotalSz.Store(total)
 	})
-	mvDecTotalSz.Store(total)
+	return mvDecDir
 }
 
 // initMVDecKey loads (or generates) the per-user AES-256 key.
@@ -83,9 +93,16 @@ func initMVDecKey() {
 		}
 		keyPath := filepath.Join(cfgDir, mvDecKeyFile)
 
-		if raw, err := os.ReadFile(keyPath); err == nil && len(raw) == 32 {
+		raw, rerr := os.ReadFile(keyPath)
+		if rerr == nil && len(raw) == 32 {
 			mvDecKey = raw
 			log.Printf("[mv-dec] key loaded from %s", keyPath)
+			return
+		}
+		// Only a missing file means "no key yet". An unreadable or malformed one must not
+		// be replaced: a new key would orphan every cached file encrypted under the old.
+		if rerr == nil || !errors.Is(rerr, fs.ErrNotExist) {
+			log.Printf("[mv-dec] key file %s unusable (%v) — dec cache disabled; delete it to reset", keyPath, rerr)
 			return
 		}
 
@@ -102,7 +119,25 @@ func initMVDecKey() {
 			log.Printf("[mv-dec] mkdir %s: %v — dec cache disabled", filepath.Dir(keyPath), err)
 			return
 		}
-		if err := os.WriteFile(keyPath, key, 0600); err != nil {
+		// O_EXCL: if another process created the key meanwhile, use theirs.
+		f, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if errors.Is(err, fs.ErrExist) {
+			if raw, rerr := os.ReadFile(keyPath); rerr == nil && len(raw) == 32 {
+				mvDecKey = raw
+				return
+			}
+		}
+		if err == nil {
+			if _, err = f.Write(key); err == nil {
+				err = f.Close()
+			} else {
+				f.Close()
+			}
+			if err != nil {
+				os.Remove(keyPath) //nolint:errcheck
+			}
+		}
+		if err != nil {
 			log.Printf("[mv-dec] write key %s: %v — dec cache disabled", keyPath, err)
 			return
 		}
@@ -126,7 +161,7 @@ func mvDecFilePath(assetID string, maxHeight int) string {
 		}
 		return '_'
 	}, assetID)
-	return filepath.Join(mvDecDir, fmt.Sprintf("%s-%d.enc", safe, maxHeight))
+	return filepath.Join(mvDecDirPath(), fmt.Sprintf("%s-%d.enc", safe, maxHeight))
 }
 
 func mvDecInFltKey(assetID string, maxHeight int) string {
@@ -151,7 +186,10 @@ func MVDecExists(assetID string, maxHeight int) bool {
 }
 
 // MVDecTotalBytes returns the total on-disk size of all cached encrypted track files.
-func MVDecTotalBytes() int64 { return mvDecTotalSz.Load() }
+func MVDecTotalBytes() int64 {
+	mvDecDirPath() // count what is already on disk before the first read
+	return mvDecTotalSz.Load()
+}
 
 // ServeMVDec decrypts and copies the cached track for assetID at maxHeight into dst.
 func ServeMVDec(assetID string, maxHeight int, dst io.Writer) error {
@@ -195,7 +233,7 @@ func MVDecCacheWriter(assetID string, maxHeight int, dst io.Writer) *decCacheWri
 		return &decCacheWriter{dst: dst}
 	}
 
-	tmp, err := os.CreateTemp(mvDecDir, ".dec-*.enc.tmp")
+	tmp, err := os.CreateTemp(mvDecDirPath(), ".dec-*.enc.tmp")
 	if err != nil {
 		log.Printf("[mv-dec] temp file: %v", err)
 		return &decCacheWriter{dst: dst}
@@ -311,13 +349,14 @@ func ClearMVDecCache() error {
 
 	// Rename the old directory aside so in-flight writers (which have open file
 	// handles) continue to succeed; their files will be cleaned up below.
-	old := mvDecDir + ".clearing"
+	dir := mvDecDirPath()
+	old := dir + ".clearing"
 	_ = os.RemoveAll(old) // remove any stale .clearing dir from a previous crash
-	if err := os.Rename(mvDecDir, old); err != nil && !os.IsNotExist(err) {
+	if err := os.Rename(dir, old); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	mvDecTotalSz.Store(0)
-	if err := os.MkdirAll(mvDecDir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	// Remove the old directory in the background so the caller isn't blocked by

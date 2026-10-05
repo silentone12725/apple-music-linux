@@ -736,6 +736,11 @@ int drm_init(const struct drm_config *config)
     /* Store paths */
     if (config->base_directory) {
         g_state.base_directory = strdup(config->base_directory);
+        /* It holds session tokens, device identifiers and the cookie jar: keep other
+         * local users out. The files inside are written by libraries we don't control. */
+        if (chmod(config->base_directory, 0700) != 0 && errno != ENOENT) {
+            fprintf(stderr, "[drm] drm_init: could not restrict %s: %s\n", config->base_directory, strerror(errno));
+        }
     }
     if (config->lib64_directory) {
         g_state.lib64_directory = strdup(config->lib64_directory);
@@ -1400,13 +1405,21 @@ int drm_is_recovery_active(void)
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/random.h>
+#include <limits.h>
+#include <ctype.h>
+#include <strings.h>
+#include <sys/socket.h>
 #include <string.h>
 
 /* Connection pool for HTTPS requests */
 #define HTTPS_POOL_SIZE 16
 #define HTTPS_MAX_REDIRECTS 5
 #define HTTPS_RETRY_ATTEMPTS 3
-#define HTTPS_TIMEOUT_SEC 30
+#define HTTPS_TIMEOUT_SEC 30 /* default; AML_HTTPS_TIMEOUT_SEC overrides */
+#define HTTPS_MAX_RESPONSE (32 * 1024 * 1024) /* hard cap on one response body */
 
 struct https_connection {
     SSL *ssl;
@@ -1414,6 +1427,7 @@ struct https_connection {
     char host[256];
     int port;
     time_t last_used;
+    int busy;       /* owned by one in-flight request */
 };
 
 struct https_state {
@@ -1427,6 +1441,8 @@ struct https_state {
 static struct https_state g_https = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
+
+static int g_https_timeout_sec = HTTPS_TIMEOUT_SEC;
 
 /* Optional SPKI pinning.  AML_TLS_PINS holds comma-separated base64
  * SHA-256 digests of SubjectPublicKeyInfo; when set, the handshake is accepted
@@ -1496,16 +1512,25 @@ int drm_https_init(int use_http2)
         return -1;
     }
     
-    /* Load system CA certificates */
-    if (SSL_CTX_load_verify_locations(g_https.ctx, "/etc/ssl/certs/ca-certificates.crt", NULL) != 1) {
-        fprintf(stderr, "[drm] https_init: warning: could not load CA certificates\n");
+    /* Trust store: OpenSSL's defaults first (they honour SSL_CERT_FILE / SSL_CERT_DIR),
+     * then the usual distro bundle locations if that left the store empty. */
+    SSL_CTX_set_default_verify_paths(g_https.ctx);
+    if (sk_X509_OBJECT_num(X509_STORE_get0_objects(SSL_CTX_get_cert_store(g_https.ctx))) == 0) {
+        static const char *const bundles[] = {
+            "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem", "/etc/ssl/cert.pem",
+        };
+        for (size_t i = 0; i < sizeof(bundles) / sizeof(bundles[0]); i++) {
+            if (SSL_CTX_load_verify_locations(g_https.ctx, bundles[i], NULL) == 1) break;
+        }
+    }
+    if (sk_X509_OBJECT_num(X509_STORE_get0_objects(SSL_CTX_get_cert_store(g_https.ctx))) == 0) {
+        fprintf(stderr, "[drm] https_init: warning: no CA certificates found — every TLS handshake will fail\n");
     }
     
     /* Set minimum TLS version to 1.2 */
     SSL_CTX_set_min_proto_version(g_https.ctx, TLS1_2_VERSION);
     
-    /* Prefer server cipher suites */
-    SSL_CTX_set_options(g_https.ctx, SSL_OP_LEGACY_SERVER_CONNECT);
     SSL_CTX_set_options(g_https.ctx, SSL_OP_NO_COMPRESSION);
     
     /* Set cipher suites (strong only) */
@@ -1526,13 +1551,25 @@ int drm_https_init(int use_http2)
     }
     
     g_https.pool_count = 0;
-    
-    fprintf(stderr, "[drm] https_init: initialized (HTTP/2=%d)\n", use_http2);
+
+    const char *to = getenv("AML_HTTPS_TIMEOUT_SEC");
+    if (to && *to) {
+        char *end;
+        long v = strtol(to, &end, 10);
+        if (*end == '\0' && v >= 1 && v <= 600) g_https_timeout_sec = (int)v;
+    }
+
+    fprintf(stderr, "[drm] https_init: initialized (HTTP/2=%d, timeout=%ds)\n", use_http2, g_https_timeout_sec);
     return 0;
 }
 
+static void sigpipe_block(sigset_t *old);
+static void sigpipe_restore(const sigset_t *old);
+
 void drm_https_shutdown(void)
 {
+    sigset_t old_mask;
+    sigpipe_block(&old_mask);
     pthread_mutex_lock(&g_https.lock);
     
     /* Close all pooled connections */
@@ -1558,153 +1595,723 @@ void drm_https_shutdown(void)
     EVP_cleanup();
     ERR_free_strings();
     
+    sigpipe_restore(&old_mask);
     fprintf(stderr, "[drm] https_shutdown: completed\n");
+}
+
+/* ── Sockets ────────────────────────────────────────────────────────────────*/
+
+/* Connect with a deadline: a blocking connect() to a black-holed address can sit
+ * for minutes, and every caller of drm_https_fetch is an engine request. */
+static int connect_with_timeout(int sock, const struct sockaddr *addr, socklen_t alen)
+{
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    int rc = connect(sock, addr, alen);
+    if (rc < 0 && errno == EINPROGRESS) {
+        struct pollfd pfd = { .fd = sock, .events = POLLOUT };
+        int pr;
+        do {
+            pr = poll(&pfd, 1, g_https_timeout_sec * 1000);
+        } while (pr < 0 && errno == EINTR);
+        if (pr <= 0) {
+            return -1; /* timeout or error */
+        }
+        int soerr = 0;
+        socklen_t sl = sizeof(soerr);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &sl) < 0 || soerr != 0) {
+            return -1;
+        }
+        rc = 0;
+    }
+    if (rc < 0) {
+        return -1;
+    }
+    return fcntl(sock, F_SETFL, flags) < 0 ? -1 : 0;
 }
 
 static int create_socket(const char *host, int port)
 {
     struct addrinfo hints, *res, *p;
     int sock = -1;
-    
+
     fprintf(stderr, "[drm] create_socket: resolving %s:%d\n", host, port);
-    
+
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    
+
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%d", port);
-    
+
     if (getaddrinfo(host, port_str, &hints, &res) != 0) {
         fprintf(stderr, "[drm] create_socket: getaddrinfo failed for %s:%d\n", host, port);
         return -1;
     }
-    
+
     for (p = res; p != NULL; p = p->ai_next) {
         sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (sock < 0) {
-            fprintf(stderr, "[drm] create_socket: socket() failed\n");
             continue;
         }
-        
-        if (connect(sock, p->ai_addr, p->ai_addrlen) == 0) {
+        if (connect_with_timeout(sock, p->ai_addr, p->ai_addrlen) == 0) {
+            /* Bound every later SSL_read/SSL_write: a stalled peer must not hang the
+             * calling thread for good. */
+            struct timeval tv = { .tv_sec = g_https_timeout_sec, .tv_usec = 0 };
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             fprintf(stderr, "[drm] create_socket: connected to %s:%d\n", host, port);
             break;
         }
-        fprintf(stderr, "[drm] create_socket: connect() failed\n");
         close(sock);
         sock = -1;
     }
-    
+
     freeaddrinfo(res);
+    if (sock < 0) {
+        fprintf(stderr, "[drm] create_socket: could not connect to %s:%d\n", host, port);
+    }
     return sock;
 }
 
-static struct https_connection *get_pooled_connection(const char *host, int port)
+/* ── Connection pool ────────────────────────────────────────────────────────
+ * A pooled connection is owned by exactly one request at a time (`busy`): an SSL
+ * object must not be used by two threads at once, and interleaving two requests
+ * on one HTTP/1.1 connection corrupts both responses. */
+
+/* Servers close idle keep-alive connections; reusing a stale one just costs a retry,
+ * so don't try connections that have been idle for long. */
+#define HTTPS_IDLE_REUSE_SEC 30
+
+/* Closes and frees a connection's resources. Caller holds g_https.lock or owns conn. */
+static void conn_drop(struct https_connection *conn)
 {
+    if (conn->ssl) {
+        SSL_free(conn->ssl);
+        conn->ssl = NULL;
+    }
+    if (conn->sock >= 0) {
+        close(conn->sock);
+    }
+    conn->sock = -1;
+    conn->busy = 0;
+}
+
+static struct https_connection *pool_acquire(const char *host, int port)
+{
+    time_t now = time(NULL);
     pthread_mutex_lock(&g_https.lock);
 
-    /* Try to find an existing valid connection */
     for (int i = 0; i < g_https.pool_count; i++) {
         struct https_connection *conn = &g_https.pool[i];
-        if (conn->ssl && strcmp(conn->host, host) == 0 && conn->port == port &&
-            SSL_is_init_finished(conn->ssl)) {
-            conn->last_used = time(NULL);
-            pthread_mutex_unlock(&g_https.lock);
-            return conn;
+        if (!conn->ssl || conn->busy || conn->port != port || strcmp(conn->host, host) != 0) {
+            continue;
         }
+        if (now - conn->last_used > HTTPS_IDLE_REUSE_SEC || !SSL_is_init_finished(conn->ssl)) {
+            conn_drop(conn); /* stale: drop it and look further */
+            continue;
+        }
+        conn->busy = 1;
+        conn->last_used = now;
+        pthread_mutex_unlock(&g_https.lock);
+        return conn;
     }
 
-    /* Check pool capacity before unlocking */
-    int has_space = g_https.pool_count < HTTPS_POOL_SIZE;
-    pthread_mutex_unlock(&g_https.lock);
-
-    if (!has_space) {
-        fprintf(stderr, "[drm] get_pooled_connection: pool full\n");
+    /* Claim a slot now so concurrent callers can't oversubscribe the pool while we
+     * connect without the lock. */
+    struct https_connection *slot = NULL;
+    for (int i = 0; i < g_https.pool_count; i++) {
+        if (!g_https.pool[i].ssl && !g_https.pool[i].busy) { slot = &g_https.pool[i]; break; }
+    }
+    if (!slot && g_https.pool_count < HTTPS_POOL_SIZE) {
+        slot = &g_https.pool[g_https.pool_count++];
+        slot->ssl = NULL;
+        slot->sock = -1;
+    }
+    if (!slot) {
+        pthread_mutex_unlock(&g_https.lock);
+        fprintf(stderr, "[drm] pool_acquire: pool full\n");
         return NULL;
     }
+    slot->busy = 1;
+    pthread_mutex_unlock(&g_https.lock);
 
-    /* Create socket and perform SSL handshake WITHOUT holding the lock —
-     * SSL_connect can block for hundreds of milliseconds. */
+    /* Socket + handshake WITHOUT the lock — they can block for a while. */
     int sock = create_socket(host, port);
     if (sock < 0) {
-        return NULL;
+        goto fail;
     }
-
     SSL *ssl = SSL_new(g_https.ctx);
     if (!ssl) {
-        fprintf(stderr, "[drm] get_pooled_connection: SSL_new failed\n");
         close(sock);
-        return NULL;
+        goto fail;
     }
-
     SSL_set_fd(ssl, sock);
     SSL_set_tlsext_host_name(ssl, host);
-    /* Chain validation alone does not bind the certificate to the server we
-     * meant to reach; require the name to match too. */
+    /* Chain validation alone does not bind the certificate to the server we meant
+     * to reach; require the name to match too. */
     SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
     if (SSL_set1_host(ssl, host) != 1) {
-        fprintf(stderr, "[drm] get_pooled_connection: SSL_set1_host failed\n");
         SSL_free(ssl);
         close(sock);
-        return NULL;
+        goto fail;
     }
 
-    fprintf(stderr, "[drm] get_pooled_connection: SSL handshake with %s:%d\n", host, port);
     ERR_clear_error();
     if (SSL_connect(ssl) != 1) {
-        unsigned long err = ERR_get_error();
         char errbuf[256];
-        ERR_error_string_n(err, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[drm] get_pooled_connection: SSL_connect failed: %s\n", errbuf);
+        ERR_error_string_n(ERR_get_error(), errbuf, sizeof(errbuf));
+        fprintf(stderr, "[drm] pool_acquire: SSL_connect to %s failed: %s\n", host, errbuf);
         SSL_free(ssl);
         close(sock);
-        return NULL;
+        goto fail;
     }
     if (!tls_pins_satisfied(ssl)) {
-        fprintf(stderr, "[drm] get_pooled_connection: no certificate in the chain from %s matches AML_TLS_PINS\n", host);
+        fprintf(stderr, "[drm] pool_acquire: no certificate in the chain from %s matches the configured pins\n", host);
         SSL_shutdown(ssl);
         SSL_free(ssl);
         close(sock);
-        return NULL;
+        goto fail;
     }
-    fprintf(stderr, "[drm] get_pooled_connection: handshake ok\n");
 
-    /* Insert under lock; re-check for a duplicate that appeared while we connected */
     pthread_mutex_lock(&g_https.lock);
+    slot->ssl = ssl;
+    slot->sock = sock;
+    snprintf(slot->host, sizeof(slot->host), "%s", host);
+    slot->port = port;
+    slot->last_used = time(NULL);
+    pthread_mutex_unlock(&g_https.lock);
+    return slot;
 
-    for (int i = 0; i < g_https.pool_count; i++) {
-        struct https_connection *conn = &g_https.pool[i];
-        if (conn->ssl && strcmp(conn->host, host) == 0 && conn->port == port) {
-            /* Another thread connected first — use theirs, discard ours */
-            pthread_mutex_unlock(&g_https.lock);
-            SSL_shutdown(ssl);
-            SSL_free(ssl);
-            close(sock);
-            pthread_mutex_lock(&g_https.lock);
-            conn->last_used = time(NULL);
-            pthread_mutex_unlock(&g_https.lock);
-            return conn;
+fail:
+    pthread_mutex_lock(&g_https.lock);
+    slot->busy = 0;
+    pthread_mutex_unlock(&g_https.lock);
+    return NULL;
+}
+
+static void pool_release(struct https_connection *conn, int keep)
+{
+    pthread_mutex_lock(&g_https.lock);
+    if (keep) {
+        conn->last_used = time(NULL);
+        conn->busy = 0;
+    } else {
+        if (conn->ssl) {
+            SSL_shutdown(conn->ssl);
+        }
+        conn_drop(conn);
+    }
+    pthread_mutex_unlock(&g_https.lock);
+}
+
+/* ── HTTP/1.1 over a pooled TLS connection ──────────────────────────────────*/
+
+struct rbuf {
+    SSL *ssl;
+    uint8_t b[8192];
+    size_t pos, len;
+    int bytes_seen;   /* any response byte received, even if the response then failed */
+    int clean_eof;    /* peer closed the TLS session in an orderly way */
+};
+
+static int rb_fill(struct rbuf *rb)
+{
+    int n = SSL_read(rb->ssl, rb->b, (int)sizeof(rb->b));
+    if (n <= 0) {
+        int err = SSL_get_error(rb->ssl, n);
+        if (err == SSL_ERROR_ZERO_RETURN) {
+            rb->clean_eof = 1;
+        }
+        return -1;
+    }
+    rb->pos = 0;
+    rb->len = (size_t)n;
+    rb->bytes_seen = 1;
+    return 0;
+}
+
+static int rb_getc(struct rbuf *rb)
+{
+    if (rb->pos >= rb->len && rb_fill(rb) < 0) {
+        return -1;
+    }
+    return rb->b[rb->pos++];
+}
+
+static int rb_read_exact(struct rbuf *rb, uint8_t *dst, size_t n)
+{
+    while (n > 0) {
+        if (rb->pos >= rb->len && rb_fill(rb) < 0) {
+            return -1;
+        }
+        size_t take = rb->len - rb->pos;
+        if (take > n) take = n;
+        memcpy(dst, rb->b + rb->pos, take);
+        rb->pos += take;
+        dst += take;
+        n -= take;
+    }
+    return 0;
+}
+
+/* Reads one line, without its CRLF. Fails on a line longer than max-1 bytes. */
+static int rb_line(struct rbuf *rb, char *out, size_t max)
+{
+    size_t n = 0;
+    for (;;) {
+        int c = rb_getc(rb);
+        if (c < 0) return -1;
+        if (c == '\n') break;
+        if (n + 1 >= max) return -1;
+        out[n++] = (char)c;
+    }
+    if (n && out[n - 1] == '\r') n--;
+    out[n] = '\0';
+    return 0;
+}
+
+struct http_result {
+    uint8_t *data;
+    size_t len, cap;
+    int status;
+    char location[2048];
+    int close_after;  /* connection can't be reused */
+    int bytes_seen;
+};
+
+static int result_reserve(struct http_result *r, size_t extra)
+{
+    if (extra > (size_t)HTTPS_MAX_RESPONSE || r->len > (size_t)HTTPS_MAX_RESPONSE - extra) {
+        fprintf(stderr, "[drm] https: response exceeds %d bytes — aborting\n", HTTPS_MAX_RESPONSE);
+        return -1;
+    }
+    size_t need = r->len + extra;
+    if (need <= r->cap) return 0;
+    size_t cap = r->cap ? r->cap : 4096;
+    while (cap < need) cap *= 2;
+    uint8_t *tmp = realloc(r->data, cap);
+    if (!tmp) return -1;
+    r->data = tmp;
+    r->cap = cap;
+    return 0;
+}
+
+static void result_free(struct http_result *r)
+{
+    free(r->data);
+    memset(r, 0, sizeof(*r));
+}
+
+static int ssl_write_all(SSL *ssl, const uint8_t *p, size_t n)
+{
+    while (n > 0) {
+        int w = SSL_write(ssl, p, n > INT_MAX ? INT_MAX : (int)n);
+        if (w <= 0) return -1;
+        p += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+/* Value of header `name` if line is "name: value" (case-insensitive), else NULL. */
+static const char *header_value(const char *line, const char *name)
+{
+    size_t nl = strlen(name);
+    if (strncasecmp(line, name, nl) != 0 || line[nl] != ':') return NULL;
+    const char *v = line + nl + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    return v;
+}
+
+static int parse_u64(const char *s, unsigned long long *out)
+{
+    if (!*s) return -1;
+    unsigned long long v = 0;
+    for (; *s >= '0' && *s <= '9'; s++) {
+        unsigned d = (unsigned)(*s - '0');
+        if (v > (ULLONG_MAX - d) / 10) return -1;
+        v = v * 10 + d;
+    }
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s) return -1;
+    *out = v;
+    return 0;
+}
+
+static int token_in_list(const char *list, const char *token)
+{
+    size_t tl = strlen(token);
+    for (const char *p = list; *p;) {
+        while (*p == ' ' || *p == ',' || *p == '\t') p++;
+        const char *e = p;
+        while (*e && *e != ',' && *e != ' ' && *e != '\t') e++;
+        if ((size_t)(e - p) == tl && strncasecmp(p, token, tl) == 0) return 1;
+        p = e;
+    }
+    return 0;
+}
+
+/* Sends the request and reads one complete response. Returns 0 on success, -1 on any
+ * failure (r->bytes_seen then says whether the server had started answering). */
+static int http_exchange(struct https_connection *conn, const char *req, size_t req_len,
+                         const uint8_t *body, uint32_t body_len, int is_head,
+                         const char *host, struct http_result *r)
+{
+    if (ssl_write_all(conn->ssl, (const uint8_t *)req, req_len) < 0 ||
+        (body_len > 0 && ssl_write_all(conn->ssl, body, body_len) < 0)) {
+        fprintf(stderr, "[drm] https: write failed\n");
+        return -1;
+    }
+
+    struct rbuf rb;
+    memset(&rb, 0, sizeof(rb));
+    rb.ssl = conn->ssl;
+
+    char line[8192];
+    int status = 0;
+    /* 1xx interim responses carry no body; skip them. */
+    do {
+        if (rb_line(&rb, line, sizeof(line)) < 0) { r->bytes_seen = rb.bytes_seen; return -1; }
+        if (strncmp(line, "HTTP/1.", 7) != 0 || sscanf(line + 7, "%*d %d", &status) != 1 ||
+            status < 100 || status > 599) {
+            fprintf(stderr, "[drm] https: bad status line\n");
+            r->bytes_seen = 1;
+            return -1;
+        }
+        if (status / 100 == 1) {
+            while (rb_line(&rb, line, sizeof(line)) == 0 && line[0]) { /* skip headers */ }
+            status = 0;
+        }
+    } while (status == 0);
+    r->status = status;
+    r->bytes_seen = 1;
+
+    int chunked = 0, have_len = 0, http10 = (line[7] == '0');
+    unsigned long long content_length = 0;
+    r->close_after = http10;
+    for (int nh = 0;; nh++) {
+        if (nh > 100 || rb_line(&rb, line, sizeof(line)) < 0) return -1;
+        if (!line[0]) break;
+
+        const char *v;
+        if ((v = header_value(line, "Content-Length"))) {
+            unsigned long long n;
+            if (parse_u64(v, &n) < 0 || (have_len && n != content_length)) {
+                fprintf(stderr, "[drm] https: bad or conflicting Content-Length\n");
+                return -1;
+            }
+            content_length = n;
+            have_len = 1;
+        } else if ((v = header_value(line, "Transfer-Encoding"))) {
+            if (token_in_list(v, "chunked")) chunked = 1;
+        } else if ((v = header_value(line, "Connection"))) {
+            if (token_in_list(v, "close")) r->close_after = 1;
+            else if (token_in_list(v, "keep-alive")) r->close_after = 0;
+        } else if ((v = header_value(line, "Location"))) {
+            snprintf(r->location, sizeof(r->location), "%s", v);
+        } else if ((v = header_value(line, "Set-Cookie"))) {
+            drm_cookie_parse_set_cookie_for_host(v, host);
         }
     }
 
-    if (g_https.pool_count >= HTTPS_POOL_SIZE) {
-        pthread_mutex_unlock(&g_https.lock);
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        close(sock);
-        return NULL;
+    if (is_head || status == 204 || status == 304) {
+        return 0; /* no body by definition */
     }
 
-    struct https_connection *conn = &g_https.pool[g_https.pool_count++];
-    conn->ssl  = ssl;
-    conn->sock = sock;
-    snprintf(conn->host, sizeof(conn->host), "%s", host);
-    conn->port = port;
-    conn->last_used = time(NULL);
+    if (chunked) {
+        for (;;) {
+            if (rb_line(&rb, line, sizeof(line)) < 0) return -1;
+            char *end;
+            unsigned long long sz = strtoull(line, &end, 16);
+            if (end == line) return -1;
+            if (sz == 0) break;
+            if (sz > (unsigned long long)HTTPS_MAX_RESPONSE || result_reserve(r, (size_t)sz) < 0) return -1;
+            if (rb_read_exact(&rb, r->data + r->len, (size_t)sz) < 0) return -1;
+            r->len += (size_t)sz;
+            if (rb_line(&rb, line, sizeof(line)) < 0 || line[0]) return -1; /* CRLF after the chunk */
+        }
+        for (int nt = 0; nt < 100; nt++) { /* trailers */
+            if (rb_line(&rb, line, sizeof(line)) < 0) return -1;
+            if (!line[0]) break;
+        }
+        return 0;
+    }
 
-    pthread_mutex_unlock(&g_https.lock);
-    return conn;
+    if (have_len) {
+        if (content_length > (unsigned long long)HTTPS_MAX_RESPONSE || result_reserve(r, (size_t)content_length) < 0) return -1;
+        if (rb_read_exact(&rb, r->data ? r->data : (uint8_t *)line, (size_t)content_length) < 0) {
+            fprintf(stderr, "[drm] https: body truncated\n");
+            return -1;
+        }
+        r->len = (size_t)content_length;
+        return 0;
+    }
+
+    /* No framing: the body ends when the server closes. Only an orderly close counts as
+     * complete; anything else is a truncated response. */
+    r->close_after = 1;
+    for (;;) {
+        if (rb.pos >= rb.len && rb_fill(&rb) < 0) break;
+        size_t take = rb.len - rb.pos;
+        if (result_reserve(r, take) < 0) return -1;
+        memcpy(r->data + r->len, rb.b + rb.pos, take);
+        r->len += take;
+        rb.pos += take;
+    }
+    return rb.clean_eof ? 0 : -1;
+}
+
+/* ── URL handling ───────────────────────────────────────────────────────────*/
+
+struct parsed_url {
+    char host[256];
+    int port;
+    char path[1024];
+};
+
+static int is_bad_url_char(unsigned char c) { return c <= 0x20 || c == 0x7f; }
+
+/* Accepts only https://host[:port][/path][?query]; fragments are dropped. Anything that
+ * would change the request framing (control characters, spaces) is rejected outright:
+ * the URL ends up verbatim in the request line. */
+static int parse_https_url(const char *url, struct parsed_url *u)
+{
+    static const char prefix[] = "https://";
+    if (strncasecmp(url, prefix, sizeof(prefix) - 1) != 0) {
+        fprintf(stderr, "[drm] https_fetch: not an https URL\n");
+        return -1;
+    }
+    for (const char *c = url; *c; c++) {
+        if (is_bad_url_char((unsigned char)*c)) return -1;
+    }
+    const char *p = url + sizeof(prefix) - 1;
+    const char *auth_end = p;
+    while (*auth_end && *auth_end != '/' && *auth_end != '?' && *auth_end != '#') auth_end++;
+
+    const char *colon = NULL;
+    for (const char *c = p; c < auth_end; c++) {
+        if (*c == '@' || *c == '[' || *c == ']') return -1; /* no userinfo / IPv6 literals */
+        if (*c == ':') colon = c;
+    }
+    const char *host_end = colon ? colon : auth_end;
+    size_t hl = (size_t)(host_end - p);
+    if (hl == 0 || hl >= sizeof(u->host)) return -1;
+    memcpy(u->host, p, hl);
+    u->host[hl] = '\0';
+
+    u->port = 443;
+    if (colon) {
+        char *e;
+        long port = strtol(colon + 1, &e, 10);
+        if (e != auth_end || port < 1 || port > 65535) return -1;
+        u->port = (int)port;
+    }
+
+    const char *rest = auth_end;
+    size_t pl = 0;
+    if (*rest == '/' || *rest == '?') {
+        const char *frag = strchr(rest, '#');
+        pl = frag ? (size_t)(frag - rest) : strlen(rest);
+        if (*rest == '?') { /* "https://h?x" → path "/?x" */
+            if (pl + 2 > sizeof(u->path)) return -1;
+            u->path[0] = '/';
+            memcpy(u->path + 1, rest, pl);
+            u->path[pl + 1] = '\0';
+            return 0;
+        }
+        if (pl + 1 > sizeof(u->path)) return -1;
+        memcpy(u->path, rest, pl);
+        u->path[pl] = '\0';
+    } else {
+        strcpy(u->path, "/");
+    }
+    return 0;
+}
+
+static int host_is_apple(const char *host)
+{
+    size_t n = strlen(host), d = strlen("apple.com");
+    if (n < d || strcasecmp(host + n - d, "apple.com") != 0) return 0;
+    return n == d || host[n - d - 1] == '.';
+}
+
+static int method_is_safe_token(const char *m)
+{
+    if (!*m || strlen(m) > 16) return 0;
+    for (; *m; m++) if (!isupper((unsigned char)*m)) return 0;
+    return 1;
+}
+
+static int https_fetch_impl(
+    const char *url,
+    const char *method,
+    const uint8_t *body,
+    uint32_t body_len,
+    uint8_t **out_data,
+    uint32_t *out_len,
+    int *out_status)
+{
+    if (!url || !method || !out_data || !out_len || !out_status || !method_is_safe_token(method)) {
+        return -1;
+    }
+    *out_data = NULL;
+    *out_len = 0;
+    *out_status = 0;
+
+    char cur_url[2048];
+    if (strlen(url) >= sizeof(cur_url)) return -1;
+    strcpy(cur_url, url);
+    char cur_method[17];
+    snprintf(cur_method, sizeof(cur_method), "%s", method);
+    const uint8_t *cur_body = body;
+    uint32_t cur_body_len = body_len;
+
+    for (int hop = 0;; hop++) {
+        struct parsed_url pu;
+        if (parse_https_url(cur_url, &pu) < 0) {
+            fprintf(stderr, "[drm] https_fetch: unsupported or malformed URL\n");
+            return -1;
+        }
+
+        /* Snapshot the music token under lock (no torn read). */
+        char *music_token_snap = NULL;
+        pthread_mutex_lock(&g_state.lock);
+        if (g_state.music_token) music_token_snap = strdup(g_state.music_token);
+        pthread_mutex_unlock(&g_state.lock);
+
+        char request[8192];
+        int n = snprintf(request, sizeof(request),
+            "%s %s HTTP/1.1\r\n"
+            "Host: %s",
+            cur_method, pu.path, pu.host);
+        if (n > 0 && pu.port != 443) {
+            n += snprintf(request + n, sizeof(request) - (size_t)n, ":%d", pu.port);
+        }
+        if (n > 0 && (size_t)n < sizeof(request)) {
+            n += snprintf(request + n, sizeof(request) - (size_t)n,
+                "\r\nUser-Agent: AppleMusicLinux/1.0\r\nAccept: */*\r\nConnection: keep-alive\r\n");
+        }
+        char cookie_header[4096] = {0};
+        if (n > 0 && (size_t)n < sizeof(request) &&
+            drm_cookie_get_for_url(cur_url, cookie_header, sizeof(cookie_header)) == 0 && cookie_header[0]) {
+            n += snprintf(request + n, sizeof(request) - (size_t)n, "Cookie: %s\r\n", cookie_header);
+        }
+        /* The bearer token goes to Apple's key endpoint only — never to whatever host a
+         * redirect or a crafted URL happens to name. */
+        if (n > 0 && (size_t)n < sizeof(request) && music_token_snap &&
+            host_is_apple(pu.host) && strstr(pu.path, "itcs/key/get") != NULL) {
+            n += snprintf(request + n, sizeof(request) - (size_t)n, "Authorization: Bearer %s\r\n", music_token_snap);
+        }
+        free(music_token_snap);
+        if (n > 0 && (size_t)n < sizeof(request)) {
+            if (cur_body_len > 0) {
+                n += snprintf(request + n, sizeof(request) - (size_t)n, "Content-Length: %u\r\n\r\n", cur_body_len);
+            } else if (strcmp(cur_method, "GET") != 0 && strcmp(cur_method, "HEAD") != 0) {
+                n += snprintf(request + n, sizeof(request) - (size_t)n, "Content-Length: 0\r\n\r\n");
+            } else {
+                n += snprintf(request + n, sizeof(request) - (size_t)n, "\r\n");
+            }
+        }
+        if (n < 0 || (size_t)n >= sizeof(request)) {
+            fprintf(stderr, "[drm] https_fetch: request headers too large\n");
+            return -1;
+        }
+
+        int idempotent = strcmp(cur_method, "GET") == 0 || strcmp(cur_method, "HEAD") == 0;
+        int is_head = strcmp(cur_method, "HEAD") == 0;
+        struct http_result res;
+        int ok = 0;
+
+        for (int attempt = 0; attempt < HTTPS_RETRY_ATTEMPTS && !ok; attempt++) {
+            memset(&res, 0, sizeof(res));
+            struct https_connection *conn = pool_acquire(pu.host, pu.port);
+            if (!conn) {
+                if (attempt < HTTPS_RETRY_ATTEMPTS - 1) usleep(100000u * (unsigned)(attempt + 1));
+                continue;
+            }
+            if (http_exchange(conn, request, (size_t)n, cur_body, cur_body_len, is_head, pu.host, &res) == 0) {
+                pool_release(conn, !res.close_after);
+                ok = 1;
+                break;
+            }
+            pool_release(conn, 0);
+            int seen_bytes = res.bytes_seen; /* read before result_free() clears it */
+            result_free(&res);
+            /* A pooled connection the server already closed fails before any byte comes
+             * back: retrying on a fresh one is safe even for POST. Once the server started
+             * answering, only idempotent requests are repeated. */
+            if (seen_bytes && !idempotent) {
+                fprintf(stderr, "[drm] https_fetch: %s failed after the server answered — not retrying\n", cur_method);
+                return -1;
+            }
+        }
+        if (!ok) {
+            fprintf(stderr, "[drm] https_fetch: all attempts failed\n");
+            return -1;
+        }
+
+        int redirect = res.status == 301 || res.status == 302 || res.status == 303 ||
+                       res.status == 307 || res.status == 308;
+        if (redirect && res.location[0] && hop < HTTPS_MAX_REDIRECTS) {
+            char next[2048];
+            if (strncasecmp(res.location, "https://", 8) == 0) {
+                snprintf(next, sizeof(next), "%s", res.location);
+            } else if (res.location[0] == '/' && res.location[1] != '/') {
+                if (pu.port != 443) {
+                    snprintf(next, sizeof(next), "https://%s:%d%s", pu.host, pu.port, res.location);
+                } else {
+                    snprintf(next, sizeof(next), "https://%s%s", pu.host, res.location);
+                }
+            } else {
+                next[0] = '\0'; /* relative/protocol-relative/non-https: hand the 3xx back */
+            }
+            if (next[0] && strlen(next) < sizeof(cur_url)) {
+                int st = res.status;
+                result_free(&res);
+                strcpy(cur_url, next);
+                if (st == 303 || ((st == 301 || st == 302) && strcmp(cur_method, "GET") != 0)) {
+                    strcpy(cur_method, "GET");
+                    cur_body = NULL;
+                    cur_body_len = 0;
+                }
+                continue;
+            }
+        }
+
+        *out_status = res.status;
+        *out_data = res.data;
+        *out_len = (uint32_t)res.len;
+        fprintf(stderr, "[drm] https_fetch: %s %s → %d (%zu bytes)\n", cur_method, pu.host, res.status, res.len);
+        return 0;
+    }
+}
+
+
+/* Writing to a connection the peer already closed raises SIGPIPE, whose default action
+ * kills the whole process — including a Go host that did not ask for it. OpenSSL writes
+ * on its own (alerts, close_notify), so block the signal on this thread for the call and
+ * drain a pending one before restoring the mask. */
+static void sigpipe_block(sigset_t *old)
+{
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &s, old);
+}
+
+static void sigpipe_restore(const sigset_t *old)
+{
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGPIPE);
+    if (!sigismember(old, SIGPIPE)) {
+        struct timespec zero = { 0, 0 };
+        while (sigtimedwait(&s, NULL, &zero) > 0) { /* discard */ }
+    }
+    pthread_sigmask(SIG_SETMASK, old, NULL);
 }
 
 int drm_https_fetch(
@@ -1716,284 +2323,40 @@ int drm_https_fetch(
     uint32_t *out_len,
     int *out_status)
 {
-    if (!url || !method || !out_data || !out_len || !out_status) {
-        return -1;
-    }
-
-    /* ── Parse URL manually (sscanf %*[:] fails for URLs without port) ─────── */
-    char scheme[16] = {0};
-    char host[256]  = {0};
-    char path[1024] = "/";
-    int  port       = 443;
-
-    {
-        const char *p = url;
-        const char *sep = strstr(p, "://");
-        if (!sep || (size_t)(sep - p) >= sizeof(scheme)) {
-            fprintf(stderr, "[drm] https_fetch: invalid URL: %s\n", url);
-            return -1;
-        }
-        size_t sl = (size_t)(sep - p);
-        memcpy(scheme, p, sl);
-        scheme[sl] = '\0';
-        p = sep + 3; /* skip :// */
-
-        /* Host — stops at ':' (port) or '/' (path) */
-        const char *host_end = p;
-        while (*host_end && *host_end != ':' && *host_end != '/') host_end++;
-        size_t hl = (size_t)(host_end - p);
-        if (hl == 0 || hl >= sizeof(host)) { return -1; }
-        memcpy(host, p, hl);
-        host[hl] = '\0';
-        p = host_end;
-
-        /* Optional port */
-        if (*p == ':') {
-            p++;
-            port = atoi(p);
-            while (*p && *p != '/') p++;
-        }
-
-        /* Path — keep the leading '/' */
-        if (*p == '/') {
-            snprintf(path, sizeof(path), "%s", p);
-        }
-    }
-
-    if (strcmp(scheme, "https") != 0) {
-        fprintf(stderr, "[drm] https_fetch: non-HTTPS scheme: %s\n", scheme);
-        return -1;
-    }
-
-    /* ── Snapshot music_token under lock (avoid data race) ─────────────────── */
-    char *music_token_snap = NULL;
-    pthread_mutex_lock(&g_state.lock);
-    if (g_state.music_token) {
-        music_token_snap = strdup(g_state.music_token);
-    }
-    pthread_mutex_unlock(&g_state.lock);
-
-    /* ── Build HTTP/1.1 request ─────────────────────────────────────────────── */
-    char request[8192];
-    int req_len = snprintf(request, sizeof(request),
-        "%s %s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "User-Agent: AppleMusicLinux/1.0\r\n"
-        "Accept: */*\r\n"
-        "Connection: keep-alive\r\n",
-        method, path, host);
-
-    if (req_len >= (int)sizeof(request) - 1) {
-        fprintf(stderr, "[drm] https_fetch: request header overflow\n");
-        free(music_token_snap);
-        return -1;
-    }
-
-    /* Add cookies */
-    char cookie_header[4096] = {0};
-    if (drm_cookie_get_for_url(url, cookie_header, sizeof(cookie_header)) == 0 &&
-        cookie_header[0]) {
-        int n = snprintf(request + req_len, sizeof(request) - req_len,
-            "Cookie: %s\r\n", cookie_header);
-        if (n < 0 || req_len + n >= (int)sizeof(request) - 1) {
-            free(music_token_snap);
-            return -1;
-        }
-        req_len += n;
-    }
-
-    /* Add Authorization header for license requests */
-    if (music_token_snap && strstr(url, "itcs/key/get") != NULL) {
-        int n = snprintf(request + req_len, sizeof(request) - req_len,
-            "Authorization: Bearer %s\r\n", music_token_snap);
-        if (n < 0 || req_len + n >= (int)sizeof(request) - 1) {
-            free(music_token_snap);
-            return -1;
-        }
-        req_len += n;
-        fprintf(stderr, "[drm] https_fetch: adding music token for license request\n");
-    }
-    free(music_token_snap);
-    music_token_snap = NULL;
-
-    {
-        int n;
-        if (body_len > 0) {
-            n = snprintf(request + req_len, sizeof(request) - req_len,
-                "Content-Length: %u\r\n\r\n", body_len);
-        } else {
-            n = snprintf(request + req_len, sizeof(request) - req_len, "\r\n");
-        }
-        if (n < 0 || req_len + n >= (int)sizeof(request)) {
-            return -1;
-        }
-        req_len += n;
-    }
-
-    /* ── Retry loop with exponential back-off ──────────────────────────────── */
-    for (int attempt = 0; attempt < HTTPS_RETRY_ATTEMPTS; attempt++) {
-        struct https_connection *conn = get_pooled_connection(host, port);
-        if (!conn) {
-            fprintf(stderr, "[drm] https_fetch: no connection (attempt %d/%d)\n",
-                    attempt + 1, HTTPS_RETRY_ATTEMPTS);
-            if (attempt < HTTPS_RETRY_ATTEMPTS - 1) {
-                usleep(100000u * (unsigned)(attempt + 1));
-                continue;
-            }
-            return -1;
-        }
-
-        fprintf(stderr, "[drm] https_fetch: sending to %s:%d (attempt %d/%d)\n",
-                host, port, attempt + 1, HTTPS_RETRY_ATTEMPTS);
-
-        /* Send request headers */
-        if (SSL_write(conn->ssl, request, req_len) <= 0) {
-            fprintf(stderr, "[drm] https_fetch: SSL_write (headers) failed\n");
-            /* Mark connection dead */
-            pthread_mutex_lock(&g_https.lock);
-            conn->ssl = NULL;
-            pthread_mutex_unlock(&g_https.lock);
-            continue;
-        }
-
-        /* Send body */
-        if (body_len > 0 && SSL_write(conn->ssl, body, (int)body_len) <= 0) {
-            fprintf(stderr, "[drm] https_fetch: SSL_write (body) failed\n");
-            pthread_mutex_lock(&g_https.lock);
-            conn->ssl = NULL;
-            pthread_mutex_unlock(&g_https.lock);
-            continue;
-        }
-
-        /* ── Read response ─────────────────────────────────────────────────── */
-        char buf[8192];
-        uint8_t *response      = NULL;
-        uint32_t response_len  = 0;
-        int      resp_capacity = 0;
-        int      in_body_flag  = 0;   /* set once we pass the header/body boundary */
-        int      content_length = -1;
-        int      status_code   = 0;
-
-        while (1) {
-            int n = SSL_read(conn->ssl, buf, (int)(sizeof(buf) - 1));
-            if (n <= 0) {
-                fprintf(stderr, "[drm] https_fetch: SSL_read → %d\n", n);
-                break;
-            }
-            buf[n] = '\0';
-
-            if (!in_body_flag) {
-                /* Print first response chunk for debugging */
-                if (status_code == 0) {
-                    fprintf(stderr, "[drm] https_fetch: response: %.*s\n",
-                            n < 200 ? n : 200, buf);
-                }
-
-                /* Parse status line */
-                if (status_code == 0) {
-                    if (sscanf(buf, "HTTP/1.%*d %d", &status_code) != 1) {
-                        fprintf(stderr, "[drm] https_fetch: bad status line\n");
-                        break;
-                    }
-                    fprintf(stderr, "[drm] https_fetch: status %d\n", status_code);
-                    *out_status = status_code;
-                }
-
-                /* Parse Content-Length */
-                if (content_length < 0) {
-                    char *cl = strstr(buf, "Content-Length:");
-                    if (cl) {
-                        content_length = atoi(cl + 15);
-                        fprintf(stderr, "[drm] https_fetch: content-length %d\n",
-                                content_length);
-                    }
-                }
-
-                /* Parse Set-Cookie headers */
-                char *sc = buf;
-                while ((sc = strstr(sc, "Set-Cookie:")) != NULL) {
-                    char *eol = strchr(sc, '\n');
-                    if (!eol) eol = strchr(sc, '\r');
-                    if (eol) {
-                        char saved = *eol;
-                        *eol = '\0';
-                        drm_cookie_parse_set_cookie(sc + 11);
-                        *eol = saved;
-                        sc = eol + 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                /* Detect end of headers */
-                char *hdr_end = strstr(buf, "\r\n\r\n");
-                if (hdr_end) {
-                    in_body_flag = 1;
-                    fprintf(stderr, "[drm] https_fetch: entering body\n");
-
-                    /* Append the body portion in this same read */
-                    const char *bptr = hdr_end + 4;
-                    int bavail = n - (int)(bptr - buf);
-                    if (bavail > 0) {
-                        if ((int)response_len + bavail > resp_capacity) {
-                            resp_capacity = resp_capacity ? resp_capacity * 2 : 4096;
-                            if (resp_capacity < (int)response_len + bavail)
-                                resp_capacity = (int)response_len + bavail + 4096;
-                            uint8_t *tmp = realloc(response, resp_capacity);
-                            if (!tmp) { free(response); response = NULL; break; }
-                            response = tmp;
-                        }
-                        memcpy(response + response_len, bptr, bavail);
-                        response_len += (uint32_t)bavail;
-                    }
-                }
-                /* (No else: if headers span multiple reads, we'll catch them next) */
-            } else {
-                /* Pure body read — append all bytes directly */
-                if ((int)response_len + n > resp_capacity) {
-                    resp_capacity = resp_capacity ? resp_capacity * 2 : 4096;
-                    if (resp_capacity < (int)response_len + n)
-                        resp_capacity = (int)response_len + n + 4096;
-                    uint8_t *tmp = realloc(response, resp_capacity);
-                    if (!tmp) { free(response); response = NULL; break; }
-                    response = tmp;
-                }
-                memcpy(response + response_len, buf, n);
-                response_len += (uint32_t)n;
-            }
-
-            if (content_length >= 0 && response_len >= (uint32_t)content_length) {
-                response_len = (uint32_t)content_length;
-                break;
-            }
-        }
-
-        fprintf(stderr, "[drm] https_fetch: %u bytes, status %d\n",
-                response_len, status_code);
-        *out_data = response;
-        *out_len  = response_len;
-        return 0;
-    }
-
-    fprintf(stderr, "[drm] https_fetch: all attempts failed\n");
-    return -1;
+    sigset_t old;
+    sigpipe_block(&old);
+    int rc = https_fetch_impl(url, method, body, body_len, out_data, out_len, out_status);
+    sigpipe_restore(&old);
+    return rc;
 }
 
-/* ── Cookie Management ──────────────────────────────────────────────────────*/
+/* ── Cookie Management ──────────────────────────────────────────────────────
+ *
+ * A small in-memory jar (at most DRM_COOKIE_MAX_ENTRIES), persisted to
+ * <base_directory>/cookies.txt. Scoping follows RFC 6265: a cookie is keyed by
+ * (name, domain, path); a Set-Cookie may only name a domain the responding host
+ * belongs to; cookies without a Domain attribute are host-only; and a cookie is
+ * sent only to hosts and paths that match. The file is replaced atomically with
+ * mode 0600 (it holds session cookies).
+ *
+ * Apple's own libraries keep a separate store in mpl_db/cookies.sqlitedb. That
+ * schema belongs to them, so this jar never touches it. */
 
 #define DRM_COOKIE_MAX_ENTRIES 64
 #define DRM_COOKIE_MAX_NAME 64
 #define DRM_COOKIE_MAX_VALUE 1024
 #define DRM_COOKIE_MAX_DOMAIN 256
+#define DRM_COOKIE_MAX_PATH 256
 
 struct drm_cookie_entry {
     char name[DRM_COOKIE_MAX_NAME];
     char value[DRM_COOKIE_MAX_VALUE];
-    char domain[DRM_COOKIE_MAX_DOMAIN];
-    char path[256];
-    time_t expires;
+    char domain[DRM_COOKIE_MAX_DOMAIN]; /* lowercase, no leading dot */
+    char path[DRM_COOKIE_MAX_PATH];
+    time_t expires;                     /* 0 = session cookie */
     int secure;
     int http_only;
+    int host_only;                      /* no Domain attribute: exact host match only */
 };
 
 struct drm_cookie_jar {
@@ -2007,129 +2370,190 @@ static struct drm_cookie_jar g_cookies = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
 
-static int cookie_file_exists(void)
+static void str_lower(char *s)
 {
-    if (!g_cookies.file_path[0]) {
-        return 0;
+    for (; *s; s++) *s = (char)tolower((unsigned char)*s);
+}
+
+/* The field separator and line breaks are what the file format cannot carry. */
+static int cookie_text_ok(const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '|' || *s == '\n' || *s == '\r') return 0;
     }
-    struct stat st;
-    return stat(g_cookies.file_path, &st) == 0;
+    return 1;
+}
+
+/* True when `host` is `domain` or a subdomain of it (with a dot boundary, so
+ * "evilapple.com" is not inside "apple.com"). */
+static int host_in_domain(const char *host, const char *domain)
+{
+    size_t hl = strlen(host), dl = strlen(domain);
+    if (dl == 0 || hl < dl || strcasecmp(host + hl - dl, domain) != 0) return 0;
+    return hl == dl || host[hl - dl - 1] == '.';
+}
+
+static int cookie_domain_matches(const char *host, const struct drm_cookie_entry *e)
+{
+    if (!e->domain[0]) return 0; /* unscoped cookies are never sent */
+    if (strcasecmp(host, e->domain) == 0) return 1;
+    return !e->host_only && host_in_domain(host, e->domain);
+}
+
+/* RFC 6265 §5.1.4 */
+static int cookie_path_matches(const char *req_path, const char *cookie_path)
+{
+    size_t cl = strlen(cookie_path);
+    if (cl == 0 || strcmp(cookie_path, "/") == 0) return 1;
+    if (strncmp(req_path, cookie_path, cl) != 0) return 0;
+    return req_path[cl] == '\0' || req_path[cl] == '/' || cookie_path[cl - 1] == '/';
+}
+
+static int cookie_expired(const struct drm_cookie_entry *e, time_t now)
+{
+    return e->expires > 0 && now > e->expires;
+}
+
+/* Writes the jar to disk through a temp file + rename. Caller holds g_cookies.lock. */
+static void cookie_save_locked(void)
+{
+    if (!g_cookies.file_path[0]) return;
+
+    char tmp[sizeof(g_cookies.file_path) + 8];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", g_cookies.file_path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return;
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(tmp); return; }
+
+    time_t now = time(NULL);
+    int ok = 1;
+    for (int i = 0; i < g_cookies.count && ok; i++) {
+        const struct drm_cookie_entry *e = &g_cookies.entries[i];
+        if (cookie_expired(e, now)) continue;
+        /* name|value|domain|path|expires|secure|http_only|host_only */
+        ok = fprintf(f, "%s|%s|%s|%s|%ld|%d|%d|%d\n", e->name, e->value, e->domain, e->path,
+                     (long)e->expires, e->secure, e->http_only, e->host_only) > 0;
+    }
+    ok = (fflush(f) == 0) && ok && fsync(fileno(f)) == 0;
+    fclose(f);
+    if (!ok || rename(tmp, g_cookies.file_path) != 0) unlink(tmp);
+}
+
+static int parse_long_field(char **cursor, long *out)
+{
+    char *sep = strchr(*cursor, '|');
+    if (sep) *sep = '\0';
+    char *end;
+    errno = 0;
+    long v = strtol(*cursor, &end, 10);
+    int ok = errno == 0 && end != *cursor && *end == '\0';
+    *out = ok ? v : 0;
+    *cursor = sep ? sep + 1 : *cursor + strlen(*cursor);
+    return ok;
 }
 
 int drm_cookie_init(void)
 {
-    if (!g_state.base_directory) {
+    return drm_cookie_init_at(g_state.base_directory);
+}
+
+int drm_cookie_init_at(const char *dir)
+{
+    if (!dir) {
         return -1;
     }
-    
-    snprintf(g_cookies.file_path, sizeof(g_cookies.file_path),
-             "%s/cookies.txt", g_state.base_directory);
-    
-    /* Load existing cookies if file exists */
-    if (!cookie_file_exists()) {
-        return 0;
-    }
-    
+
+    pthread_mutex_lock(&g_cookies.lock);
+    snprintf(g_cookies.file_path, sizeof(g_cookies.file_path), "%s/cookies.txt", dir);
+    g_cookies.count = 0;
+
     FILE *f = fopen(g_cookies.file_path, "r");
     if (!f) {
-        return -1;
+        pthread_mutex_unlock(&g_cookies.lock);
+        return 0; /* no jar yet */
     }
-    
+
+    time_t now = time(NULL);
     char line[2048];
     while (fgets(line, sizeof(line), f) && g_cookies.count < DRM_COOKIE_MAX_ENTRIES) {
-        /* Format: name|value|domain|path|expires|secure|http_only */
-        struct drm_cookie_entry *entry = &g_cookies.entries[g_cookies.count];
-        char *ptr = line;
-        char *sep;
-        
-        /* Parse name */
-        sep = strchr(ptr, '|');
-        if (!sep) continue;
-        *sep = '\0';
-        snprintf(entry->name, sizeof(entry->name), "%s", ptr);
-        
-        ptr = sep + 1;
-        
-        /* Parse value */
-        sep = strchr(ptr, '|');
-        if (!sep) continue;
-        *sep = '\0';
-        snprintf(entry->value, sizeof(entry->value), "%s", ptr);
-        
-        ptr = sep + 1;
-        
-        /* Parse domain */
-        sep = strchr(ptr, '|');
-        if (!sep) continue;
-        *sep = '\0';
-        snprintf(entry->domain, sizeof(entry->domain), "%s", ptr);
-        
-        ptr = sep + 1;
-        
-        /* Parse path */
-        sep = strchr(ptr, '|');
-        if (!sep) continue;
-        *sep = '\0';
-        snprintf(entry->path, sizeof(entry->path), "%s", ptr);
-        
-        ptr = sep + 1;
-        
-        /* Parse expires */
-        sep = strchr(ptr, '|');
-        if (!sep) continue;
-        *sep = '\0';
-        entry->expires = atol(ptr);
-        
-        ptr = sep + 1;
-        
-        /* Parse secure */
-        sep = strchr(ptr, '|');
-        if (!sep) continue;
-        *sep = '\0';
-        entry->secure = atoi(ptr);
-        
-        ptr = sep + 1;
-        
-        /* Parse http_only */
-        sep = strchr(ptr, '|');
-        if (sep) *sep = '\0';
-        entry->http_only = atoi(ptr);
-        
-        g_cookies.count++;
+        size_t ll = strlen(line);
+        while (ll && (line[ll - 1] == '\n' || line[ll - 1] == '\r')) line[--ll] = '\0';
+
+        struct drm_cookie_entry e;
+        memset(&e, 0, sizeof(e));
+        char *fields[4];
+        char *cur = line;
+        int bad = 0;
+        for (int i = 0; i < 4; i++) { /* name, value, domain, path */
+            char *sep = strchr(cur, '|');
+            if (!sep) { bad = 1; break; }
+            *sep = '\0';
+            fields[i] = cur;
+            cur = sep + 1;
+        }
+        long expires, secure, http_only, host_only = -1;
+        if (bad || !parse_long_field(&cur, &expires) || !parse_long_field(&cur, &secure) ||
+            !parse_long_field(&cur, &http_only)) {
+            continue;
+        }
+        if (*cur) parse_long_field(&cur, &host_only); /* absent in files from before scoping */
+
+        snprintf(e.name, sizeof(e.name), "%s", fields[0]);
+        snprintf(e.value, sizeof(e.value), "%s", fields[1]);
+        const char *dom = fields[2];
+        int had_dot = (dom[0] == '.');
+        if (had_dot) dom++;
+        snprintf(e.domain, sizeof(e.domain), "%s", dom);
+        str_lower(e.domain);
+        snprintf(e.path, sizeof(e.path), "%s", fields[3][0] == '/' ? fields[3] : "/");
+        e.expires = (time_t)expires;
+        e.secure = secure != 0;
+        e.http_only = http_only != 0;
+        e.host_only = host_only >= 0 ? host_only != 0 : !had_dot; /* old files: a bare domain meant exact match */
+        if (!e.name[0] || !e.domain[0] || cookie_expired(&e, now)) continue;
+        g_cookies.entries[g_cookies.count++] = e;
     }
-    
     fclose(f);
+    pthread_mutex_unlock(&g_cookies.lock);
     return 0;
 }
 
 void drm_cookie_shutdown(void)
 {
     pthread_mutex_lock(&g_cookies.lock);
-    
-    if (!cookie_file_exists() && g_cookies.count == 0) {
-        pthread_mutex_unlock(&g_cookies.lock);
-        return;
-    }
-    
-    FILE *f = fopen(g_cookies.file_path, "w");
-    if (!f) {
-        pthread_mutex_unlock(&g_cookies.lock);
-        return;
-    }
-    
-    for (int i = 0; i < g_cookies.count; i++) {
-        struct drm_cookie_entry *entry = &g_cookies.entries[i];
-        /* Skip expired cookies */
-        if (entry->expires > 0 && time(NULL) > entry->expires) {
-            continue;
-        }
-        fprintf(f, "%s|%s|%s|%s|%ld|%d|%d\n",
-                entry->name, entry->value, entry->domain, entry->path,
-                (long)entry->expires, entry->secure, entry->http_only);
-    }
-    
-    fclose(f);
+    cookie_save_locked();
     pthread_mutex_unlock(&g_cookies.lock);
+}
+
+/* Splits an https URL into lowercase host (no port) and path (no query). */
+static int cookie_url_parts(const char *url, char *host, size_t host_sz, char *path, size_t path_sz, int *is_https)
+{
+    const char *p = strstr(url, "://");
+    if (!p) return -1;
+    *is_https = (p - url == 5 && strncasecmp(url, "https", 5) == 0);
+    p += 3;
+    const char *end = p;
+    while (*end && *end != '/' && *end != ':' && *end != '?' && *end != '#') end++;
+    size_t hl = (size_t)(end - p);
+    if (hl == 0 || hl >= host_sz) return -1;
+    memcpy(host, p, hl);
+    host[hl] = '\0';
+    str_lower(host);
+
+    const char *q = end;
+    while (*q && *q != '/' && *q != '?' && *q != '#') q++; /* skip :port */
+    size_t pl = 0;
+    if (*q == '/') {
+        const char *pe = q;
+        while (*pe && *pe != '?' && *pe != '#') pe++;
+        pl = (size_t)(pe - q);
+    }
+    if (pl == 0) { snprintf(path, path_sz, "/"); return 0; }
+    if (pl >= path_sz) pl = path_sz - 1;
+    memcpy(path, q, pl);
+    path[pl] = '\0';
+    return 0;
 }
 
 int drm_cookie_get_for_url(const char *url, char *out_buf, size_t buf_size)
@@ -2137,160 +2561,165 @@ int drm_cookie_get_for_url(const char *url, char *out_buf, size_t buf_size)
     if (!url || !out_buf || buf_size == 0) {
         return -1;
     }
-    
-    /* Parse host from URL */
-    char host[256] = {0};
-    char *host_start = strstr(url, "://");
-    if (!host_start) {
+    char host[DRM_COOKIE_MAX_DOMAIN], path[1024];
+    int is_https;
+    if (cookie_url_parts(url, host, sizeof(host), path, sizeof(path), &is_https) < 0) {
         return -1;
     }
-    host_start += 3;
-    char *host_end = strchr(host_start, '/');
-    if (host_end) {
-        size_t len = host_end - host_start;
-        if (len >= sizeof(host)) len = sizeof(host) - 1;
-        strncpy(host, host_start, len);
-    } else {
-        strncpy(host, host_start, sizeof(host) - 1);
-    }
-    
+
     out_buf[0] = '\0';
     size_t offset = 0;
-    
+    time_t now = time(NULL);
+
     pthread_mutex_lock(&g_cookies.lock);
-    
-    for (int i = 0; i < g_cookies.count && offset < buf_size - 10; i++) {
-        struct drm_cookie_entry *entry = &g_cookies.entries[i];
-        
-        /* Skip expired cookies */
-        if (entry->expires > 0 && time(NULL) > entry->expires) {
-            continue;
-        }
-        
-        /* Check domain match */
-        if (entry->domain[0] && strcmp(entry->domain, host) != 0) {
-            /* Check suffix match for .domain.com */
-            if (entry->domain[0] == '.') {
-                size_t domain_len = strlen(entry->domain);
-                size_t host_len = strlen(host);
-                if (host_len < domain_len - 1) continue;
-                if (strcmp(host + (host_len - domain_len + 1), entry->domain + 1) != 0) continue;
-            } else {
-                continue;
-            }
-        }
-        
-        /* Add cookie to header */
-        int written = snprintf(out_buf + offset, buf_size - offset,
-                               "%s%s=%s",
-                               offset > 0 ? "; " : "",
-                               entry->name, entry->value);
+    for (int i = 0; i < g_cookies.count; i++) {
+        const struct drm_cookie_entry *e = &g_cookies.entries[i];
+        if (cookie_expired(e, now)) continue;
+        if (e->secure && !is_https) continue;
+        if (!cookie_domain_matches(host, e) || !cookie_path_matches(path, e->path)) continue;
+
+        int written = snprintf(out_buf + offset, buf_size - offset, "%s%s=%s",
+                               offset > 0 ? "; " : "", e->name, e->value);
         if (written < 0 || (size_t)written >= buf_size - offset) {
+            out_buf[offset] = '\0'; /* drop the cookie that did not fit */
             break;
         }
-        offset += written;
+        offset += (size_t)written;
     }
-    
     pthread_mutex_unlock(&g_cookies.lock);
     return 0;
 }
 
-void drm_cookie_parse_set_cookie(const char *set_cookie)
+static char *trim_ws(char *s)
 {
-    if (!set_cookie || !g_state.base_directory) {
+    while (*s == ' ' || *s == '\t') s++;
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) *--e = '\0';
+    return s;
+}
+
+/* Removes the entry matching (name, domain, path), if any. Caller holds the lock. */
+static void cookie_remove_locked(const char *name, const char *domain, const char *path)
+{
+    for (int i = 0; i < g_cookies.count; i++) {
+        struct drm_cookie_entry *e = &g_cookies.entries[i];
+        if (strcmp(e->name, name) == 0 && strcmp(e->domain, domain) == 0 && strcmp(e->path, path) == 0) {
+            memmove(e, e + 1, (size_t)(g_cookies.count - i - 1) * sizeof(*e));
+            g_cookies.count--;
+            return;
+        }
+    }
+}
+
+void drm_cookie_parse_set_cookie_for_host(const char *set_cookie, const char *host)
+{
+    if (!set_cookie || !host || !host[0]) {
         return;
     }
-    
-    pthread_mutex_lock(&g_cookies.lock);
-    
-    if (g_cookies.count >= DRM_COOKIE_MAX_ENTRIES) {
-        pthread_mutex_unlock(&g_cookies.lock);
-        return;
-    }
-    
-    struct drm_cookie_entry *entry = &g_cookies.entries[g_cookies.count];
-    memset(entry, 0, sizeof(*entry));
-    
-    /* Parse name=value; Domain=...; Path=...; Expires=...; Secure; HttpOnly */
-    char *ptr = strdup(set_cookie);
-    char *ptr_orig = ptr;  /* Keep original for free() */
-    if (!ptr) {
-        pthread_mutex_unlock(&g_cookies.lock);
-        return;
-    }
-    
-    /* Extract name=value */
-    char *eq = strchr(ptr, '=');
-    if (!eq) {
-        free(ptr_orig);
-        pthread_mutex_unlock(&g_cookies.lock);
-        return;
-    }
-    *eq = '\0';
-    snprintf(entry->name, sizeof(entry->name), "%s", ptr);
-    
-    ptr = eq + 1;
-    
-    /* Default path is / */
-    strncpy(entry->path, "/", sizeof(entry->path) - 1);
-    
-    /* Parse attributes */
+
+    char *buf = strdup(set_cookie);
+    if (!buf) return;
+
+    struct drm_cookie_entry e;
+    memset(&e, 0, sizeof(e));
+    snprintf(e.path, sizeof(e.path), "/");
+    snprintf(e.domain, sizeof(e.domain), "%s", host);
+    str_lower(e.domain);
+    e.host_only = 1;
+
     char *saveptr;
-    char *token = strtok_r(ptr, ";", &saveptr);
-    while (token) {
-        char *eq2 = strchr(token, '=');
-        if (eq2) {
-            *eq2 = '\0';
-            char *key = token;
-            char *value = eq2 + 1;
-            
-            /* Trim whitespace */
-            while (*key == ' ') key++;
-            while (*value == ' ') value++;
-            
-            if (strcasecmp(key, "domain") == 0) {
-                strncpy(entry->domain, value, sizeof(entry->domain) - 1);
-            } else if (strcasecmp(key, "path") == 0) {
-                strncpy(entry->path, value, sizeof(entry->path) - 1);
-            } else if (strcasecmp(key, "expires") == 0) {
-                /* Parse date: "Wed, 09 Jun 2021 10:18:14 GMT" */
-                struct tm tm = {0};
-                if (strptime(value, "%a, %d %b %Y %H:%M:%S GMT", &tm) == NULL) {
-                    /* Try alternative format */
-                    strptime(value, "%a, %d-%b-%Y %H:%M:%S GMT", &tm);
-                }
-                entry->expires = mktime(&tm);
-            } else if (strcasecmp(key, "max-age") == 0) {
-                entry->expires = time(NULL) + atoi(value);
+    char *pair = strtok_r(buf, ";", &saveptr);
+    char *eq = pair ? strchr(pair, '=') : NULL;
+    if (!eq) { free(buf); return; }
+    *eq = '\0';
+    char *name = trim_ws(pair), *value = trim_ws(eq + 1);
+    if (!name[0] || strlen(name) >= sizeof(e.name) || strlen(value) >= sizeof(e.value) ||
+        !cookie_text_ok(name) || !cookie_text_ok(value)) {
+        free(buf);
+        return;
+    }
+    snprintf(e.name, sizeof(e.name), "%s", name);
+    snprintf(e.value, sizeof(e.value), "%s", value);
+
+    int delete_it = 0, have_max_age = 0;
+    for (char *attr = strtok_r(NULL, ";", &saveptr); attr; attr = strtok_r(NULL, ";", &saveptr)) {
+        char *aeq = strchr(attr, '=');
+        char *key = attr, *val = "";
+        if (aeq) { *aeq = '\0'; val = trim_ws(aeq + 1); }
+        key = trim_ws(key);
+
+        if (strcasecmp(key, "domain") == 0 && val[0]) {
+            if (val[0] == '.') val++;
+            char dom[DRM_COOKIE_MAX_DOMAIN];
+            if (strlen(val) >= sizeof(dom) || !cookie_text_ok(val)) { free(buf); return; }
+            snprintf(dom, sizeof(dom), "%s", val);
+            str_lower(dom);
+            /* A server may only set cookies for its own domain family — and not for a
+             * bare public suffix like "com". */
+            if (!strchr(dom, '.') || !host_in_domain(e.domain, dom)) {
+                fprintf(stderr, "[drm] cookie: rejected Domain=%s from %s\n", dom, host);
+                free(buf);
+                return;
             }
-        } else if (token) {
-            if (strcasecmp(token, "secure") == 0) {
-                entry->secure = 1;
-            } else if (strcasecmp(token, "httponly") == 0) {
-                entry->http_only = 1;
+            snprintf(e.domain, sizeof(e.domain), "%s", dom);
+            e.host_only = 0;
+        } else if (strcasecmp(key, "path") == 0) {
+            if (val[0] == '/' && strlen(val) < sizeof(e.path) && cookie_text_ok(val)) {
+                snprintf(e.path, sizeof(e.path), "%s", val);
+            }
+        } else if (strcasecmp(key, "max-age") == 0) {
+            char *end;
+            long secs = strtol(val, &end, 10);
+            if (end != val) {
+                have_max_age = 1;
+                if (secs <= 0) delete_it = 1;
+                else e.expires = time(NULL) + secs;
+            }
+        } else if (strcasecmp(key, "expires") == 0 && !have_max_age) {
+            struct tm tm;
+            memset(&tm, 0, sizeof(tm));
+            if (strptime(val, "%a, %d %b %Y %H:%M:%S", &tm) != NULL ||
+                strptime(val, "%a, %d-%b-%Y %H:%M:%S", &tm) != NULL) {
+                e.expires = timegm(&tm); /* the date is GMT, not local time */
+                if (e.expires <= time(NULL)) delete_it = 1;
+            }
+        } else if (strcasecmp(key, "secure") == 0) {
+            e.secure = 1;
+        } else if (strcasecmp(key, "httponly") == 0) {
+            e.http_only = 1;
+        }
+    }
+    free(buf);
+
+    pthread_mutex_lock(&g_cookies.lock);
+    cookie_remove_locked(e.name, e.domain, e.path); /* replace, never duplicate */
+    if (!delete_it) {
+        time_t now = time(NULL);
+        for (int i = 0; i < g_cookies.count;) { /* make room: expired first, then the oldest */
+            if (cookie_expired(&g_cookies.entries[i], now)) {
+                memmove(&g_cookies.entries[i], &g_cookies.entries[i + 1],
+                        (size_t)(g_cookies.count - i - 1) * sizeof(e));
+                g_cookies.count--;
+            } else {
+                i++;
             }
         }
-        
-        token = strtok_r(NULL, ";", &saveptr);
+        if (g_cookies.count >= DRM_COOKIE_MAX_ENTRIES) {
+            memmove(&g_cookies.entries[0], &g_cookies.entries[1],
+                    (size_t)(g_cookies.count - 1) * sizeof(e));
+            g_cookies.count--;
+        }
+        g_cookies.entries[g_cookies.count++] = e;
     }
-    
-    /* Set cookie value */
-    /* Find end of value (first ; or end of string) */
-    char *semi = strchr(eq + 1, ';');
-    if (semi) {
-        *semi = '\0';
-    }
-    /* Trim trailing whitespace */
-    char *end = eq + strlen(eq + 1) - 1;
-    while (end > eq && (*end == ' ' || *end == '\r' || *end == '\n')) {
-        *end-- = '\0';
-    }
-    strncpy(entry->value, eq + 1, sizeof(entry->value) - 1);
-    
-    g_cookies.count++;
-    
-    free(ptr_orig);
+    cookie_save_locked();
     pthread_mutex_unlock(&g_cookies.lock);
+}
+
+/* Without the responding host a cookie cannot be scoped safely, so it is not stored. */
+void drm_cookie_parse_set_cookie(const char *set_cookie)
+{
+    (void)set_cookie;
+    fprintf(stderr, "[drm] cookie: drm_cookie_parse_set_cookie() needs the host; use drm_cookie_parse_set_cookie_for_host()\n");
 }
 
 /* ── JWT Token Parsing ──────────────────────────────────────────────────────*/
@@ -2407,24 +2836,15 @@ static int generate_uuid(char *out_uuid, size_t buf_size)
     if (!out_uuid || buf_size < 37) {
         return -1;
     }
-    
+
     uint8_t uuid[16];
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd < 0 || read(fd, uuid, 16) != 16) {
-        /* Fallback to time-based if /dev/urandom fails */
-        if (fd >= 0) close(fd);
-        time_t t = time(NULL);
-        uuid[0] = (t >> 24) & 0xFF;
-        uuid[1] = (t >> 16) & 0xFF;
-        uuid[2] = (t >> 8) & 0xFF;
-        uuid[3] = t & 0xFF;
-        for (int i = 4; i < 16; i++) {
-            uuid[i] = rand() % 256;
-        }
-    } else {
-        close(fd);
+    ssize_t got = getrandom(uuid, sizeof(uuid), 0);
+    if (got != (ssize_t)sizeof(uuid)) {
+        /* No usable entropy source: fail rather than mint a predictable identifier. */
+        fprintf(stderr, "[drm] generate_uuid: getrandom failed: %s\n", strerror(errno));
+        return -1;
     }
-    
+
     /* Set version (4) and variant (1) */
     uuid[6] = (uuid[6] & 0x0F) | 0x40;
     uuid[8] = (uuid[8] & 0x3F) | 0x80;

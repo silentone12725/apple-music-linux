@@ -304,10 +304,16 @@ func (b *eventBus) emit(typ string, data any) {
 	if b.ringLen < ringSize {
 		b.ringLen++
 	}
-	for _, ch := range b.clients {
+	for id, ch := range b.clients {
 		select {
 		case ch <- ev:
-		default: // slow consumer: drop rather than block
+		default:
+			// A consumer that can't keep up must not stall the bus, and silently dropping
+			// events would leave it believing a stale state is current. Disconnect it: the
+			// handler sees the closed channel, tells the client, and the client reconnects
+			// with Last-Event-ID — getting a replay, or a replay.truncated resync signal.
+			close(ch)
+			delete(b.clients, id)
 		}
 	}
 	b.mu.Unlock()
@@ -347,7 +353,11 @@ func (b *eventBus) subscribeAndReplay(afterID int64) (subID string, ch <-chan ss
 	c := make(chan sseEvent, 64) // larger buffer absorbs events emitted during replay write
 	b.clients[id] = c
 
-	if afterID >= 0 && b.ringLen > 0 {
+	if afterID > b.seq {
+		// The client has seen events this bus never issued: the engine restarted and its
+		// IDs started over. Nothing it remembers applies; make it resync.
+		truncated = true
+	} else if afterID >= 0 && b.ringLen > 0 {
 		oldestSlot := b.ringPos - b.ringLen
 		oldestID := b.ring[oldestSlot&ringMask].ID
 		if afterID < oldestID-1 {
@@ -427,6 +437,12 @@ func (cb *circuitBreaker) State() string {
 
 // APIServer is the long-running HTTP daemon started by --api <port>.
 type APIServer struct {
+	// Per-instance playback bookkeeping. These used to be package-level maps, which made two
+	// servers in one process share state; they belong to the server that owns the sessions.
+	vsegStates  sync.Map // sessionID → *vsegState: segmented-video producers
+	mvPreparing sync.Map // assetID → struct{}: faststart caches being built, so the info endpoint can say "preparing" and duplicate jobs are avoided
+	mvEphemeral sync.Map // assetID → struct{}: mv-dl files written under "caching disabled", deleted on session release
+
 	srv         *http.Server
 	tlsSrv      *http.Server // HTTPS listener on port+1 for <video src> byte-range seeking
 	port        int
@@ -474,6 +490,7 @@ type ServerConfig struct {
 
 // NewAPIServer wires all routes.
 func NewAPIServer(port int, cfg ServerConfig) *APIServer {
+	initMVPrefs()
 	epoch := newEpochManager()
 	shutCtx, shutStop := context.WithCancel(context.Background())
 	s := &APIServer{
@@ -578,6 +595,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		acctSource = &drmAccountAdapter{s.dm}
 	}
 	s.pm = playback.NewWithProvider(apple.NewProviderWithCBCS(cbcsDialer, acctSource))
+	s.installReleaseHook()
 
 	// Prefetch scheduler — credentials are resolved lazily at Submit time
 	// so token rotations are picked up automatically.
@@ -641,7 +659,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
-	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10})
+	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10, OutputRoots: exportRoots()})
 
 	mux := http.NewServeMux()
 
@@ -761,7 +779,12 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	// OPTIONS, causing preflights to 405.  Chrome also requires the response
 	// to include Access-Control-Allow-Private-Network: true when fetching
 	// across localhost ports (CORS-RFC1918 / Private Network Access).
-	s.srv = &http.Server{Handler: corsPreflightHandler(mux), ReadHeaderTimeout: 10 * time.Second}
+	s.srv = &http.Server{
+		Handler:           corsPreflightHandler(requireToken(os.Getenv("AML_API_TOKEN"), mux)),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
 	return s
 }
 
@@ -779,6 +802,9 @@ func (s *APIServer) Start() error {
 	}
 
 	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
+	if err == nil {
+		l = guardListener(l)
+	}
 	if err != nil {
 		if s.sessionLock != nil {
 			s.sessionLock.Release()
@@ -824,7 +850,13 @@ func (s *APIServer) Start() error {
 		slog.Error("loopback TLS setup failed", "err", err)
 		return fmt.Errorf("TLS setup failed: %w", err)
 	}
-	s.tlsSrv = &http.Server{Handler: s.srv.Handler, ReadHeaderTimeout: 10 * time.Second, TLSConfig: tlsCfg}
+	s.tlsSrv = &http.Server{
+		Handler:           s.srv.Handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+		TLSConfig:         tlsCfg,
+	}
 	slog.Info("Apple Music API (TLS) ready", "addr", fmt.Sprintf("https://127.0.0.1:%d", s.port))
 	go s.tlsSrv.ServeTLS(l, "", "") //nolint:errcheck
 
@@ -843,6 +875,9 @@ func (s *APIServer) Stop() {
 	// Stop the export worker before shutting down playback.
 	if s.em != nil {
 		s.em.Stop()
+	}
+	if s.scheduler != nil {
+		s.scheduler.Stop()
 	}
 	// Stop the wrapper process first so it doesn't keep running as an orphan.
 	// Session files are NOT cleared — they persist for the next server start.
@@ -1030,4 +1065,27 @@ func randID() string {
 	b := make([]byte, 8)
 	rand.Read(b) //nolint:errcheck
 	return hex.EncodeToString(b)
+}
+
+// exportRoots returns the directories exports may write into. The request body that names
+// the output directory comes from a web page, so by default it is confined to the user's
+// home; AML_EXPORT_ROOTS (a colon-separated list) replaces that.
+func exportRoots() []string {
+	if v := os.Getenv("AML_EXPORT_ROOTS"); v != "" {
+		return filepath.SplitList(v)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return []string{home}
+	}
+	return []string{"/nonexistent"} // no home to anchor to: refuse rather than allow everything
+}
+
+// installReleaseHook frees a session's server-side resources however the session ends.
+// DELETE /playback/{id} does this itself; a session that simply expires, or whose client
+// vanished, would otherwise leave its producers running and its cache file pinned.
+func (s *APIServer) installReleaseHook() {
+	s.pm.SetReleaseHook(func(id string) {
+		s.stopMVGrowing(id)
+		s.stopVsegSession(id)
+	})
 }

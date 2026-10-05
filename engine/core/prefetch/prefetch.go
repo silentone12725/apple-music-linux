@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"math"
 	"regexp"
 	"sort"
@@ -323,6 +324,14 @@ func (q *workQueue) pop() (*workItem, bool) {
 	return heap.Pop(&q.h).(*workItem), true
 }
 
+// close wakes every blocked pop; once the queue is drained pop reports it is closed.
+func (q *workQueue) close() {
+	q.mu.Lock()
+	q.done = true
+	q.mu.Unlock()
+	q.cond.Broadcast()
+}
+
 func (q *workQueue) depth() int {
 	q.mu.Lock()
 	n := q.h.Len()
@@ -359,6 +368,13 @@ type Scheduler struct {
 
 	wq *workQueue
 
+	// Lifetime: every job and re-warm runs under rootCtx, so Stop cancels them all.
+	rootCtx   context.Context
+	stopRoot  context.CancelFunc
+	workerWG  sync.WaitGroup
+	stopOnce  sync.Once
+	rewarmSem chan struct{} // bounds concurrent background re-warms
+
 	// Cache config set by PUT /api/v1/cache/config; zero = unlimited/default.
 	prewarmLimitMB atomic.Int64
 	persistLimitMB atomic.Int64
@@ -394,10 +410,52 @@ func NewScheduler(pm *playback.Manager, token, mut func() string, sink EventSink
 		latencies:  ring.New(200),
 		queueWaits: ring.New(200),
 	}
+	s.rootCtx, s.stopRoot = context.WithCancel(context.Background())
+	s.rewarmSem = make(chan struct{}, maxConcurrentRewarms)
 	for range workers {
-		go s.worker()
+		s.workerWG.Add(1)
+		go func() {
+			defer s.workerWG.Done()
+			s.worker()
+		}()
 	}
 	return s
+}
+
+// root is the context every job runs under. A Scheduler built without NewScheduler (as
+// some tests do) has none and falls back to Background.
+func (s *Scheduler) root() context.Context {
+	if s.rootCtx != nil {
+		return s.rootCtx
+	}
+	return context.Background()
+}
+
+// maxConcurrentRewarms caps background session re-opens. Re-warming is an optimisation;
+// a burst of expired or mismatched entries must not become a burst of network calls.
+const maxConcurrentRewarms = 4
+
+// rewarmTimeout bounds one background re-open so a stalled upstream can't pin a goroutine.
+const rewarmTimeout = 90 * time.Second
+
+// Stop cancels every queued and running job, stops the workers and releases the
+// pre-warmed sessions. It is safe to call more than once and returns when the workers
+// have exited or after a bounded wait.
+func (s *Scheduler) Stop() {
+	s.stopOnce.Do(func() {
+		s.stopRoot()
+		s.wq.close()
+		done := make(chan struct{})
+		go func() { s.workerWG.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			log.Printf("[prefetch] Stop: workers still running after 10s")
+		}
+		if s.pm != nil {
+			s.ClearPreWarmed()
+		}
+	})
 }
 
 // CacheConfig holds user-configurable cache limits from PUT /api/v1/cache/config.
@@ -463,7 +521,7 @@ func (s *Scheduler) Submit(payload ContextPayload) string {
 	tracks := selectTracks(payload)
 	gen := s.generation.Add(1)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.root())
 	job := &WarmJob{
 		ID:         newID(),
 		Generation: gen,
@@ -574,7 +632,14 @@ func (s *Scheduler) TakePreWarmed(assetID string, lossless bool) (sessionID stri
 
 // rewarm opens a fresh session for an expired pre-warmed entry and stores it.
 func (s *Scheduler) rewarm(entry preWarmedEntry) {
-	ctx := context.Background()
+	select {
+	case s.rewarmSem <- struct{}{}:
+		defer func() { <-s.rewarmSem }()
+	default:
+		return // enough re-warms already running; the next claim will try again
+	}
+	ctx, cancel := context.WithTimeout(s.root(), rewarmTimeout)
+	defer cancel()
 	req := entry.req
 	req.Token = s.token()
 	req.MUT = s.mut()

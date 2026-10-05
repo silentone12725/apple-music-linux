@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func lookFFmpeg(p string) error {
@@ -304,18 +305,67 @@ func runFFmpeg(ffmpegPath, src, artPath, dst string, meta TrackMeta) error {
 	return nil
 }
 
-// validToolPath reports whether p is empty (resolve from PATH) or names one of
-// the expected tools. Tool paths arrive in request bodies from the web page,
-// so they must not be able to point the exporter at an arbitrary executable.
+// validToolPath is the name rule for a tool path from a request: empty (resolve from
+// PATH), a bare tool name, or an absolute path whose file name is the tool or
+// "<tool>-<suffix>" (versioned installs). Tool paths arrive in request bodies from the
+// web page, so they must not be able to point the exporter at an arbitrary executable.
+// It is a pure name check; checkToolExecutable verifies the file itself.
 func validToolPath(p string, names ...string) bool {
 	if p == "" {
 		return true
 	}
-	base := filepath.Base(p)
+	if strings.ContainsRune(p, 0) || (filepath.IsAbs(p) && filepath.Clean(p) != p) {
+		return false
+	}
+	if !filepath.IsAbs(p) && strings.ContainsRune(p, filepath.Separator) {
+		return false // "bin/ffmpeg": neither a bare name nor absolute
+	}
+	return toolNameOK(filepath.Base(p), names)
+}
+
+func toolNameOK(base string, names []string) bool {
 	for _, n := range names {
-		if base == n || strings.HasPrefix(base, n+"-") || strings.HasPrefix(base, n+".") {
+		if base == n || strings.HasPrefix(base, n+"-") {
 			return true
 		}
 	}
 	return false
+}
+
+// checkToolExecutable verifies that an absolute tool path is what it claims to be: a
+// regular, executable file (after resolving symlinks, which must still carry the tool's
+// name) owned by root or the current user and not writable by anyone else, in a
+// directory nobody else can write to. Bare names are left to PATH lookup.
+func checkToolExecutable(p string, names ...string) error {
+	if p == "" || !filepath.IsAbs(p) {
+		return nil
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return fmt.Errorf("%s: %w", p, err)
+	}
+	if !toolNameOK(filepath.Base(resolved), names) {
+		return fmt.Errorf("%s resolves to %s, which is not the expected tool", p, resolved)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("%s is not an executable file", resolved)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is writable by other users", resolved)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s is owned by another user", resolved)
+	}
+	dir, err := os.Stat(filepath.Dir(resolved))
+	if err != nil {
+		return err
+	}
+	if dir.Mode().Perm()&0o002 != 0 {
+		return fmt.Errorf("%s is in a directory writable by other users", resolved)
+	}
+	return nil
 }

@@ -27,7 +27,7 @@ func (s *APIServer) prepareItunFaststart(id, assetID string, cdnURL string, adam
 	if pw == nil {
 		return
 	}
-	mvPreparing.Store(assetID, struct{}{})
+	s.mvPreparing.Store(assetID, struct{}{})
 	outPath := pw.File.Name()
 	pw.File.Close()
 
@@ -36,7 +36,7 @@ func (s *APIServer) prepareItunFaststart(id, assetID string, cdnURL string, adam
 	defer cancel()
 
 	err := itunDecryptToFile(ctx, s, cdnURL, adamID, outPath)
-	mvPreparing.Delete(assetID)
+	s.mvPreparing.Delete(assetID)
 	if err != nil {
 		log.Printf("[itun-dec] FAILED assetID=%s: %v", assetID, err)
 		pw.Discard()

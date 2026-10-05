@@ -3,6 +3,7 @@ package diskcache
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -311,5 +312,70 @@ func TestCommitKeepsKeyClaimedUntilRenamed(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("committed entry corrupted: %d bytes, want %d", len(got), len(want))
 		}
+	}
+}
+
+// Path is how players that open the file themselves use the cache; a hit must count as a
+// use, or their favourite tracks look the oldest and are evicted first.
+func TestPathHitRefreshesRecency(t *testing.T) {
+	c, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, err := c.BeginPut("a", "q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw.Write([]byte("data")) //nolint:errcheck
+	if err := pw.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := c.Path("a", "q")
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := c.Path("a", "q"); !ok {
+		t.Fatal("miss")
+	}
+	fi, _ := os.Stat(path)
+	if time.Since(fi.ModTime()) > time.Minute {
+		t.Fatalf("a Path hit left the entry %v old", time.Since(fi.ModTime()))
+	}
+}
+
+// A burst of commits requests many evictions at once: they must not run concurrently
+// (each would scan and remove the same files), and the last request must not be lost.
+func TestEvictCoalescesConcurrentRequests(t *testing.T) {
+	c, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.limitBytes.Store(100)
+	for i := 0; i < 6; i++ {
+		os.WriteFile(filepath.Join(c.dir, fmt.Sprintf("%064d", i)), make([]byte, 60), 0o600) //nolint:errcheck
+		old := time.Now().Add(time.Duration(-10+i) * time.Minute)
+		os.Chtimes(filepath.Join(c.dir, fmt.Sprintf("%064d", i)), old, old) //nolint:errcheck
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.Evict() }()
+	}
+	wg.Wait()
+
+	entries, _ := os.ReadDir(c.dir)
+	var total int64
+	for _, e := range entries {
+		fi, _ := e.Info()
+		total += fi.Size()
+	}
+	if total > 100 {
+		t.Fatalf("cache is %d bytes after eviction, limit 100", total)
+	}
+	if c.evicting.Load() {
+		t.Fatal("eviction flag left set")
 	}
 }

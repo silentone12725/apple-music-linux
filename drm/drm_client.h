@@ -356,6 +356,23 @@ int drm_cookie_get_for_url(const char *url, char *out_buf, size_t buf_size);
  */
 void drm_cookie_parse_set_cookie(const char *set_cookie);
 
+/**
+ * Store one Set-Cookie header value received from `host`.
+ *
+ * Replaces an existing cookie with the same name/domain/path, rejects a Domain
+ * attribute `host` does not belong to, and treats a cookie without Domain as
+ * host-only. The jar is saved atomically (mode 0600) after every change.
+ */
+void drm_cookie_parse_set_cookie_for_host(const char *set_cookie, const char *host);
+
+/**
+ * Like drm_cookie_init(), with an explicit directory (the jar lives in
+ * <dir>/cookies.txt). Replaces the in-memory jar with the file's contents.
+ *
+ * @return 0 on success (including "no file yet"), -1 if dir is NULL
+ */
+int drm_cookie_init_at(const char *dir);
+
 /* ── JWT Token Parsing ──────────────────────────────────────────────────────*/
 
 /**

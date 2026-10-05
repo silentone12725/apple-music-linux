@@ -38,6 +38,11 @@ type Cache struct {
 	limitBytes atomic.Int64 // 0 = unlimited
 	ttlDays    atomic.Int64 // 0 = never expire
 
+	// Evict is requested after every commit; passes are coalesced so a burst of commits
+	// costs one directory scan, not one per commit running concurrently.
+	evicting   atomic.Bool
+	evictAgain atomic.Bool
+
 	// in-flight tracks a put in progress for a given filename so that
 	// concurrent requests for the same track don't both write to temp files.
 	// Value is struct{}; presence means "write in progress".
@@ -82,7 +87,18 @@ func (c *Cache) Path(assetID, qualifier string) (string, bool) {
 		os.Remove(path)
 		return "", false
 	}
+	// A hit is a use: callers that open the file themselves (VLC, ServeContent) never go
+	// through Get, and without this their hottest tracks looked oldest to eviction.
+	touchIfStale(path, info)
 	return path, true
+}
+
+// touchIfStale refreshes path's mtime, at most once an hour (see Get).
+func touchIfStale(path string, info os.FileInfo) {
+	if time.Since(info.ModTime()) > time.Hour {
+		now := time.Now()
+		os.Chtimes(path, now, now)
+	}
 }
 
 // Get returns an open *os.File for the cached track, or (nil, false) on miss.
@@ -109,10 +125,7 @@ func (c *Cache) Get(assetID, qualifier string) (*os.File, bool) {
 	// Touch mtime so LRU eviction keeps recently accessed entries.
 	// Throttled to once per hour — byte-range replays for the same file
 	// would otherwise issue a utimes syscall on every range request.
-	if time.Since(info.ModTime()) > time.Hour {
-		now := time.Now()
-		os.Chtimes(path, now, now)
-	}
+	touchIfStale(path, info)
 
 	return f, true
 }
@@ -219,6 +232,20 @@ func (c *Cache) Clear() error {
 // Evict removes the oldest entries (by mtime) until the total size is below
 // the configured limit.  No-op when no limit is set.
 func (c *Cache) Evict() {
+	if !c.evicting.CompareAndSwap(false, true) {
+		c.evictAgain.Store(true) // a pass is running; ask it to go round once more
+		return
+	}
+	defer c.evicting.Store(false)
+	for {
+		c.evictOnce()
+		if !c.evictAgain.Swap(false) {
+			return
+		}
+	}
+}
+
+func (c *Cache) evictOnce() {
 	limit := c.limitBytes.Load()
 	if limit == 0 {
 		return

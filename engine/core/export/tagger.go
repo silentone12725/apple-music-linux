@@ -40,6 +40,10 @@ type TagOptions struct {
 	EmbedArtwork bool
 	ArtworkSize  int
 	Lyrics       string // pre-fetched LRC string; empty = don't embed
+
+	// Ctx bounds the artwork download (cancelling an export stops it). Nil means
+	// context.Background().
+	Ctx context.Context
 }
 
 // TagFile embeds metadata into the file at path using go-mp4tag.
@@ -85,7 +89,11 @@ func TagFile(path string, meta TrackMeta, opts TagOptions) error {
 
 	// Fetch and embed artwork.
 	if opts.EmbedArtwork && meta.ArtworkURL != "" {
-		if pic, err := fetchArtworkPicture(meta.ArtworkURL, opts.ArtworkSize); err == nil {
+		ctx := opts.Ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if pic, err := fetchArtworkPicture(ctx, meta.ArtworkURL, opts.ArtworkSize); err == nil {
 			t.Pictures = []*mp4tag.MP4Picture{pic}
 		}
 		// Non-fatal: tag without artwork if download fails.
@@ -105,8 +113,8 @@ func TagFile(path string, meta TrackMeta, opts TagOptions) error {
 
 // fetchArtworkPicture downloads the artwork at urlTemplate (with size applied)
 // and returns an MP4Picture ready to embed via mp4tag.
-func fetchArtworkPicture(urlTemplate string, size int) (*mp4tag.MP4Picture, error) {
-	data, ct, err := downloadArtworkBytes(urlTemplate, size)
+func fetchArtworkPicture(ctx context.Context, urlTemplate string, size int) (*mp4tag.MP4Picture, error) {
+	data, ct, err := downloadArtworkBytes(ctx, urlTemplate, size)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +128,7 @@ func fetchArtworkPicture(urlTemplate string, size int) (*mp4tag.MP4Picture, erro
 // downloadArtworkBytes fetches raw artwork bytes and returns (data, contentType, error).
 // Retries up to 3 times with exponential backoff to handle transient CDN failures.
 // Used by both fetchArtworkPicture (mp4 tagging) and FLAC conversion (ffmpeg input).
-func downloadArtworkBytes(urlTemplate string, size int) ([]byte, string, error) {
+func downloadArtworkBytes(ctx context.Context, urlTemplate string, size int) ([]byte, string, error) {
 	if size <= 0 {
 		size = 3000
 	}
@@ -129,25 +137,37 @@ func downloadArtworkBytes(urlTemplate string, size int) ([]byte, string, error) 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*2) * time.Second)
+			select {
+			case <-ctx.Done():
+				return nil, "", ctx.Err()
+			case <-time.After(time.Duration(attempt*2) * time.Second):
+			}
 		}
-		data, ct, err := fetchArtworkURL(u)
+		data, ct, err := fetchArtworkURL(ctx, u)
 		if err == nil {
 			return data, ct, nil
 		}
 		lastErr = err
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
 	}
 	return nil, "", lastErr
 }
 
-func fetchArtworkURL(u string) ([]byte, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// maxArtworkBytes bounds one artwork download; Apple's 3000px JPEGs are well under it.
+const maxArtworkBytes = 16 << 20
+
+var artworkHTTP = &http.Client{Timeout: 45 * time.Second}
+
+func fetchArtworkURL(ctx context.Context, u string) ([]byte, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := artworkHTTP.Do(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -155,9 +175,12 @@ func fetchArtworkURL(u string) ([]byte, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("artwork HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxArtworkBytes+1))
 	if err != nil {
 		return nil, "", err
+	}
+	if len(data) > maxArtworkBytes {
+		return nil, "", fmt.Errorf("artwork larger than %d bytes", maxArtworkBytes)
 	}
 	return data, resp.Header.Get("Content-Type"), nil
 }

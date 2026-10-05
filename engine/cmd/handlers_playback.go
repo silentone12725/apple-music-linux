@@ -645,18 +645,18 @@ func (s *APIServer) handlePlaybackVideoNativeInfo(w http.ResponseWriter, r *http
 		}
 		// No downloadKey — itun-encrypted. Start offline decrypt in background.
 		if adamID, parseErr := strconv.ParseUint(sess.AssetID, 10, 64); parseErr == nil {
-			if _, already := mvPreparing.Load(sess.AssetID); !already {
+			if _, already := s.mvPreparing.Load(sess.AssetID); !already {
 				go s.prepareItunFaststart(id, sess.AssetID, cdnURL, adamID)
 			}
 		}
-		_, preparing := mvPreparing.Load(sess.AssetID)
+		_, preparing := s.mvPreparing.Load(sess.AssetID)
 		writeJSON(w, http.StatusOK, map[string]any{"cached": false, "preparing": preparing})
 		return
 	}
 	// Not cached, no CDN proxy — start the faststart build and have the client
 	// poll until ready.
 	go s.prepareMVFaststart(id, sess.AssetID, float64(sess.DurationMs)/1000.0)
-	_, preparing := mvPreparing.Load(sess.AssetID)
+	_, preparing := s.mvPreparing.Load(sess.AssetID)
 	writeJSON(w, http.StatusOK, map[string]any{"cached": false, "preparing": preparing})
 }
 
@@ -738,7 +738,7 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 			// No downloadKey = itun-encrypted file. Use offline decrypt path.
 			if adamID, parseErr := strconv.ParseUint(assetID, 10, 64); parseErr == nil {
 				log.Printf("%s itun offline decrypt id=%s assetID=%s", tagVideo("[video-itun]"), id, assetID)
-				if _, already := mvPreparing.Load(assetID); !already {
+				if _, already := s.mvPreparing.Load(assetID); !already {
 					go s.prepareItunFaststart(id, assetID, cdnURL, adamID)
 				}
 				// Return 503 so the frontend polls /video-dl-info until the
@@ -749,7 +749,7 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 		}
 
 		log.Printf("%s CDN proxy id=%s assetID=%s", tagVideo("[video-cdn]"), id, assetID)
-		if _, already := mvPreparing.Load(assetID); !already {
+		if _, already := s.mvPreparing.Load(assetID); !already {
 			go s.prepareMVFaststart(id, assetID, durationSec)
 		}
 		r2 := r.Clone(r.Context())
@@ -764,7 +764,7 @@ func (s *APIServer) handlePlaybackVideoNative(w http.ResponseWriter, r *http.Req
 	// No progressive URL available; return 503 so the frontend shows a spinner
 	// and polls /video-dl-info until the HLS CBCS → faststart build completes.
 	log.Printf("%s cache miss id=%s assetID=%s → 503 (building)", tagVideo("[video-dl]"), id, assetID)
-	if _, already := mvPreparing.Load(assetID); !already {
+	if _, already := s.mvPreparing.Load(assetID); !already {
 		go s.prepareMVFaststart(id, assetID, durationSec)
 	}
 	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"cached": false, "preparing": true})
@@ -1008,11 +1008,11 @@ func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request)
 	// Stop the mv-es WebCodecs growing-file producer and remove its scratch file.
 	s.stopMVGrowing(id)
 	// Cancel any active vseg (segmented video) producer for this session.
-	stopVsegSession(id)
+	s.stopVsegSession(id)
 	// If this session's MV faststart file was written under "caching disabled",
 	// delete it now — it existed only to serve this playback.
 	if sess, ok := s.pm.GetSession(id); ok {
-		if _, ephemeral := mvEphemeral.LoadAndDelete(sess.AssetID); ephemeral {
+		if _, ephemeral := s.mvEphemeral.LoadAndDelete(sess.AssetID); ephemeral {
 			s.diskCache.Remove(sess.AssetID, "mv-dl")
 			log.Printf("%s ephemeral mv-dl removed assetID=%s (caching disabled)", tagInfo("[video-dl]"), sess.AssetID)
 		}
@@ -1214,10 +1214,6 @@ var mvCDNClient = &http.Client{
 // Apple's CDN URLs typically expire after ~15 minutes.
 const mvProgressiveTTL = 10 * time.Minute
 
-// mvPreparing tracks assetIDs whose faststart cache is being built, so the
-// info endpoint can report "preparing" and the handler avoids duplicate jobs.
-var mvPreparing sync.Map // assetID → struct{}
-
 // prepareMVFaststart builds the faststart MP4 cache for a video session in the
 // background (download → decrypt → faststart remux → commit). Guarded by
 // diskCache.BeginPut's in-flight lock so only one job per asset runs.
@@ -1227,7 +1223,7 @@ func (s *APIServer) prepareMVFaststart(id, assetID string, durationSec float64) 
 	if pw == nil {
 		return // another goroutine is already preparing this asset
 	}
-	mvPreparing.Store(assetID, struct{}{})
+	s.mvPreparing.Store(assetID, struct{}{})
 	tmpPath := pw.File.Name()
 	pw.File.Close() // ffmpeg writes the path itself; keep the in-flight lock via pw
 
@@ -1237,7 +1233,7 @@ func (s *APIServer) prepareMVFaststart(id, assetID string, durationSec float64) 
 	err := transcodeVideoFaststart(ctx, func(dst io.Writer) error {
 		return s.pm.Stream(ctx, id, pipeline.KindVideo, dst)
 	}, tmpPath, durationSec)
-	mvPreparing.Delete(assetID)
+	s.mvPreparing.Delete(assetID)
 	if err != nil {
 		log.Printf("%s prepare faststart FAILED assetID=%s: %v", tagErr("[video-dl]"), assetID, err)
 		pw.Discard()
@@ -1251,16 +1247,12 @@ func (s *APIServer) prepareMVFaststart(id, assetID string, durationSec float64) 
 	// (native <video src> plays FROM it), but it must not persist. Mark it
 	// ephemeral so it's deleted when the session is released (track change / exit).
 	if !aacstream.MVCacheEnabled() {
-		mvEphemeral.Store(assetID, struct{}{})
+		s.mvEphemeral.Store(assetID, struct{}{})
 	}
 	if fi, e := os.Stat(func() string { p, _ := s.diskCache.Path(assetID, qualifier); return p }()); e == nil {
 		log.Printf("%s prepare faststart DONE assetID=%s size=%d ephemeral=%v", tagOK("[video-dl]"), assetID, fi.Size(), !aacstream.MVCacheEnabled())
 	}
 }
-
-// mvEphemeral holds assetIDs whose mv-dl faststart file was written under
-// "caching disabled" — deleted on session release so nothing persists.
-var mvEphemeral sync.Map // assetID → struct{}
 
 // streamMedia runs fn into a firstByteWriter so that:
 //   - If fn produces no bytes and returns an error, the client receives a

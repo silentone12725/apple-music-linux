@@ -18,8 +18,10 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -91,22 +93,38 @@ func New(cacheDir string) *Store {
 		log.Printf("[library] open in-memory db: %v", err)
 		return &Store{keyPath: filepath.Join(cacheDir, "library.key"), encPath: filepath.Join(cacheDir, "library.enc")}
 	}
+	// ":memory:" gives every connection its own empty database, so there must be exactly
+	// one connection and it must never be recycled.
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
 	s := &Store{
 		db:      db,
 		keyPath: filepath.Join(cacheDir, "library.key"),
 		encPath: filepath.Join(cacheDir, "library.enc"),
 	}
-	s.initSchema()
+	if err := s.initSchema(); err != nil {
+		log.Printf("[library] init schema: %v — library cache disabled", err)
+		db.Close() //nolint:errcheck
+		s.db = nil
+		return s
+	}
 	s.load()
 	return s
 }
 
-func (s *Store) initSchema() {
-	s.db.Exec(`
+// initSchema creates the tables. The database lives in memory and is rebuilt from the
+// encrypted dump on every start, so the schema is simply its current shape; the dump
+// carries its own format version (see cacheFormatVersion).
+func (s *Store) initSchema() error {
+	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS songs (
-			lid TEXT PRIMARY KEY, cid TEXT, name TEXT, artist TEXT, album TEXT, ms INTEGER
+			lid TEXT PRIMARY KEY, cid TEXT, name TEXT, artist TEXT, album TEXT, ms INTEGER,
+			album_id TEXT NOT NULL DEFAULT '', track_number INTEGER NOT NULL DEFAULT 0,
+			disc_number INTEGER NOT NULL DEFAULT 0
 		);
+		CREATE INDEX IF NOT EXISTS idx_songs_album_id ON songs(album_id);
 		CREATE TABLE IF NOT EXISTS playlists (
 			lid TEXT PRIMARY KEY, name TEXT, track_count INTEGER
 		);
@@ -119,11 +137,7 @@ func (s *Store) initSchema() {
 		);
 		CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 	`)
-	// Migrations for existing DBs.
-	s.db.Exec(`ALTER TABLE songs ADD COLUMN album_id TEXT NOT NULL DEFAULT ''`)
-	s.db.Exec(`ALTER TABLE songs ADD COLUMN track_number INTEGER NOT NULL DEFAULT 0`)
-	s.db.Exec(`ALTER TABLE songs ADD COLUMN disc_number INTEGER NOT NULL DEFAULT 0`)
-	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_songs_album_id ON songs(album_id)`)
+	return err
 }
 
 // ── Encryption helpers ────────────────────────────────────────────────────────
@@ -134,20 +148,48 @@ func (s *Store) encKey() ([]byte, error) {
 	if len(s.key) == 32 {
 		return s.key, nil
 	}
-	data, err := os.ReadFile(s.keyPath)
-	if err == nil {
+	read := func() ([]byte, error) {
+		data, err := os.ReadFile(s.keyPath)
+		if err != nil {
+			return nil, err
+		}
 		if len(data) != 32 {
 			return nil, fmt.Errorf("key file wrong length %d (expected 32) — delete %s to reset", len(data), s.keyPath)
 		}
+		return data, nil
+	}
+	data, err := read()
+	if err == nil {
 		s.key = data
 		return s.key, nil
 	}
-	// Key file absent: generate a fresh one.
+	// Only a missing file means "no key yet". Any other failure (permissions, I/O) must
+	// not mint a new key: that would overwrite the real one and orphan the cache.
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read key: %w", err)
+	}
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
-	if err := os.WriteFile(s.keyPath, key, 0o600); err != nil {
+	// O_EXCL: if another process created the key since our read, use theirs.
+	f, err := os.OpenFile(s.keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			if data, rerr := read(); rerr == nil {
+				s.key = data
+				return s.key, nil
+			}
+		}
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if _, err := f.Write(key); err != nil {
+		f.Close()
+		os.Remove(s.keyPath) //nolint:errcheck
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(s.keyPath) //nolint:errcheck
 		return nil, fmt.Errorf("write key: %w", err)
 	}
 	s.key = key
@@ -195,7 +237,12 @@ func (s *Store) decrypt(data []byte) ([]byte, error) {
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 
+// cacheFormatVersion is the layout of the encrypted dump. A dump from a newer layout is
+// ignored (and rebuilt by the next sync) rather than half-understood.
+const cacheFormatVersion = 1
+
 type diskCache struct {
+	Version   int                        `json:"version,omitempty"`
 	Songs     []SongInfo                 `json:"songs"`
 	Albums    []AlbumInfo                `json:"albums"`
 	Playlists []PlaylistInfo             `json:"playlists"`
@@ -220,6 +267,10 @@ func (s *Store) load() {
 	var dc diskCache
 	if err := json.Unmarshal(plain, &dc); err != nil {
 		log.Printf("[library] load unmarshal: %v", err)
+		return
+	}
+	if dc.Version > cacheFormatVersion {
+		log.Printf("[library] cache format v%d is newer than this build understands (v%d) — ignoring it", dc.Version, cacheFormatVersion)
 		return
 	}
 	tx, err := s.db.Begin()
@@ -303,7 +354,7 @@ func (s *Store) save() {
 	rtx.QueryRow("SELECT value FROM meta WHERE key='revision'").Scan(&revision) //nolint:errcheck — absent is fine
 	rtx.Commit()                                                                //nolint:errcheck — read-only, no changes to commit
 
-	plain, err := json.Marshal(diskCache{Songs: songs, Albums: albums, Playlists: pls, PlTracks: plTracks, SyncedAt: syncedAt, Revision: revision})
+	plain, err := json.Marshal(diskCache{Version: cacheFormatVersion, Songs: songs, Albums: albums, Playlists: pls, PlTracks: plTracks, SyncedAt: syncedAt, Revision: revision})
 	if err != nil {
 		log.Printf("[library] save marshal: %v", err)
 		return
@@ -331,6 +382,9 @@ func (s *Store) save() {
 // *InTx variants used by save() so the full dump is one consistent snapshot.
 
 func (s *Store) querySongsInTx(tx *sql.Tx) []SongInfo {
+	if tx == nil && s.db == nil {
+		return nil
+	}
 	q := "SELECT lid,cid,name,artist,album,album_id,ms,track_number,disc_number FROM songs"
 	var rows *sql.Rows
 	if tx != nil {
@@ -351,6 +405,10 @@ func (s *Store) querySongsInTx(tx *sql.Tx) []SongInfo {
 		}
 		out = append(out, sg)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[library] read songs: %v", err)
+		return nil
+	}
 	return out
 }
 
@@ -369,11 +427,18 @@ func queryAlbumsInTx(tx *sql.Tx) []AlbumInfo {
 		}
 		out = append(out, al)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[library] read albums: %v", err)
+		return nil
+	}
 	return out
 }
 
 func (s *Store) queryPlaylists() []PlaylistInfo { return s.queryPlaylistsInTx(nil) }
 func (s *Store) queryPlaylistsInTx(tx *sql.Tx) []PlaylistInfo {
+	if tx == nil && s.db == nil {
+		return nil
+	}
 	q := "SELECT lid,name,track_count FROM playlists"
 	var rows *sql.Rows
 	if tx != nil {
@@ -388,13 +453,23 @@ func (s *Store) queryPlaylistsInTx(tx *sql.Tx) []PlaylistInfo {
 	var out []PlaylistInfo
 	for rows.Next() {
 		var pl PlaylistInfo
-		rows.Scan(&pl.LibraryID, &pl.Name, &pl.TrackCount)
+		if err := rows.Scan(&pl.LibraryID, &pl.Name, &pl.TrackCount); err != nil {
+			log.Printf("[library] scan playlist: %v", err)
+			continue
+		}
 		out = append(out, pl)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[library] read playlists: %v", err)
+		return nil // a partial list must not pass for the whole library
 	}
 	return out
 }
 
 func (s *Store) queryAllPlaylistTracksInTx(tx *sql.Tx) map[string][]PlaylistTrack {
+	if tx == nil && s.db == nil {
+		return nil
+	}
 	q := "SELECT playlist_id,lid,cid FROM playlist_tracks ORDER BY playlist_id,position"
 	var rows *sql.Rows
 	if tx != nil {
@@ -410,8 +485,15 @@ func (s *Store) queryAllPlaylistTracksInTx(tx *sql.Tx) map[string][]PlaylistTrac
 	for rows.Next() {
 		var plID string
 		var t PlaylistTrack
-		rows.Scan(&plID, &t.LibraryID, &t.CatalogID)
+		if err := rows.Scan(&plID, &t.LibraryID, &t.CatalogID); err != nil {
+			log.Printf("[library] scan playlist track: %v", err)
+			continue
+		}
 		out[plID] = append(out[plID], t)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[library] read playlist tracks: %v", err)
+		return nil
 	}
 	return out
 }
@@ -462,8 +544,15 @@ func (s *Store) PlaylistTracks(playlistID string) []PlaylistTrack {
 	var tracks []PlaylistTrack
 	for rows.Next() {
 		var t PlaylistTrack
-		rows.Scan(&t.LibraryID, &t.CatalogID)
+		if err := rows.Scan(&t.LibraryID, &t.CatalogID); err != nil {
+			log.Printf("[library] scan playlist track: %v", err)
+			return nil
+		}
 		tracks = append(tracks, t)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[library] read playlist %s: %v", playlistID, err)
+		return nil
 	}
 	return tracks // nil if no rows (= not cached)
 }
@@ -483,8 +572,15 @@ func (s *Store) SongsByAlbum(albumID string) []PlaylistTrack {
 	var out []PlaylistTrack
 	for rows.Next() {
 		var t PlaylistTrack
-		rows.Scan(&t.LibraryID, &t.CatalogID)
+		if err := rows.Scan(&t.LibraryID, &t.CatalogID); err != nil {
+			log.Printf("[library] scan album track: %v", err)
+			return nil
+		}
 		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[library] read album %s: %v", albumID, err)
+		return nil
 	}
 	return out
 }
@@ -516,10 +612,16 @@ func (s *Store) SetPlaylistTracks(playlistID string, tracks []PlaylistTrack) {
 		return
 	}
 	defer tx.Rollback() //nolint:errcheck
-	tx.Exec("DELETE FROM playlist_tracks WHERE playlist_id=?", playlistID)
+	if _, err := tx.Exec("DELETE FROM playlist_tracks WHERE playlist_id=?", playlistID); err != nil {
+		log.Printf("[library] set playlist tracks delete: %v", err)
+		return
+	}
 	for i, t := range tracks {
-		tx.Exec("INSERT INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)",
-			playlistID, i, t.LibraryID, t.CatalogID)
+		if _, err := tx.Exec("INSERT INTO playlist_tracks(playlist_id,position,lid,cid) VALUES(?,?,?,?)",
+			playlistID, i, t.LibraryID, t.CatalogID); err != nil {
+			log.Printf("[library] set playlist tracks insert: %v", err)
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[library] set playlist tracks commit: %v", err)
@@ -550,10 +652,12 @@ func (s *Store) Ingest(p IngestPayload) {
 		return
 	}
 	defer tx.Rollback() //nolint:errcheck
-	tx.Exec("DELETE FROM songs")
-	tx.Exec("DELETE FROM albums")
-	tx.Exec("DELETE FROM playlists")
-	tx.Exec("DELETE FROM playlist_tracks")
+	for _, q := range []string{"DELETE FROM songs", "DELETE FROM albums", "DELETE FROM playlists", "DELETE FROM playlist_tracks"} {
+		if _, err := tx.Exec(q); err != nil {
+			log.Printf("[library] ingest %s: %v", q, err)
+			return
+		}
+	}
 
 	if err := ingestSongs(tx, p.Songs); err != nil {
 		log.Printf("[library] %v", err)
@@ -572,10 +676,16 @@ func (s *Store) Ingest(p IngestPayload) {
 		return
 	}
 
-	tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('synced_at',?)",
-		time.Now().Format(time.RFC3339))
+	if _, err := tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('synced_at',?)",
+		time.Now().Format(time.RFC3339)); err != nil {
+		log.Printf("[library] ingest meta: %v", err)
+		return
+	}
 	if p.Revision != "" {
-		tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('revision',?)", p.Revision)
+		if _, err := tx.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('revision',?)", p.Revision); err != nil {
+			log.Printf("[library] ingest meta: %v", err)
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[library] ingest commit: %v", err)

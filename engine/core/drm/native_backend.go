@@ -62,6 +62,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -92,6 +93,44 @@ type nativeBackend struct {
 	cachedDevTok string        // MusicKit developer JWT, fetched once on Start
 	fpReady      chan struct{} // closed once hybris + FairPlay init succeeded
 	fpOnce       sync.Once
+
+	// In-flight accounting for calls into the C library (guarded by mu). Stop must not
+	// tear the library down under a running call, and key contexts handed out by one
+	// Start are meaningless after the next, so each Start gets a generation.
+	active  int           // calls currently inside the C library
+	drained chan struct{} // closed when active reaches 0 while Stop is waiting
+	gen     uint64        // incremented by every successful Start
+}
+
+var errBackendStopped = errors.New("DRM backend is not running")
+
+// enter registers one call into the C library. gen is the generation the caller's
+// state (key contexts) belongs to, or 0 for calls that carry none. The returned func
+// must be called when the call is done.
+func (b *nativeBackend) enter(gen uint64) (leave func(), err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.running || (gen != 0 && gen != b.gen) {
+		return nil, errBackendStopped
+	}
+	b.active++
+	return b.leave, nil
+}
+
+func (b *nativeBackend) leave() {
+	b.mu.Lock()
+	b.active--
+	if b.active == 0 && b.drained != nil {
+		close(b.drained)
+		b.drained = nil
+	}
+	b.mu.Unlock()
+}
+
+func (b *nativeBackend) currentGen() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.gen
 }
 
 // NewNativeBackend creates a new native DRM backend
@@ -280,6 +319,7 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	}
 
 	b.running = true
+	b.gen++
 
 	// Emit initial state event to notify DRMManager that backend is running
 	select {
@@ -318,12 +358,38 @@ func (b *nativeBackend) Authenticate(ctx context.Context) error {
 	return nil
 }
 
-// Stop shuts down the native DRM backend
+// quiesce refuses new calls into the C library and waits (bounded) for the ones already
+// inside it to finish. It reports whether everything drained in time.
+func (b *nativeBackend) quiesce(timeout time.Duration) bool {
+	b.mu.Lock()
+	b.running = false
+	var wait chan struct{}
+	if b.active > 0 {
+		b.drained = make(chan struct{})
+		wait = b.drained
+	}
+	b.mu.Unlock()
+
+	if wait == nil {
+		return true
+	}
+	select {
+	case <-wait:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// Stop shuts down the native DRM backend. New calls are refused at once; calls already
+// inside the C library get a bounded time to finish before it is torn down.
 func (b *nativeBackend) Stop() error {
+	if !b.quiesce(15 * time.Second) {
+		log.Printf("[drm] Stop: calls still inside the DRM library after 15s — shutting down anyway")
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	b.running = false
 	if b.hybrisReady {
 		C.hybris_backend_shutdown()
 		b.hybrisReady = false
@@ -348,6 +414,12 @@ func (b *nativeBackend) SetAuthSource(src AuthSource) {
 
 // Decrypt decrypts FairPlay-encrypted samples
 func (b *nativeBackend) Decrypt(ctx context.Context, req DecryptRequest) (DecryptResponse, error) {
+	leave, err := b.enter(0)
+	if err != nil {
+		return DecryptResponse{}, err
+	}
+	defer leave()
+
 	// Open key context
 	cAssetID := C.CString(req.AdamID)
 	cMediaURI := C.CString(req.KeyURI)
@@ -362,6 +434,9 @@ func (b *nativeBackend) Decrypt(ctx context.Context, req DecryptRequest) (Decryp
 	// Decrypt each sample
 	decrypted := make([][]byte, len(req.Samples))
 	for i, sample := range req.Samples {
+		if len(sample) == 0 {
+			continue // nothing to decrypt (and &sample[0] would panic)
+		}
 		cSample := (*C.uint8_t)(unsafe.Pointer(&sample[0]))
 		ret := C.drm_decrypt_sample(kdCtx, cSample, C.uint32_t(len(sample)))
 
@@ -379,6 +454,11 @@ func (b *nativeBackend) Decrypt(ctx context.Context, req DecryptRequest) (Decryp
 
 // GetM3U8 returns the HLS URL for an asset
 func (b *nativeBackend) GetM3U8(ctx context.Context, adamID uint64) (string, error) {
+	leave, err := b.enter(0)
+	if err != nil {
+		return "", err
+	}
+	defer leave()
 	cURL := C.drm_get_hls_url(C.drm_adam_id_t(adamID))
 	if cURL == nil {
 		return "", fmt.Errorf("failed to get HLS URL for asset %d", adamID)
@@ -390,6 +470,11 @@ func (b *nativeBackend) GetM3U8(ctx context.Context, adamID uint64) (string, err
 
 // GetAccount returns the account information
 func (b *nativeBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
+	leave, err := b.enter(0)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+	defer leave()
 	cJSON := C.drm_get_account()
 	if cJSON == nil {
 		return AccountInfo{}, fmt.Errorf("failed to get account info")
@@ -406,6 +491,12 @@ func (b *nativeBackend) GetAccount(ctx context.Context) (AccountInfo, error) {
 
 // GetProgressiveMVURL returns the progressive download URL and download key
 func (b *nativeBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error) {
+	leave, err := b.enter(0)
+	if err != nil {
+		return "", "", err
+	}
+	defer leave()
+
 	var cURL, cDK *C.char
 	var hasDecryptor C.int
 
@@ -433,9 +524,17 @@ func (b *nativeBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64) 
 
 // DecryptItunSamples decrypts itun-encrypted samples
 func (b *nativeBackend) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
+	leave, err := b.enter(0)
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
 	decrypted := make([][]byte, len(samples))
 
 	for i, sample := range samples {
+		if len(sample) == 0 {
+			continue
+		}
 		cSample := (*C.uint8_t)(unsafe.Pointer(&sample[0]))
 		var outSize C.uint32_t
 
@@ -460,6 +559,7 @@ func (b *nativeBackend) DecryptItunSamples(ctx context.Context, adamID uint64, s
 func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	// For native backend, use a pipe
 	client, server := net.Pipe()
+	gen := b.currentGen() // key contexts opened below belong to this run of the backend
 
 	// Start the CBCS server on the server side
 	go func() {
@@ -515,6 +615,10 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 				}
 			}
 
+			leave, enterErr := b.enter(gen)
+			if enterErr != nil {
+				return nil, enterErr
+			}
 			cAssetID := C.CString(adamID)
 			cMediaURI := C.CString(uri)
 			kdCtx := C.drm_open_key_context(cAssetID, cMediaURI)
@@ -522,6 +626,7 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 			C.free(unsafe.Pointer(cMediaURI))
 
 			if kdCtx == nil {
+				leave()
 				log.Printf("[drm] DialCBCS: drm_open_key_context returned NULL for adamID=%s", adamID)
 				return nil, fmt.Errorf("failed to open key context for asset %s", adamID)
 			}
@@ -539,6 +644,7 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 					log.Printf("[drm] DialCBCS: key context key set successfully")
 				}
 			}
+			leave()
 
 			return func(sample []byte) error {
 				// CBCS pattern: only whole 16-byte blocks are encrypted.
@@ -547,6 +653,13 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 				// drm_decrypt_sample_at(ctx, data, n, 0) computes
 				// derive_iv(zeroBaseIV, 0) = zeros, matching the correct IV.
 				if n := len(sample) &^ 0xf; n > 0 {
+					// kdCtx is only valid for the run that created it: refuse after a Stop
+					// or restart instead of handing a dangling pointer to the library.
+					leaveDec, err := b.enter(gen)
+					if err != nil {
+						return err
+					}
+					defer leaveDec()
 					cSample := (*C.uint8_t)(unsafe.Pointer(&sample[0]))
 					if ret := C.drm_decrypt_sample_at(kdCtx, cSample, C.uint32_t(n), 0); ret != 0 {
 						return fmt.Errorf("drm_decrypt_sample_at failed (size=%d): ret=%d", n, ret)

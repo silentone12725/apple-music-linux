@@ -267,10 +267,12 @@ func TestMVLiveIndex_LookupAndEnd(t *testing.T) {
 
 	// Availability predicate the handler uses: complete AND fully downloaded.
 	f2, _ := m.Lookup(4.0) // frag 2, End = wantOffsets[3]
-	if !(f2.End > 0 && f2.End <= f2.End) {
+	written := f2.End      // everything up to the fragment's end has been downloaded
+	if !(f2.End > 0 && f2.End <= written) {
 		t.Fatal("bounded fragment should be seekable when written >= End")
 	}
-	if f2.End > 0 && f2.End <= f2.End-1 {
+	written = f2.End - 1 // one byte short
+	if f2.End > 0 && f2.End <= written {
 		t.Fatal("fragment must NOT be seekable when written < End")
 	}
 	t.Log("VERDICT: MVLiveIndex.Lookup returns latest frag ≤ t with correct End bounds; InitSize exposed; last frag unbounded.")

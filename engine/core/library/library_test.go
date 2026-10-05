@@ -90,3 +90,90 @@ func TestLoadRejectsTamperedCache(t *testing.T) {
 		t.Fatalf("tampered cache loaded %d songs", n)
 	}
 }
+
+// A key file that is unreadable for any reason other than "absent" must not be replaced:
+// minting a new key would overwrite the real one and orphan the encrypted cache.
+func TestKeyIsNotRegeneratedOnReadFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	dir := t.TempDir()
+	s := New(dir)
+	first, err := s.encKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "library.key")
+	if fi, err := os.Stat(keyPath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("key file: %v, mode %v", err, fi.Mode().Perm())
+	}
+
+	if err := os.Chmod(keyPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	s2 := New(dir) // a fresh process: no cached key
+	if _, err := s2.encKey(); err == nil {
+		t.Fatal("an unreadable key file must be an error, not a reason to generate a new key")
+	}
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(keyPath)
+	if err != nil || string(got) != string(first) {
+		t.Fatal("the original key was overwritten")
+	}
+}
+
+func TestKeyCreationIsExclusive(t *testing.T) {
+	dir := t.TempDir()
+	const racers = 8
+	keys := make(chan string, racers)
+	for i := 0; i < racers; i++ {
+		go func() {
+			k, err := New(dir).encKey()
+			if err != nil {
+				keys <- "error: " + err.Error()
+				return
+			}
+			keys <- string(k)
+		}()
+	}
+	first := <-keys
+	for i := 1; i < racers; i++ {
+		if k := <-keys; k != first {
+			t.Fatal("concurrent starts ended up with different keys: the cache would be undecryptable by some of them")
+		}
+	}
+}
+
+// A store whose database failed to open must degrade to "empty", never panic.
+func TestStoreWithoutDatabaseDoesNotPanic(t *testing.T) {
+	s := &Store{}
+	if s.Playlists() != nil || s.PlaylistTracks("x") != nil || s.SongsByAlbum("x") != nil {
+		t.Error("expected empty results")
+	}
+	s.SetPlaylistTracks("x", nil)
+	s.Ingest(IngestPayload{})
+	if !s.NeedsSync() {
+		t.Error("a store without a database always needs a sync")
+	}
+	_, _, _, _ = s.Stats()
+}
+
+// A dump written by a newer layout is ignored instead of half-loaded.
+func TestLoadIgnoresNewerCacheFormat(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	plain := []byte(`{"version":99,"songs":[{"libraryId":"x","name":"n"}]}`)
+	enc, err := s.encrypt(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "library.enc"), enc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s2 := New(dir)
+	if songs, _, _, _ := s2.Stats(); songs != 0 {
+		t.Fatalf("loaded %d songs from a newer format", songs)
+	}
+}

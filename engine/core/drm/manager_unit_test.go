@@ -203,13 +203,13 @@ func makeSession(t *testing.T, baseDir string) {
 // playback request or explicit Authenticate call.
 func TestManagerInitialStateWithSession(t *testing.T) {
 	backend := newMockBackend()
-	mgr, baseDir := newUnitManager(t, backend)
+	_, baseDir := newUnitManager(t, backend)
 	makeSession(t, baseDir)
 
 	// Re-create the manager AFTER the session file exists so NewDRMManager
 	// can observe HasSession() == true at construction time.
 	session := drm.NewSessionManager(baseDir)
-	mgr = drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir}, drm.RestartPolicy{})
+	mgr := drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir}, drm.RestartPolicy{})
 
 	snap := mgr.Status()
 	if snap.State.Session != drm.SessionValid {
@@ -254,11 +254,11 @@ func TestManagerMergeEmitSession(t *testing.T) {
 		},
 	}}
 
-	mgr, baseDir := newUnitManager(t, backend)
+	_, baseDir := newUnitManager(t, backend)
 	makeSession(t, baseDir)
 	// Re-create session manager pointing at the same dir so HasSession() is true.
 	session := drm.NewSessionManager(baseDir)
-	mgr = drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir},
+	mgr := drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir},
 		drm.RestartPolicy{StartupTimeout: 5 * time.Second, AuthTimeout: 10 * time.Second})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -330,10 +330,10 @@ func TestManagerBackendStartError(t *testing.T) {
 	backend := newMockBackend()
 	backend.startErr = errors.New("mock: binary not found")
 
-	mgr, baseDir := newUnitManager(t, backend)
+	_, baseDir := newUnitManager(t, backend)
 	makeSession(t, baseDir)
 	session := drm.NewSessionManager(baseDir)
-	mgr = drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir},
+	mgr := drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir},
 		drm.RestartPolicy{StartupTimeout: 5 * time.Second, AuthTimeout: 10 * time.Second})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -353,10 +353,10 @@ func TestManagerAuthenticateStopsRunningBackend(t *testing.T) {
 	backend.running = true // simulate already-running backend
 	backend.mu.Unlock()
 
-	mgr, baseDir := newUnitManager(t, backend)
+	_, baseDir := newUnitManager(t, backend)
 	makeSession(t, baseDir)
 	session := drm.NewSessionManager(baseDir)
-	mgr = drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir},
+	mgr := drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir},
 		drm.RestartPolicy{StartupTimeout: 5 * time.Second, AuthTimeout: 10 * time.Second})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -406,10 +406,10 @@ func TestManagerLogoutResetsState(t *testing.T) {
 	backend.running = true
 	backend.mu.Unlock()
 
-	mgr, baseDir := newUnitManager(t, backend)
+	_, baseDir := newUnitManager(t, backend)
 	makeSession(t, baseDir)
 	session := drm.NewSessionManager(baseDir)
-	mgr = drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir},
+	mgr := drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {}, drm.BackendConfig{BaseDir: baseDir},
 		drm.RestartPolicy{})
 
 	ctx := context.Background()

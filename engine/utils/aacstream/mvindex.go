@@ -99,7 +99,6 @@ type mvDecIndexer struct {
 	baseTime    float64
 	baseTimeSet bool
 	dbgN        int // limits per-fragment/skip diagnostic logging
-	dbgBoxN     int // limits per-box scanner diagnostic logging
 }
 
 func newMVDecIndexer() *mvDecIndexer {

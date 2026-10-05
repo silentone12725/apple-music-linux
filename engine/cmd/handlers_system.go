@@ -236,6 +236,13 @@ func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 			writeEv(s.events.nextID(), "ping", map[string]int64{"ts": time.Now().UnixMilli()}, epochInfo.Generation, false, "")
 		case ev, ok := <-ch:
 			if !ok {
+				// The bus closed this subscription because the client fell behind (it
+				// is never closed for any other reason while the request is live).
+				if r.Context().Err() == nil {
+					writeEv(s.events.nextID(), "stream.lagged", map[string]string{
+						"reason": "slow_consumer", "action": "reconnect with Last-Event-ID",
+					}, epochInfo.Generation, false, "")
+				}
 				return
 			}
 			writeEv(ev.ID, ev.Type, ev.Data, ev.Generation, false, "")

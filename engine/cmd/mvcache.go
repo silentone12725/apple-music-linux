@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 
 	"engine/utils/aacstream"
@@ -49,6 +50,7 @@ func loadMVPrefs() {
 }
 
 func saveMVPrefs() {
+	initMVPrefs()
 	p := mvCachePrefs{
 		Enabled:  aacstream.MVCacheEnabled(),
 		MaxBytes: mvCachePrefMaxBytes.Load(),
@@ -64,13 +66,21 @@ func saveMVPrefs() {
 	}
 }
 
-func init() {
-	mvCachePrefMaxBytes.Store(aacstream.DefaultMVCacheMaxBytes)
-	loadMVPrefs()
+var mvPrefsOnce sync.Once
+
+// initMVPrefs applies the saved MV cache preferences, once. It is called when a server is
+// built (and lazily by the accessors below) instead of from init(): importing the package
+// must not read the user's files.
+func initMVPrefs() {
+	mvPrefsOnce.Do(func() {
+		mvCachePrefMaxBytes.Store(aacstream.DefaultMVCacheMaxBytes)
+		loadMVPrefs()
+	})
 }
 
 // MVCacheGetInfo returns the current MV cache state for the capabilities/stats API.
 func MVCacheGetInfo() (enabled bool, maxBytes, sizeBytes int64, quality string) {
+	initMVPrefs()
 	return aacstream.MVCacheEnabled(), aacstream.MVCacheMaxBytes(), aacstream.MVCacheTotalBytes(), mvlabel.Get()
 }
 
@@ -78,6 +88,7 @@ func ClearMVCache() error { return aacstream.ClearMVCache() }
 
 // MVCacheSetEnabled turns the MV cache on or off and persists the choice.
 func MVCacheSetEnabled(enabled bool) {
+	initMVPrefs()
 	if enabled {
 		aacstream.SetMVCacheMaxBytes(mvCachePrefMaxBytes.Load())
 	} else {
@@ -88,6 +99,7 @@ func MVCacheSetEnabled(enabled bool) {
 
 // MVCacheSetMaxBytes sets the MV cache capacity in bytes, enables the cache, and persists.
 func MVCacheSetMaxBytes(n int64) {
+	initMVPrefs()
 	if n > 0 {
 		mvCachePrefMaxBytes.Store(n)
 	}

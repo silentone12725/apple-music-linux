@@ -123,7 +123,7 @@ func newDirectTestServer(t *testing.T, src *fakeVideoSource) (*APIServer, string
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { stopVsegSession(sess.ID) })
+	t.Cleanup(func() { s.stopVsegSession(sess.ID) })
 	return s, sess.ID
 }
 
@@ -223,5 +223,26 @@ func TestStartVsegSessionDirectReportsPlanFailure(t *testing.T) {
 	s, id := newDirectTestServer(t, &fakeVideoSource{fx: fx, directOK: false})
 	if _, err := s.startVsegSessionDirect(id, "mv-test", 1); err == nil {
 		t.Fatal("a failed plan must be reported so the handler can fall back to FFmpeg")
+	}
+}
+
+// A session that goes away without a DELETE (expiry, reaper) must still stop its vseg
+// producers: they otherwise run on, and pin the cache file, until the process exits.
+func TestSessionReleaseStopsVsegProducers(t *testing.T) {
+	fx := newDirectFixture(t, 4)
+	s, id := newDirectTestServer(t, &fakeVideoSource{fx: fx, directOK: true})
+	s.installReleaseHook()
+
+	rec := vsegCall(t, s.handlePlaybackVsegSeek, id, "/seek?t=1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seek: %d %s", rec.Code, rec.Body)
+	}
+	if s.vsegStateFor(id) == nil {
+		t.Fatal("no vseg state after a seek")
+	}
+
+	s.pm.Release(id) // what the reaper does for an expired session
+	if s.vsegStateFor(id) != nil {
+		t.Fatal("vseg state survived the session")
 	}
 }

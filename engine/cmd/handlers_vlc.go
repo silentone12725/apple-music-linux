@@ -20,7 +20,7 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		AssetID   string `json:"assetId"`
 		StartMs   int64  `json:"startMs"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -100,7 +100,7 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		PosMs     int64  `json:"posMs"`
 		SessionID string `json:"sessionId"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -133,7 +133,7 @@ func (s *APIServer) handleVLCVolume(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Volume int `json:"volume"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}

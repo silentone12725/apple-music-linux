@@ -86,7 +86,8 @@ func (s *APIServer) catalogParams(w http.ResponseWriter, r *http.Request) (sf, i
 	if sf == "" {
 		sf = "us"
 	}
-	if !catalogIDRe.MatchString(id) || !catalogIDRe.MatchString(sf) || id == "." || id == ".." {
+	if !catalogIDRe.MatchString(id) || !catalogIDRe.MatchString(sf) ||
+		id == "." || id == ".." || sf == "." || sf == ".." {
 		http.Error(w, "invalid id or storefront", http.StatusBadRequest)
 		return "", "", false
 	}

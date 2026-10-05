@@ -52,6 +52,11 @@ type Options struct {
 	// FloorBps is the minimum export rate (bytes/s) while playback streams.
 	// Zero selects the default (128 KiB/s).
 	FloorBps int64
+	// OutputRoots, when non-empty, confines exports: a request's OutputDir must lie
+	// inside one of these directories (compared after resolving symlinks). Empty
+	// means unrestricted, which is only appropriate when every caller is trusted —
+	// the HTTP server sets it, because request bodies come from a web page.
+	OutputRoots []string
 }
 
 // Manager enqueues and executes export jobs one at a time: highest priority
@@ -71,6 +76,8 @@ type Manager struct {
 	bw       *bwController
 	run      func(*workItem) // test seam; nil means m.execute
 	seq      atomic.Int64    // monotonically increasing enqueue counter
+	roots    []string        // resolved OutputRoots
+	confined bool            // OutputRoots was set (even if nothing resolved: then nothing is allowed)
 }
 
 type workItem struct {
@@ -83,7 +90,18 @@ type workItem struct {
 // notifies ev on each state transition. Jobs are processed one at a time,
 // highest priority first and FIFO within a priority.
 func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
+	var roots []string
+	for _, r := range opts.OutputRoots {
+		if r == "" {
+			continue
+		}
+		if real, err := resolveExisting(r); err == nil {
+			roots = append(roots, real)
+		}
+	}
 	m := &Manager{
+		roots:    roots,
+		confined: len(opts.OutputRoots) > 0,
 		jobs:     make(map[string]*ExportJob),
 		requests: make(map[string]ExportRequest),
 		queue:    pq.New[*workItem](),
@@ -111,8 +129,17 @@ func (m *Manager) Enqueue(req ExportRequest) (*ExportJob, error) {
 	if !validToolPath(req.Options.VLCPath, "vlc", "cvlc") {
 		return nil, fmt.Errorf("options.vlcPath must name a vlc or cvlc binary")
 	}
+	if err := checkToolExecutable(req.Options.FFmpegPath, "ffmpeg"); err != nil {
+		return nil, fmt.Errorf("options.ffmpegPath: %w", err)
+	}
+	if err := checkToolExecutable(req.Options.VLCPath, "vlc", "cvlc"); err != nil {
+		return nil, fmt.Errorf("options.vlcPath: %w", err)
+	}
 	if req.OutputDir == "" {
 		req.OutputDir = defaultOutputDir()
+	}
+	if err := m.checkOutputDir(req.OutputDir); err != nil {
+		return nil, err
 	}
 	if req.Options.ArtworkSize <= 0 {
 		req.Options.ArtworkSize = defaultArtworkSize
@@ -815,6 +842,7 @@ func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *Ex
 	// ── Phase 6: Tag (metadata, artwork, lyrics) ──────────────────────
 	if !req.Capabilities.Video {
 		if err := TagFile(tmpPath, meta, TagOptions{
+			Ctx:          ctx,
 			EmbedArtwork: req.Options.EmbedArtwork,
 			ArtworkSize:  req.Options.ArtworkSize,
 			Lyrics:       lrcStr,
@@ -835,7 +863,7 @@ func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *Ex
 
 	// ── Phase 8: Format conversion (optional) ────────────────────────
 	if req.Options.ConvertToFLAC && req.Capabilities.Lossless && !req.Capabilities.Video {
-		tmpPath, finalPath = convertFLAC(req, meta, tmpPath, finalPath)
+		tmpPath, finalPath = convertFLAC(ctx, req, meta, tmpPath, finalPath)
 	}
 
 	// ── Phase 9: Move temp → final ────────────────────────────────────
@@ -912,7 +940,7 @@ func (m *Manager) expandCollection(ctx context.Context, req ExportRequest, job *
 // convertFLAC converts tmpPath (ALAC fMP4) to FLAC, returning the updated
 // tmpPath and finalPath. Prefers VLC decode → ffmpeg tag; falls back to
 // ffmpeg all-in-one.
-func convertFLAC(req ExportRequest, meta TrackMeta, tmpPath, finalPath string) (string, string) {
+func convertFLAC(ctx context.Context, req ExportRequest, meta TrackMeta, tmpPath, finalPath string) (string, string) {
 	flacTmp := tmpPath + ".flac"
 	ffpathFlac := req.Options.FFmpegPath
 	if ffpathFlac == "" {
@@ -926,7 +954,7 @@ func convertFLAC(req ExportRequest, meta TrackMeta, tmpPath, finalPath string) (
 			log.Printf("export %s: vlc transcode failed: %v — trying ffmpeg", req.AssetID, err)
 			os.Remove(rawFlac) //nolint:errcheck
 		} else {
-			artArg := downloadArtworkToTemp(req, meta, rawFlac)
+			artArg := downloadArtworkToTemp(ctx, req, meta, rawFlac)
 			if tagErr := tagFLAC(ffpathFlac, rawFlac, artArg, flacTmp, meta); tagErr != nil {
 				log.Printf("export %s: flac tag failed: %v — retrying without art", req.AssetID, tagErr)
 				os.Remove(flacTmp) //nolint:errcheck
@@ -967,12 +995,12 @@ func convertFLAC(req ExportRequest, meta TrackMeta, tmpPath, finalPath string) (
 
 // downloadArtworkToTemp downloads artwork to a temp file alongside rawFlac and
 // returns its path (empty string if skipped or failed).
-func downloadArtworkToTemp(req ExportRequest, meta TrackMeta, rawFlac string) string {
+func downloadArtworkToTemp(ctx context.Context, req ExportRequest, meta TrackMeta, rawFlac string) string {
 	if !req.Options.EmbedArtwork || meta.ArtworkURL == "" {
 		return ""
 	}
 	artTmp := rawFlac + ".art.jpg"
-	artBytes, _, err := downloadArtworkBytes(meta.ArtworkURL, req.Options.ArtworkSize)
+	artBytes, _, err := downloadArtworkBytes(ctx, meta.ArtworkURL, req.Options.ArtworkSize)
 	if err != nil {
 		return ""
 	}

@@ -58,6 +58,7 @@ func TestCatalogParamsValidation(t *testing.T) {
 	}{
 		{"1440833098", "us", true}, {"pl.u-abc_1", "gb", true}, {"l.AbC.1", "", true},
 		{"..", "us", false}, {"1", "us/../../v1/me", false}, {"a?b", "us", false}, {"", "us", false},
+		{"1", "..", false}, {"1", ".", false}, // a dot-segment storefront would climb out of /v1/catalog/
 	} {
 		r := httptest.NewRequest("GET", "/api/v1/catalog/albums/x", nil)
 		r.SetPathValue("id", c.id)

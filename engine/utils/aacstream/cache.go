@@ -14,6 +14,7 @@ package aacstream
 import (
 	"container/list"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,25 +35,68 @@ const (
 	mvCacheDirName = "engine/mv-segments"
 )
 
-// segmentCache is the global LRU cache for audio HLS segments.
-var segmentCache = &SegmentCache{}
+// segmentCache is the process-wide LRU cache for audio HLS segments.
+var segmentCache = newSegmentCache(CacheMaxBytes)
 
-// mvSegmentCache is the global LRU cache for MV video HLS segments.
+// mvSegmentCache is the process-wide LRU cache for MV video HLS segments.
 // Kept separate so its size limit and enabled state can be tuned independently.
-var mvSegmentCache = &SegmentCache{}
+var mvSegmentCache = newSegmentCache(DefaultMVCacheMaxBytes)
 
-func init() {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
+func newSegmentCache(maxBytes int64) *SegmentCache {
+	c := &SegmentCache{}
+	c.maxBytes.Store(maxBytes)
+	return c
+}
+
+// The cache directories are created on first use, not when the package is imported:
+// importing the SDK must not touch the user's home. SetCacheBaseDir picks where they go.
+var (
+	cacheBaseMu   sync.Mutex
+	cacheBase     string
+	cacheDirsOnce sync.Once
+	cacheDirsUsed bool
+)
+
+// SetCacheBaseDir sets the directory under which the segment and MV caches keep their
+// files (default: the user cache directory). It must be called before the caches are first
+// used, and reports an error afterwards.
+func SetCacheBaseDir(dir string) error {
+	cacheBaseMu.Lock()
+	defer cacheBaseMu.Unlock()
+	if cacheDirsUsed {
+		return errors.New("aacstream: SetCacheBaseDir called after the caches were first used")
 	}
-	segmentCache.dir = filepath.Join(base, cacheDirName)
-	segmentCache.maxBytes.Store(CacheMaxBytes)
-	os.MkdirAll(segmentCache.dir, 0700)
+	cacheBase = dir
+	return nil
+}
 
-	mvSegmentCache.dir = filepath.Join(base, mvCacheDirName)
-	mvSegmentCache.maxBytes.Store(DefaultMVCacheMaxBytes)
-	os.MkdirAll(mvSegmentCache.dir, 0700)
+func ensureCacheDirs() {
+	cacheDirsOnce.Do(func() {
+		cacheBaseMu.Lock()
+		cacheDirsUsed = true
+		base := cacheBase
+		cacheBaseMu.Unlock()
+		if base == "" {
+			var err error
+			if base, err = os.UserCacheDir(); err != nil {
+				base = os.TempDir()
+			}
+		}
+		if segmentCache.dir == "" {
+			segmentCache.dir = filepath.Join(base, cacheDirName)
+		}
+		if mvSegmentCache.dir == "" {
+			mvSegmentCache.dir = filepath.Join(base, mvCacheDirName)
+		}
+		os.MkdirAll(segmentCache.dir, 0700)
+		os.MkdirAll(mvSegmentCache.dir, 0700)
+	})
+}
+
+// directory returns the cache's directory, creating the cache directories on first use.
+func (c *SegmentCache) directory() string {
+	ensureCacheDirs()
+	return c.dir
 }
 
 // SegmentCache manages a bounded on-disk cache for HLS segment bytes.
@@ -81,7 +125,7 @@ func cacheKey(url string) string {
 }
 
 func (c *SegmentCache) cachePath(key string) string {
-	return filepath.Join(c.dir, key[:2], key)
+	return filepath.Join(c.directory(), key[:2], key)
 }
 
 // On-disk format: [32 bytes SHA-256 of content] [content bytes]
@@ -224,7 +268,7 @@ func (c *SegmentCache) WarmFromDisk() {
 		atime time.Time
 	}
 	var files []fileInfo
-	filepath.Walk(c.dir, func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(c.directory(), func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || len(info.Name()) != 64 {
 			return nil
 		}
@@ -334,7 +378,7 @@ func ClearSegmentCache() error {
 	segmentCache.lru.Init()
 	segmentCache.entries = make(map[string]*list.Element)
 	segmentCache.totalSz = 0
-	dir := segmentCache.dir
+	dir := segmentCache.directory()
 	segmentCache.mu.Unlock()
 	if err := os.RemoveAll(dir); err != nil {
 		return err
@@ -349,7 +393,7 @@ func ClearMVCache() error {
 	mvSegmentCache.lru.Init()
 	mvSegmentCache.entries = make(map[string]*list.Element)
 	mvSegmentCache.totalSz = 0
-	dir := mvSegmentCache.dir
+	dir := mvSegmentCache.directory()
 	mvSegmentCache.mu.Unlock()
 	if err := os.RemoveAll(dir); err != nil {
 		return err
