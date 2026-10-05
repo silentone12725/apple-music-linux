@@ -98,6 +98,7 @@ class EngineSSE {
             this._connected = true;
             this._retryDelay = 1000; // reset on successful connect
             console.log('[AML SSE] Connected');
+            this._dispatch('sse.open', {}); // local event: lets clients re-send state a restarted engine lost
 
             await this._parseStream(resp.body);
         } catch (e) {

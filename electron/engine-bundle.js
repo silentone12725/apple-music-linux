@@ -204,6 +204,7 @@
     else if (_isCharging === false && _lastBatLevel !== null)
       _setPowerMode(_lastBatLevel > 0.25 ? "reduced" : "minimal");
   }
+  var _lastLoggedFloor;
   function _applySysPowerProfile(profile) {
     if (!profile) {
       _sysPowerFloor = null;
@@ -214,7 +215,10 @@
     } else {
       _sysPowerFloor = null;
     }
-    console.log(`[AML Power] sys profile=${profile} \u2192 floor=${_sysPowerFloor ?? "none"}`);
+    if (_sysPowerFloor !== _lastLoggedFloor) {
+      _lastLoggedFloor = _sysPowerFloor;
+      console.log(`[AML Power] sys profile=${profile} \u2192 floor=${_sysPowerFloor ?? "none"}`);
+    }
     _recomputePowerMode();
   }
   navigator.getBattery?.().then((bat) => {
@@ -233,7 +237,10 @@
     const fetch2 = () => window.amlBridge?.getPowerProfile().then(_applySysPowerProfile).catch(() => {
     });
     fetch2();
-    setInterval(fetch2, 3e4);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) fetch2();
+    });
+    window.addEventListener("focus", fetch2);
   })();
   var _domSettleCbs = /* @__PURE__ */ new Set();
   var _domSettleObs = null;
@@ -6819,7 +6826,8 @@
       }
     };
     _pushLibraryTokens();
-    setInterval(_pushLibraryTokens, 6e4);
+    window._amlEngine?.on("sse.open", _pushLibraryTokens);
+    mk.addEventListener("authorizationStatusDidChange", _pushLibraryTokens);
     async function _mkFetchAll(mkInst, basePath, extraParams, onProgress) {
       const items = [];
       const [pathOnly, qs] = basePath.split("?");

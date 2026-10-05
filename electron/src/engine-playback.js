@@ -101,12 +101,16 @@ function _recomputePowerMode() {
         _setPowerMode(_lastBatLevel > 0.25 ? 'reduced' : 'minimal');
 }
 
+let _lastLoggedFloor;
 function _applySysPowerProfile(profile) {
     if (!profile) { _sysPowerFloor = null; }
     else if (profile === 'performance' || profile === 'balanced') { _sysPowerFloor = 'full'; }
     else if (profile === 'cool' || profile === 'quiet') { _sysPowerFloor = 'reduced'; }
     else { _sysPowerFloor = null; }
-    console.log(`[AML Power] sys profile=${profile} → floor=${_sysPowerFloor ?? 'none'}`);
+    if (_sysPowerFloor !== _lastLoggedFloor) {
+        _lastLoggedFloor = _sysPowerFloor;
+        console.log(`[AML Power] sys profile=${profile} → floor=${_sysPowerFloor ?? 'none'}`);
+    }
     _recomputePowerMode();
 }
 
@@ -125,13 +129,16 @@ navigator.getBattery?.().then(bat => {
     _isCharging = true;
 });
 
-// Poll system power profile via Electron IPC; refresh every 30 s in case user
-// switches profiles (e.g. power-profiles-daemon responds to a GUI toggle).
+// Read the system power profile via Electron IPC at startup and again on window
+// focus/visibility (power-profiles-daemon responds to a GUI toggle made elsewhere).
 ;(function _pollSysPowerProfile() {
     const fetch = () => window.amlBridge?.getPowerProfile()
         .then(_applySysPowerProfile).catch(() => {});
     fetch();
-    setInterval(fetch, 30_000);
+    // Event-driven: re-read when the window becomes visible/focused, not on a timer.
+    // The profile is a user setting, so it can only change while they are elsewhere.
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) fetch(); });
+    window.addEventListener('focus', fetch);
 })();
 
 // ── Coalesced DOM watching ────────────────────────────────────────────────────
@@ -7442,8 +7449,8 @@ async function setup() {
 
     // Push MusicKit JS credentials to the engine so the library API can use
     // the web-auth token pair instead of the Android DRM session token.
-    // Runs immediately and re-pushes every 60s so the engine always has fresh
-    // tokens even after an engine restart (the engine forgets them on exit).
+    // Pushed at startup, whenever the SSE stream (re)connects (the engine forgets
+    // the tokens when it restarts) and when the web authorisation changes. No timer.
     const _pushLibraryTokens = () => {
         try {
             const mkut = mk.musicUserToken;
@@ -7458,7 +7465,8 @@ async function setup() {
         } catch (_) {}
     };
     _pushLibraryTokens();
-    setInterval(_pushLibraryTokens, 60_000);
+    window._amlEngine?.on('sse.open', _pushLibraryTokens);
+    mk.addEventListener('authorizationStatusDidChange', _pushLibraryTokens);
 
     // _mkFetchAll paginates a MusicKit library endpoint until exhausted.
     // Extracted from _syncLibraryViaJS so its CC stays independent.
