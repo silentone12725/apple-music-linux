@@ -121,7 +121,7 @@ A Wayland compositor with blur support (Hyprland, KWin) gives the best glass UI.
 
 Two formats are available. Both contain the same build.
 
-### Option A — `.run` installer (123 MB, recommended)
+### Option A — `.run` installer (112 MB, recommended)
 
 No dependencies, no root required for a user install.
 
@@ -143,7 +143,7 @@ This installs to `~/.local/lib/apple-music-linux` and adds a launcher to `~/.loc
 
 After install, launch from your app menu or run `apple-music-linux` in a terminal.
 
-### Option B — AppImage (184 MB, portable)
+### Option B — AppImage (160 MB, portable)
 
 No install needed — just run it directly.
 
