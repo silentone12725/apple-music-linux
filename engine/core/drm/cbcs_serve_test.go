@@ -38,13 +38,14 @@ func TestServeCBCSKeySwitchKeepsConnection(t *testing.T) {
 	var opened []string
 	done := make(chan error, 1)
 	go func() {
-		done <- serveCBCS(context.Background(), server, func(adamID, uri string) (func([]byte), error) {
+		done <- serveCBCS(context.Background(), server, func(adamID, uri string) (func([]byte) error, error) {
 			opened = append(opened, adamID+"|"+uri)
 			k := byte(len(opened)) // key 1 XORs with 1, key 2 with 2
-			return func(b []byte) {
+			return func(b []byte) error {
 				for i := range b {
 					b[i] ^= k
 				}
+				return nil
 			}, nil
 		})
 		server.Close()
@@ -82,7 +83,7 @@ func TestServeCBCSKeyOpenFailureEndsSession(t *testing.T) {
 		writeShort(t, client, "1")
 		writeShort(t, client, "skd://bad")
 	}()
-	err := serveCBCS(context.Background(), server, func(string, string) (func([]byte), error) {
+	err := serveCBCS(context.Background(), server, func(string, string) (func([]byte) error, error) {
 		return nil, errors.New("no kd ctx")
 	})
 	if err == nil {

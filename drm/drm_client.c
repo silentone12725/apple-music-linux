@@ -1048,6 +1048,12 @@ int drm_get_progressive_url(
 
 /* ── drm_open_key_context (REQ-4.6) ─────────────────────────────────────────*/
 
+/* A key context derived before a lease refresh is no longer valid. */
+static int key_context_stale(const struct drm_key_context *ctx)
+{
+    return ctx->hybris_ctx && ctx->hybris_epoch != hybris_decrypt_epoch();
+}
+
 drm_key_context_handle_t drm_open_key_context(
     const char *asset_id_str,
     const char *media_uri)
@@ -1079,7 +1085,8 @@ drm_key_context_handle_t drm_open_key_context(
     struct drm_key_context_cache_entry *entry = g_state.key_context_cache[bucket];
     while (entry) {
         if (strcmp(entry->asset_id_str, asset_id_str) == 0 &&
-            strcmp(entry->media_uri, media_uri) == 0) {
+            strcmp(entry->media_uri, media_uri) == 0 &&
+            !key_context_stale(entry->ctx)) {
             /* Found - increment ref count */
             pthread_mutex_lock(&entry->ctx->lock);
             entry->ctx->ref_count++;
@@ -1104,14 +1111,18 @@ drm_key_context_handle_t drm_open_key_context(
     /* For skd:// URIs (ALAC FairPlay), try the hybris backend which performs
      * the full SPC → KSM → CKC exchange — a network call, done without lock. */
     if (strncmp(media_uri, "skd://", 6) == 0) {
-        void *hctx = hybris_open_kd_ctx_from_uri(media_uri);
+        unsigned epoch = hybris_decrypt_epoch(); /* before derivation: conservative */
+        void *hctx = hybris_open_kd_ctx_from_uri(asset_id_str, media_uri);
         if (hctx) {
+            ctx->hybris_epoch     = epoch;
             ctx->hybris_ctx       = hctx;
             ctx->hybris_ctx_alien = 1; /* owned by libandroidappmusic.so */
             fprintf(stderr, "[drm] hybris key context for %s: %p\n", media_uri, hctx);
         } else {
-            fprintf(stderr, "[drm] hybris key context unavailable for %s — zero-key fallback\n",
+            fprintf(stderr, "[drm] hybris key context unavailable for %s — refusing zero-key fallback\n",
                     media_uri);
+            destroy_key_context(ctx);
+            return NULL;
         }
     }
 
@@ -1121,7 +1132,8 @@ drm_key_context_handle_t drm_open_key_context(
     entry = g_state.key_context_cache[bucket];
     while (entry) {
         if (strcmp(entry->asset_id_str, asset_id_str) == 0 &&
-            strcmp(entry->media_uri, media_uri) == 0) {
+            strcmp(entry->media_uri, media_uri) == 0 &&
+            !key_context_stale(entry->ctx)) {
             /* Another thread inserted while we were out — return that entry */
             pthread_mutex_lock(&entry->ctx->lock);
             entry->ctx->ref_count++;

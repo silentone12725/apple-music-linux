@@ -21,7 +21,7 @@ import (
 // (alacstream.SwitchKeys) then sends the next adamID/URI on the same
 // connection. The connection ends when the client closes it (EOF at a header),
 // or when a header is empty or its key cannot be opened.
-func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri string) (decrypt func([]byte), err error)) error {
+func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri string) (decrypt func([]byte) error, err error)) error {
 	for {
 		adamID, err := readShortString(conn)
 		if errors.Is(err, io.EOF) {
@@ -63,7 +63,9 @@ func serveCBCS(ctx context.Context, conn net.Conn, openKey func(adamID, uri stri
 			if _, err := io.ReadFull(conn, sample); err != nil {
 				return err
 			}
-			decrypt(sample)
+			if err := decrypt(sample); err != nil {
+				return fmt.Errorf("decrypt CBCS sample: %w", err)
+			}
 			if _, err := conn.Write(sample); err != nil {
 				return err
 			}

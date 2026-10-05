@@ -94,6 +94,7 @@ drm/rootfs/data/data/com.apple.android.music/files/531EA4BB8D4B206263577F83ADB39
 drm/rootfs/data/data/com.apple.android.music/files/687AFDAA1CFB2E9F37DD7FD5EE63A93FCAC1AFAA
 drm/rootfs/home/
 drm/rootfs/tmp/
+drm/rootfs/system/
 
 # ── DRM client credentials (native backend) ───────────────────────────────────
 # These files are written by the running DRM client and must not be committed.
@@ -161,3 +162,11 @@ docs/
 
 # ── verification/pipeline-check.go output (multi-hundred-MB captured streams) ──
 pipeline-out/
+
+# ── DRM native build outputs / runtime state ──────────────────────────────────
+drm/native/*.o
+drm/drm_hybris.o
+drm/corefp_probe
+drm/embedded_blobs/
+drm/drm-rootless/
+drm/files/

@@ -118,6 +118,26 @@ drm_key_context_handle_t drm_open_key_context(
     const char *media_uri
 );
 
+/**
+ * Set the AES key and IV for a key context.
+ *
+ * After drm_open_key_context() creates a context with zero keys, call this
+ * function to set the actual FairPlay content key obtained from license fetch.
+ *
+ * @param key_context   Handle from drm_open_key_context()
+ * @param aes_key       16-byte AES-128 key
+ * @param iv            16-byte initialization vector
+ * @return              0 on success, -1 on failure
+ *
+ * @note                Must be called before any drm_decrypt_sample() calls.
+ * @note                The key and IV are copied internally; caller can free them.
+ */
+int drm_set_key_context_key(
+    drm_key_context_handle_t key_context,
+    const uint8_t *aes_key,
+    const uint8_t *iv
+);
+
 /* ── Decryption Functions ───────────────────────────────────────────────────*/
 
 /**
@@ -136,6 +156,42 @@ drm_key_context_handle_t drm_open_key_context(
  * @note                Sample must be aligned to 16-byte boundary.
  */
 int drm_decrypt_sample(
+    drm_key_context_handle_t key_context,
+    uint8_t *sample_data,
+    uint32_t sample_size
+);
+
+/**
+ * Decrypt a FairPlay-encrypted sample with explicit sample number.
+ *
+ * Same as drm_decrypt_sample() but allows specifying the sample number
+ * explicitly. This is useful when the sample counter should be maintained
+ * externally (e.g., per CBCS stream rather than per key context).
+ *
+ * @param key_context   Handle from drm_open_key_context()
+ * @param sample_data   Encrypted sample (decrypted in-place)
+ * @param sample_size   Sample size in bytes (must be multiple of 16)
+ * @param sample_number Explicit sample number for IV derivation
+ * @return              0 on success, -1 on failure
+ *
+ * @note                sample_data is modified in-place.
+ * @note                sample_number is used for IV derivation (not incremented).
+ * @note                Sample must be aligned to 16-byte boundary.
+ */
+int drm_decrypt_sample_at(
+    drm_key_context_handle_t key_context,
+    uint8_t *sample_data,
+    uint32_t sample_size,
+    uint64_t sample_number
+);
+
+/**
+ * Decrypt a sample using the sample's first ciphertext block as the IV
+ * derivation input. This matches the standalone Android wrapper's fallback
+ * path, which derives a 16-byte value from the key-delivery context and the
+ * first block rather than maintaining a process-global sample counter.
+ */
+int drm_decrypt_sample_with_sample_iv(
     drm_key_context_handle_t key_context,
     uint8_t *sample_data,
     uint32_t sample_size

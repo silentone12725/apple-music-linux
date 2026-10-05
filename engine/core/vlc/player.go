@@ -7,9 +7,12 @@ package vlc
 // #include <stdlib.h>
 import "C"
 import (
+	"bufio"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -107,6 +110,10 @@ func (p *Player) playLocked() error {
 	if ret := C.libvlc_media_player_play(p.mp); ret != 0 {
 		return fmt.Errorf("vlc: play failed (ret %d)", int(ret))
 	}
+	// A previous libvlc session can leave the player muted even when the
+	// requested software volume is non-zero. Clear that state before the
+	// audio output is opened.
+	C.libvlc_audio_set_mute(p.mp, 0)
 	C.libvlc_audio_set_volume(p.mp, C.int(vol))
 	// WirePlumber applies its stored per-app stream volume asynchronously after
 	// VLC opens the audio device, overriding the libvlc software volume above.
@@ -143,10 +150,11 @@ func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
 		p.mu.Unlock()
 		return
 	}
+	C.libvlc_audio_set_mute(p.mp, 0)
 	C.libvlc_audio_set_volume(p.mp, C.int(vol))
+	log.Printf("[vlc] audio output volume=%d mute=%d", vol, int(C.libvlc_audio_get_mute(p.mp)))
 	p.mu.Unlock()
 
-	const wpctlCmd = `id=$(wpctl status 2>/dev/null | grep -i "vlc" | awk '{print $1}' | tr -d '.' | grep -E '^[0-9]+$' | head -1); [ -n "$id" ] && wpctl set-mute "$id" 0 && wpctl set-volume "$id" 1.0`
 	for range 8 {
 		p.mu.Lock()
 		stale := p.loadGen != myGen
@@ -154,8 +162,40 @@ func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
 		if stale {
 			return
 		}
-		exec.Command("sh", "-c", wpctlCmd).Run() //nolint:errcheck
+		resetPipeWireVolume(vol)
 		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// resetPipeWireVolume targets the sink input owned by this engine process.
+// libVLC is embedded in the Go engine, so PipeWire names the stream after the
+// engine process rather than after a standalone "vlc" application.
+func resetPipeWireVolume(vol int) {
+	out, err := exec.Command("pactl", "list", "sink-inputs").Output()
+	if err != nil {
+		return
+	}
+	pid := strconv.Itoa(os.Getpid())
+	sinkID := ""
+	matchesPID := false
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "Sink Input #") {
+			sinkID = strings.TrimSpace(strings.TrimPrefix(line, "Sink Input #"))
+			matchesPID = false
+			continue
+		}
+		if strings.Contains(line, "application.process.id =") &&
+			strings.Contains(line, `"`+pid+`"`) {
+			matchesPID = true
+		}
+		if matchesPID && sinkID != "" {
+			_ = exec.Command("pactl", "set-sink-input-mute", sinkID, "0").Run()
+			_ = exec.Command("pactl", "set-sink-input-volume", sinkID,
+				fmt.Sprintf("%d%%", vol)).Run()
+			return
+		}
 	}
 }
 
@@ -381,6 +421,7 @@ func (p *Player) SetVolume(vol int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.volume = vol
+	C.libvlc_audio_set_mute(p.mp, 0)
 	C.libvlc_audio_set_volume(p.mp, C.int(vol))
 }
 

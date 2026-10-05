@@ -52,9 +52,9 @@ type DecryptResponse struct {
 
 // AccountInfo holds the cached Apple Music account information.
 type AccountInfo struct {
-	StorefrontID string
-	DevToken     string
-	MusicToken   string
+	StorefrontID string `json:"storefront_id"`
+	DevToken     string `json:"dev_token"`
+	MusicToken   string `json:"music_token"`
 }
 
 // ErrNotAuthenticated is returned by Decrypt and GetM3U8 when no valid
