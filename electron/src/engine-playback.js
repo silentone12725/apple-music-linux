@@ -662,6 +662,13 @@ function _guardSourceBufferMethods() {
 
 // ── CDN blocker (prototype-level, runs at parse time) ─────────────────────────
 
+function _warnIfOurSourceCleared(el, how) {
+    if (!_activeMs || _activeMs.readyState === 'closed' || !_ourBlobUrl) return;
+    if (how.startsWith('src=') && how !== 'src=""') return; // only a clear detaches our stream here
+    console.warn('[AML MSE] our MediaSource is being detached by ' + how + '\n' +
+        (new Error().stack || '').split('\n').slice(2, 8).join('\n'));
+}
+
 function blockAppleCDN() {
     if (window.__amlCDNBlocked) return;
     window.__amlCDNBlocked = true;
@@ -681,11 +688,19 @@ function blockAppleCDN() {
             if (isAppleCDN(val) && _allowCDNTransition) { console.log('[AML Engine] CDN src THROUGH (gate open):', val.slice(0, 80)); }
             if (_allowCDNTransition && val !== undefined) { console.log('[AUDIO-SRC] gate-open src set → "' + String(val).slice(0,60) + '"'); }
             if (val?.startsWith('blob:') && _ourBlobUrl && val !== _ourBlobUrl) { return; }
+            _warnIfOurSourceCleared(this, 'src=' + JSON.stringify(String(val).slice(0, 24)));
             desc.set.call(this, val);
         },
         configurable: true,
         enumerable: desc.enumerable,
     });
+
+    // Diagnostics only: if anything detaches our MediaSource while an AAC stream is live, say who.
+    const realRemoveAttr = Element.prototype.removeAttribute;
+    Element.prototype.removeAttribute = function(name) {
+        if (name === 'src' && this instanceof HTMLMediaElement) _warnIfOurSourceCleared(this, 'removeAttribute(src)');
+        return realRemoveAttr.call(this, name);
+    };
 
     const realSetAttr = HTMLMediaElement.prototype.setAttribute;
     HTMLMediaElement.prototype.setAttribute = function(name, val) {
@@ -5636,7 +5651,8 @@ async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
 
     const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
     sb.addEventListener('error', () => {
-        console.error('[AML MSE] SourceBuffer error — ms=' + ms.readyState + ' updating=' + sb.updating +
+        console.error('[AML MSE] SourceBuffer error — audio.error=' + (mkAudio.error ? mkAudio.error.code + ' ' + mkAudio.error.message : 'none') +
+            ' src=' + (mkAudio.currentSrc ? mkAudio.currentSrc.slice(0, 24) : '(empty)') + ' ms=' + ms.readyState + ' updating=' + sb.updating +
             ' buf=' + (sb.buffered.length > 0 ? sb.buffered.start(0).toFixed(1) + '-' + sb.buffered.end(sb.buffered.length-1).toFixed(1) + 's' : 'empty'));
     });
     _activeSb = sb; _activeMs = ms;

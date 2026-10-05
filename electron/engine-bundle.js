@@ -727,6 +727,11 @@
       };
     }
   }
+  function _warnIfOurSourceCleared(el, how) {
+    if (!_activeMs || _activeMs.readyState === "closed" || !_ourBlobUrl) return;
+    if (how.startsWith("src=") && how !== 'src=""') return;
+    console.warn("[AML MSE] our MediaSource is being detached by " + how + "\n" + (new Error().stack || "").split("\n").slice(2, 8).join("\n"));
+  }
   function blockAppleCDN() {
     if (window.__amlCDNBlocked) return;
     window.__amlCDNBlocked = true;
@@ -750,11 +755,17 @@
         if (val?.startsWith("blob:") && _ourBlobUrl && val !== _ourBlobUrl) {
           return;
         }
+        _warnIfOurSourceCleared(this, "src=" + JSON.stringify(String(val).slice(0, 24)));
         desc.set.call(this, val);
       },
       configurable: true,
       enumerable: desc.enumerable
     });
+    const realRemoveAttr = Element.prototype.removeAttribute;
+    Element.prototype.removeAttribute = function(name) {
+      if (name === "src" && this instanceof HTMLMediaElement) _warnIfOurSourceCleared(this, "removeAttribute(src)");
+      return realRemoveAttr.call(this, name);
+    };
     const realSetAttr = HTMLMediaElement.prototype.setAttribute;
     HTMLMediaElement.prototype.setAttribute = function(name, val) {
       if (name === "src" && isAppleCDN(val) && !_allowCDNTransition) return;
@@ -5176,7 +5187,7 @@
     }
     const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
     sb.addEventListener("error", () => {
-      console.error("[AML MSE] SourceBuffer error \u2014 ms=" + ms.readyState + " updating=" + sb.updating + " buf=" + (sb.buffered.length > 0 ? sb.buffered.start(0).toFixed(1) + "-" + sb.buffered.end(sb.buffered.length - 1).toFixed(1) + "s" : "empty"));
+      console.error("[AML MSE] SourceBuffer error \u2014 audio.error=" + (mkAudio.error ? mkAudio.error.code + " " + mkAudio.error.message : "none") + " src=" + (mkAudio.currentSrc ? mkAudio.currentSrc.slice(0, 24) : "(empty)") + " ms=" + ms.readyState + " updating=" + sb.updating + " buf=" + (sb.buffered.length > 0 ? sb.buffered.start(0).toFixed(1) + "-" + sb.buffered.end(sb.buffered.length - 1).toFixed(1) + "s" : "empty"));
     });
     _activeSb = sb;
     _activeMs = ms;
