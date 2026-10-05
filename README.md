@@ -9,8 +9,8 @@
 An Apple Music desktop client for Linux — lossless audio, music videos, downloads, and a native-feeling UI.
 
 <div align="center">
-  <img src="assets/screenshots/Preview_logged_out.png" alt="Logged out" width="49%"/>
-  <img src="assets/screenshots/Preview_logged_in.png" alt="Logged in" width="49%"/>
+  <img src="assets/screenshots/Blur-preview.png" alt="Blur theme" width="49%"/>
+  <img src="assets/screenshots/Accented-preview.png" alt="Accent theme" width="49%"/>
 </div>
 
 </div>
@@ -40,6 +40,7 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 - [Dev](#dev)
 - [Build](#build)
 - [Project structure](#project-structure)
+- [Changelog](#changelog)
 - [References](#references)
 
 ## Features
@@ -47,7 +48,8 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 ### Playback
 - **Lossless & Hi-Res** — ALAC up to 192kHz via FairPlay-decrypted HLS
 - **AAC streaming** — dedicated MSE pipeline for AAC with accurate seek
-- **Music Videos** — full MV playback with resolution selector (480p → 4K), subtitles, fullscreen, and seek; H.264-preferred to avoid HEVC decode issues on Linux
+- **In-process DRM** — FairPlay runs inside the engine, with no helper process or local sockets
+- **Music Videos** — full MV playback with resolution selector (480p → 4K), subtitles, fullscreen, and fast fragment-level seeking; H.264-preferred to avoid HEVC decode issues on Linux
 - **Audio quality badge** — shows codec, bit depth, and sample rate right in the player bar; click for full details
 
 ### Downloads
@@ -59,7 +61,8 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 - Output folder configurable via a native folder picker
 
 ### Themes & Appearance
-- **Three theme modes**: glass blur, system/custom accent colour, or a fully custom CSS file
+- **Three theme modes**: Blur (wallpaper blurred behind the app), Accent (system or custom accent colour), or a fully custom CSS file
+- **Album art theming** — album and playlist pages take their colours from the artwork, and follow the playing track
 - Automatically picks up your system accent colour from KDE, Hyprland, or GNOME
 - Save and share your own theme presets (export/import JSON)
 - Adjustable blur strength and sidebar opacity sliders
@@ -84,6 +87,8 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 
 - **Media keys** — hardware play/pause, next, and previous keys work even when the window is in the background (includes Bluetooth AVRCP)
 - **System tray** — minimize to tray; playback controls in the right-click menu
+- **Mini player** — a small always-on-top now-playing window
+- **Discord Rich Presence**, **Last.fm** and **ListenBrainz** scrobbling
 - **Wayland + X11** — tested on Hyprland, KDE Plasma, GNOME, and Sway
 
 ### Other
@@ -91,6 +96,7 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 - Back / Forward navigation buttons in the sidebar header
 - Smart segment cache — tracks pre-warmed before you press play
 - Separate cache for music video segments (2 GiB by default, adjustable)
+- Encrypted local library cache that persists across restarts
 - Settings auto-save with visual confirmation
 
 ## Roadmap
@@ -155,19 +161,6 @@ chmod +x apple-music-linux.AppImage
 > ```
 > Or run without FUSE: `./apple-music-linux.AppImage --appimage-extract-and-run`
 
-### Unprivileged user namespaces (Ubuntu 23.10+, Debian 12+)
-
-The FairPlay layer requires unprivileged user namespaces. Some newer distros restrict this via AppArmor. If the app shows an error about this:
-
-```bash
-# Temporary (until reboot)
-sudo sysctl -w kernel.unprivileged_userns_clone=1
-
-# Permanent
-echo 'kernel.unprivileged_userns_clone = 1' | sudo tee /etc/sysctl.d/99-userns.conf
-sudo sysctl -p /etc/sysctl.d/99-userns.conf
-```
-
 ### GNOME
 
 The system tray requires the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/). The glass UI uses a software blur fallback on GNOME — Mutter does not support compositor blur-behind.
@@ -198,7 +191,10 @@ This authenticates the FairPlay layer. Without it, playback falls back to AAC 25
 
 ## Dev
 
+The Android runtime used by the DRM layer (`drm/rootfs/system/lib64`, `libhybris-core.so`) is stored with [Git LFS](https://git-lfs.com), so install it before cloning.
+
 ```bash
+git lfs install
 git clone https://github.com/silentone12725/apple-music-linux
 cd apple-music-linux/electron
 bash build.sh
@@ -232,7 +228,7 @@ cp ../drm/libdrm_client.so ../drm/libhybris-core.so ../electron/dist/resources/
 ## Build
 
 ```bash
-make -C drm                           # DRM client library (drm/libdrm_client.so)
+make -C drm android-stubs libdrm_client.so   # Android stub libraries + DRM client library
 cd electron
 bash build.sh                         # bundle the audio-only VLC subset → dist/resources/vlc
 NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
@@ -241,11 +237,11 @@ cd .. && scripts/build-installer.sh   # .run installer → dist/apple-music-linu
 
 ### Cleaning
 
-Builds leave intermediates behind (the DRM library alone generates ~400 MB of embedded-blob sources).
+Builds leave intermediates behind (objects, the electron-builder staging directory and the unpacked app).
 
 ```bash
 scripts/clean.sh --dry-run         # see what would go
-scripts/clean.sh                   # intermediates: objects, embedded blobs, probe/test binaries, staging
+scripts/clean.sh                   # intermediates: objects, probe/test binaries, staging
 scripts/clean.sh --dist            # + packaged output (dist/, AppImage, electron/dist/linux-unpacked)
 make -C drm release                # build the library, then drop what it was built from
 scripts/build-installer.sh --clean # build the installer, then drop electron/dist/linux-unpacked
@@ -265,6 +261,10 @@ electron/preload.cjs              — IPC bridge exposed to the renderer
 engine/                           — Go HTTP server (audio sessions, DRM, cache, VLC)
 drm/                              — DRM client (libdrm_client.so), vendored wrapper and Android runtime
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## References
 
