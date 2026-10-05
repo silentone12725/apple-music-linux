@@ -1,0 +1,53 @@
+name: Release build
+
+# Manual only: builds the .run installer and the AppImage and attaches them to a DRAFT
+# release for the given tag. Nothing is published automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the packages to (the draft is created if missing)
+        required: true
+        default: v1.4.0
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true # the Android runtime under drm/ (about 66 MB per run)
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: engine/go.mod
+          cache-dependency-path: engine/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc zstd build-essential
+      - run: npm ci
+        working-directory: electron
+      - name: Build the installer
+        env:
+          AML_VLC_LIBDIR: /usr/lib/x86_64-linux-gnu
+          AML_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
+        run: scripts/build-installer.sh
+      - name: Build the AppImage
+        env:
+          AML_VLC_LIBDIR: /usr/lib/x86_64-linux-gnu
+          AML_VLC_PLUGINS: /usr/lib/x86_64-linux-gnu/vlc/plugins
+        working-directory: electron
+        run: npm run dist
+      - name: Attach to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes-file "releases/${TAG}.md"
+          gh release upload "$TAG" dist/apple-music-linux.run electron/dist/apple-music-linux.AppImage --clobber
