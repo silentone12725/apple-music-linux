@@ -460,6 +460,7 @@ type APIServer struct {
 	backendName string              // configured backend name ("native")
 	scheduler   *prefetch.Scheduler // background cache-warming scheduler
 	diskCache   *diskcache.Cache    // per-track decrypted audio disk cache
+	alac        *alacGate           // parks background ALAC downloads while the player's track starts
 	libStore    *library.Store      // local library metadata cache (songs, playlists)
 	vlcPlayer   *vlc.Player         // nil when libvlc is not available
 
@@ -628,6 +629,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	if cacheBase, err := os.UserCacheDir(); err == nil {
 		if dc, err := diskcache.New(filepath.Join(cacheBase, "apple-music-linux", "playback")); err == nil {
 			s.diskCache = dc
+			s.alac = newALACGate()
 			go func() {
 				t := time.NewTicker(time.Hour)
 				defer t.Stop()

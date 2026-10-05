@@ -470,8 +470,9 @@ func (s *APIServer) startCacheDownload(id string, spw *diskcache.StreamingPutWri
 	downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	go func() {
 		defer cancel()
+		defer s.alac.done(id)
 		log.Printf("[cache] startCacheDownload calling pm.Stream: session=%s", id)
-		if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, spw); err != nil {
+		if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, s.alac.writer(downloadCtx, id, spw)); err != nil {
 			log.Printf("[cache] startCacheDownload pm.Stream ERROR: session=%s err=%v", id, err)
 			spw.Discard()
 		} else {
@@ -503,11 +504,12 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 	bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	go func() {
 		defer cancel()
+		defer s.alac.done(id)
 		pw, err := s.diskCache.BeginPut(sess.AssetID, qualifier)
 		if err != nil || pw == nil {
 			return
 		}
-		if err := s.pm.Stream(bgCtx, id, pipeline.KindAudio, pw); err != nil {
+		if err := s.pm.Stream(bgCtx, id, pipeline.KindAudio, s.alac.writer(bgCtx, id, pw)); err != nil {
 			pw.Discard()
 			return
 		}

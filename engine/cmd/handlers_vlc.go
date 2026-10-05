@@ -33,10 +33,25 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found or expired", http.StatusNotFound)
 		return
 	}
+	// The player is about to wait on this session's bytes: let its download go first.
+	// Nothing to protect when the file is cached or the download is already well ahead.
+	hold := true
+	if s.diskCache != nil {
+		if _, cached := s.diskCache.Path(sess.AssetID, sess.Codec); cached {
+			hold = false
+		} else if spw := s.diskCache.GetStreaming(sess.AssetID, sess.Codec); spw != nil && spw.Written() >= alacStartBytes {
+			hold = false
+		}
+	}
+	s.alac.Foreground(req.SessionID, hold)
 	src, err := s.openVLCSource(req.SessionID, sess.AssetID, sess.Codec)
 	if err != nil {
+		s.alac.done(req.SessionID)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if src == nil {
+		s.alac.done(req.SessionID) // served over HTTP (no cache); nothing of ours to wait for
 	}
 	if src != nil {
 		log.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
