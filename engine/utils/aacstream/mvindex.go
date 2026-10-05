@@ -31,6 +31,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/itouakirai/mp4ff/mp4"
 )
@@ -43,6 +44,11 @@ type MVFragEntry struct {
 	T   float64 `json:"t"`             // start time, seconds
 	Off int64   `json:"off"`           // plaintext byte offset of the moof
 	End int64   `json:"end,omitempty"` // plaintext offset one past the fragment (next moof's Off); 0 if unbounded
+	// MdatEnd is where the first mdat after this fragment's moof ends. It is known as
+	// soon as that mdat header is parsed, i.e. before the next moof arrives, and for a
+	// single-track remux equals End. Live serving uses it as an exact stream limit
+	// while End is still unknown. Not persisted.
+	MdatEnd int64 `json:"-"`
 }
 
 // MVDecIndex is the sidecar written next to a completed dec-cache file.
@@ -70,8 +76,10 @@ type mvDecIndexer struct {
 
 	disabled bool
 
-	pos      int64 // running total of plaintext bytes fed
-	boxStart int64 // plaintext offset where the current box began
+	pos int64 // running total of plaintext bytes fed
+	// parsedPos mirrors pos for readers on other goroutines (atomic).
+	parsedPos atomic.Int64
+	boxStart  int64 // plaintext offset where the current box began
 
 	hdr     []byte // accumulates the box header (8 or 16 bytes)
 	hdrNeed int    // header bytes needed (8, then possibly 16 for largesize)
@@ -109,6 +117,7 @@ func (ix *mvDecIndexer) feed(p []byte) {
 		if r := recover(); r != nil {
 			ix.disabled = true
 		}
+		ix.parsedPos.Store(ix.pos)
 	}()
 
 	for len(p) > 0 {
@@ -204,6 +213,13 @@ func (ix *mvDecIndexer) startBox(size int64, typ string) bool {
 	}
 	ix.boxType = typ
 	ix.remaining = size - hdrLen
+	if typ == "mdat" {
+		ix.mu.Lock()
+		if n := len(ix.frags); n > 0 && ix.frags[n-1].End == 0 && ix.frags[n-1].MdatEnd == 0 {
+			ix.frags[n-1].MdatEnd = ix.boxStart + size
+		}
+		ix.mu.Unlock()
+	}
 	ix.collect = typ == "moov" || typ == "moof"
 	if ix.collect {
 		ix.body = append(ix.body[:0], ix.hdr...) // seed body with the header
@@ -452,6 +468,31 @@ func (m *MVLiveIndex) FragEndByIndex(n int) (end int64, known bool) {
 	end = m.ix.frags[n].End
 	return end, end > 0
 }
+
+// FragLimitByIndex returns the exact end of fragment n when it can be known
+// without waiting for the next moof: End if set, otherwise the end of the
+// fragment's mdat once its header has been parsed. known=false means neither is
+// available yet and callers must not stream past the parsed frontier.
+func (m *MVLiveIndex) FragLimitByIndex(n int) (limit int64, known bool) {
+	m.ix.mu.RLock()
+	defer m.ix.mu.RUnlock()
+	if n < 0 || n >= len(m.ix.frags) {
+		return 0, false
+	}
+	f := m.ix.frags[n]
+	switch {
+	case f.End > 0:
+		return f.End, true
+	case f.MdatEnd > 0:
+		return f.MdatEnd, true
+	}
+	return 0, false
+}
+
+// ParsedBytes returns how many plaintext bytes the indexer has examined. Bytes
+// beyond it may contain box headers (a following moof) the index does not know
+// about yet, so live readers must not treat them as part of an open fragment.
+func (m *MVLiveIndex) ParsedBytes() int64 { return m.ix.parsedPos.Load() }
 
 // FragCount returns the current number of indexed fragments (may grow while producer runs).
 func (m *MVLiveIndex) FragCount() int {

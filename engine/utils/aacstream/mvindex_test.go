@@ -560,3 +560,56 @@ func TestMVLiveIndex_FragIndexForTime_DoneState(t *testing.T) {
 	// check `base.done` to get the correct answer.
 	// (This test documents the invariant, not the handler logic directly.)
 }
+
+// A live reader must be able to bound an open fragment without waiting for the
+// next moof: FragLimitByIndex yields the end of the fragment's own mdat as soon
+// as that header is parsed, and equals the true boundary (the next moof's
+// offset) for a single-track remux. ParsedBytes must never run ahead of the
+// bytes actually fed.
+func TestMVLiveIndex_FragLimitFromMdatBeforeNextMoof(t *testing.T) {
+	stream, _, _, wantOffsets := buildMVStream(t, 1000, []uint64{0, 1000, 2000})
+	m := NewMVLiveIndex()
+
+	// Feed everything up to (but not including) the second moof: fragment 0 is
+	// complete in the stream but its End is not yet known from a following moof.
+	cut := int(wantOffsets[1])
+	if _, err := m.Write(stream[:cut]); err != nil {
+		t.Fatal(err)
+	}
+	if _, known := m.FragEndByIndex(0); known {
+		t.Fatal("End must not be known before the next moof is parsed")
+	}
+	limit, known := m.FragLimitByIndex(0)
+	if !known {
+		t.Fatal("limit must be known once fragment 0's mdat header is parsed")
+	}
+	if limit != wantOffsets[1] {
+		t.Fatalf("limit = %d, want next moof offset %d", limit, wantOffsets[1])
+	}
+	if got := m.ParsedBytes(); got != int64(cut) {
+		t.Fatalf("ParsedBytes = %d, want %d", got, cut)
+	}
+
+	// Mid-header feed: only part of fragment 1's moof has arrived; its limit is
+	// unknown and the parsed frontier covers exactly what was written.
+	if _, err := m.Write(stream[cut : cut+5]); err != nil {
+		t.Fatal(err)
+	}
+	if _, known := m.FragLimitByIndex(1); known {
+		t.Fatal("fragment 1 is not indexed yet; limit must be unknown")
+	}
+	if got := m.ParsedBytes(); got != int64(cut+5) {
+		t.Fatalf("ParsedBytes = %d, want %d", got, cut+5)
+	}
+
+	// Finish the stream: every fragment's limit equals the next moof / stream end.
+	if _, err := m.Write(stream[cut+5:]); err != nil {
+		t.Fatal(err)
+	}
+	m.Finalize(int64(len(stream)))
+	for n, want := range []int64{wantOffsets[1], wantOffsets[2], int64(len(stream))} {
+		if got, ok := m.FragLimitByIndex(n); !ok || got != want {
+			t.Errorf("frag %d limit = %d (known=%v), want %d", n, got, ok, want)
+		}
+	}
+}

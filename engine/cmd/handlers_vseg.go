@@ -495,13 +495,19 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 	}
 
 	// Phase 2: stream response. Fragment n is indexed; start sending bytes immediately
-	// without waiting for fragment n+1's moof (which would set End). We stream up to
-	// (written - safeMargin) bytes at a time so we never accidentally cross the fragment
-	// boundary into the next moof header. Once End is known, we flush the exact remainder.
+	// without waiting for fragment n+1's moof (which would set End).
 	//
-	// safeStreamMargin: bytes held back at the write frontier. Any moof header is at most
-	// a few hundred bytes; 4 KiB is comfortably above that.
-	const safeStreamMargin = 4096
+	// The fragment's end is taken, in order of preference, from End (next moof seen),
+	// then from the end of its own mdat (known as soon as that header is parsed). If
+	// neither is known yet we stream only bytes the indexer has already examined, minus
+	// a safety margin: the index is fed after the bytes are written, so trusting the
+	// raw write frontier lets us run across the boundary into the next moof when the
+	// producer bursts ahead of the indexer (the browser then fails with "Failed to
+	// prepare video sample for decode").
+	//
+	// safeStreamMargin must exceed the largest moof header; long GOPs produce moofs of
+	// several KiB, so 64 KiB leaves ample room.
+	const safeStreamMargin = 64 << 10
 
 	fl, hasFlusher := w.(http.Flusher)
 	w.Header().Set("Content-Type", "video/mp4")
@@ -515,11 +521,17 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 	buf := make([]byte, 32<<10)
 
 	for {
-		written := vs.spw.Written()
+		// Order matters: read the frontier BEFORE the limit. If the limit is unknown at
+		// this point, any moof inside the bytes we are about to send would already have
+		// been indexed (the frontier is capped at what the indexer has parsed).
+		frontier := vs.spw.Written()
+		if parsed := vs.idx.ParsedBytes(); parsed < frontier {
+			frontier = parsed
+		}
 
-		// If End is now known, flush the exact remaining bytes and return.
-		if end, known := vs.idx.FragEndByIndex(n); known {
-			remaining := (end - fragOff) - sent
+		// Exact end known: flush the remainder and return.
+		if limit, known := vs.idx.FragLimitByIndex(n); known {
+			remaining := (limit - fragOff) - sent
 			if remaining > 0 {
 				_, _ = io.CopyN(w, rd, remaining)
 			}
@@ -529,9 +541,8 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		// End not yet known. Send bytes up to (written - safeMargin) to stay clear
-		// of the write frontier where the next moof might be partially written.
-		safeBytes := (written - fragOff) - sent - safeStreamMargin
+		// End not yet known. Send bytes up to (frontier - safeMargin).
+		safeBytes := (frontier - fragOff) - sent - safeStreamMargin
 		if safeBytes > 0 {
 			toRead := safeBytes
 			if toRead > int64(len(buf)) {
@@ -545,7 +556,7 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 					fl.Flush()
 				}
 			}
-			continue // re-check End before blocking
+			continue // re-check the limit before blocking
 		}
 
 		// Nothing safe to send yet — block until more bytes arrive or producer finishes.
@@ -570,7 +581,7 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 		}
 
 		// Other wait errors are re-checked via vs.done on the next iteration.
-		if waitForGrowth(ctx, vs.spw, written); ctx.Err() != nil {
+		if waitForGrowth(ctx, vs.spw, vs.spw.Written()); ctx.Err() != nil {
 			return
 		}
 	}
