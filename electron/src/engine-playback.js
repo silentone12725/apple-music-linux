@@ -2909,6 +2909,12 @@ async function startMVPipeline() {
     // waiting for a multi-second lead only delays the audio; the 'waiting'/'playing'
     // handlers mute and re-sync it if the video then stalls.
     const SEEK_PRE_BUF = 0.4;
+    // Video buffer lead needed before a music video first starts. The stream bitrate is
+    // often close to the link's throughput, so a 1.5 s lead was gone within a couple of
+    // seconds and playback stalled repeatedly in the first ten. A few more seconds up front
+    // costs a slightly longer first wait; it stays well below BUF_HIGH, which governs
+    // resuming after a stall. Not used after a seek (see SEEK_PRE_BUF).
+    const MV_START_LEAD = 3.0;
 
     let _dynBufTimer  = null;
     let _bufPaused    = false; // true while hidden-paused for buffering
@@ -4820,12 +4826,12 @@ async function startMVPipeline() {
                 if (_abortCtrl?.signal.aborted) return;
                 const b = videoEl.buffered;
                 const lead = b.length > 0 ? b.end(b.length - 1) : 0;
-                if (lead >= 1.5) {
+                if (lead >= MV_START_LEAD) {
                     console.log(`[AML MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
                     _videoCanPlay = true;
                     tryStart();
                 } else {
-                    console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need 1.5s)`);
+                    console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need ${MV_START_LEAD}s)`);
                     videoEl.addEventListener('progress', checkBuf, { once: true });
                 }
             };

@@ -320,12 +320,12 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 		mvFetchedAt:      time.Now(),
 	}
 
-	for _, track := range ms.Tracks {
-		stream, err := track.Open(ctx)
-		if err != nil {
-			log.Printf("[openDirect] %s: track.Open kind=%s FAILED: %v", req.AssetID, track.Kind, err)
-			return nil, fmt.Errorf("open %s stream: %w", track.Kind, err)
-		}
+	streams, err := openTracks(ctx, req.AssetID, ms.Tracks)
+	if err != nil {
+		return nil, err
+	}
+	for i, track := range ms.Tracks {
+		stream := streams[i]
 		pctx.streams[track.Kind] = stream
 
 		switch track.Kind {
@@ -350,6 +350,54 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 
 	m.store(assetKey, sess, pctx)
 	return sess, nil
+}
+
+// openTracks opens every track concurrently. A music video has an audio and a video
+// track, each needing its own playlist round-trip, so opening them one after another
+// added a full round-trip to every start. The results are returned in track order;
+// if any open fails the others are cancelled and the first failure is returned.
+func openTracks(ctx context.Context, assetID string, tracks []media.Track) ([]*pipeline.Stream, error) {
+	streams := make([]*pipeline.Stream, len(tracks))
+	if len(tracks) == 1 {
+		st, err := tracks[0].Open(ctx)
+		if err != nil {
+			log.Printf("[openDirect] %s: track.Open kind=%s FAILED: %v", assetID, tracks[0].Kind, err)
+			return nil, fmt.Errorf("open %s stream: %w", tracks[0].Kind, err)
+		}
+		streams[0] = st
+		return streams, nil
+	}
+	// Cancelled only on failure: the opened streams may keep using this context, so it
+	// must stay live on success.
+	openCtx, cancel := context.WithCancel(ctx)
+	context.AfterFunc(ctx, cancel) // released with the parent; on success the streams keep using openCtx
+	var (
+		wg        sync.WaitGroup
+		once      sync.Once
+		firstKind pipeline.StreamKind
+		firstErr  error
+	)
+	for i := range tracks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			st, err := tracks[i].Open(openCtx)
+			if err != nil {
+				// Record the failure that happened first, before cancelling the others:
+				// their "context canceled" errors are a consequence, not the cause.
+				once.Do(func() { firstKind, firstErr = tracks[i].Kind, err })
+				cancel()
+				return
+			}
+			streams[i] = st
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		log.Printf("[openDirect] %s: track.Open kind=%s FAILED: %v", assetID, firstKind, firstErr)
+		return nil, fmt.Errorf("open %s stream: %w", firstKind, firstErr)
+	}
+	return streams, nil
 }
 
 // Stream pipes the decrypted media for sessionID/kind to dst.

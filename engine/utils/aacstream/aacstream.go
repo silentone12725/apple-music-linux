@@ -394,24 +394,19 @@ func streamMVSegmentDirect(ctx context.Context, url string, w io.Writer) error {
 	return fmt.Errorf("all retries exhausted")
 }
 
-// mvByteCounter wraps an io.Writer and records the total bytes written.
-// Used to measure segment 0's size for bandwidth estimation.
-type mvByteCounter struct {
-	w io.Writer
-	n int64
-}
-
-func (c *mvByteCounter) Write(p []byte) (int, error) {
-	n, err := c.w.Write(p)
-	c.n += int64(n)
-	return n, err
-}
+// mvLookahead is how many segment connections may be open at once while streaming an MV.
+// More connections do not make the download faster: the CDN link is shared and one
+// connection already saturates it (measured; parallel ranges were no faster). Their only
+// use is hiding the per-segment request latency, since with one slot the next segment's
+// request starts only after the current one has drained, leaving the link idle for about
+// a second at every boundary. One segment of lookahead is enough for that, and an
+// undrained body buffers little (its socket window stays small until it is read).
+const mvLookahead = 2
 
 // DownloadMVSegmentsStreaming replaces DownloadMVSegmentsParallel on the
-// streaming branch. Segment 0 is streamed at full available bandwidth with no
-// concurrent downloads competing for it. After segment 0 completes, bandwidth
-// is measured and an adaptive prefetch count is chosen (1 at 2Mbps, up to
-// `prefetch` at high bandwidth). Prefetched segments also stream: goroutines
+// streaming branch. Segment 0 (the init segment) is streamed on its own with no
+// concurrent downloads competing for it. The rest are fetched with at most
+// min(prefetch, mvLookahead) connections open at once. Prefetched segments also stream: goroutines
 // open HTTP connections in parallel and send the open body as soon as headers
 // arrive (O(RTT)); the main goroutine drains each body in order via io.Copy,
 // so the growing file grows continuously — not in discrete end-of-segment jumps.
@@ -431,36 +426,15 @@ func DownloadMVSegmentsStreaming(ctx context.Context, urls []string, w io.Writer
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Stream segment 0 at full bandwidth — no concurrent downloads compete.
-	// Wrap w to count bytes so we can measure bandwidth for adaptive prefetch.
-	seg0 := &mvByteCounter{w: w}
+	// Stream segment 0 (the init segment) before any lookahead connection opens.
 	t0 := time.Now()
 	log.Printf("[dl] mv#0 streaming directly (no buffer)")
-	if err := streamMVSegmentDirect(ctx, urls[0], seg0); err != nil {
+	if err := streamMVSegmentDirect(ctx, urls[0], w); err != nil {
 		cancel()
 		return fmt.Errorf("segment 0: %w", err)
 	}
-	seg0Dur := time.Since(t0)
-
-	// Compute effectivePrefetch from measured segment-0 bandwidth.
-	// Parallel connections each get (bw/N) — at 2Mbps that's ruinous.
-	// 1 extra concurrent connection per 8Mbps keeps each connection's share ≥ 2Mbps.
-	effectivePrefetch := prefetch
-	if seg0Dur > 0 && seg0.n > 0 {
-		bwMbps := float64(seg0.n*8) / seg0Dur.Seconds() / 1e6
-		p := int(bwMbps / 8)
-		if p < 1 {
-			p = 1
-		}
-		if p > prefetch {
-			p = prefetch
-		}
-		effectivePrefetch = p
-		log.Printf("[dl] mv#0 done size=%dB elapsed=%.2fs bw=%.1fMbps → effectivePrefetch=%d",
-			seg0.n, seg0Dur.Seconds(), bwMbps, effectivePrefetch)
-	} else {
-		log.Printf("[dl] mv#0 done elapsed=%.2fs", seg0Dur.Seconds())
-	}
+	effectivePrefetch := min(max(prefetch, 1), mvLookahead)
+	log.Printf("[dl] mv#0 done elapsed=%.2fs lookahead=%d", time.Since(t0).Seconds(), effectivePrefetch)
 
 	if len(urls) == 1 {
 		return nil
