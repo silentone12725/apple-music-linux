@@ -130,7 +130,6 @@ func (s *APIServer) handleLibraryToken(w http.ResponseWriter, r *http.Request) {
 	if body.DeveloperToken != "" {
 		s.setToken(body.DeveloperToken)
 	}
-	log.Printf("[library] received MK web tokens (mut len=%d, dev len=%d)", len(body.MusicUserToken), len(body.DeveloperToken))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

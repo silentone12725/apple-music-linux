@@ -283,6 +283,10 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 			}
 		}
 	}
+	// fpState is what the initial event reports. stateLoop is already running, so the
+	// wrapper's RUNNING callback may have emitted Ready during init; the initial event
+	// must agree with that instead of resetting the manager to Initializing.
+	fpState := FairPlayInitializing
 	if linkerDir == "" || lib64Dir == "" {
 		log.Printf("[drm] hybris backend: not available (linker=%q lib64=%q)", linkerDir, lib64Dir)
 	} else {
@@ -306,13 +310,17 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 			C.free(unsafe.Pointer(cDevInfoFP))
 			C.free(unsafe.Pointer(cLib64FP))
 			if fpret == 0 {
+				fpState = FairPlayReady
 				log.Printf("[drm] hybris FairPlay init: ok")
 				b.fpOnce.Do(func() { close(b.fpReady) })
 			} else {
 				log.Printf("[drm] hybris FairPlay init: failed (rc=%d) — key exchange may fail", int(fpret))
+				fpState = FairPlayFailed
 			}
-			// Run libCoreFP.so probe in debug mode to log what each export returns
-			C.hybris_corefp_probe()
+			// The probe dumps every libCoreFP export's return value; only useful when debugging.
+			if os.Getenv("AML_DRM_DEBUG") != "" {
+				C.hybris_corefp_probe()
+			}
 		} else {
 			log.Printf("[drm] hybris backend: not available (vseg rootfs absent or load failed)")
 		}
@@ -329,7 +337,7 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 				Process:        ProcessRunning,
 				Manager:        ManagerReady,
 				Authentication: AuthLoggedIn,
-				FairPlay:       FairPlayInitializing,
+				FairPlay:       fpState,
 				Session:        SessionValid,
 				Recovery:       RecoveryIdle,
 			},

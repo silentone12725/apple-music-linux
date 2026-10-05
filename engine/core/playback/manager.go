@@ -320,15 +320,12 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 		mvFetchedAt:      time.Now(),
 	}
 
-	log.Printf("[openDirect] %s: provider returned %d tracks", req.AssetID, len(ms.Tracks))
 	for _, track := range ms.Tracks {
-		log.Printf("[openDirect] %s: calling track.Open kind=%s", req.AssetID, track.Kind)
 		stream, err := track.Open(ctx)
 		if err != nil {
 			log.Printf("[openDirect] %s: track.Open kind=%s FAILED: %v", req.AssetID, track.Kind, err)
 			return nil, fmt.Errorf("open %s stream: %w", track.Kind, err)
 		}
-		log.Printf("[openDirect] %s: track.Open kind=%s OK", req.AssetID, track.Kind)
 		pctx.streams[track.Kind] = stream
 
 		switch track.Kind {
