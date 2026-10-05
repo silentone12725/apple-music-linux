@@ -171,7 +171,7 @@
   window.__amlEngineInjected = true;
   var ENGINE = window._amlEngineURL || "https://127.0.0.1:20025";
   var ENGINE_HTTPS = ENGINE;
-  var _AML_DEBUG = !!window.amlBridge?.isDev || localStorage.getItem("_AML_DEBUG") === "1";
+  var _AML_DEBUG = !!(window.amlBridge?.isDev || window.amlBridge?.debug) || localStorage.getItem("_AML_DEBUG") === "1";
   var LASTFM_API_KEY = "de5f164dcf024dc00e0aab05ba464d17";
   var LASTFM_API_SECRET = "c03db782a5d29db42da06edcbf76d89a";
   var _TIMINGS = {
@@ -2532,6 +2532,7 @@
     const BUF_LOW = 2;
     const BUF_HIGH = 10;
     const SEEK_PRE_BUF = 0.4;
+    const MV_START_LEAD = 3;
     let _dynBufTimer = null;
     let _bufPaused = false;
     let _userPaused = false;
@@ -4375,12 +4376,12 @@
           if (_abortCtrl?.signal.aborted) return;
           const b = videoEl.buffered;
           const lead = b.length > 0 ? b.end(b.length - 1) : 0;
-          if (lead >= 1.5) {
+          if (lead >= MV_START_LEAD) {
             console.log(`[AML MV buf:gate] video gate satisfied lead=${lead.toFixed(2)}s`);
             _videoCanPlay = true;
             tryStart();
           } else {
-            console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need 1.5s)`);
+            console.log(`[AML MV buf:gate] video gate waiting lead=${lead.toFixed(2)}s (need ${MV_START_LEAD}s)`);
             videoEl.addEventListener("progress", checkBuf, { once: true });
           }
         };
@@ -7045,15 +7046,24 @@
           _amlPendingII = -1;
           return;
         }
-        const hasVideo = targetIsVideo || allIds.some(_isVideoId);
-        if (hasVideo) {
-          const desc = targetIsVideo ? { musicVideo: targetSongId } : { song: targetSongId };
+        const songIds = targetIsVideo ? allIds : allIds.filter((id) => !_isVideoId(id));
+        const songIdx = targetIsVideo ? -1 : songIds.indexOf(targetSongId);
+        if (targetIsVideo) {
+          const desc = { musicVideo: targetSongId };
           console.log("[AML] _amlGoto mixed/MV session \u2014 targeted setQueue " + JSON.stringify(desc));
           _amlGotoTarget = 0;
           _amlGotoTargetId = targetSongId ?? null;
           await mk.setQueue(desc).catch(() => {
           });
           await mk.changeToMediaAtIndex(0).catch(() => {
+          });
+        } else if (songIdx >= 0 && songIds.length !== allIds.length) {
+          console.log("[AML] _amlGoto mixed session \u2014 songs only, idx=" + songIdx + " of " + songIds.length);
+          _amlGotoTarget = songIdx;
+          _amlGotoTargetId = targetSongId ?? null;
+          await mk.setQueue({ songs: songIds }).catch(() => {
+          });
+          await mk.changeToMediaAtIndex(songIdx).catch(() => {
           });
         } else {
           const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
@@ -7614,6 +7624,22 @@
             }
             if (swType === "music-videos" || desc?.url?.includes("/music-video/")) {
               _itemTypes.set(startWithId, "music-videos");
+            }
+            const albumUrlId = typeof desc?.url === "string" ? desc.url.match(/\/album\/[^/?#]+\/(\d{6,})/)?.[1] : null;
+            const mkInstAlbum = window.MusicKit?.getInstance?.();
+            if (albumUrlId && mkInstAlbum?.storefrontId) {
+              if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
+              _externalPlayGateTimer = setTimeout(() => {
+                if (_AML_DEBUG) console.log("[AML click] AAC CDN gate reset (safety timeout)");
+                _aacCloseGate();
+              }, 2e4);
+              return mkInstAlbum.api.music(`/v1/catalog/${mkInstAlbum.storefrontId}/albums/${encodeURIComponent(albumUrlId)}/tracks`, { limit: 100 }).then((res) => res?.data?.data || []).catch(() => []).then((items) => {
+                const trackIds = items.map((item) => item?.id).filter((id) => id && /^\d{6,}$/.test(id));
+                if (trackIds.includes(startWithId)) {
+                  return _aacOwnedGoto(trackIds, startWithId, "album/startWith");
+                }
+                return _aacOwnedGoto([startWithId], startWithId, "startWith");
+              });
             }
             return _aacOwnedGoto([startWithId], startWithId, "startWith");
           }
@@ -10793,18 +10819,6 @@
       libBody.appendChild(libSyncRow);
       return wrap;
     }
-    function _buildDevSection(prefs) {
-      const { wrap, body: devBody } = makeSection("Developer");
-      const debugToggle = document.createElement("input");
-      debugToggle.type = "checkbox";
-      debugToggle.checked = !!prefs.debug;
-      debugToggle.style.cssText = "width:16px;height:16px;accent-color:#fc3c44;cursor:pointer;";
-      debugToggle.onchange = () => {
-        window.amlBridge?.setPref("debug", debugToggle.checked);
-      };
-      devBody.appendChild(makeRow("Enable debug mode", debugToggle, "Opens DevTools and full console on next launch", true));
-      return wrap;
-    }
     let _settingsPreload = null;
     function _warmSettingsCache() {
       _settingsPreload = Promise.all([
@@ -10906,7 +10920,6 @@
       dlg.appendChild(scrobbleWrap);
       dlg.appendChild(historyWrap);
       dlg.appendChild(libraryWrap);
-      dlg.appendChild(_buildDevSection(prefs));
     }
     const COG_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:17%"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.05-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.03-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>`;
     const DOWNLOAD_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:19%"><path d="M11.9952,21.1159C12.3277,21.1159 12.6697,20.9829 12.8977,20.7359L19.12,14.5136C19.3765,14.2571 19.5,13.9531 19.5,13.6396C19.5,12.9462 19.006,12.4522 18.341,12.4522C17.9801,12.4522 17.6856,12.6042 17.4671,12.8322L15.3011,14.9791L13.1352,17.4395L13.2112,15.3781L13.2112,4.254C13.2112,3.5035 12.7172,3 11.9952,3C11.2733,3 10.7793,3.5035 10.7793,4.254L10.7793,15.3781L10.8648,17.4395L8.6894,14.9791L6.5329,12.8322C6.3049,12.6042 6.0199,12.4522 5.659,12.4522C4.994,12.4522 4.5,12.9462 4.5,13.6396C4.5,13.9531 4.6235,14.2571 4.88,14.5136L11.0928,20.7359C11.3303,20.9829 11.6628,21.1159 11.9952,21.1159Z"/></svg>`;
