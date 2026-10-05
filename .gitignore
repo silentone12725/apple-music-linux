@@ -170,3 +170,4 @@ drm/corefp_probe
 drm/embedded_blobs/
 drm/drm-rootless/
 drm/files/
+drm/*.o
