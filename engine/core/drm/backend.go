@@ -105,6 +105,11 @@ type BackendConfig struct {
 	// DRMManager.Authenticate() sets this for the duration of one Start() call.
 	// It is never stored in m.cfg — crash restarts always use session-reuse.
 	Credentials Credentials
+
+	// DisableHiRes reports hi-res lossless as unavailable in the capability
+	// snapshot. The account JWT carries no subscription tier, so hi-res is
+	// assumed available once FairPlay is ready unless the embedder opts out.
+	DisableHiRes bool
 }
 
 // ─── Authentication challenge model ──────────────────────────────────────────

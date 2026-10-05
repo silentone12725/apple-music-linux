@@ -31,6 +31,7 @@
 #include <time.h>
 #include <openssl/aes.h>
 #include <openssl/evp.h>
+#include <openssl/x509v3.h>
 
 #include "drm_client.h"
 #include "drm_hybris.h"
@@ -1427,7 +1428,51 @@ static struct https_state g_https = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
 
-/* Certificate pins for Apple domains (SPKI SHA-256) — TODO: implement pinning */
+/* Optional SPKI pinning.  AML_TLS_PINS holds comma-separated base64
+ * SHA-256 digests of SubjectPublicKeyInfo; when set, the handshake is accepted
+ * only if some certificate in the served chain (leaf, intermediate or root)
+ * matches one.  Pinning an intermediate/root survives leaf rotation.  Unset
+ * means ordinary chain + hostname validation only. */
+static int spki_matches_pin(X509 *cert, const char *pins)
+{
+    unsigned char *der = NULL;
+    int der_len = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), &der);
+    if (der_len <= 0) return 0;
+
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int md_len = 0;
+    int ok = EVP_Digest(der, (size_t)der_len, md, &md_len, EVP_sha256(), NULL);
+    OPENSSL_free(der);
+    if (!ok) return 0;
+
+    unsigned char b64[64];
+    int n = EVP_EncodeBlock(b64, md, (int)md_len);
+    if (n <= 0) return 0;
+
+    const char *p = pins;
+    while (*p) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        while (len && (*p == ' ')) { p++; len--; }
+        while (len && p[len - 1] == ' ') len--;
+        if (len == (size_t)n && memcmp(p, b64, len) == 0) return 1;
+        if (!end) break;
+        p = end + 1;
+    }
+    return 0;
+}
+
+static int tls_pins_satisfied(SSL *ssl)
+{
+    const char *pins = getenv("AML_TLS_PINS");
+    if (!pins || !*pins) return 1;
+
+    STACK_OF(X509) *chain = SSL_get_peer_cert_chain(ssl);
+    for (int i = 0; chain && i < sk_X509_num(chain); i++) {
+        if (spki_matches_pin(sk_X509_value(chain, i), pins)) return 1;
+    }
+    return 0;
+}
 
 static int https_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
 {
@@ -1435,12 +1480,7 @@ static int https_verify_callback(int preverify_ok, X509_STORE_CTX *ctx)
         return 1;
     }
     
-    X509 *cert = X509_STORE_CTX_get_current_cert(ctx);
-    if (cert) {
-        /* Get server name from SSL */
-        /* For simplicity, accept if chain is valid */
-    }
-    
+    (void)ctx;
     return preverify_ok;
 }
 
@@ -1600,6 +1640,15 @@ static struct https_connection *get_pooled_connection(const char *host, int port
 
     SSL_set_fd(ssl, sock);
     SSL_set_tlsext_host_name(ssl, host);
+    /* Chain validation alone does not bind the certificate to the server we
+     * meant to reach; require the name to match too. */
+    SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+    if (SSL_set1_host(ssl, host) != 1) {
+        fprintf(stderr, "[drm] get_pooled_connection: SSL_set1_host failed\n");
+        SSL_free(ssl);
+        close(sock);
+        return NULL;
+    }
 
     fprintf(stderr, "[drm] get_pooled_connection: SSL handshake with %s:%d\n", host, port);
     ERR_clear_error();
@@ -1608,6 +1657,13 @@ static struct https_connection *get_pooled_connection(const char *host, int port
         char errbuf[256];
         ERR_error_string_n(err, errbuf, sizeof(errbuf));
         fprintf(stderr, "[drm] get_pooled_connection: SSL_connect failed: %s\n", errbuf);
+        SSL_free(ssl);
+        close(sock);
+        return NULL;
+    }
+    if (!tls_pins_satisfied(ssl)) {
+        fprintf(stderr, "[drm] get_pooled_connection: no certificate in the chain from %s matches AML_TLS_PINS\n", host);
+        SSL_shutdown(ssl);
         SSL_free(ssl);
         close(sock);
         return NULL;

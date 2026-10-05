@@ -966,3 +966,27 @@ func TestDecryptTimesOutIfRecoveryStalls(t *testing.T) {
 		t.Fatal("Decrypt: expected timeout error, got nil")
 	}
 }
+
+// TestManagerDisableHiRes verifies the embedder opt-out: lossless capabilities
+// stay on, but HiRes is reported false.
+func TestManagerDisableHiRes(t *testing.T) {
+	backend := newMockBackend()
+	session := drm.NewSessionManager(t.TempDir())
+	mgr := drm.NewDRMManager(backend, session, func(drm.DRMSnapshot) {},
+		drm.BackendConfig{BaseDir: t.TempDir(), DisableHiRes: true}, drm.RestartPolicy{})
+
+	backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
+		State: drm.DRMState{FairPlay: drm.FairPlayReady},
+	}})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !mgr.Status().Capabilities.CBCS {
+		time.Sleep(10 * time.Millisecond)
+	}
+	caps := mgr.Status().Capabilities
+	if !caps.ALAC || !caps.CBCS {
+		t.Fatalf("ALAC/CBCS must stay enabled, got %+v", caps)
+	}
+	if caps.HiRes {
+		t.Error("HiRes must be false when DisableHiRes is set")
+	}
+}

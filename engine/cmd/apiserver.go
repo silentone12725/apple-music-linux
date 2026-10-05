@@ -551,7 +551,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 				}
 				s.events.emit("drm", snap)
 			},
-			drm.BackendConfig{BaseDir: drmBaseDir},
+			drm.BackendConfig{BaseDir: drmBaseDir, DisableHiRes: os.Getenv("AML_DISABLE_HIRES") == "1"},
 			drm.DefaultRestartPolicy,
 		)
 	} else {

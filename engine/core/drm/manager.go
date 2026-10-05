@@ -541,7 +541,7 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 			CBCS:  true,
 			ALAC:  true,
 			Atmos: true,
-			HiRes: true, // TODO: verify subscription tier via GetAccount
+			HiRes: !m.cfg.DisableHiRes,
 		}
 	}
 
