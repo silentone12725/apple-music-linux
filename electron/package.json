@@ -71,7 +71,7 @@
         "to": "vlc"
       },
       {
-        "from": "../tray-icon.png",
+        "from": "../assets/tray-icon.png",
         "to": "tray-icon.png"
       },
       {

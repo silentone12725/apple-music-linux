@@ -2408,7 +2408,7 @@ ipcMain.on('miniplayer:cmd', (_, payload) => {
 function createTray() {
     const iconPath = app.isPackaged
         ? path.join(process.resourcesPath, 'tray-icon.png')
-        : path.join(__dirname, '..', 'tray-icon.png');
+        : path.join(__dirname, '..', 'assets', 'tray-icon.png');
     const icon = nativeImage.createFromPath(iconPath);
 
     tray = new Tray(icon);
