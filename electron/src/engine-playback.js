@@ -4301,6 +4301,7 @@ async function startMVPipeline() {
         _bufSpinner.style.display = 'block';
 
         let sb = null;
+        let _vsegCodecs = '';
         let fetchGeneration = 0;
         let loopAbort = new AbortController();
         // Prevents re-entry from drain-induced seeking events; cleared on 'seeked'.
@@ -4331,6 +4332,51 @@ async function startMVPipeline() {
 
         const _clearSeekFreeze = () => {
             if (_seekFreeze) { try { _seekFreeze.remove(); } catch (_) {} _seekFreeze = null; }
+        };
+
+        // Fragment-level ("direct") seeks hand the player the engine's decrypted fragments
+        // without the FFmpeg remux. A rejected append kills a media element for good, so
+        // the first direct seek per codec is validated in a throwaway MediaSource: Chrome
+        // must accept the init + first fragment and place it where the engine says.
+        // Verdicts live on window so every MV in the page shares them.
+        const _directVerdicts = (window.__amlVsegDirect = window.__amlVsegDirect || {});
+        const _probeDirect = async (resp, sig) => {
+            let url = null, probeVid = null;
+            try {
+                const [ir, sr] = await Promise.all([
+                    fetch(`${base}/init`, { signal: sig }), fetch(`${base}/seg/0`, { signal: sig })]);
+                if (!ir.ok || !sr.ok) return false;
+                const [initData, segData] = await Promise.all([ir.arrayBuffer(), sr.arrayBuffer()]);
+                const pms = new MediaSource();
+                probeVid = document.createElement('video');
+                probeVid.muted = true;
+                url = URL.createObjectURL(pms);
+                probeVid.src = url;
+                await new Promise((res, rej) => {
+                    pms.addEventListener('sourceopen', res, { once: true });
+                    setTimeout(() => rej(new Error('sourceopen timeout')), 3000);
+                });
+                const psb = pms.addSourceBuffer(`video/mp4; codecs="${_vsegCodecs}"`);
+                psb.timestampOffset = resp.tsOffset;
+                const append = (buf) => new Promise((res, rej) => {
+                    psb.addEventListener('error', () => rej(new Error('append error')), { once: true });
+                    psb.addEventListener('updateend', res, { once: true });
+                    psb.appendBuffer(buf);
+                });
+                await append(initData);
+                await append(segData);
+                if (!psb.buffered.length) throw new Error('nothing buffered');
+                const start = psb.buffered.start(0);
+                if (Math.abs(start - resp.t) > 0.5) throw new Error(`placed at ${start.toFixed(2)}s, engine said ${resp.t.toFixed(2)}s`);
+                console.log(`[AML vseg] direct probe ok: buffered ${start.toFixed(2)}-${psb.buffered.end(0).toFixed(2)}s (tsOffset=${resp.tsOffset})`);
+                return true;
+            } catch (e) {
+                console.warn('[AML vseg] direct probe failed:', e?.message || e);
+                return false;
+            } finally {
+                try { if (probeVid) { probeVid.removeAttribute('src'); probeVid.load(); } } catch (_) {}
+                try { if (url) URL.revokeObjectURL(url); } catch (_) {}
+            }
         };
 
         const runFetchLoop = async (startN) => {
@@ -4379,6 +4425,7 @@ async function startMVPipeline() {
             }
             if (!codecs) { console.error('[AML vseg] no codec from manifest'); return; }
 
+            _vsegCodecs = codecs;
             sb = ms.addSourceBuffer(`video/mp4; codecs="${codecs}"`);
             _vsegSb = sb;
             sb.addEventListener('error', e => console.error('[AML vseg] SourceBuffer error', e));
@@ -4416,8 +4463,19 @@ async function startMVPipeline() {
             console.log(`[AML vseg] seek to ${seekSec.toFixed(2)}s`);
             // Engine cancels the current producer and starts a new one from the
             // nearest HLS segment boundary — returns immediately with {n:0, t:actualStart}.
-            const resp = await fetch(`${base}/seek?t=${seekSec}`, { signal: sig }).then(r => r.json()).catch(() => null);
+            const seekUrl = (noDirect) => `${base}/seek?t=${seekSec}${noDirect ? '&direct=0' : ''}`;
+            let resp = await fetch(seekUrl(_directVerdicts[_vsegCodecs] === false), { signal: sig }).then(r => r.json()).catch(() => null);
             if (sig.aborted) { _seekHandlerActive = false; return; }
+            if (resp?.direct && _directVerdicts[_vsegCodecs] === undefined) {
+                const ok = await _probeDirect(resp, sig);
+                if (sig.aborted) { _seekHandlerActive = false; return; }
+                _directVerdicts[_vsegCodecs] = ok;
+                if (!ok) {
+                    console.warn('[AML vseg] direct seek rejected by the probe — using the FFmpeg path from now on');
+                    resp = await fetch(seekUrl(true), { signal: sig }).then(r => r.json()).catch(() => null);
+                    if (sig.aborted) { _seekHandlerActive = false; return; }
+                }
+            }
             // n=0: new seek producer — FFmpeg re-encodes from the HLS boundary at t=resp.t,
             //      resetting timestamps to 0. Set timestampOffset so the SourceBuffer places
             //      the content at the correct absolute position (resp.t onward).
@@ -4430,7 +4488,28 @@ async function startMVPipeline() {
                 const end = sb.buffered.end(sb.buffered.length - 1);
                 if (end > 0) { sb.remove(0, end + 0.001); await waitUpdateEnd().catch(() => {}); }
             }
-            try { sb.timestampOffset = (startN === 0) ? startT : 0; } catch (_) {}
+            // direct: fragments keep the stream's raw timeline, so the engine states the offset
+            // (a negative one: raw = playlist + 10s). Otherwise the rules above apply.
+            const tsOff = (typeof resp?.tsOffset === 'number') ? resp.tsOffset : ((startN === 0) ? startT : 0);
+            try { sb.timestampOffset = tsOff; } catch (_) {}
+            // The engine flips between the FFmpeg and the direct init segment; the
+            // SourceBuffer must be given the matching one before any fragment.
+            if (resp?.reinit) {
+                try {
+                    const ir = await fetch(`${base}/init`, { signal: sig });
+                    if (!ir.ok) throw new Error(`init HTTP ${ir.status}`);
+                    const initData = await ir.arrayBuffer();
+                    if (sig.aborted) { _seekHandlerActive = false; return; }
+                    await waitUpdateEnd().catch(() => {});
+                    sb.appendBuffer(initData);
+                    await waitUpdateEnd();
+                    console.log(`[AML vseg] re-initialised SourceBuffer (${resp.direct ? 'direct' : 'ffmpeg'} init, ${initData.byteLength}B, tsOffset=${tsOff})`);
+                } catch (e) {
+                    if (e?.name !== 'AbortError') console.error('[AML vseg] re-init failed:', e?.message || e);
+                    _seekHandlerActive = false;
+                    return;
+                }
+            }
             // _seekHandlerActive stays true until 'seeked' — blocks drain-induced re-fires.
             if (!sig.aborted) runFetchLoop(startN);
         });

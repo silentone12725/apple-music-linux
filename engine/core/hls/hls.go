@@ -365,6 +365,35 @@ func (m *Media) URLsFromExact(startSec float64) (urls []string, actualStart floa
 	return out, cumulative
 }
 
+// SegmentFor returns the index and playlist start time of the segment holding
+// startSec, using the same rule as URLsFromExact. ok is false when the playlist
+// carries no durations.
+func (m *Media) SegmentFor(startSec float64) (idx int, segStart float64, ok bool) {
+	if len(m.SegmentDurations) == 0 || len(m.SegmentURLs) == 0 {
+		return 0, 0, false
+	}
+	if startSec < 0 {
+		startSec = 0
+	}
+	var cumulative float64
+	for i, d := range m.SegmentDurations {
+		if cumulative+d > startSec {
+			idx = i
+			break
+		}
+		cumulative += d
+		idx = i + 1
+	}
+	if idx >= len(m.SegmentURLs) {
+		idx = len(m.SegmentURLs) - 1
+		cumulative = 0
+		for _, d := range m.SegmentDurations[:idx] {
+			cumulative += d
+		}
+	}
+	return idx, cumulative, true
+}
+
 // CumulativeSegmentTimes returns the presentation start time of each segment.
 // Entry i is the cumulative sum of durations[0..i-1], so entry 0 is always 0.
 func (m *Media) CumulativeSegmentTimes() []float64 {

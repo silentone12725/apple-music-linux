@@ -20,10 +20,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -44,6 +46,10 @@ type vsegSession struct {
 	// ephemeral producers are never committed to the disk cache (seek producers,
 	// and a base producer started while another session still writes the key).
 	ephemeral bool
+
+	// direct marks a fragment-level seek session: its output is the decrypted raw
+	// stream (no FFmpeg remux), so it has its own init segment and a raw timeline.
+	direct bool
 
 	mu   sync.RWMutex
 	done bool
@@ -79,6 +85,30 @@ type vsegState struct {
 	mu     sync.Mutex
 	base   *vsegSession // from-0, permanent
 	active *vsegSession // currently serving: base or most recent seek producer
+
+	// sbDirect records which init segment the player's SourceBuffer was last told
+	// to use: false = the FFmpeg-produced one (base and FFmpeg seek producers),
+	// true = a direct session's raw one. The player re-appends the init when it flips.
+	sbDirect bool
+}
+
+// markInitKind records the init kind handed to the player with a seek response and
+// reports whether it differs from the previous one (the player must then re-append
+// the init segment before any fragments).
+func (st *vsegState) markInitKind(direct bool) (changed bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	changed = st.sbDirect != direct
+	st.sbDirect = direct
+	return changed
+}
+
+// vsegStateFor returns the state for id, or nil.
+func vsegStateFor(id string) *vsegState {
+	if v, ok := mvVsegStates.Load(id); ok {
+		return v.(*vsegState)
+	}
+	return nil
 }
 
 // mvVsegStates stores active vseg states keyed by session ID.
@@ -293,7 +323,9 @@ func setActiveVsegSession(id string, seek *vsegSession) {
 	if v, loaded := mvVsegStates.Load(id); loaded {
 		state = v.(*vsegState)
 	} else {
-		state = &vsegState{active: seek}
+		// Leave active unset: seeding it with `seek` made the swap below cancel the
+		// session it was installing.
+		state = &vsegState{}
 		actual, _ := mvVsegStates.LoadOrStore(id, state)
 		state = actual.(*vsegState)
 	}
@@ -394,6 +426,105 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 	go s.runVsegProducer(ctx, id, assetID, startSec, seek)
 	log.Printf("[vseg] seek producer started id=%s startSec=%.3f actual=%.3f ephemeral=%v", id, startSec, actual, ephemeral)
 	return actual, nil
+}
+
+// directSeekEnabled reports whether fragment-level seeks may be used for this request.
+// AML_MV_DIRECT_SEEK=0 disables them globally; ?direct=0 disables one request (the
+// player sets it after its own validation of the direct output failed).
+func directSeekEnabled(r *http.Request) bool {
+	return os.Getenv("AML_MV_DIRECT_SEEK") != "0" && r.URL.Query().Get("direct") != "0"
+}
+
+// vsegCodecIsCopyable reports whether the stream's video can be handed to the browser
+// as is. The FFmpeg path stream-copies H.264 and transcodes anything else (Chrome on
+// Linux has no HEVC MSE decoder), and the direct path never transcodes.
+func vsegCodecIsCopyable(codecs string) bool {
+	c := extractVideoCodec(codecs)
+	return strings.HasPrefix(c, "avc1") || strings.HasPrefix(c, "avc3")
+}
+
+const (
+	directPlanTimeout  = 6 * time.Second // mapping the segment: a few small range reads
+	directFirstTimeout = 8 * time.Second // from plan to the first complete fragment
+)
+
+// startVsegSessionDirect starts a fragment-level seek session and returns once its
+// first fragment is indexed, so the caller can still fall back to the FFmpeg producer
+// if anything fails before that.
+func (s *APIServer) startVsegSessionDirect(id, assetID string, startSec float64) (pipeline.DirectInfo, error) {
+	planCtx, planCancel := context.WithTimeout(aacstream.WithSeekPriority(s.shutdownCtx), directPlanTimeout)
+	defer planCancel()
+	src, info, err := s.pm.PrepareDirectSeek(planCtx, id, pipeline.KindVideo, startSec)
+	if err != nil {
+		return pipeline.DirectInfo{}, err
+	}
+
+	spw, err := s.diskCache.BeginStreamingPut(assetID, fmt.Sprintf("mv-vseg-direct-%d", time.Now().UnixNano()))
+	if err != nil || spw == nil {
+		return pipeline.DirectInfo{}, fmt.Errorf("direct streaming put: %v", err)
+	}
+	ctx, cancel := context.WithCancel(aacstream.WithSeekPriority(s.shutdownCtx))
+	vs := &vsegSession{
+		spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: pinnedCancel(spw, cancel),
+		ephemeral: true, direct: true,
+	}
+	setActiveVsegSession(id, vs)
+	holdBackgroundUntilPlayable(ctx, vs)
+	go s.runVsegDirectProducer(ctx, id, src, vs)
+
+	deadline := time.NewTimer(directFirstTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if _, started := vs.idx.FragOffByIndex(0); started {
+			if size, ok := vs.idx.InitSize(); ok && size > 0 {
+				return info, nil
+			}
+		}
+		vs.mu.RLock()
+		done, perr := vs.done, vs.err
+		vs.mu.RUnlock()
+		if done {
+			vs.cancel()
+			if perr == nil {
+				perr = errors.New("direct stream ended before its first fragment")
+			}
+			return pipeline.DirectInfo{}, perr
+		}
+		select {
+		case <-deadline.C:
+			vs.cancel()
+			return pipeline.DirectInfo{}, errors.New("timed out waiting for the first direct fragment")
+		case <-ctx.Done():
+			return pipeline.DirectInfo{}, ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+// runVsegDirectProducer feeds src through the session's decrypt stage straight into
+// the session's file and index — the same sink the FFmpeg producer writes to, so the
+// init, segment and manifest handlers serve it unchanged.
+func (s *APIServer) runVsegDirectProducer(ctx context.Context, id string, src pipeline.Source, vs *vsegSession) {
+	err := s.pm.StreamSource(ctx, id, pipeline.KindVideo, src, io.MultiWriter(vs.spw, vs.idx))
+	vs.idx.Finalize(vs.spw.Written())
+
+	var producerErr error
+	if err != nil && ctx.Err() == nil {
+		producerErr = fmt.Errorf("direct stream: %w", err)
+	}
+	vs.mu.Lock()
+	vs.done = true
+	vs.err = producerErr
+	vs.mu.Unlock()
+
+	if producerErr != nil {
+		log.Printf("[vseg] direct producer error id=%s: %v", id, producerErr)
+	} else {
+		log.Printf("[vseg] direct producer done id=%s written=%d frags=%d cancelled=%v", id, vs.spw.Written(), vs.idx.FragCount(), ctx.Err() != nil)
+	}
+	vs.spw.Discard() // direct sessions are never cached
 }
 
 // Background (from-0) downloads wait for the seek producer to get playable, bounded so
@@ -776,7 +907,7 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 						old.cancel()
 					}
 					log.Printf("[vseg/seek] instant from base id=%s tSec=%.3f fragN=%d fragT=%.3f", id, tSec, fragN, frag.T)
-					writeJSON(w, http.StatusOK, map[string]any{"n": fragN, "t": frag.T})
+					writeJSON(w, http.StatusOK, map[string]any{"n": fragN, "t": frag.T, "reinit": state.markInitKind(false)})
 					return
 				}
 			}
@@ -793,7 +924,9 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 		active := state.active
 		base := state.base
 		state.mu.Unlock()
-		if active != nil && active != base {
+		// Direct sessions are never reused: their timeline is raw and their init differs,
+		// and starting a new one is cheap.
+		if active != nil && active != base && !active.direct {
 			fragN, frag, hasIt := active.idx.FragIndexForTime(tSec, active.spw.Written())
 			if hasIt {
 				active.mu.RLock()
@@ -810,11 +943,30 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 				}
 				if activePast {
 					log.Printf("[vseg/seek] instant from active seek id=%s tSec=%.3f fragN=%d fragT=%.3f", id, tSec, fragN, frag.T)
-					writeJSON(w, http.StatusOK, map[string]any{"n": fragN, "t": frag.T})
+					writeJSON(w, http.StatusOK, map[string]any{"n": fragN, "t": frag.T, "reinit": state.markInitKind(false)})
 					return
 				}
 			}
 		}
+	}
+
+	// Fragment-level path: fetch and decrypt only the fragment holding tSec and what
+	// follows, with no FFmpeg. Any failure before the first fragment is ready falls
+	// through to the FFmpeg seek producer below.
+	if directSeekEnabled(r) && vsegCodecIsCopyable(sess.Capabilities.VideoCodec) {
+		info, dErr := s.startVsegSessionDirect(id, sess.AssetID, tSec)
+		if dErr == nil {
+			reinit := false
+			if st := vsegStateFor(id); st != nil {
+				reinit = st.markInitKind(true)
+			}
+			log.Printf("[vseg/seek] direct id=%s t=%.3f startSec=%.3f tsOffset=%.3f reinit=%v", id, tSec, info.StartSec, info.TsOffset, reinit)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"n": 0, "t": info.StartSec, "direct": true, "tsOffset": info.TsOffset, "reinit": reinit,
+			})
+			return
+		}
+		log.Printf("[vseg/seek] direct seek unavailable id=%s t=%.3f: %v — falling back to FFmpeg", id, tSec, dErr)
 	}
 
 	// Slow path: base hasn't reached tSec yet — start a parallel seek producer.
@@ -843,7 +995,11 @@ func (s *APIServer) handlePlaybackVsegSeek(w http.ResponseWriter, r *http.Reques
 
 	// Return immediately — the producer runs in the background.
 	// The frontend drains its SourceBuffer and restarts the fetch loop from seg/0.
-	writeJSON(w, http.StatusOK, map[string]any{"n": 0, "t": actual})
+	reinit := false
+	if st := vsegStateFor(id); st != nil {
+		reinit = st.markInitKind(false)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"n": 0, "t": actual, "reinit": reinit})
 }
 
 // extractVideoCodec returns the first codec from a comma-separated HLS CODECS string.

@@ -86,6 +86,22 @@ type SegmentTimingSource interface {
 	SegmentTimings() []float64
 }
 
+// DirectInfo describes a fragment-level seek: the Source emits only the fragments
+// from the one holding the target onward, still on the stream's raw timeline.
+type DirectInfo struct {
+	StartSec float64 // playlist time of the first emitted fragment
+	TsOffset float64 // seconds to add to emitted timestamps to get playlist time
+}
+
+// DirectSeekable is an optional extension of SeekableSource that can seek at
+// fragment granularity instead of segment granularity. DirectSourceFrom does a few
+// small network reads to plan the seek, so it takes a context; callers fall back to
+// SourceFrom when it returns an error.
+type DirectSeekable interface {
+	SeekableSource
+	DirectSourceFrom(ctx context.Context, startSec float64) (Source, DirectInfo, error)
+}
+
 // URLSource is an optional extension of Source for sources backed by a direct
 // CDN URL (e.g. progressiveVideoSource). Exposing the URL lets the engine
 // forward browser Range headers straight to the CDN instead of buffering the

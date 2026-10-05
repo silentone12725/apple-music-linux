@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"engine/core/hls"
 	"engine/core/pipeline"
@@ -164,6 +165,24 @@ func (s *hlsMVVideoSource) SourceFrom(startSec float64) (pipeline.Source, float6
 	// HLS segment boundary, so no TFDT-overlap context is needed.
 	urls, actual := s.media.URLsFromExact(startSec)
 	return &hlsMVVideoRaw{urls: urls}, actual
+}
+
+// DirectSourceFrom plans a fragment-level seek: only the fragment holding startSec
+// and everything after it is fetched, instead of the whole segment containing it.
+func (s *hlsMVVideoSource) DirectSourceFrom(ctx context.Context, startSec float64) (pipeline.Source, pipeline.DirectInfo, error) {
+	idx, segStart, ok := s.media.SegmentFor(startSec)
+	if !ok || s.media.InitURL == "" {
+		return nil, pipeline.DirectInfo{}, aacstream.ErrDirectUnsupported
+	}
+	plan, err := aacstream.PlanDirectSeek(ctx, s.media.InitURL, s.media.SegmentURLs[idx],
+		s.media.SegmentURLs[idx+1:], startSec-segStart)
+	if err != nil {
+		return nil, pipeline.DirectInfo{}, err
+	}
+	// The raw timeline sits at a constant offset from the playlist's (10.000s for
+	// Apple MVs); measure it from the segment's own first fragment, to the millisecond.
+	base := math.Round((plan.RawSegStart-segStart)*1000) / 1000
+	return plan, pipeline.DirectInfo{StartSec: plan.RawFragStart - base, TsOffset: -base}, nil
 }
 
 func (s *hlsMVVideoSource) SegmentTimings() []float64 {

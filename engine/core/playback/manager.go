@@ -399,6 +399,42 @@ func (m *Manager) StreamFrom(ctx context.Context, sessionID string, kind pipelin
 	return actualStart, pipeline.Run(ctx, seekStream, dst)
 }
 
+// PrepareDirectSeek plans a fragment-level seek for the session's stream. It returns
+// pipeline.ErrNoDirectSeek-style errors from the source unchanged, so callers can fall
+// back to StreamFrom. The returned Source must be run with StreamSource.
+func (m *Manager) PrepareDirectSeek(ctx context.Context, sessionID string, kind pipeline.StreamKind, startSec float64) (pipeline.Source, pipeline.DirectInfo, error) {
+	_, pctx, ok := m.lookup(sessionID)
+	if !ok {
+		return nil, pipeline.DirectInfo{}, fmt.Errorf("session %s not found or expired", sessionID)
+	}
+	stream, ok := pctx.streams[kind]
+	if !ok {
+		return nil, pipeline.DirectInfo{}, fmt.Errorf("session %s has no %s stream", sessionID, kind)
+	}
+	direct, ok := stream.Source.(pipeline.DirectSeekable)
+	if !ok {
+		return nil, pipeline.DirectInfo{}, fmt.Errorf("session %s stream has no fragment-level seek", sessionID)
+	}
+	return direct.DirectSourceFrom(ctx, startSec)
+}
+
+// StreamSource runs src — typically from PrepareDirectSeek — through the session
+// stream's stages (decrypt) into dst.
+func (m *Manager) StreamSource(ctx context.Context, sessionID string, kind pipeline.StreamKind, src pipeline.Source, dst io.Writer) error {
+	sess, pctx, ok := m.lookup(sessionID)
+	if !ok {
+		return fmt.Errorf("session %s not found or expired", sessionID)
+	}
+	stream, ok := pctx.streams[kind]
+	if !ok {
+		return fmt.Errorf("session %s has no %s stream", sessionID, kind)
+	}
+	st := &pipeline.Stream{Source: src, Stages: stream.Stages, Kind: stream.Kind, Codec: stream.Codec}
+	dst, end := m.beginStream(ctx, sess, kind, dst)
+	defer end()
+	return pipeline.Run(ctx, st, dst)
+}
+
 // GetSession returns the public Session descriptor for the given ID.
 func (m *Manager) GetSession(id string) (*Session, bool) {
 	sess, _, ok := m.lookup(id)
