@@ -1,8 +1,9 @@
 # Makefile for DRM client clean-room implementation
 #
 # Builds libdrm_client.so shared library and test executable.
-# The library embeds all Android .so dependencies as binary blobs (memfd
-# approach), so no rootfs/system/lib64/ directory is needed at runtime.
+# The library embeds the Android .so files listed in EMBED_LIBS as binary blobs. They are only used
+# when AML_EMBED_LIBS=1 (loading from memfds breaks FairPlay); normally the Android libraries are
+# loaded from rootfs/system/lib64 on disk, which must hold everything in android-libs.txt.
 
 CC = gcc
 AS = as
@@ -18,6 +19,15 @@ HYBRIS_CORE ?= libhybris-core.so
 
 # Android library directory (embedded into the .so at build time)
 LIB64 = rootfs/system/lib64
+
+# libandroid.so and libOpenSLES.so are listed as dependencies by Apple's libraries but nothing
+# is imported from them, so they are built here from an empty stub instead of shipping the real
+# ones (which drag in the whole Android graphics/media stack). See stubs/empty_stub.c.
+STUB_LIBS = $(LIB64)/libandroid.so $(LIB64)/libOpenSLES.so
+$(STUB_LIBS): stubs/empty_stub.c
+	@mkdir -p $(LIB64)
+	$(CC) -shared -fPIC -nostdlib -O2 -Wl,-soname,$(notdir $@) -Wl,--hash-style=both -o $@ $<
+android-stubs: $(STUB_LIBS)
 
 # ICU open-source build (x86_64-linux-android via NDK).
 # `make build-icu` (or `make`) runs build-icu-ndk.sh which builds ICU 68.2
@@ -293,5 +303,5 @@ coverage: LDFLAGS_LIB += --coverage
 coverage: LDFLAGS_TEST += --coverage
 coverage: clean all
 
-.PHONY: all clean clean-objs release clean-icu install uninstall test test-https test-realworld test-all \
+.PHONY: all android-stubs clean clean-objs release clean-icu install uninstall test test-https test-realworld test-all \
         analyze format-check format valgrind-test coverage probe gen-blobs build-icu
