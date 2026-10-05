@@ -9398,7 +9398,6 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         '--aml-art-src'];
     const BG_LAYER_IDS = ['_amlBlurBg', '_amlAccentBg', '_amlCustomBg', '_amlArtBlur', '_amlArtBg'];
     let enabled = true;
-    let artBlurMode = false;
     let lastSrc = null;
     let token = 0;
 
@@ -9430,24 +9429,13 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         body[data-aml-art-theme] #_amlArtBlur { opacity: 1; }
 
         /* ── Mode isolation: hide wallpaper blur layers in non-blur modes ── */
-        /* main.mjs injects #_amlBlurBg + #_amlBlurTint for blur/art-blur modes but
+        /* main.mjs injects #_amlBlurBg + #_amlBlurTint for blur mode but
            never removes them. When the user switches to accent or custom CSS the layers
            must disappear so they don't bleed through as ghost colours. */
         body[data-aml-mode="accent"] #_amlBlurBg,
         body[data-aml-mode="accent"] #_amlBlurTint,
         body[data-aml-mode="custom"] #_amlBlurBg,
         body[data-aml-mode="custom"] #_amlBlurTint { opacity: 0 !important; transition: opacity .4s ease !important; }
-
-        /* ── Accented Blur: use wallpaper blur + palette tint ── */
-        /* Hide the CSS artwork blur layer — wallpaper blur (#_amlBlurBg) does the blur */
-        body[data-aml-art-theme][data-aml-art-blur] #_amlArtBlur { display: none !important; }
-        /* Body must be transparent so the wallpaper layer (#_amlBlurBg, z-index:-1) shows */
-        body[data-aml-art-theme][data-aml-art-blur] { background: transparent !important; }
-        /* Override the dark tint with palette colour derived from artwork */
-        body[data-aml-art-theme][data-aml-art-blur] #_amlBlurTint {
-            background: var(--aml-nav-bg, rgba(20,10,35,0.55)) !important;
-            opacity: 0.8 !important;
-        }
 
         /* ── gradient glow layer (sits above the blur) ── */
         /* pageBg removed — the blur layer's tint overlay provides the dark base. */
@@ -9597,15 +9585,12 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         b.setProperty('--aml-art-src', artSrc ? `url("${artSrc.replace(/"/g, '%22')}")` : 'none');
         ensureBgLayers();
         document.body.setAttribute('data-aml-art-theme', '');
-        if (artBlurMode) document.body.setAttribute('data-aml-art-blur', '');
-        else document.body.removeAttribute('data-aml-art-blur');
     }
 
     function clear() {
         if (!document.body) return;
         for (const v of BODY_VARS) document.body.style.removeProperty(v);
         document.body.removeAttribute('data-aml-art-theme');
-        document.body.removeAttribute('data-aml-art-blur');
     }
 
     // Palette from the artwork pixels; falls back to Apple's --artwork-bg-color
@@ -9665,22 +9650,15 @@ setup().catch(e => console.error('[AML Engine] setup:', e));
         lastSrc = null;
         sync();
     });
-    // aml:art-blur-mode keeps artBlurMode in sync when the mode changes at runtime
-    // (the settings click handler fires this; prefs load sets it directly below).
-    window.addEventListener('aml:art-blur-mode', (e) => {
-        artBlurMode = !!e.detail;
-        lastSrc = null;
-        sync();
-    });
     window.amlBridge?.getPrefs?.().then(p => {
         if (!document.body) return; // body may not be available during early init
         enabled = p?.artTheme !== false;
-        artBlurMode = p?.artThemeMode === 'art-blur';
         // Stamp data-aml-mode from prefs so CSS mode-isolation (ghost blur layer
         // suppression) is correct from first paint, before settings are ever opened.
-        const startupMode = p?.artThemeMode || p?.themeMode || 'accent';
+        // "Accented Blur" was removed; a saved artThemeMode is a leftover from it.
+        if (p?.artThemeMode) window.amlBridge.setTweak('artThemeMode', null);
+        const startupMode = p?.themeMode || 'accent';
         document.body.setAttribute('data-aml-mode', startupMode);
-        if (artBlurMode) document.body.setAttribute('data-aml-art-blur', '');
         sync();
     }).catch(() => {});
     watchDomSettled(sync);
@@ -10647,13 +10625,10 @@ window.amlGetQueueInfo = function () {
         const thInfo = await window.amlBridge.getThemeInfo().catch(() => ({ blurAvailable: false, themeMode: 'accent', themePalette: null, themePresets: [], customCssPath: null, systemAccent: '#fc3c44', themeAppearance: 'dark' }));
         const blurAvail = !!thInfo.blurAvailable;
         const st = {
-            curMode: prefs.artThemeMode || thInfo.themeMode || (blurAvail ? 'blur' : 'accent'),
+            curMode: thInfo.themeMode || (blurAvail ? 'blur' : 'accent'),
             curPalette: thInfo.themePalette,
             thPresets: thInfo.themePresets || [],
             curAppearance: thInfo.themeAppearance || 'dark',
-            // Remembers whether artTheme was on before the user entered art-blur
-            // so we only force-off artTheme on exit if WE forced it on at entry.
-            artThemeWasOn: prefs.artTheme !== false,
         };
         // Stamp the active mode onto body so CSS mode-isolation rules apply
         // immediately — ensures blur ghost layers are hidden if we're in accent/custom.
@@ -10694,12 +10669,7 @@ window.amlGetQueueInfo = function () {
                     ? 'Wallpaper is blurred and shown behind the app. Adjust intensity with the Background blur slider above.'
                     : 'Blur is only available on Hyprland and KDE. Your current desktop does not support it.';
                 thContentArea.appendChild(info);
-            } else if (mode === 'art-blur') {
-                const info = document.createElement('div');
-                info.style.cssText = FF+'font-size:12px;color:rgba(255,255,255,0.4);padding:12px 0;';
-                info.textContent = 'Your desktop wallpaper is blurred behind the app and tinted with the playing track\'s palette colours. Album art theming is enabled automatically.';
-                thContentArea.appendChild(info);
-            } else if (mode === 'accent') {
+                        } else if (mode === 'accent') {
                 if (!st.curPalette) st.curPalette = _amlGenPalette(thInfo.systemAccent || '#fc3c44', st.curAppearance);
                 _amlRenderPaletteEditor(thContentArea, thInfo, st);
             } else {
@@ -10712,7 +10682,6 @@ window.amlGetQueueInfo = function () {
         modeSeg.style.cssText = 'display:flex;background:rgba(255,255,255,0.06);border-radius:8px;padding:2px;gap:2px;';
         const thModes = [
             { label: 'Blur', value: 'blur', disabled: !blurAvail, tip: blurAvail ? '' : 'Only on Hyprland / KDE' },
-            { label: 'Accented Blur', value: 'art-blur', disabled: false, tip: '' },
             { label: 'Accent', value: 'accent', disabled: false, tip: '' },
             { label: 'Custom CSS', value: 'custom', disabled: false, tip: '' },
         ];
@@ -10728,7 +10697,6 @@ window.amlGetQueueInfo = function () {
                 (disabled ? 'opacity:0.3;' : '');
             btn.onclick = () => {
                 if (disabled) return;
-                const prev = st.curMode;
                 st.curMode = value;
                 modeSeg.querySelectorAll('button').forEach((b, i) => {
                     const a = thModes[i].value === st.curMode;
@@ -10736,37 +10704,10 @@ window.amlGetQueueInfo = function () {
                     b.style.color = a ? 'rgba(255,255,255,0.88)' : 'rgba(255,255,255,0.38)';
                     b.style.fontWeight = a ? '500' : '';
                 });
-                // Each mode is fully isolated: set data-aml-mode first so CSS
-                // isolation rules (ghost blur layers, transparent body) fire immediately,
-                // then update the backend and fire events so initArtTheme stays in sync.
+                // Each mode is fully isolated: set data-aml-mode first so the CSS isolation
+                // rules (ghost blur layers) fire immediately, then update the backend.
                 document.body.setAttribute('data-aml-mode', value);
-                if (value === 'art-blur') {
-                    window.amlBridge.setThemeMode('blur'); // wallpaper blur from main.mjs
-                    window.amlBridge.setTweak('artThemeMode', 'art-blur');
-                    document.body.setAttribute('data-aml-art-blur', '');
-                    window.dispatchEvent(new CustomEvent('aml:art-blur-mode', { detail: true }));
-                    if (!artToggle._cb.checked) {
-                        st.artThemeWasOn = false; // we forced it on; remember to restore off
-                        artToggle._cb.checked = true;
-                        window.amlBridge.setTweak('artTheme', true);
-                        window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: true }));
-                    } else {
-                        st.artThemeWasOn = true; // already on; leaving should keep it on
-                    }
-                } else {
-                    window.amlBridge.setThemeMode(value);
-                    window.amlBridge.setTweak('artThemeMode', null);
-                    document.body.removeAttribute('data-aml-art-blur');
-                    window.dispatchEvent(new CustomEvent('aml:art-blur-mode', { detail: false }));
-                    // Only turn artTheme off on exit if we forced it on at entry.
-                    // If the user had art theming on independently before entering art-blur,
-                    // honour that choice and leave it on.
-                    if (prev === 'art-blur' && !st.artThemeWasOn) {
-                        artToggle._cb.checked = false;
-                        window.amlBridge.setTweak('artTheme', false);
-                        window.dispatchEvent(new CustomEvent('aml:art-theme', { detail: false }));
-                    }
-                }
+                window.amlBridge.setThemeMode(value);
                 renderThemeContent(value);
             };
             modeSeg.appendChild(btn);

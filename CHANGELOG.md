@@ -45,8 +45,8 @@ size; the same list is in releases/v1.4.0.md.
 - A reliable quit: VLC stops immediately on engine shutdown and the quit time is hard-capped.
 
 ### Theme and interface
-- **Album-art palette theming** across every major surface, an **Accented Blur** mode that uses the wallpaper blur plus a palette tint, a blurred artwork backdrop built from 600 px artwork, and the theme following the currently playing track on all pages; several attempts at a background strip below the content were tried and reverted.
-- **Settings**: frosted-glass dropdowns, backdrop blur and HIG polish, a compact toggle (reverted to plain checkboxes), a persisted Accented Blur choice, DRM, tools and prefs pre-loaded so the panel opens instantly, a global accent colour no longer forced on the dialog, and a corrected DRM status indicator.
+- **Album-art palette theming** across every major surface, a blurred artwork backdrop built from 600 px artwork, and the theme following the currently playing track on all pages; the area below the content continues the page colour.
+- **Settings**: frosted-glass dropdowns, backdrop blur and HIG polish, a compact toggle (reverted to plain checkboxes), DRM, tools and prefs pre-loaded so the panel opens instantly, a global accent colour no longer forced on the dialog, and a corrected DRM status indicator.
 - Search-row, sidebar-item and detail-header fixes, the "Also available in the iTunes Store" button hidden everywhere, a new app icon with shape variants, and loose project files reorganised.
 - VA-API hardware video decode is used where available, with a leaner disk cache and tray show/hide fixed.
 
