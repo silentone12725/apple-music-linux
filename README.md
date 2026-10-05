@@ -103,7 +103,8 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 ## Roadmap
 
 - **arm64 support** — packaging and wrapper binary for Apple Silicon / Raspberry Pi
-- **EQ Studio** — per-headphone parametric EQ from autoeq.app (engine ready, UI coming)
+- **AutoEQ** — per-headphone parametric EQ from autoeq.app, with an EQ Studio panel in Settings (engine package ready; not yet wired into playback or the UI)
+- **Cavern** — lossless Dolby Atmos binaural rendering through CavernPipeServer, opt-in via `scripts/install-cavern.sh` (engine package ready; not yet wired into playback)
 
 ## Requirements
 
