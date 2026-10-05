@@ -1,18 +1,13 @@
 /*
- * embedded_loader.c — In-memory Android library loader.
+ * embedded_loader.c — loads libhybris-core.so from an image embedded in this library.
  *
- * Lifecycle:
- *   1. Load libhybris-core.so from its embedded memfd → get android_dlopen/dlsym.
- *   2. Walk embedded_libs[]: for each entry write to a memfd, call
- *      android_dlopen("/proc/self/fd/N", RTLD_NOW | RTLD_GLOBAL).
- *      The Android linker registers each library by its ELF SONAME; subsequent
- *      android_dlopen("libstoreservicescore.so") returns the preloaded handle.
- *   3. Callers use embedded_dlopen() / embedded_dlsym() just like the old
- *      android_dlopen / android_dlsym, but without a live rootfs directory.
+ * libhybris-core.so is written to an anonymous memfd and dlopen'ed via /proc/self/fd/N, which
+ * gives android_dlopen/android_dlsym. The Android libraries themselves are NOT embedded: they are
+ * loaded by real path from HYBRIS_LD_LIBRARY_PATH (rootfs/system/lib64), because FairPlay code
+ * locates files relative to its own library path and crashes when loaded from a memfd.
  *
- * All memfds are kept open for the lifetime of the process (the mapping is
- * backed by the fd; closing it unmaps the library).  embedded_loader_shutdown()
- * closes them.
+ * The memfd is kept open for the lifetime of the process (the mapping is backed by it);
+ * embedded_loader_shutdown() closes it.
  */
 
 #define _GNU_SOURCE
@@ -53,10 +48,6 @@ static struct {
     android_dlclose_fn android_dlclose;
     android_update_ld_fn android_update_ld;
     android_init_ns_fn   android_init_ns;
-
-    /* Per-lib memfds — kept open so the Android linker mapping stays valid */
-    int    lib_memfds[128];
-    size_t lib_memfd_count;
 
     char last_error[512];
 } g_el = {
@@ -105,7 +96,7 @@ int embedded_loader_init(void)
     pthread_mutex_lock(&g_el.lock);
     if (g_el.initialized) { pthread_mutex_unlock(&g_el.lock); return 0; }
 
-    /* ── Step 1: load libhybris-core.so from its embedded image ── */
+    /* Load libhybris-core.so from its embedded image */
     int hfd = write_memfd("libhybris-core.so",
                           libhybris_core_so_data,
                           libhybris_core_so_size);
@@ -140,43 +131,6 @@ int embedded_loader_init(void)
 
     fprintf(stderr, "[embedded_loader] libhybris-core.so loaded from memfd\n");
 
-    /* ── Step 2: preload every embedded Android lib via its own memfd ──
-     * Opt-in (AML_EMBED_LIBS=1): by default libs load from HYBRIS_LD_LIBRARY_PATH
-     * by their real paths, as the reference wrapper does.  Memfd-loaded libs
-     * break FairPlay code that locates files relative to its own library path
-     * (the lease request crashes on a NULL FilePath-backed Data). */
-    const char *embed_libs = getenv("AML_EMBED_LIBS");
-    for (uint64_t i = 0; i < num_embedded_libs && embed_libs && embed_libs[0] == '1'; i++) {
-        const embedded_lib_entry_t *entry = &embedded_libs[i];
-
-        int fd = write_memfd(entry->name, entry->data, entry->size);
-        if (fd < 0) {
-            /* Log but continue — a missing optional lib shouldn't abort init */
-            fprintf(stderr, "[embedded_loader] memfd(%s) failed: %s\n",
-                    entry->name, g_el.last_error);
-            continue;
-        }
-
-        char path[64];
-        snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
-
-        void *handle = g_el.android_dlopen(path, 0x102 /* RTLD_NOW | RTLD_GLOBAL */);
-        if (!handle) {
-            fprintf(stderr, "[embedded_loader] android_dlopen(%s) failed\n", entry->name);
-            close(fd);
-            continue;
-        }
-
-        /* Keep fd open — the Android linker mapping is backed by it */
-        if (g_el.lib_memfd_count < 128) {
-            g_el.lib_memfds[g_el.lib_memfd_count++] = fd;
-        } else {
-            /* Overflow safety: keep fd open anyway via /proc/self/fd */
-            /* (won't happen with our ~25 libs) */
-        }
-        fprintf(stderr, "[embedded_loader] loaded %s\n", entry->name);
-    }
-
     g_el.initialized = 1;
     pthread_mutex_unlock(&g_el.lock);
     return 0;
@@ -188,7 +142,6 @@ void *embedded_dlopen(const char *name, int flags)
         snprintf(g_el.last_error, sizeof(g_el.last_error), "not initialized");
         return NULL;
     }
-    /* The lib is already preloaded; android_dlopen returns the cached handle */
     return g_el.android_dlopen(name, flags);
 }
 
@@ -219,15 +172,6 @@ void embedded_loader_shutdown(void)
 {
     pthread_mutex_lock(&g_el.lock);
     if (!g_el.initialized) { pthread_mutex_unlock(&g_el.lock); return; }
-
-    /* Close all per-lib memfds */
-    for (size_t i = 0; i < g_el.lib_memfd_count; i++) {
-        if (g_el.lib_memfds[i] >= 0) {
-            close(g_el.lib_memfds[i]);
-            g_el.lib_memfds[i] = -1;
-        }
-    }
-    g_el.lib_memfd_count = 0;
 
     /* Unload hybris */
     if (g_el.hybris_handle) {

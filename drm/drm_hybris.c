@@ -235,7 +235,7 @@ int hybris_backend_init(
     g_hybris.android_dlclose = NULL; /* not exposed by embedded loader */
 
     /* ── Load libCoreFP.so (experimental direct path) ── */
-    /* Already preloaded by embedded_loader_init(); android_dlopen returns cached handle */
+    /* Loaded by real path from HYBRIS_LD_LIBRARY_PATH (rootfs/system/lib64) */
     g_hybris.corefp_handle = g_hybris.android_dlopen("libCoreFP.so", RTLD_NOW);
     if (g_hybris.corefp_handle) {
         g_hybris.fp_dku = (corefp_dku_fn) g_hybris.android_dlsym(g_hybris.corefp_handle, "dku592fbFAj");
