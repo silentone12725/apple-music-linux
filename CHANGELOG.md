@@ -16,7 +16,7 @@ size; every change is listed in releases/v1.4.0.md, together with the complete c
 - **The DRM client** (HTTPS with HTTP/2 option, cookie jar, JWT parsing, device GUID persistence, license fetch, skd:// to HTTPS conversion for license requests, system CA certificates, FairPlay license parsing) was rebuilt and audited: 22 findings fixed, an RFC 6265 cookie jar, HTTP/1.1 framing and size caps, timeouts, redirect and retry rules, TLS server-name verification, optional SPKI pinning (AML_TLS_PINS), and hi-res availability that follows a switch (AML_DISABLE_HIRES) instead of being hard-coded.
 - **Android runtime.** The stripped ICU libraries load under hybris (the __register_atfork import is retargeted), the libdl.so shim is tracked, the DRM library builds against the in-tree libhybris-core.so, and the runtime shrank from 99 libraries (116 MiB) to the 25 in drm/android-libs.txt (65 MiB): libandroid.so and libOpenSLES.so are empty stubs because Apple's libraries import nothing from them. The unused embedding of those libraries inside libdrm_client.so was removed (64 MB to 1 MB).
 - **Content keys.** A content-key cache, format fields, session reuse and audio analysis were ported from Android Apple Music 6.5.2; cached keys survive a cancelled stream; in-process ALAC decryption survives key switches and reconnects; malformed CBCS fragments return errors instead of panicking; the FairPlay license pool is pre-warmed at startup; Widevine license parameters are carried by a typed context key; and a Widevine device identity can be supplied with AML_WIDEVINE_DIR (the built-in default still works).
-- **Itun (progressive music-video) decryption**: the offline pipeline and proactive URL refresh were added, then wired to the real wrapper calls. The engine now obtains the real progressive URL, but Apple's response carries no sinf for it, so it cannot be decrypted yet (see Known limitations).
+- **Itun (progressive music-video) groundwork**: the offline decryption pipeline and proactive URL refresh were added, and the engine now requests the real progressive URL through the vendored wrapper (opt-in with AML_MV_PROGRESSIVE=1 while it is evaluated).
 
 ### Lossless and AAC playback
 - **ALAC plays in-process through libvlc callbacks**: libvlc reads from the disk cache or the in-progress download, with no loopback HTTP and no subprocess. A first play serves while it downloads (the Android RandomAccessFile model), and seeking works during the download through Range-from-writer. A cache-commit race and an engine crash after VLC passthrough teardown were fixed.
@@ -68,15 +68,6 @@ size; every change is listed in releases/v1.4.0.md, together with the complete c
 - **Debug output follows how you start the app**: from a terminal (or with AML_DEBUG=1) it turns on the renderer log forwarding, a log file and verbose logging. The "Enable debug mode" setting is gone; a DevTools window opens only with AML_DEVTOOLS.
 - Opt-in live checks of the real playback pipeline decrypt and decode ALAC, AAC, Atmos and music-video streams (comparable byte for byte between Android runtimes), plus a live check of the itun path.
 - Repository cleanup: generated output, one-off reverse-engineering tools, UI captures and stale benchmark reports were removed, a clean script was added, and the go.work follows the engine's Go version.
-
-### Known limitations
-- **Music-video progressive (itun) streams are not used.** The real progressive URL is a roughly 4 Mbit/s file (about 9 for the HLS rendition) but is itun-encrypted and Apple's response carries no sinf for it, so it cannot be decrypted; music videos stay on HLS. It is opt-in with AML_MV_PROGRESSIVE=1 for testing.
-- Music videos can stall when the link is near or below the stream's bitrate (about 8 to 10 Mbit/s); there is no adaptive quality yet. Lowering the maximum video height in Settings should help.
-
-### Breaking changes
-- The subprocess and TCP DRM backends, the AML_EMBED_LIBS embedding mode and the "Enable debug mode" setting are gone.
-- DRM state now lives under ~/.config/apple-music-linux/drm. If lossless or music videos are unavailable after upgrading, sign in again from AML Settings.
-- The installer file is now apple-music-linux.run (no version in the name), and the command is installed to ~/.local/bin with no shell startup file edited.
 
 ## 1.3.0 - 2026-08-11
 
