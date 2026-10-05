@@ -108,6 +108,8 @@ sheet.replaceSync(`
      ::after, which ends where main ends, so the footer takes the same colour to continue it
      (transparent on pages that have none). Its own backdrop blur is dropped. */
   footer { background: var(--joe-color, transparent) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+  footer { border: 0 !important; }
+  footer::before, footer::after { display: none !important; }
   footer > * { display: none !important; }
 
   /* ── Songs library column header bar — glass-themed instead of solid dark ── */
