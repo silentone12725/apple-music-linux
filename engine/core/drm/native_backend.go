@@ -202,6 +202,14 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		}
 	}
 
+	if lib64Dir != "" {
+		n := 0
+		if ents, err := os.ReadDir(lib64Dir); err == nil {
+			n = len(ents)
+		}
+		log.Printf("[drm] Android libraries: %s (%d files)", lib64Dir, n)
+	}
+
 	// Prepare config
 	cBaseDir := C.CString(baseDir)
 	var cLib64Dir *C.char
