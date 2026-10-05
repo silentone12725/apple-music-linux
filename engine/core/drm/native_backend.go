@@ -528,6 +528,14 @@ func (b *nativeBackend) GetProgressiveMVURL(ctx context.Context, adamID uint64) 
 		C.free(unsafe.Pointer(cDK))
 	}
 
+	// An empty downloadKey means the file is itun-encrypted and must be decrypted here.
+	// That needs the sinf data Apple returns with the asset; when the response carried
+	// none, no decryptor exists and the file cannot be played (verified live: the
+	// stored sinf boxes are stripped placeholders).
+	if downloadKey == "" && hasDecryptor == 0 {
+		return "", "", fmt.Errorf("asset %d: progressive file is itun-encrypted but Apple returned no sinf, so it cannot be decrypted", adamID)
+	}
+
 	return url, downloadKey, nil
 }
 

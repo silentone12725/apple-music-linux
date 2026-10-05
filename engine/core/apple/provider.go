@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -322,7 +323,9 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	// wrapper (port 40020). The downloadKey is sent as an HTTP cookie to the
 	// CDN (Android pattern) — the CDN authorises server-side decryption.
 	// Non-fatal: HLS CBCS path is always the primary; this is an optimisation.
-	if p.acct != nil {
+	// Opt-in (AML_MV_PROGRESSIVE=1): the request costs seconds on every open, and nothing
+	// consumes the result unless the native <video> backend is in use.
+	if p.acct != nil && os.Getenv("AML_MV_PROGRESSIVE") == "1" {
 		if adamID, parseErr := strconv.ParseUint(req.AssetID, 10, 64); parseErr == nil {
 			progCtx, progCancel := context.WithTimeout(ctx, 5*time.Second)
 			pURL, pKey, pErr := p.acct.GetProgressiveMVURL(progCtx, adamID)

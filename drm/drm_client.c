@@ -469,53 +469,6 @@ cleanup:
     return ret;
 }
 
-/**
- * AES-128 CBC decryption with PKCS#7 padding (for itun).
- */
-static int aes128_cbc_decrypt_padded(const uint8_t *key, const uint8_t *iv,
-                                      uint8_t *data, uint32_t input_len,
-                                      uint32_t *output_len)
-{
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) {
-        return -1;
-    }
-    
-    int ret = -1;
-    int len;
-    
-    /* Initialize decryption context */
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv) != 1) {
-        goto cleanup;
-    }
-    
-    /* Enable padding for itun */
-    EVP_CIPHER_CTX_set_padding(ctx, 1);
-    
-    /* Decrypt */
-    if (EVP_DecryptUpdate(ctx, data, &len, data, input_len) != 1) {
-        goto cleanup;
-    }
-    
-    /* Finalize and get output length */
-    uint8_t final[DRM_AES_BLOCK_SIZE];
-    int final_len = 0;
-    if (EVP_DecryptFinal_ex(ctx, final, &final_len) != 1) {
-        goto cleanup;
-    }
-    
-    *output_len = (uint32_t)(len + final_len);
-    if (final_len > 0) {
-        memcpy(data + len, final, final_len);
-    }
-    
-    ret = 0;
-    
-cleanup:
-    EVP_CIPHER_CTX_free(ctx);
-    return ret;
-}
-
 /* ── Key Context Cache Functions ────────────────────────────────────────────*/
 
 /* ── Fetch and parse FairPlay license ───────────────────────────────────────*/
@@ -607,22 +560,6 @@ static void free_key_context_cache(void)
 
 /* ── Itun Context Cache Functions ───────────────────────────────────────────*/
 
-static drm_itun_context_handle_t create_itun_context(drm_adam_id_t asset_id)
-{
-    struct drm_itun_context *ctx = calloc(1, sizeof(struct drm_itun_context));
-    if (!ctx) {
-        return NULL;
-    }
-    
-    ctx->asset_id = asset_id;
-    memset(ctx->aes_key, 0, DRM_AES_KEY_SIZE);
-    memset(ctx->iv, 0, DRM_AES_BLOCK_SIZE);
-    ctx->valid = 1;
-    pthread_mutex_init(&ctx->lock, NULL);
-    
-    return ctx;
-}
-
 static void destroy_itun_context(drm_itun_context_handle_t ctx)
 {
     if (!ctx) return;
@@ -640,36 +577,6 @@ static void free_itun_cache(void)
         }
     }
     g_state.itun_count = 0;
-}
-
-static drm_itun_context_handle_t find_or_create_itun_context(drm_adam_id_t asset_id)
-{
-    pthread_mutex_lock(&g_state.lock);
-
-    /* Search existing */
-    for (int i = 0; i < DRM_ITUN_CACHE_SIZE; i++) {
-        if (g_state.itun_cache[i] && g_state.itun_cache[i]->asset_id == asset_id) {
-            drm_itun_context_handle_t found = g_state.itun_cache[i];
-            pthread_mutex_unlock(&g_state.lock);
-            return found;
-        }
-    }
-
-    /* Create new */
-    drm_itun_context_handle_t result = NULL;
-    for (int i = 0; i < DRM_ITUN_CACHE_SIZE; i++) {
-        if (!g_state.itun_cache[i]) {
-            g_state.itun_cache[i] = create_itun_context(asset_id);
-            if (g_state.itun_cache[i]) {
-                g_state.itun_count++;
-                result = g_state.itun_cache[i];
-            }
-            break;
-        }
-    }
-
-    pthread_mutex_unlock(&g_state.lock);
-    return result;
 }
 
 /* ── Helper Functions ───────────────────────────────────────────────────────*/
@@ -1021,34 +928,21 @@ int drm_get_progressive_url(
         return -1;
     }
     
-    /* Create itun decryptor context for this asset (called outside lock) */
-    drm_itun_context_handle_t itun_ctx = find_or_create_itun_context(asset_id);
-    
-    /* Placeholder: Returns deterministic URL and download key based on asset_id.
-     * Production: Request progressive URL from Apple servers. */
-    
-    char url[256];
-    snprintf(url, sizeof(url),
-             "https://video-ssl.itunes.apple.com/itunes-assets/Video/"
-             "%04lld/%04lld/%04lld/video.m4a",
-             (long long)(asset_id / 1000000) % 10000,
-             (long long)(asset_id / 1000) % 10000,
-             (long long)asset_id % 10000);
-    
-    *out_url = strdup(url);
-    
-    /* Generate a placeholder download key */
-    char download_key[65];
-    snprintf(download_key, sizeof(download_key),
-             "%016llx%016llx%016llx%016llx",
-             (unsigned long long)(asset_id >> 48),
-             (unsigned long long)((asset_id >> 32) & 0xFFFF),
-             (unsigned long long)((asset_id >> 16) & 0xFFFF),
-             (unsigned long long)(asset_id & 0xFFFF));
-    *out_download_key = strdup(download_key);
-    
-    *out_has_decryptor = (itun_ctx != NULL && itun_ctx->valid) ? 1 : 0;
-    
+    /* Real URL and itun decryptor from Apple, through the Android libraries. There is
+     * no fallback: a made-up URL or key would only produce garbage. */
+    char *url = NULL, *dk = NULL;
+    int has_itun = 0;
+    if (hybris_get_progressive((unsigned long)asset_id, &url, &dk, &has_itun) != 0 || !url) {
+        free(url);
+        free(dk);
+        *out_url = NULL;
+        *out_download_key = NULL;
+        *out_has_decryptor = 0;
+        return -1;
+    }
+    *out_url = url;
+    *out_download_key = dk; /* NULL/empty for itun-encrypted files */
+    *out_has_decryptor = has_itun;
     return 0;
 }
 
@@ -1309,25 +1203,16 @@ int drm_decrypt_itun(
         return -1;
     }
     
-    pthread_mutex_lock(&g_state.lock);
-    drm_itun_context_handle_t ctx = NULL;
-    for (int i = 0; i < DRM_ITUN_CACHE_SIZE; i++) {
-        if (g_state.itun_cache[i] && g_state.itun_cache[i]->asset_id == asset_id) {
-            ctx = g_state.itun_cache[i];
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_state.lock);
-    
-    if (!ctx || !ctx->valid) {
-        fprintf(stderr, "[drm] drm_decrypt_itun: no decryptor for asset %llu\n",
+    /* Apple's SVPastisDecryptor, set up by drm_get_progressive_url() for this asset. */
+    uint32_t out = 0;
+    int rc = hybris_decrypt_itun((unsigned long)asset_id, sample_data, input_size, &out);
+    if (rc == 0) {
+        *output_size = out;
+    } else {
+        fprintf(stderr, "[drm] drm_decrypt_itun: failed for asset %llu\n",
                 (unsigned long long)asset_id);
-        return -1;
     }
-    
-    /* Perform AES-128 CBC decryption with padding (REQ-8.3) */
-    return aes128_cbc_decrypt_padded(ctx->aes_key, ctx->iv,
-                                      sample_data, input_size, output_size);
+    return rc;
 }
 
 /* ── drm_decrypt_samples_batch (Performance Optimization) ───────────────────*/

@@ -301,6 +301,10 @@ int hybris_backend_init(
  */
 extern int   aml_lib_init_guarded(const drm_lib_config_t *cfg);
 extern void *aml_open_kd_ctx_guarded(const char *adam, const char *uri);
+extern int   aml_get_mv_guarded(unsigned long adam, char **out_url, char **out_dk,
+                                int *out_has_itun);
+extern int   aml_decrypt_itun_guarded(unsigned long adam, uint8_t *sample, uint32_t in_size,
+                                      uint32_t *out_size);
 
 static void wrapper_state_cb(const char *state, void *ud)
 {
@@ -476,6 +480,31 @@ void *hybris_open_kd_ctx_from_uri(const char *adam, const char *uri)
     void *ctx = aml_open_kd_ctx_guarded(adam, uri);
     fprintf(stderr, "[hybris] key ctx adam=%s uri=%s: %p\n", adam, uri, ctx);
     return ctx;
+}
+
+/* ── Progressive MV (itun) ───────────────────────────────────────────────────*/
+
+int hybris_get_progressive(unsigned long adam, char **out_url, char **out_dk,
+                           int *out_has_itun)
+{
+    if (!g_hybris.initialized || !g_hybris.fairplay_inited) {
+        fprintf(stderr, "[hybris] get_progressive: FairPlay session not ready\n");
+        return -1;
+    }
+    if (!out_url || !out_dk || !out_has_itun) return -1;
+    if (drm_lib_is_recovery_active()) {
+        fprintf(stderr, "[hybris] progressive URL refused: lease recovery in progress\n");
+        return -1;
+    }
+    return aml_get_mv_guarded(adam, out_url, out_dk, out_has_itun);
+}
+
+int hybris_decrypt_itun(unsigned long adam, uint8_t *sample, uint32_t in_size,
+                        uint32_t *out_size)
+{
+    if (!g_hybris.initialized || !g_hybris.fairplay_inited) return -1;
+    if (!sample || !out_size) return -1;
+    return aml_decrypt_itun_guarded(adam, sample, in_size, out_size);
 }
 
 /* ── Decryption ──────────────────────────────────────────────────────────────*/

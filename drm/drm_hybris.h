@@ -116,6 +116,23 @@ unsigned hybris_decrypt_epoch(void);
  */
 void hybris_corefp_probe(void);
 
+/**
+ * Progressive music-video URL and download key for adam, from Apple's StoreKit auth
+ * through the Android libraries. The key is empty/NULL for itun-encrypted files, which
+ * are decrypted client-side. Also creates the itun decryptor for adam (one at a time).
+ * out_url / out_dk are malloc'd; the caller frees them. Returns 0 on success.
+ */
+int hybris_get_progressive(unsigned long adam, char **out_url, char **out_dk,
+                           int *out_has_itun);
+
+/**
+ * Decrypt one itun-encrypted sample in place with Apple's SVPastisDecryptor.
+ * hybris_get_progressive() must have been called for the same adam. out_size is the
+ * decrypted length. Returns 0 on success.
+ */
+int hybris_decrypt_itun(unsigned long adam, uint8_t *sample, uint32_t in_size,
+                        uint32_t *out_size);
+
 /*
  * Shut down the hybris backend and unload libraries.
  */
