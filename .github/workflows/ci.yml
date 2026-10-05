@@ -28,11 +28,9 @@ jobs:
           go-version-file: engine/go.mod
           cache-dependency-path: engine/go.sum
       - name: Install libvlc headers
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvlc-dev vlc-plugin-base
       - run: go vet ./...
-      # core/vlc tests drive a real libvlc audio session, which a headless runner cannot provide;
-      # the package is still compiled and vetted above.
-      - run: go test $(go list ./... | grep -v '/core/vlc$')
+      - run: go test ./...
 
   electron:
     name: Electron app
