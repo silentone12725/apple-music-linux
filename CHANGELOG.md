@@ -8,7 +8,7 @@ the project's Releases page.
 ## 1.4.0 - 2026-10-06
 
 A major release: 304 commits across 689 files since 1.3.0. Grouped by area because of its
-size; every change is listed in releases/v1.4.0.md, together with the complete commit list.
+size; the same list is in releases/v1.4.0.md.
 
 ### DRM and key handling
 - **DRM moved in-process.** The subprocess and TCP backends (ProcessBackend, drm-rootless, the TCP sockets) were removed in stages: first a hybris-backed backend, then an in-process cgo backend, then a clean-room native backend (libdrm_client.so) that drives Apple's Android libraries through libhybris. FairPlay keys are derived through a vendored host-native wrapper (lease management and recovery, key contexts, an exception barrier so a C++ exception cannot abort the engine). Packaged builds ship the in-process DRM.
