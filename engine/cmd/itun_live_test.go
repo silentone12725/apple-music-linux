@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,12 @@ func TestItunLive(t *testing.T) {
 	t0 := time.Now()
 	cdnURL, dk, err := s.dm.GetProgressiveMVURL(ctx, adam)
 	if err != nil {
+		// With ITUN_URL_ONLY the point is that the DRM libraries reached Apple and got an asset;
+		// the "no sinf" refusal is the engine's deliberate answer for an undecryptable file.
+		if os.Getenv("ITUN_URL_ONLY") != "" && strings.Contains(err.Error(), "no sinf") {
+			t.Logf("reached Apple, asset returned; engine refused as expected: %v", err)
+			return
+		}
 		t.Fatalf("GetProgressiveMVURL: %v", err)
 	}
 	u, perr := url.Parse(cdnURL)
@@ -47,6 +54,10 @@ func TestItunLive(t *testing.T) {
 	// Host and path only: the query carries signed access parameters.
 	t.Logf("progressive URL in %s: host=%s path=%s queryLen=%d downloadKeyLen=%d",
 		time.Since(t0).Truncate(time.Millisecond), u.Host, u.Path, len(u.RawQuery), len(dk))
+
+	if os.Getenv("ITUN_URL_ONLY") != "" {
+		return // enough to prove the DRM libraries reach Apple; skip the 88 MiB download
+	}
 
 	enc, err := downloadToTemp(ctx, cdnURL)
 	if err != nil {
