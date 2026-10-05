@@ -204,7 +204,7 @@ const ENGINE_PORT = 20025;
 const DEBUG_OUTPUT = process.env.AML_DEBUG === '1' || [0, 1, 2].some((fd) => { try { return isatty(fd); } catch { return false; } });
 
 // ── User DRM dir setup ────────────────────────────────────────────────────────
-// DRM runs in-process (HybrisBackend, libdrm-native.so next to the engine).
+// DRM runs in-process (NativeBackend, libdrm_client.so next to the engine).
 // The engine takes its DRM directory from dirname(drm-binary-path) and expects
 // the dev layout there:
 //   <dir>/rootfs/system/lib64   Android libs

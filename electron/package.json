@@ -16,16 +16,19 @@
     "abstract-socket@2.1.1": true
   },
   "scripts": {
-    "dist": "npm run build:go && npm run build:engine && electron-builder --linux AppImage",
+    "dist": "npm run build:drm && npm run build:go && npm run build:engine && npm run build:vlc && electron-builder --linux AppImage",
     "postdist": "rm -f dist/builder-debug.yml dist/builder-effective-config.yaml",
     "clean": "bash ../scripts/clean.sh",
-    "build:engine": "npx esbuild src/engine-playback.js --bundle --format=iife --outfile=engine-bundle.js && cp engine-bundle.js dist/linux-unpacked/resources/engine-bundle.js",
-    "build:go": "bash ../scripts/build-engine.sh dist/resources"
+    "build:drm": "make -C ../drm libdrm_client.so",
+    "build:engine": "bash ../scripts/build-renderer.sh",
+    "build:go": "bash ../scripts/build-engine.sh dist/resources",
+    "build:vlc": "bash ../scripts/bundle-vlc.sh"
   },
   "desktopName": "apple-music-linux.desktop",
   "devDependencies": {
     "electron": "^43.1.0",
     "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
     "mp4box": "^2.4.1"
   },
   "build": {
@@ -37,9 +40,7 @@
       "!node_modules/.bin",
       "!**/*.map",
       "!test-*.html",
-      "!dist/resources/engine",
-      "!dist/resources/drm",
-      "!dist/resources/vlc"
+      "!dist/**"
     ],
     "extraResources": [
       {
@@ -47,11 +48,11 @@
         "to": "engine"
       },
       {
-        "from": "dist/resources/libdrm-native.so",
-        "to": "libdrm-native.so"
+        "from": "dist/resources/libdrm_client.so",
+        "to": "libdrm_client.so"
       },
       {
-        "from": "dist/resources/libhybris-core.so",
+        "from": "../drm/libhybris-core.so",
         "to": "libhybris-core.so"
       },
       {

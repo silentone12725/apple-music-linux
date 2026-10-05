@@ -18,6 +18,48 @@ FORCE=0
 SYSTEM=0
 UNINSTALL=0
 
+# ── PATH helpers ──────────────────────────────────────────────────────────────
+# The launcher is installed as `apple-music-linux`. For a user install its directory may not
+# be on PATH, so the installer adds it to the shell startup files. Each edit carries a marker
+# line so reinstalling never duplicates it and --uninstall can remove exactly what was added.
+PATH_MARK="# apple-music-linux: launcher directory on PATH"
+FISH_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/apple-music-linux.fish"
+PATH_EDITED=""
+
+# Append "export PATH" to a POSIX-style startup file (created if needed).
+add_path_line() { # <file>
+    f="$1"
+    if [ -f "$f" ] && grep -qF "$PATH_MARK" "$f"; then return 0; fi
+    printf '\n%s\nexport PATH="%s:$PATH"\n' "$PATH_MARK" "$BIN_DIR" >> "$f" || return 1
+    PATH_EDITED="$PATH_EDITED $f"
+}
+
+ensure_on_path() {
+    case ":$PATH:" in *":$BIN_DIR:"*) return 0 ;; esac
+    # Login shells (and anything sourcing it) and bash interactive shells.
+    add_path_line "$HOME/.profile"
+    [ -f "$HOME/.bashrc" ] && add_path_line "$HOME/.bashrc"
+    # zsh reads .zshrc for every interactive shell. Only edit one that exists: creating it would
+    # suppress zsh's first-run setup for someone who has not configured zsh yet.
+    [ -f "${ZDOTDIR:-$HOME}/.zshrc" ] && add_path_line "${ZDOTDIR:-$HOME}/.zshrc"
+    # fish has its own syntax and a conf.d drop-in directory.
+    if command -v fish >/dev/null 2>&1 || [ -d "${XDG_CONFIG_HOME:-$HOME/.config}/fish" ]; then
+        mkdir -p "$(dirname "$FISH_CONF")"
+        [ -f "$FISH_CONF" ] || PATH_EDITED="$PATH_EDITED $FISH_CONF"
+        printf '%s\nif not contains -- "%s" $PATH\n    set -gx PATH "%s" $PATH\nend\n' "$PATH_MARK" "$BIN_DIR" "$BIN_DIR" > "$FISH_CONF"
+    fi
+}
+
+remove_path_lines() {
+    rm -f "$FISH_CONF"
+    for f in "$HOME/.profile" "$HOME/.bashrc" "${ZDOTDIR:-$HOME}/.zshrc"; do
+        [ -f "$f" ] && grep -qF "$PATH_MARK" "$f" || continue
+        awk -v m="$PATH_MARK" '$0==m{skip=1;next} skip{skip=0;next} {print}' "$f" > "$f.aml-tmp" \
+            && cat "$f.aml-tmp" > "$f"
+        rm -f "$f.aml-tmp"
+    done
+}
+
 for arg in "$@"; do
     case "$arg" in
         --force)    FORCE=1 ;;
@@ -44,6 +86,7 @@ if [ "$UNINSTALL" = "1" ]; then
     rm -f  "$DESKTOP_DIR/apple-music-linux.desktop"
     rm -f  "$ICON_DIR/apple-music-linux.png"
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+    [ "$SYSTEM" = "1" ] || remove_path_lines
     echo "Uninstalled Apple Music Linux."
     exit 0
 fi
@@ -104,6 +147,7 @@ cat > "$BIN_DIR/apple-music-linux" <<EOF
 exec "$INSTALL_DIR/apple-music-linux" --no-sandbox "\$@"
 EOF
 chmod +x "$BIN_DIR/apple-music-linux"
+[ "$SYSTEM" = "1" ] || ensure_on_path
 
 # ── desktop entry + icon ──────────────────────────────────────────────────────
 mkdir -p "$DESKTOP_DIR" "$ICON_DIR"
@@ -145,10 +189,11 @@ echo ""
 echo "Apple Music Linux $VERSION installed to $INSTALL_DIR"
 echo "Launcher: $BIN_DIR/apple-music-linux"
 
-if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
+if [ -n "$PATH_EDITED" ]; then
     echo ""
-    echo "Note: $BIN_DIR is not in your PATH."
-    echo "Add to ~/.bashrc or ~/.zshrc:  export PATH=\"\$PATH:$BIN_DIR\""
+    echo "Added $BIN_DIR to your PATH in:$PATH_EDITED"
+    echo "Open a new terminal, then run:  apple-music-linux"
+    echo "(In this terminal: export PATH=\"$BIN_DIR:\$PATH\")"
 fi
 
 exit 0
