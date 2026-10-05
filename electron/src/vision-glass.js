@@ -107,7 +107,7 @@ sheet.replaceSync(`
      only its children go; its background is made transparent so the themed page (solid,
      Blur or Accented Blur) shows through instead of Apple's native colour. */
   footer { background: transparent !important; }
-  footer > *, [class*="footer-wrapper"] { display: none !important; }
+  footer > * { display: none !important; }
 
   /* ── Songs library column header bar — glass-themed instead of solid dark ── */
   [class*="library-track--header"] {
