@@ -49,6 +49,7 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 - **Lossless & Hi-Res** — ALAC up to 192kHz via FairPlay-decrypted HLS
 - **AAC streaming** — dedicated MSE pipeline for AAC with accurate seek
 - **In-process DRM** — FairPlay runs inside the engine, with no helper process or local sockets
+- **Clean mode switching** — moving between lossless, AAC and music video stops the previous player first, so tracks never overlap
 - **Music Videos** — full MV playback with resolution selector (480p → 4K), subtitles, fullscreen, and fast fragment-level seeking; H.264-preferred to avoid HEVC decode issues on Linux
 - **Audio quality badge** — shows codec, bit depth, and sample rate right in the player bar; click for full details
 
@@ -101,7 +102,6 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 
 ## Roadmap
 
-- **Playback handoff** — verify transitions between AAC, lossless, and music video modes on real playback (stalls, double-plays, state leaks); leaving lossless now stops libvlc deterministically, with tests
 - **arm64 support** — packaging and wrapper binary for Apple Silicon / Raspberry Pi
 - **EQ Studio** — per-headphone parametric EQ from autoeq.app (engine ready, UI coming)
 
