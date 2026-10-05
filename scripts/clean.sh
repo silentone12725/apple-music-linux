@@ -31,7 +31,8 @@ targets=(
     .installer-stage engine/build engine/core/apple-music-cli
 )
 while IFS= read -r -d '' f; do targets+=("${f#"$REPO"/}"); done < <(
-    find "$REPO/drm" "$REPO/engine" \( -name '*.o' -o -name '*.test' \) -type f -print0)
+    find "$REPO/drm" "$REPO/engine" \( -name '*.o' -o -name '*.test' \) -type f \
+        -not -path '*/embedded_blobs/*' -print0)
 
 if [ "$DIST" = 1 ]; then
     targets+=(dist electron/dist/linux-unpacked)
