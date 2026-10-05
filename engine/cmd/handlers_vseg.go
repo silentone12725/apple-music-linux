@@ -50,6 +50,21 @@ type vsegSession struct {
 	err  error // nil = clean EOF; non-nil = producer failed
 }
 
+// pinnedCancel returns a cancel func that, besides cancelling the producer, releases
+// a reader reference taken on spw right now. Commit/Discard drop the writer's own
+// reference, and the cache file is closed when the last one goes — so without the pin,
+// a fragment request arriving after the producer finished reads from a closed file and
+// gets an empty body, which the player appends as nothing and then races through the
+// remaining fragment numbers.
+func pinnedCancel(spw *diskcache.StreamingPutWriter, cancel context.CancelFunc) context.CancelFunc {
+	pin := spw.NewReader()
+	var once sync.Once
+	return func() {
+		cancel()
+		once.Do(pin.Close)
+	}
+}
+
 // vsegState holds the per-playback-session state:
 //   - base: the from-0 producer, always running; builds the full index on disk.
 //     Seek requests that land within already-indexed territory are served instantly
@@ -108,7 +123,7 @@ func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) 
 	base := &vsegSession{
 		spw:       spw,
 		idx:       aacstream.NewMVLiveIndex(),
-		cancel:    cancel,
+		cancel:    pinnedCancel(spw, cancel),
 		ephemeral: ephemeral,
 	}
 	state := &vsegState{base: base, active: base}
@@ -368,7 +383,7 @@ func (s *APIServer) startVsegSessionFrom(id, assetID string, startSec float64) (
 	}
 
 	ctx, cancel := context.WithCancel(s.shutdownCtx)
-	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: cancel, ephemeral: ephemeral}
+	seek := &vsegSession{spw: spw, idx: aacstream.NewMVLiveIndex(), cancel: pinnedCancel(spw, cancel), ephemeral: ephemeral}
 
 	setActiveVsegSession(id, seek)
 
@@ -535,7 +550,14 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 		if limit, known := vs.idx.FragLimitByIndex(n); known {
 			remaining := (limit - fragOff) - sent
 			if remaining > 0 {
-				_, _ = io.CopyN(w, rd, remaining)
+				if copied, err := io.CopyN(w, rd, remaining); err != nil {
+					// A short body would be appended as a truncated fragment; abort the
+					// response so the client sees a failed fetch instead.
+					if ctx.Err() == nil {
+						log.Printf("[vseg/seg] id=%s n=%d short read: %d/%d bytes: %v", id, n, copied, remaining, err)
+					}
+					panic(http.ErrAbortHandler)
+				}
 			}
 			if hasFlusher {
 				fl.Flush()
