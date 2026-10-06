@@ -666,7 +666,7 @@ int main(int argc, char **argv)
     /* For the probe, derive base_dir from lib64_dir and call fairplay_init */
     char *bdir = derive_base_dir(lib64_dir);
     if (bdir) {
-        hybris_fairplay_init(bdir, NULL, lib64_dir);
+        hybris_fairplay_init(bdir, NULL, lib64_dir, NULL, NULL);
         free(bdir);
     }
 
