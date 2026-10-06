@@ -113,7 +113,7 @@ An Apple Music desktop client for Linux — lossless audio, music videos, downlo
 - PulseAudio or PipeWire
 - Apple Music subscription
 
-VLC is bundled inside the installer — no system VLC needed.
+VLC and a minimal FFmpeg are bundled in every package — no system VLC or FFmpeg needed.
 
 A Wayland compositor with blur support (Hyprland, KWin) gives the best glass UI. X11, GNOME, and Sway use a software blur fallback.
 
@@ -313,8 +313,10 @@ apple-music-linux/
 │   ├── rootfs/system/lib64/   Android runtime (Git LFS)
 │   └── files/                 Your Apple session (never packaged or committed)
 ├── flatpak/                   Flatpak manifest, desktop entry, metainfo and icon
+├── third_party/ffmpeg/        Prebuilt minimal FFmpeg (LGPL, Git LFS) bundled into every package
 ├── scripts/                   build-installer.sh, build-flatpak.sh, build-engine.sh,
-│                              build-renderer.sh, bundle-vlc.sh, clean.sh, install-cavern.sh
+│                              build-renderer.sh, bundle-vlc.sh, build-ffmpeg.sh, clean.sh,
+│                              install-cavern.sh
 ├── verification/              API schema, QA console, benchmark and test harnesses
 ├── releases/                  Release notes (one file per version)
 ├── assets/                    Screenshots and tray icon
@@ -334,7 +336,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 **Runtime**
 - [Electron](https://electronjs.org) — desktop shell
 - [libvlc](https://www.videolan.org/vlc/libvlc.html) — lossless audio playback, bundled as an audio-only subset
-- [FFmpeg](https://ffmpeg.org) — music-video remuxing, export and binaural rendering
+- [FFmpeg](https://ffmpeg.org) — a minimal LGPL build (9.0.2, [source](https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz)) is bundled for music-video remuxing and export, and supplies the codec libraries VLC loads
 - [libhybris](https://github.com/libhybris/libhybris) — runs Apple's Android FairPlay libraries on glibc
 - [MusicKit JS](https://developer.apple.com/documentation/musickitjs) — Apple's web playback SDK, loaded from music.apple.com
 
