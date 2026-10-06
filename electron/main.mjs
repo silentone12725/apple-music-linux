@@ -10,7 +10,7 @@ process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, symlinkSync, rmSync, createWriteStream, createReadStream, readdirSync } from 'fs';
+import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, symlinkSync, rmSync, createWriteStream, createReadStream, readdirSync, cpSync } from 'fs';
 import { readFile as readFileAsync, writeFile as writeFileAsync } from 'fs/promises';
 import os from 'os';
 import { isatty } from 'tty';
@@ -21,7 +21,10 @@ const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Persistence ──────────────────────────────────────────────────────────────
-const CONFIG_DIR = path.join(os.homedir(), '.config', 'apple-music-linux');
+// Inside a Flatpak the real ~/.config is not visible; XDG_CONFIG_HOME points at the app's own
+// persistent directory. Everywhere else keep the long-standing ~/.config location.
+const CONFIG_DIR = path.join(process.env.FLATPAK_ID && process.env.XDG_CONFIG_HOME
+    ? process.env.XDG_CONFIG_HOME : path.join(os.homedir(), '.config'), 'apple-music-linux');
 const PREF_FILE  = path.join(CONFIG_DIR, 'electron-prefs.json');
 
 function loadPrefs() {
@@ -259,7 +262,16 @@ function ensureEngineConfig() {
     if (app.isPackaged) {
         const { drmMarker, userRootfs } = ensureUserDRM();
         drmBin  = drmMarker;
-        drmBase = path.join(__dirname, '..', 'drm', 'files');
+        // The session (tokens, account database) must be writable and survive updates, so it
+        // lives in the user's config dir. The bundle (an AppImage mount, /opt, a Flatpak /app)
+        // can be read-only: the engine failed to start there.
+        drmBase = path.join(CONFIG_DIR, 'drm', 'files');
+        const legacyBase = path.join(__dirname, '..', 'drm', 'files');
+        if (!existsSync(drmBase) && existsSync(legacyBase)) {
+            try { cpSync(legacyBase, drmBase, { recursive: true }); } // sessions saved inside the install dir by older builds
+            catch (e) { console.error('[AML] could not migrate the DRM session:', e.message); }
+        }
+        mkdirSync(drmBase, { recursive: true });
     } else {
         // Dev: the repo's own drm/ directory — it holds libdrm_client.so, rootfs/ and files/.
         drmBin  = path.join(__dirname, '..', 'drm');
