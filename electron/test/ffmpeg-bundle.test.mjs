@@ -5,7 +5,7 @@
 //   node --test electron/test/ffmpeg-bundle.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,5 +41,17 @@ test('the bundled ffmpeg runs from its own libraries with an empty environment',
     for (const lib of ['libavcodec', 'libavformat', 'libavutil']) {
         const line = ldd.split('\n').find((l) => l.includes(lib + '.so'));
         assert.ok(line && line.includes(path.join('third_party', 'ffmpeg')), `${lib} must resolve inside third_party/ffmpeg: ${line}`);
+    }
+});
+
+test('no bundled FFmpeg file needs a newer glibc than the other packaged binaries (2.38)', { skip: !existsSync(path.join(FF, 'bin', 'ffmpeg')) }, () => {
+    const files = ['bin/ffmpeg', ...readdirSync(path.join(FF, 'lib')).filter((f) => /\.so\.\d+\.\d+\.\d+$/.test(f)).map((f) => 'lib/' + f)];
+    const ver = (v) => v.split('.').map(Number);
+    const newer = (a, b) => { for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); } return false; };
+    for (const f of files) {
+        const out = execFileSync('objdump', ['-T', path.join(FF, f)], { encoding: 'utf8' });
+        for (const m of out.matchAll(/GLIBC_(\d+(?:\.\d+)*)/g)) {
+            assert.ok(!newer(ver(m[1]), [2, 38]), `${f} needs GLIBC_${m[1]}: rebuild with scripts/build-ffmpeg.sh (inside the SDK), not on a rolling host`);
+        }
     }
 });
