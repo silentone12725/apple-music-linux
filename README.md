@@ -121,7 +121,7 @@ A Wayland compositor with blur support (Hyprland, KWin) gives the best glass UI.
 
 Three formats are available. They contain the same build.
 
-### Option A — `.run` installer (112 MB, recommended)
+### Option A — `.run` installer (113 MB, recommended)
 
 No dependencies, no root required for a user install.
 
@@ -143,7 +143,7 @@ This installs to `~/.local/lib/apple-music-linux` and adds a launcher to `~/.loc
 
 After install, launch from your app menu or run `apple-music-linux` in a terminal.
 
-### Option B — AppImage (160 MB, portable)
+### Option B — AppImage (162 MB, portable)
 
 No install needed — just run it directly.
 
@@ -161,7 +161,7 @@ chmod +x apple-music-linux.AppImage
 > ```
 > Or run without FUSE: `./apple-music-linux.AppImage --appimage-extract-and-run`
 
-### Option C — Flatpak (117 MB, experimental)
+### Option C — Flatpak (118 MB, experimental)
 
 A single-file Flatpak bundle that runs in the Flatpak sandbox. You need `flatpak` installed and the Flathub remote configured (the bundle pulls the freedesktop runtime from it).
 
