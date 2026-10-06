@@ -49,10 +49,10 @@ cp_plugins access libhttp_plugin.so libhttps_plugin.so libtcp_plugin.so libfiles
 cp_plugins demux libadaptive_plugin.so libmp4_plugin.so libts_plugin.so libes_plugin.so \
     libavformat_plugin.so libflacsys_plugin.so libogg_plugin.so libwav_plugin.so \
     librawaud_plugin.so libplaylist_plugin.so
-# codec — ALAC/AAC/MP3/AC3/FLAC via ffmpeg plus individual fallbacks
+# codec — ALAC/AAC/MP3/AC3/FLAC via ffmpeg plus individual fallbacks (no faad: libavcodec decodes AAC)
 cp_plugins codec libavcodec_plugin.so libaraw_plugin.so libmpg123_plugin.so liba52_plugin.so \
     libflac_plugin.so libvorbis_plugin.so libopus_plugin.so libspdif_plugin.so \
-    libddummy_plugin.so libedummy_plugin.so liblpcm_plugin.so libg711_plugin.so libfaad_plugin.so
+    libddummy_plugin.so libedummy_plugin.so liblpcm_plugin.so libg711_plugin.so
 # audio_output — PulseAudio + ALSA + dummy
 cp_plugins audio_output libpulse_plugin.so libalsa_plugin.so libamem_plugin.so \
     libadummy_plugin.so libafile_plugin.so
@@ -85,7 +85,7 @@ done
 # Libraries the plugins link that other distros (and the Flatpak runtime) do not provide. The
 # FFmpeg libraries are not among them: they ship in third_party/ffmpeg (a minimal build whose
 # sonames match these plugins) and reach VLC through LD_LIBRARY_PATH.
-for lib in libvlc_pulse.so.0 libsoxr.so.0 libfaad.so.2 libdvbpsi.so.10 libaribb24.so.0 liba52.so.0; do
+for lib in libvlc_pulse.so.0 libsoxr.so.0 libdvbpsi.so.10 libaribb24.so.0 liba52.so.0; do
     real=""
     for d in "$LIBDIR" "$LIBDIR/vlc"; do   # libvlc_pulse lives in the vlc subdirectory
         [ -e "$d/$lib" ] && { real="$(readlink -f "$d/$lib")"; break; }
@@ -113,6 +113,19 @@ for plug in "$P/codec/libavcodec_plugin.so" "$P/demux/libavformat_plugin.so" "$P
     done
 done
 [ "$bad" = 0 ] || exit 1
+
+# Nothing bundled may need a newer glibc than the other packaged binaries (2.38): a library copied
+# from a rolling distro can require symbols that older systems and the Flatpak runtime lack.
+MAX_GLIBC="2.38"
+over=0
+while IFS= read -r f; do
+    v="$(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+    [ -z "$v" ] && continue
+    if [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$v" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+        echo "error: ${f#$DEST/} needs GLIBC_$v (limit $MAX_GLIBC): do not bundle it" >&2; over=1
+    fi
+done < <(find "$DEST" -type f \( -name '*.so' -o -name '*.so.*' \))
+[ "$over" = 0 ] || exit 1
 
 # Regenerate the plugin cache so VLC does not scan on every start.
 vlc-cache-gen "$P" 2>/dev/null || true
