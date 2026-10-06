@@ -119,7 +119,7 @@ A Wayland compositor with blur support (Hyprland, KWin) gives the best glass UI.
 
 ## Download & Install
 
-Two formats are available. Both contain the same build.
+Three formats are available. They contain the same build.
 
 ### Option A — `.run` installer (112 MB, recommended)
 
@@ -160,6 +160,24 @@ chmod +x apple-music-linux.AppImage
 > sudo dnf install fuse       # Fedora
 > ```
 > Or run without FUSE: `./apple-music-linux.AppImage --appimage-extract-and-run`
+
+### Option C — Flatpak (117 MB, experimental)
+
+A single-file Flatpak bundle that runs in the Flatpak sandbox. You need `flatpak` installed and the Flathub remote configured (the bundle pulls the freedesktop runtime from it).
+
+```bash
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user apple-music-linux.flatpak
+flatpak run io.github.silentone12725.AppleMusicLinux
+```
+
+It also appears in your app menu as **Apple Music**. To remove it: `flatpak uninstall --user io.github.silentone12725.AppleMusicLinux`.
+
+Things to know:
+- It keeps its own settings and sign-in under `~/.var/app/io.github.silentone12725.AppleMusicLinux/`, separate from the other formats, so you sign in again.
+- Only one copy of the app can run at a time (the engine uses port 20025), so close the other formats first.
+- Wallpaper detection for the blur theme is limited by the sandbox; the software blur is used instead.
+- This is a self-hosted bundle, not a Flathub listing.
 
 ### GNOME
 
@@ -233,6 +251,7 @@ cd electron
 bash build.sh                         # bundle the audio-only VLC subset → dist/resources/vlc
 NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
 cd .. && scripts/build-installer.sh   # .run installer → dist/apple-music-linux.run
+scripts/build-flatpak.sh                # Flatpak bundle → dist/apple-music-linux.flatpak (after one of the above)
 ```
 
 ### Cleaning
@@ -293,8 +312,9 @@ apple-music-linux/
 │   ├── stubs/                 Generated stand-ins for libandroid and libOpenSLES
 │   ├── rootfs/system/lib64/   Android runtime (Git LFS)
 │   └── files/                 Your Apple session (never packaged or committed)
-├── scripts/                   build-installer.sh, build-engine.sh, build-renderer.sh,
-│                              bundle-vlc.sh, clean.sh, install-cavern.sh
+├── flatpak/                   Flatpak manifest, desktop entry, metainfo and icon
+├── scripts/                   build-installer.sh, build-flatpak.sh, build-engine.sh,
+│                              build-renderer.sh, bundle-vlc.sh, clean.sh, install-cavern.sh
 ├── verification/              API schema, QA console, benchmark and test harnesses
 ├── releases/                  Release notes (one file per version)
 ├── assets/                    Screenshots and tray icon
