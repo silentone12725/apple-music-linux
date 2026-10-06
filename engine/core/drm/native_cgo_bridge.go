@@ -9,20 +9,52 @@ package drm
 import "C"
 
 import (
+	"context"
 	"runtime"
 	"runtime/cgo"
 	"unsafe"
 )
 
+// nativeAuthSession is retained by a cgo.Handle until drm_shutdown finishes.
+// Copy the AuthSource before entering C: Start holds the backend mutex while
+// C invokes this callback, so taking that mutex from here would deadlock.
+type nativeAuthSession struct {
+	ctx    context.Context
+	source AuthSource
+}
+
+func (s *nativeAuthSession) reply(kind string, capacity int) string {
+	if s.source == nil {
+		return ""
+	}
+	challenge, ok := nativeAuthChallenge(kind)
+	if !ok {
+		return ""
+	}
+	reply, err := s.source.Challenge(s.ctx, challenge)
+	if err != nil || len(reply) >= capacity {
+		return "" // reject truncation instead of sending corrupted credentials
+	}
+	return reply
+}
+
 //export nativeBridgeAuth
 func nativeBridgeAuth(cType *C.char, buf *C.char, size C.int, ud unsafe.Pointer) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-
-	// Auth is handled via callbacks - for now just return empty
-	if size > 0 {
-		C.memset(unsafe.Pointer(buf), 0, C.size_t(size))
+	if buf == nil || size <= 0 {
+		return
 	}
+	C.memset(unsafe.Pointer(buf), 0, C.size_t(size))
+	if ud == nil || cType == nil {
+		return
+	}
+	session, ok := cgo.Handle(uintptr(ud)).Value().(*nativeAuthSession)
+	if !ok || session.source == nil {
+		return
+	}
+	reply := session.reply(C.GoString(cType), int(size))
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(buf)), int(size)), reply)
 }
 
 //export nativeBridgeState

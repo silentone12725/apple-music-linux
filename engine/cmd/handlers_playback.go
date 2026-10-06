@@ -467,7 +467,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 // commits when the listener disconnects mid-track (skip).
 func (s *APIServer) startCacheDownload(id string, spw *diskcache.StreamingPutWriter) {
 	log.Printf("[cache] startCacheDownload START: session=%s", id)
-	downloadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	downloadCtx, cancel := context.WithTimeout(s.shutdownCtx, 15*time.Minute)
 	go func() {
 		defer cancel()
 		defer s.alac.done(id)
@@ -501,7 +501,7 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusNoContent) // already in cache
 		return
 	}
-	bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	bgCtx, cancel := context.WithTimeout(s.shutdownCtx, 10*time.Minute)
 	go func() {
 		defer cancel()
 		defer s.alac.done(id)

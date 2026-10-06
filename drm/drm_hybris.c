@@ -89,7 +89,9 @@ typedef void (*pcontext_ctor_str_ulong_fn)(
 /* ── Forward declarations ────────────────────────────────────────────────────*/
 
 int hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir,
-                         const char *username, const char *password);
+                         const char *username, const char *password,
+                         drm_auth_callback_t auth_cb, void *auth_ud,
+                         drm_state_callback_t state_cb, void *state_ud);
 
 /* ── Global module state ─────────────────────────────────────────────────────*/
 
@@ -314,7 +316,9 @@ static void wrapper_state_cb(const char *state, void *ud)
 }
 
 int hybris_fairplay_init(const char *base_dir, const char *device_info,
-                         const char *lib64_dir, const char *username, const char *password)
+                         const char *lib64_dir, const char *username, const char *password,
+                         drm_auth_callback_t auth_cb, void *auth_ud,
+                         drm_state_callback_t state_cb, void *state_ud)
 {
     if (!g_hybris.initialized || !g_hybris.appmusic_available) return -1;
     if (g_hybris.fairplay_inited) return 0;
@@ -328,10 +332,18 @@ int hybris_fairplay_init(const char *base_dir, const char *device_info,
      * own account database is empty until it has logged in. */
     cfg.username    = username;
     cfg.password    = password;
-    cfg.state_cb    = wrapper_state_cb;
+    cfg.auth_cb     = auth_cb;
+    cfg.auth_ud     = auth_ud;
+    cfg.state_cb    = state_cb ? state_cb : wrapper_state_cb;
+    cfg.state_ud    = state_ud;
 
     int rc = aml_lib_init_guarded(&cfg);
-    if (rc == 0) g_hybris.fairplay_inited = 1;
+    if (rc == 0) {
+        extern char *g_storefront_id, *g_dev_token, *g_music_token;
+        extern int drm_set_account_tokens(const char *, const char *, const char *);
+        rc = drm_set_account_tokens(g_storefront_id, g_dev_token, g_music_token);
+        if (rc == 0) g_hybris.fairplay_inited = 1;
+    }
     return rc;
 }
 
@@ -592,15 +604,11 @@ void hybris_backend_shutdown(void)
     pthread_mutex_lock(&g_hybris.lock);
     if (!g_hybris.initialized) { pthread_mutex_unlock(&g_hybris.lock); return; }
 
-    if (g_hybris.appmusic_handle && g_hybris.android_dlclose)
-        g_hybris.android_dlclose(g_hybris.appmusic_handle);
-    if (g_hybris.corefp_handle && g_hybris.android_dlclose)
-        g_hybris.android_dlclose(g_hybris.corefp_handle);
-
-    embedded_loader_shutdown();
-
-    memset(&g_hybris, 0, sizeof(g_hybris));
-    pthread_mutex_init(&g_hybris.lock, NULL);
+    drm_lib_shutdown();
+    /* Apple's lease timers have no exported join/destructor. Unmapping their
+     * code here can crash a background thread after the host reports STOPPED.
+     * Keep the loader mapped until process exit; a later Start can reuse it. */
+    g_hybris.fairplay_inited = 0;
     pthread_mutex_unlock(&g_hybris.lock);
 }
 
@@ -666,7 +674,7 @@ int main(int argc, char **argv)
     /* For the probe, derive base_dir from lib64_dir and call fairplay_init */
     char *bdir = derive_base_dir(lib64_dir);
     if (bdir) {
-        hybris_fairplay_init(bdir, NULL, lib64_dir);
+        hybris_fairplay_init(bdir, NULL, lib64_dir, NULL, NULL, NULL, NULL, NULL, NULL);
         free(bdir);
     }
 

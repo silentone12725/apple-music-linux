@@ -342,6 +342,19 @@ func TestManagerBackendStartError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error from GetAccount when backend.Start fails, got nil")
 	}
+	snap := mgr.Status()
+	if snap.State.Manager != drm.ManagerFailed || snap.State.Process != drm.ProcessFailed || snap.State.Authentication != drm.AuthFailed || snap.State.FairPlay != drm.FairPlayFailed {
+		t.Fatalf("failed restore still advertises a usable login: %+v", snap)
+	}
+	if snap.Capabilities != (drm.CapabilityState{}) || snap.Challenge != nil {
+		t.Fatalf("failed restore advertises playback or a stale challenge: %+v", snap)
+	}
+	if !session.HasSession() {
+		t.Fatal("failed restore removed the stored session")
+	}
+	if data, readErr := os.ReadFile(filepath.Join(baseDir, "mpl_db", "accounts.sqlitedb")); readErr != nil || string(data) != "mock_session" {
+		t.Fatalf("failed restore changed the session database: data=%q err=%v", data, readErr)
+	}
 }
 
 // TestManagerAuthenticateStopsRunningBackend verifies that Authenticate calls

@@ -248,3 +248,42 @@ coverage: clean all
 
 .PHONY: all android-stubs clean clean-objs release clean-icu install uninstall test test-https test-realworld test-all \
         analyze format-check format valgrind-test coverage probe gen-blobs build-icu
+
+# Authentication challenge retries and long passwords, without contacting Apple.
+.PHONY: test-auth
+test-auth:
+	$(CC) -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g tests/auth_credentials_test.c -o /tmp/aml-auth-credentials-test
+	/tmp/aml-auth-credentials-test
+	rm -f /tmp/aml-auth-credentials-test
+
+.PHONY: test-recovery
+test-recovery:
+	$(CXX) -std=c++17 -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections -Wl,--gc-sections -fsanitize=address,undefined -g tests/recovery_lifecycle_test.cpp -pthread -o /tmp/aml-recovery-lifecycle-test
+	/tmp/aml-recovery-lifecycle-test
+	rm -f /tmp/aml-recovery-lifecycle-test
+
+.PHONY: test-auth-transport
+test-auth-transport: $(TARGET)
+	$(CC) -std=c11 -Wall -Wextra -Werror tests/auth_transport_test.c -L. -ldrm_client -o /tmp/aml-auth-transport-test
+	LD_LIBRARY_PATH=. /tmp/aml-auth-transport-test
+	rm -f /tmp/aml-auth-transport-test
+
+.PHONY: test-subscription
+test-subscription:
+	$(CC) -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g tests/subscription_status_test.c -o /tmp/aml-subscription-status-test
+	/tmp/aml-subscription-status-test
+	rm -f /tmp/aml-subscription-status-test
+
+.PHONY: test-music-token-request
+test-music-token-request:
+	$(CC) -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -g tests/music_token_request_test.c native/cJSON.c -lm -o /tmp/aml-music-token-request-test
+	/tmp/aml-music-token-request-test
+	rm -f /tmp/aml-music-token-request-test
+
+# Call the production native handler with Android ABI stubs; catches borrowed
+# password buffers freed before Apple reads them, including repeated 2FA replies.
+.PHONY: test-credential-handler
+test-credential-handler:
+	$(CC) -D_GNU_SOURCE -DMyRelease -DDRM_LIB_BUILD -include sys/time.h -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-format -ffunction-sections -fdata-sections -Wl,--gc-sections -fsanitize=address,undefined -g tests/credential_handler_test.c -o /tmp/aml-credential-handler-test
+	/tmp/aml-credential-handler-test
+	rm -f /tmp/aml-credential-handler-test

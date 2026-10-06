@@ -184,9 +184,10 @@
       return Object.entries(this._counts).sort(([, a], [, b]) => b.count - a.count).slice(0, n).map(([id]) => id);
     }
     // ── Startup warm ───────────────────────────────────────────────────────────
-    // Warms top-10 most-played tracks immediately on app startup.
+    // Warm a small idle-startup set. Active playback already warms its queue.
     async warmOnStartup(mk) {
-      const ids = this.topPlayed(10);
+      if (mk?.nowPlayingItem) return;
+      const ids = this.topPlayed(3);
       if (ids.length === 0) return;
       const tracks = ids.map((id) => ({ id }));
       await this.sendContext({

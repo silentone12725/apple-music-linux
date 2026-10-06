@@ -116,6 +116,12 @@ else
     rm -rf "$R/ffmpeg" && cp -a "$REPO/third_party/ffmpeg" "$R/ffmpeg"
     # the renderer bundles were refreshed in step 3 (build-renderer.sh updates this directory)
 fi
+# electron-builder recreates linux-unpacked after build-renderer refreshed it.
+# Always ship fresh external bundles: upgrades extract over an existing install,
+# and main.mjs prefers these paths over app.asar (including older copies).
+for b in engine-bundle.js engine-sse-bundle.js smart-cache-bundle.js vision-bundle.js mp4box-bundle.js; do
+    cp "$ELECTRON/$b" "$ELECTRON/dist/linux-unpacked/resources/$b"
+done
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -r "$ELECTRON/dist/linux-unpacked" "$UNPACKED"

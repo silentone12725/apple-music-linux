@@ -54,8 +54,10 @@ typedef struct {
  * Must be called exactly once before any other drm_lib_* function. */
 int drm_lib_init(const drm_lib_config_t *cfg);
 
-/* drm_lib_shutdown — stop background threads and free global state.
- * After this returns, no further calls to drm_lib_* are valid. */
+/* drm_lib_shutdown — join the host recovery worker and clear callbacks.
+ * Android libraries stay mapped because their own timer threads have no
+ * exported shutdown API. After this returns, host operations are invalid
+ * until initialization succeeds again. */
 void drm_lib_shutdown(void);
 
 /* ── DRM operations ──────────────────────────────────────────────────────────*/

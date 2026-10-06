@@ -9,6 +9,8 @@ package drm
 #include <stdint.h>
 #include <stdlib.h>
 
+static void *native_userdata(uintptr_t handle) { return (void *)handle; }
+
 // ── drm_client.h declarations ───────────────────────────────────────────────
 
 typedef void (*drm_auth_callback_t)(const char *challenge_type, char *output_buffer, int buffer_size, void *user_data);
@@ -45,7 +47,7 @@ int   drm_is_recovery_active(void);
 
 // ── drm_hybris.h declarations (libCoreFP.so / libandroidappmusic.so via hybris) ──
 int   hybris_backend_init(const char *hybris_linker_dir, const char *lib64_dir, const char *hybris_core_path);
-int   hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir, const char *username, const char *password);
+int   hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir, const char *username, const char *password, drm_auth_callback_t auth_cb, void *auth_ud, drm_state_callback_t state_cb, void *state_ud);
 int   hybris_backend_decrypt(void *ctx, uint32_t selector, uint8_t *data, uint32_t len);
 void *hybris_backend_open_kd_ctx(const uint8_t *ckc_data, uint32_t ckc_len, uint32_t selector);
 void  hybris_backend_close_kd_ctx(void *ctx);
@@ -80,12 +82,15 @@ import (
 
 // nativeBackend implements the DRM backend using the native implementation
 type nativeBackend struct {
-	mu      sync.Mutex
-	config  BackendConfig
-	drmDir  string // directory containing libdrm_client.so and files/
-	authSrc AuthSource
-	eventCh chan DRMEvent
-	running bool
+	mu         sync.Mutex
+	config     BackendConfig
+	drmDir     string // directory containing libdrm_client.so and files/
+	authMu     sync.Mutex
+	authCancel context.CancelFunc
+	authHandle cgo.Handle
+	authSrc    AuthSource
+	eventCh    chan DRMEvent
+	running    bool
 	// Global state callback channel for C callbacks
 	stateCh      chan string
 	stateHandle  cgo.Handle
@@ -143,6 +148,7 @@ func NewNativeBackend(drmDir string) DRMBackend {
 		stateCh: make(chan string, 16),
 	}
 	b.stateHandle = cgo.NewHandle(b.stateCh)
+	go b.stateLoop()
 	return b
 }
 
@@ -151,11 +157,45 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if b.running {
+		return nil
+	}
+	if b.active != 0 {
+		return fmt.Errorf("DRM restart deferred: native calls still in flight")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b.config = cfg
-
-	// Start callback goroutines
-	go b.authLoop()
-	go b.stateLoop()
+	b.config.Credentials = Credentials{}
+	b.fpReady = make(chan struct{})
+	b.fpOnce = sync.Once{}
+	authCtx, authCancel := context.WithCancel(context.Background())
+	// The request deadline cancels initial interactive authentication. Once
+	// Start completes, callbacks belong to the backend lifetime (Stop), not
+	// the completed HTTP login request.
+	stopLoginCancellation := context.AfterFunc(ctx, authCancel)
+	defer stopLoginCancellation()
+	b.authMu.Lock()
+	b.authCancel = authCancel
+	b.authMu.Unlock()
+	if b.authHandle != 0 {
+		b.authHandle.Delete()
+	}
+	b.authHandle = cgo.NewHandle(&nativeAuthSession{ctx: authCtx, source: b.authSrc})
+	started := false
+	defer func() {
+		if !started {
+			authCancel()
+			if b.hybrisReady {
+				C.hybris_backend_shutdown()
+				b.hybrisReady = false
+			}
+			C.drm_shutdown()
+			b.authHandle.Delete()
+			b.authHandle = 0
+		}
+	}()
 
 	// Determine paths:
 	// - base_directory: the files/ folder where credentials are stored
@@ -226,10 +266,10 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		device_info:     cDeviceInfo,
 		offline_only:    0,
 		auth_callback:   (C.drm_auth_callback_t)(C.nativeBridgeAuth),
-		auth_user_data:  nil,
-		state_callback:  (C.drm_state_callback_t)(C.nativeBridgeState),
+		auth_user_data:  C.native_userdata(C.uintptr_t(b.authHandle)),
+		state_callback:  nil, // transport init does not establish real FairPlay readiness
 		// Pass stateCh as userdata via cgo.Handle
-		state_user_data: unsafe.Pointer(uintptr(b.stateHandle)),
+		state_user_data: C.native_userdata(C.uintptr_t(b.stateHandle)),
 	}
 
 	// Pass credentials if provided
@@ -296,7 +336,7 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	// must agree with that instead of resetting the manager to Initializing.
 	fpState := FairPlayInitializing
 	if linkerDir == "" || lib64Dir == "" {
-		log.Printf("[drm] hybris backend: not available (linker=%q lib64=%q)", linkerDir, lib64Dir)
+		return fmt.Errorf("FairPlay runtime unavailable (linker=%q lib64=%q)", linkerDir, lib64Dir)
 	} else {
 		coreSOPath := ""
 		cLinkerDir := C.CString(linkerDir)
@@ -320,7 +360,7 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 				cUserFP = C.CString(cfg.Credentials.Email)
 				cPassFP = C.CString(cfg.Credentials.Password)
 			}
-			fpret := C.hybris_fairplay_init(cBaseDirFP, cDevInfoFP, cLib64FP, cUserFP, cPassFP)
+			fpret := C.hybris_fairplay_init(cBaseDirFP, cDevInfoFP, cLib64FP, cUserFP, cPassFP, drmConfig.auth_callback, drmConfig.auth_user_data, (C.drm_state_callback_t)(C.nativeBridgeState), drmConfig.state_user_data)
 			if cUserFP != nil {
 				C.free(unsafe.Pointer(cUserFP))
 				C.free(unsafe.Pointer(cPassFP))
@@ -332,22 +372,26 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 				fpState = FairPlayReady
 				log.Printf("[drm] hybris FairPlay init: ok")
 				b.fpOnce.Do(func() { close(b.fpReady) })
-				go b.warmDefaultKeyContext()
+				go b.warmDefaultKeyContext(b.gen + 1)
 			} else {
 				log.Printf("[drm] hybris FairPlay init: failed (rc=%d) — key exchange may fail", int(fpret))
-				fpState = FairPlayFailed
+				return fmt.Errorf("FairPlay authentication failed (code %d)", int(fpret))
 			}
 			// The probe dumps every libCoreFP export's return value; only useful when debugging.
 			if os.Getenv("AML_DRM_DEBUG") != "" {
 				C.hybris_corefp_probe()
 			}
 		} else {
-			log.Printf("[drm] hybris backend: not available (vseg rootfs absent or load failed)")
+			return fmt.Errorf("FairPlay runtime could not be loaded (code %d)", int(hret))
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b.running = true
 	b.gen++
+	started = true
 
 	// Emit initial state event to notify DRMManager that backend is running
 	select {
@@ -412,8 +456,15 @@ func (b *nativeBackend) quiesce(timeout time.Duration) bool {
 // Stop shuts down the native DRM backend. New calls are refused at once; calls already
 // inside the C library get a bounded time to finish before it is torn down.
 func (b *nativeBackend) Stop() error {
+	// Cancel a callback waiting for 2FA before acquiring mu: Start holds mu
+	// across native initialisation and cannot finish until the callback returns.
+	b.authMu.Lock()
+	if b.authCancel != nil {
+		b.authCancel()
+	}
+	b.authMu.Unlock()
 	if !b.quiesce(15 * time.Second) {
-		log.Printf("[drm] Stop: calls still inside the DRM library after 15s — shutting down anyway")
+		return fmt.Errorf("DRM shutdown deferred: native calls still in flight after 15s")
 	}
 
 	b.mu.Lock()
@@ -423,6 +474,10 @@ func (b *nativeBackend) Stop() error {
 		b.hybrisReady = false
 	}
 	C.drm_shutdown()
+	if b.authHandle != 0 {
+		b.authHandle.Delete()
+		b.authHandle = 0
+	}
 	return nil
 }
 
@@ -598,8 +653,8 @@ const defaultKeyURI = "skd://itunes.apple.com/P000000000/s1/e1"
 // The first open costs about 5 s inside the Android library; the library caches contexts
 // by (asset, URI), so doing it here means the first track's CBCS dial finds it instead of
 // paying that during playback startup. The context is deliberately kept open.
-func (b *nativeBackend) warmDefaultKeyContext() {
-	leave, err := b.enter(b.currentGen()) // waits for Start to release b.mu
+func (b *nativeBackend) warmDefaultKeyContext(gen uint64) {
+	leave, err := b.enter(gen) // waits for Start to release b.mu
 	if err != nil {
 		return
 	}
@@ -620,7 +675,11 @@ func (b *nativeBackend) InProcess() bool { return true }
 func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 	// For native backend, use a pipe
 	client, server := net.Pipe()
-	gen := b.currentGen() // key contexts opened below belong to this run of the backend
+	b.mu.Lock()
+	gen := b.gen // key contexts and readiness belong to this run
+	fpReady := b.fpReady
+	devToken := b.cachedDevTok
+	b.mu.Unlock()
 
 	// Start the CBCS server on the server side
 	go func() {
@@ -630,7 +689,7 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 
 			// No zero-key fallback: content keys are only valid via FairPlay.
 			select {
-			case <-b.fpReady:
+			case <-fpReady:
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(30 * time.Second):
@@ -663,7 +722,7 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 				} else {
 					// Fetch license using aacstream's AcquireKey.
 					// token = developer JWT (Authorization: Bearer), mutoken = user music token.
-					devTok := b.cachedDevTok
+					devTok := devToken
 					if devTok == "" {
 						devTok = account.DevToken
 					}
@@ -671,7 +730,7 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 					if err != nil {
 						log.Printf("[drm] DialCBCS: failed to fetch license: %v", err)
 					} else {
-						log.Printf("[drm] DialCBCS: license fetched, key=%02x%02x...", fetchedKey[0], fetchedKey[1])
+						log.Printf("[drm] DialCBCS: license fetched (%d bytes)", len(fetchedKey))
 					}
 				}
 			}
@@ -766,7 +825,8 @@ func (b *nativeBackend) stateLoop() {
 
 		select {
 		case b.eventCh <- DRMEvent{
-			Snapshot: snap,
+			Snapshot:    snap,
+			Intentional: state == "STOPPED",
 		}:
 		default:
 			// Event channel full, ignore

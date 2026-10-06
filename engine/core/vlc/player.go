@@ -7,12 +7,8 @@ package vlc
 // #include <stdlib.h>
 import "C"
 import (
-	"bufio"
 	"fmt"
 	"log"
-	"os"
-	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,9 +30,24 @@ type Player struct {
 // New creates a libvlc instance and media player.
 // Returns an error if libvlc cannot be initialised (missing shared library).
 func New() (*Player, error) {
+	return newPlayer("Apple Music Linux", "io.github.apple_music_linux")
+}
+
+func newPlayer(applicationName, applicationID string) (*Player, error) {
 	inst := C.libvlc_new(0, nil)
 	if inst == nil {
 		return nil, fmt.Errorf("vlc: libvlc_new failed — is libvlc.so.5 in LD_LIBRARY_PATH?")
+	}
+	// Stable audio identity lets the desktop mixer retain its per-app settings.
+	name := C.CString(applicationName)
+	agent := C.CString("AppleMusicLinux/1.4.1")
+	appID := C.CString(applicationID)
+	version := C.CString("1.4.1")
+	icon := C.CString("apple-music-linux")
+	C.libvlc_set_user_agent(inst, name, agent)
+	C.libvlc_set_app_id(inst, appID, version, icon)
+	for _, value := range []*C.char{name, agent, appID, version, icon} {
+		C.free(unsafe.Pointer(value))
 	}
 	mp := C.libvlc_media_player_new(inst)
 	if mp == nil {
@@ -50,6 +61,9 @@ func New() (*Player, error) {
 func (p *Player) Load(url string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return fmt.Errorf("vlc: player closed")
+	}
 
 	cURL := C.CString(url)
 	defer C.free(unsafe.Pointer(cURL))
@@ -72,6 +86,11 @@ func (p *Player) Load(url string) error {
 func (p *Player) LoadSource(src Source) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		src.Abort()
+		src.Close()
+		return fmt.Errorf("vlc: player closed")
+	}
 
 	p.detachLocked()
 	cm := newCallbackMedia(src)
@@ -105,98 +124,26 @@ func (p *Player) detachLocked() {
 
 func (p *Player) playLocked() error {
 	p.loadGen++
-	myGen := p.loadGen
-	vol := p.volume
 	if ret := C.libvlc_media_player_play(p.mp); ret != 0 {
 		return fmt.Errorf("vlc: play failed (ret %d)", int(ret))
 	}
-	// A previous libvlc session can leave the player muted even when the
-	// requested software volume is non-zero. Clear that state before the
-	// audio output is opened.
-	C.libvlc_audio_set_mute(p.mp, 0)
-	C.libvlc_audio_set_volume(p.mp, C.int(vol))
-	// WirePlumber applies its stored per-app stream volume asynchronously after
-	// VLC opens the audio device, overriding the libvlc software volume above.
-	// Re-apply after VLC reaches playing state so our value lands last.
-	go p.reapplyVolumeOnPlay(vol, myGen)
+	// Volume/mute belong to the existing player and the desktop mixer. Repeated
+	// reapplication here overwrote external mixer changes on every new track.
 	return nil
 }
 
-// reapplyVolumeOnPlay waits until VLC enters playing state then sets the
-// libvlc software volume and resets any WirePlumber stream mute via wpctl.
-func (p *Player) reapplyVolumeOnPlay(vol int, myGen int) {
-	// Wait for VLC to reach Playing state. Bail out immediately if a newer
-	// Load() call has fired (myGen no longer matches p.loadGen).
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-		p.mu.Lock()
-		if p.loadGen != myGen {
-			p.mu.Unlock()
-			return // stale — new track loaded or player closed
-		}
-		state := C.libvlc_media_player_get_state(p.mp)
-		p.mu.Unlock()
-		if state == C.libvlc_Playing {
-			break
-		}
-	}
-
-	// Re-apply libvlc software volume then apply wpctl correction.
-	// WirePlumber applies vol=0 asynchronously after VLC opens the audio
-	// device; repeated calls ensure our value lands last.
+// Volume reports the live mixer state rather than the last slider request.
+func (p *Player) Volume() (int, bool) {
 	p.mu.Lock()
-	if p.loadGen != myGen {
-		p.mu.Unlock()
-		return
+	defer p.mu.Unlock()
+	if p.mp == nil {
+		return p.volume, false
 	}
-	C.libvlc_audio_set_mute(p.mp, 0)
-	C.libvlc_audio_set_volume(p.mp, C.int(vol))
-	log.Printf("[vlc] audio output volume=%d mute=%d", vol, int(C.libvlc_audio_get_mute(p.mp)))
-	p.mu.Unlock()
-
-	for range 8 {
-		p.mu.Lock()
-		stale := p.loadGen != myGen
-		p.mu.Unlock()
-		if stale {
-			return
-		}
-		resetPipeWireVolume(vol)
-		time.Sleep(250 * time.Millisecond)
+	vol := int(C.libvlc_audio_get_volume(p.mp))
+	if vol < 0 {
+		vol = p.volume
 	}
-}
-
-// resetPipeWireVolume targets the sink input owned by this engine process.
-// libVLC is embedded in the Go engine, so PipeWire names the stream after the
-// engine process rather than after a standalone "vlc" application.
-func resetPipeWireVolume(vol int) {
-	out, err := exec.Command("pactl", "list", "sink-inputs").Output()
-	if err != nil {
-		return
-	}
-	pid := strconv.Itoa(os.Getpid())
-	sinkID := ""
-	matchesPID := false
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "Sink Input #") {
-			sinkID = strings.TrimSpace(strings.TrimPrefix(line, "Sink Input #"))
-			matchesPID = false
-			continue
-		}
-		if strings.Contains(line, "application.process.id =") &&
-			strings.Contains(line, `"`+pid+`"`) {
-			matchesPID = true
-		}
-		if matchesPID && sinkID != "" {
-			_ = exec.Command("pactl", "set-sink-input-mute", sinkID, "0").Run()
-			_ = exec.Command("pactl", "set-sink-input-volume", sinkID,
-				fmt.Sprintf("%d%%", vol)).Run()
-			return
-		}
-	}
+	return vol, C.libvlc_audio_get_mute(p.mp) == 1
 }
 
 // SeekURL stops current playback, loads seekURL, and logs the actual landed
@@ -262,7 +209,6 @@ func (p *Player) SeekReload(posMs int64) error {
 	}
 	p.mu.Lock()
 	url := p.lastURL
-	vol := p.volume
 	p.mu.Unlock()
 	if url == "" {
 		return nil
@@ -300,8 +246,6 @@ func (p *Player) SeekReload(posMs int64) error {
 	if ret := C.libvlc_media_player_play(p.mp); ret != 0 {
 		return fmt.Errorf("vlc: play failed (ret %d)", int(ret))
 	}
-	C.libvlc_audio_set_volume(p.mp, C.int(vol))
-	go p.reapplyVolumeOnPlay(vol, myGen)
 	// Verify actual landing position once VLC enters playing state.
 	go func() {
 		deadline := time.Now().Add(5 * time.Second)
@@ -345,15 +289,16 @@ func (p *Player) SetTime(posMs int64) {
 		return
 	}
 	p.mu.Lock()
+	if p.mp == nil {
+		p.mu.Unlock()
+		return
+	}
 	state := C.libvlc_media_player_get_state(p.mp)
-	p.mu.Unlock()
 	if state == C.libvlc_Playing || state == C.libvlc_Paused {
-		p.mu.Lock()
 		C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
 		p.mu.Unlock()
 		return
 	}
-	p.mu.Lock()
 	myGen := p.loadGen
 	p.mu.Unlock()
 	go func() {
@@ -382,6 +327,9 @@ func (p *Player) SetTime(posMs int64) {
 func (p *Player) Time() (posMs, lengthMs int64, state string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return 0, 0, "stopped"
+	}
 	posMs = int64(C.libvlc_media_player_get_time(p.mp))
 	lengthMs = int64(C.libvlc_media_player_get_length(p.mp))
 	state = vlcStateName(C.libvlc_media_player_get_state(p.mp))
@@ -392,6 +340,9 @@ func (p *Player) Time() (posMs, lengthMs int64, state string) {
 func (p *Player) Pause() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return
+	}
 	C.libvlc_media_player_set_pause(p.mp, 1)
 }
 
@@ -399,6 +350,9 @@ func (p *Player) Pause() {
 func (p *Player) Resume() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return
+	}
 	C.libvlc_media_player_set_pause(p.mp, 0)
 }
 
@@ -407,6 +361,9 @@ func (p *Player) Resume() {
 func (p *Player) SetRate(rate float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.mp == nil {
+		return
+	}
 	C.libvlc_media_player_set_rate(p.mp, C.float(rate))
 }
 
@@ -421,6 +378,9 @@ func (p *Player) SetVolume(vol int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.volume = vol
+	if p.mp == nil {
+		return
+	}
 	C.libvlc_audio_set_mute(p.mp, 0)
 	C.libvlc_audio_set_volume(p.mp, C.int(vol))
 }
@@ -430,6 +390,7 @@ func (p *Player) SetVolume(vol int) {
 func (p *Player) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.loadGen++ // cancel delayed seeks even if no new track follows Stop
 	if p.mp != nil {
 		p.detachLocked()
 		C.libvlc_media_player_stop(p.mp)

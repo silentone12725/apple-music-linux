@@ -9,6 +9,7 @@
 
 extern "C" {
 #include "drm_lib.h"
+void drm_lib_abort_init(void);
 }
 
 extern "C" void *aml_open_kd_ctx_guarded(const char *adam, const char *uri)
@@ -32,6 +33,7 @@ extern "C" int aml_lib_init_guarded(const drm_lib_config_t *cfg)
     } catch (...) {
         fprintf(stderr, "[guard] drm_lib_init: unknown C++ exception\n");
     }
+    drm_lib_abort_init();
     return -1;
 }
 

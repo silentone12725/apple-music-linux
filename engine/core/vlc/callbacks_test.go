@@ -51,7 +51,7 @@ func silentWAV(seconds int) []byte {
 
 func newTestPlayer(t *testing.T) *Player {
 	t.Helper()
-	p, err := New()
+	p, err := newPlayer("Apple Music Linux test", "io.github.apple_music_linux.test")
 	if err != nil {
 		t.Skipf("libvlc unavailable: %v", err)
 	}
@@ -119,5 +119,25 @@ func TestLoadSourceReplacesPrevious(t *testing.T) {
 	}
 	if !first.closed {
 		t.Fatal("previous source not closed")
+	}
+}
+
+func TestRequestsAfterCloseAreSafe(t *testing.T) {
+	p := newTestPlayer(t)
+	p.Close()
+	p.Pause()
+	p.Resume()
+	p.SetTime(1000)
+	p.SetRate(1)
+	p.SetVolume(37)
+	if _, _, state := p.Time(); state != "stopped" {
+		t.Fatalf("closed state: %s", state)
+	}
+	if err := p.Load("file:///not-read-after-close.wav"); err == nil {
+		t.Fatal("closed player accepted load")
+	}
+	source := &blockingSource{abort: make(chan struct{})}
+	if err := p.LoadSource(source); err == nil || !source.closed {
+		t.Fatal("closed player did not reject and release source")
 	}
 }

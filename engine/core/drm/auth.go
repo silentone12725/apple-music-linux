@@ -24,7 +24,7 @@ import (
 // For 2FA and device-approval challenges, Challenge blocks until SubmitReply.
 type AuthCoordinator struct {
 	stored  Credentials
-	replies chan string // SubmitReply sends here; Challenge reads here
+	pending chan string // non-nil only while a challenge awaits a reply
 	mu      sync.Mutex
 	emitter func(DRMSnapshot) // set by DRMManager to emit snapshots to SSE
 }
@@ -33,7 +33,6 @@ type AuthCoordinator struct {
 // emitter is called to broadcast challenge snapshots to SSE clients.
 func NewAuthCoordinator(emitter func(DRMSnapshot)) *AuthCoordinator {
 	return &AuthCoordinator{
-		replies: make(chan string, 1),
 		emitter: emitter,
 	}
 }
@@ -49,12 +48,26 @@ func (a *AuthCoordinator) SetCredentials(creds Credentials) {
 // SubmitReply delivers a challenge reply from the browser (e.g. a 2FA code).
 // Returns an error if no challenge is currently pending.
 func (a *AuthCoordinator) SubmitReply(reply string) error {
-	select {
-	case a.replies <- reply:
-		return nil
-	default:
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending == nil {
 		return fmt.Errorf("no authentication challenge pending")
 	}
+	select {
+	case a.pending <- reply:
+		// A challenge accepts exactly one reply.
+		a.pending = nil
+		return nil
+	default:
+		return fmt.Errorf("authentication challenge already answered")
+	}
+}
+
+// Pending reports whether the backend is waiting for user input.
+func (a *AuthCoordinator) Pending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.pending != nil
 }
 
 // Challenge implements AuthSource. Called by the backend when input is needed.
@@ -87,12 +100,24 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		return "\x00", nil
 	}
 
-	// Drain any stale reply BEFORE announcing the challenge: draining after
-	// would discard a reply the browser sends right after the announcement.
-	select {
-	case <-a.replies:
-	default:
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
+	replies := make(chan string, 1)
+	a.mu.Lock()
+	if a.pending != nil {
+		a.mu.Unlock()
+		return "", fmt.Errorf("authentication challenge already pending")
+	}
+	a.pending = replies
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		if a.pending == replies {
+			a.pending = nil
+		}
+		a.mu.Unlock()
+	}()
 
 	// Emit challenge to SSE so the browser knows to prompt the user.
 	if a.emitter != nil {
@@ -104,7 +129,7 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 
 	// Wait for the browser to call SubmitReply.
 	select {
-	case reply := <-a.replies:
+	case reply := <-replies:
 		return reply, nil
 	case <-ctx.Done():
 		return "", ctx.Err()

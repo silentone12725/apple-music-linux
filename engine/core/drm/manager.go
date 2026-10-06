@@ -82,7 +82,9 @@ type DRMManager struct {
 
 	// crash restart state
 	crashCount int
-	restartMu  sync.Mutex // serialises concurrent handleCrash goroutines
+	restartMu  sync.Mutex // serialises backend starts, login, logout and recovery
+	authMu     sync.Mutex
+	authCancel context.CancelFunc
 	// emitMu is held from snapshot copy to sink so events reach clients in the
 	// order the state changed; copying under mu but emitting after unlocking
 	// let two goroutines deliver an older snapshot after a newer one.
@@ -105,6 +107,15 @@ type DRMManager struct {
 // NewDRMManager creates a DRMManager with the given backend.
 // sink receives every DRMSnapshot and forwards it to SSE.
 func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, cfg BackendConfig, policy RestartPolicy) *DRMManager {
+	if policy.StartupTimeout <= 0 {
+		policy.StartupTimeout = DefaultRestartPolicy.StartupTimeout
+	}
+	if policy.AuthTimeout <= 0 {
+		policy.AuthTimeout = DefaultRestartPolicy.AuthTimeout
+	}
+	if len(policy.RestartBackoff) == 0 {
+		policy.RestartBackoff = DefaultRestartPolicy.RestartBackoff
+	}
 	gate := make(chan struct{})
 	close(gate) // start closed: no recovery in progress
 	shutCtx, shutStop := context.WithCancel(context.Background())
@@ -227,6 +238,11 @@ func (m *DRMManager) GetAccount(ctx context.Context) (AccountInfo, error) {
 // Returns ErrNotAuthenticated if no session exists.
 // Never authenticates — that is Authenticate()'s job.
 func (m *DRMManager) ensureRunning(ctx context.Context) error {
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
+	if err := m.shutdownCtx.Err(); err != nil {
+		return err
+	}
 	if m.backend.Running() {
 		return nil
 	}
@@ -240,6 +256,10 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 		// A concurrent ensureRunning / handleCrash goroutine may have started
 		// the backend between our Running() check and this call — that is fine.
 		if !m.backend.Running() {
+			m.mergeAndEmit(DRMSnapshot{
+				State:   DRMState{Manager: ManagerFailed, Process: ProcessFailed, Authentication: AuthFailed, FairPlay: FairPlayFailed, Session: SessionExpired},
+				Message: fmt.Sprintf("session restore failed: %v", err),
+			})
 			return err
 		}
 	}
@@ -267,17 +287,29 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 //   - !HasSession(): credentials are stored; wrapper's credentialHandler
 //     fires Challenge(ChallengeCredentials) and AuthCoordinator replies.
 func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error {
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
+	if err := m.shutdownCtx.Err(); err != nil {
+		return err
+	}
 	m.auth.SetCredentials(creds) // stored in AuthCoordinator; used if challenged
-	m.setManagerState(ManagerInitializing)
+	defer m.auth.SetCredentials(Credentials{})
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Manager: ManagerInitializing, Authentication: AuthLoggingIn, FairPlay: FairPlayInitializing}})
 
 	loginCtx, cancel := context.WithTimeout(ctx, m.policy.AuthTimeout)
 	defer cancel()
+	m.authMu.Lock()
+	m.authCancel = cancel
+	m.authMu.Unlock()
+	defer func() { m.authMu.Lock(); m.authCancel = nil; m.authMu.Unlock() }()
 
 	// Stop any running backend first so the fresh Start below gets a clean slate.
 	// This also kills any adopted wrapper (one we didn't launch ourselves) so its
 	// port is released before we try to start a fresh process with --login.
 	if m.backend.Running() {
-		_ = m.backend.Stop()
+		if err := m.backend.Stop(); err != nil {
+			return fmt.Errorf("authenticate stop: %w", err)
+		}
 	}
 	// Pass credentials in BackendConfig for this one Start() call.
 	// NOT stored in m.cfg — crash restarts use session-reuse (empty credentials).
@@ -285,7 +317,7 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 	loginCfg.Credentials = creds
 	authErr := m.backend.Start(loginCtx, loginCfg)
 	if authErr != nil {
-		m.setManagerState(ManagerFailed)
+		m.mergeAndEmit(DRMSnapshot{State: DRMState{Manager: ManagerFailed, Authentication: AuthFailed, FairPlay: FairPlayFailed}, Message: authErr.Error()})
 		return fmt.Errorf("authenticate: %w", authErr)
 	}
 	m.lastStart.Store(time.Now().UnixNano())
@@ -297,7 +329,7 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 			Message: "session reuse — mpl_db present",
 		})
 	}
-	m.setManagerState(ManagerReady)
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Manager: ManagerReady, Authentication: AuthLoggedIn}})
 	return nil
 }
 
@@ -305,13 +337,40 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 // from the browser. Call this after receiving a DRM SSE event with
 // Authentication == AuthChallenging.
 func (m *DRMManager) SubmitChallenge(_ context.Context, reply string) error {
-	return m.auth.SubmitReply(reply)
+	// Order this transition before native callbacks for subsequent challenges.
+	m.emitMu.Lock()
+	defer m.emitMu.Unlock()
+	if err := m.auth.SubmitReply(reply); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.snapshot.Challenge = nil
+	m.snapshot.State.Authentication = AuthLoggingIn
+	m.snapshot.Timestamp = time.Now()
+	snap := m.snapshot
+	m.mu.Unlock()
+	if m.sink != nil {
+		m.sink(snap)
+	}
+	return nil
+}
+
+func (m *DRMManager) cancelAuthentication() {
+	m.authMu.Lock()
+	if m.authCancel != nil {
+		m.authCancel()
+	}
+	m.authMu.Unlock()
 }
 
 // Logout stops the backend and clears the session.
 // Stop() is sufficient — NativeBackend holds no persistent process state.
 // SessionManager.ClearSession removes the persisted mpl_db and derived files.
 func (m *DRMManager) Logout(ctx context.Context) error {
+	m.cancelAuthentication()
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
+	m.auth.SetCredentials(Credentials{})
 	m.setManagerState(ManagerShuttingDown)
 	if err := m.backend.Stop(); err != nil {
 		return fmt.Errorf("logout stop: %w", err)
@@ -334,6 +393,8 @@ func (m *DRMManager) Logout(ctx context.Context) error {
 		Recovery:       RecoveryUnknown,
 	}
 	m.snapshot.Capabilities = CapabilityState{}
+	m.snapshot.Challenge = nil
+	m.snapshot.Timestamp = time.Now()
 	// Recovery is now Unknown: release any Decrypt waiters parked on the gate
 	// (mergeAndEmit only does this on a recovery→idle transition).
 	openGate := m.recoveryGate
@@ -384,6 +445,9 @@ func (m *DRMManager) InProcess() bool {
 // Unlike Logout, Shutdown does not remove mpl_db or any session files.
 func (m *DRMManager) Shutdown() {
 	m.shutdownStop() // cancel any in-progress handleCrash sleep or restart
+	m.cancelAuthentication()
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
 	m.setManagerState(ManagerShuttingDown)
 	if m.backend.Running() {
 		_ = m.backend.Stop()
@@ -400,7 +464,17 @@ func (m *DRMManager) Status() DRMSnapshot {
 // watchEvents drains the backend event channel and updates the DRMManager
 // state accordingly. Handles crash detection and restart policy.
 func (m *DRMManager) watchEvents() {
-	for ev := range m.backend.Events() {
+	for {
+		var ev DRMEvent
+		select {
+		case <-m.shutdownCtx.Done():
+			return
+		case event, ok := <-m.backend.Events():
+			if !ok {
+				return
+			}
+			ev = event
+		}
 		snap := ev.Snapshot
 
 		// Crash detection: backend stopped unexpectedly → apply restart policy.
@@ -425,7 +499,7 @@ func (m *DRMManager) handleCrash() {
 
 	// If a concurrent handleCrash goroutine already restarted the backend,
 	// or Authenticate() started a fresh one, there is nothing to do.
-	if m.backend.Running() {
+	if m.backend.Running() || m.shutdownCtx.Err() != nil {
 		return
 	}
 
@@ -468,7 +542,7 @@ func (m *DRMManager) handleCrash() {
 
 	if err := m.backend.Start(ctx, m.cfg); err != nil {
 		m.mergeAndEmit(DRMSnapshot{
-			State:   DRMState{Process: ProcessFailed},
+			State:   DRMState{Manager: ManagerFailed, Process: ProcessFailed, Authentication: AuthFailed, FairPlay: FairPlayFailed, Session: SessionExpired},
 			Message: fmt.Sprintf("restart failed: %v", err),
 		})
 		return
@@ -496,8 +570,19 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 	if snap.State.Process != 0 {
 		m.snapshot.State.Process = snap.State.Process
 	}
-	if snap.State.Authentication != 0 {
-		m.snapshot.State.Authentication = snap.State.Authentication
+	authState := snap.State.Authentication
+	pending := m.auth.Pending()
+	// Native state notifications are buffered, while the interactive prompt
+	// is emitted synchronously. Ignore earlier LOGIN events during a pending
+	// prompt, and late WAITING_2FA events after its reply was accepted.
+	if pending && m.snapshot.State.Authentication == AuthChallenging && authState == AuthLoggingIn {
+		authState = AuthUnknown
+	}
+	if authState == AuthChallenging && snap.Challenge == nil && !pending {
+		authState = AuthUnknown
+	}
+	if authState != AuthUnknown {
+		m.snapshot.State.Authentication = authState
 	}
 	if snap.State.FairPlay != 0 {
 		m.snapshot.State.FairPlay = snap.State.FairPlay
@@ -507,7 +592,7 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 	}
 	if snap.Challenge != nil {
 		m.snapshot.Challenge = snap.Challenge
-	} else if snap.State.Authentication != AuthChallenging {
+	} else if m.snapshot.State.Authentication != AuthChallenging {
 		m.snapshot.Challenge = nil
 	}
 
@@ -551,6 +636,8 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 			Atmos: true,
 			HiRes: !m.cfg.DisableHiRes,
 		}
+	} else {
+		m.snapshot.Capabilities = CapabilityState{}
 	}
 
 	m.snapshot.Timestamp = time.Now()

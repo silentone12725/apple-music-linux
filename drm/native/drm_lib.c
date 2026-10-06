@@ -52,6 +52,7 @@ extern void          *g_drm_state_ud;
 /* init/codec helpers in main.c / hybris_stubs.c */
 extern void hybris_init_callbacks(void);
 extern void start_recovery_thread(void);
+extern void stop_recovery_thread(void);
 extern int hybris_init_libs(const char *lib64_path);
 
 /* account helpers */
@@ -81,6 +82,9 @@ extern char *g_music_token;
 
 /* ── Module state ───────────────────────────────────────────────────────────*/
 
+static char *g_base_dir = NULL;
+static char *g_username = NULL;
+static char *g_password = NULL;
 static int             g_init_result = 0;  /* 0 = success, -1 = failed */
 static pthread_mutex_t g_init_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
@@ -88,7 +92,25 @@ static pthread_mutex_t g_init_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
 int drm_lib_init(const drm_lib_config_t *cfg)
 {
+    if (!cfg || !cfg->base_dir || !cfg->base_dir[0]) return -1;
     pthread_mutex_lock(&g_init_mutex);
+
+    /* Callers release their CGO strings as soon as initialization returns.
+     * The library and its recovery worker retain these paths/credentials. */
+    char *base_dir = strdup(cfg->base_dir);
+    char *username = cfg->username ? strdup(cfg->username) : NULL;
+    char *password = cfg->password ? strdup(cfg->password) : NULL;
+    if (!base_dir || (cfg->username && !username) || (cfg->password && !password)) {
+        free(base_dir); free(username); free(password);
+        pthread_mutex_unlock(&g_init_mutex);
+        return -1;
+    }
+    free(g_base_dir); free(g_username); free(g_password);
+    g_base_dir = base_dir;
+    g_username = username;
+    g_password = password;
+    amUsername = g_username;
+    amPassword = g_password;
 
     /* Store callbacks before any library call so write_drm_state fires them */
     g_drm_auth_cb  = cfg->auth_cb;
@@ -111,7 +133,7 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     /* Synthesise a fake args_info from cfg so the rest of main.c still works */
     memset(&args_info, 0, sizeof(args_info));
     if (cfg->base_dir) {
-        args_info.base_dir_arg = (char *)cfg->base_dir;
+        args_info.base_dir_arg = g_base_dir;
         args_info.base_dir_given = 1;
     }
     {
@@ -125,25 +147,28 @@ int drm_lib_init(const drm_lib_config_t *cfg)
         static char *di_copy = NULL;
         if (di_copy) free(di_copy);
         di_copy = strdup(di);
+        memset(device_infos, 0, sizeof(char *) * 9);
+        if (!di_copy) {
+            pthread_mutex_unlock(&g_init_mutex);
+            return -1;
+        }
         char *tok = strtok(di_copy, "/");
-        for (int i = 0; i < 9 && tok; i++) {
-            device_infos[i] = tok;
+        int fields = 0;
+        for (; fields < 9 && tok; fields++) {
+            device_infos[fields] = tok;
             tok = strtok(NULL, "/");
+        }
+        if (fields != 9 || tok) {
+            fprintf(stderr, "[drm_lib] invalid device info: expected 9 fields\n");
+            pthread_mutex_unlock(&g_init_mutex);
+            return -1;
         }
     }
     offlineFlag = cfg->offline_only ? 1 : 0;
 
-    /* Credentials for fresh login */
-    if (cfg->username && cfg->password) {
-        amUsername = (char *)cfg->username;
-        /* Allocate a mutable buffer (credentialHandler appends the 2FA code) */
-        static char pw_buf[256];
-        strncpy(pw_buf, cfg->password, sizeof(pw_buf) - 1);
-        pw_buf[sizeof(pw_buf) - 1] = '\0';
-        amPassword = pw_buf;
-        args_info.login_arg = NULL; /* not used in library mode */
-        args_info.login_given = 0;
-    }
+    /* Credentials are owned above, without truncating long passwords. */
+    args_info.login_arg = NULL;
+    args_info.login_given = 0;
 
     /*
      * Run the exact same sequence as main() up to RUNNING state.
@@ -184,8 +209,7 @@ int drm_lib_init(const drm_lib_config_t *cfg)
 
     fprintf(stderr, "[drm_lib] FHinstance\n"); fflush(stderr);
     FHinstance = _ZN21SVFootHillSessionCtrl8instanceEv();
-    fprintf(stderr, "[drm_lib] start_recovery_thread\n"); fflush(stderr);
-    start_recovery_thread();
+
     fprintf(stderr, "[drm_lib] offline_available\n"); fflush(stderr);
 
     offlineFlag = offline_available();
@@ -228,20 +252,33 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     if (g_drm_state_cb)
         g_drm_state_cb("RUNNING", g_drm_state_ud);
 
+    start_recovery_thread();
     g_init_result = 0;
     pthread_mutex_unlock(&g_init_mutex);
     return 0;
+}
+
+/* C++ exceptions unwind through this C initializer without releasing pthread
+ * locks. The exception barrier calls this only when init threw on its thread. */
+void drm_lib_abort_init(void)
+{
+    g_init_result = -1;
+    pthread_mutex_unlock(&g_init_mutex);
+    if (g_drm_state_cb) g_drm_state_cb("FAILED", g_drm_state_ud);
 }
 
 /* ── drm_lib_shutdown ───────────────────────────────────────────────────────*/
 
 void drm_lib_shutdown(void)
 {
-    /* No clean shutdown API in the underlying library — just reset callbacks
-     * so no further callbacks fire after the Go engine destroys its context. */
+    stop_recovery_thread();
+    /* The underlying Android libraries have no complete shutdown API. Clear
+     * host callbacks before the Go engine releases their handles. */
     pthread_mutex_lock(&g_init_mutex);
     g_drm_auth_cb  = NULL;
+    g_drm_auth_ud  = NULL;
     g_drm_state_cb = NULL;
+    g_drm_state_ud = NULL;
     pthread_mutex_unlock(&g_init_mutex);
 }
 

@@ -593,20 +593,6 @@ static void call_state_callback(const char *state_name)
     }
 }
 
-static int call_auth_callback(const char *challenge_type, char *buffer, int size)
-{
-    pthread_mutex_lock(&g_state.lock);
-    drm_auth_callback_t cb = g_state.auth_callback;
-    void *ud = g_state.auth_user_data;
-    pthread_mutex_unlock(&g_state.lock);
-
-    if (cb && challenge_type && buffer && size > 0) {
-        cb(challenge_type, buffer, size, ud);
-        return buffer[0] != '\0';
-    }
-    return 0;
-}
-
 /* ── drm_init (REQ-4.1) ─────────────────────────────────────────────────────*/
 
 int drm_init(const struct drm_config *config)
@@ -683,52 +669,31 @@ int drm_init(const struct drm_config *config)
     fprintf(stderr, "[drm] drm_init: dev_token=%s\n", g_state.dev_token ? (strlen(g_state.dev_token) > 0 ? "SET" : "EMPTY") : "NULL");
     fprintf(stderr, "[drm] drm_init: music_token=%s\n", g_state.music_token ? (strlen(g_state.music_token) > 0 ? "SET" : "EMPTY") : "NULL");
     
-    /* Simulate login if credentials provided (REQ-5.1) */
-    if (config->username && config->password) {
-        call_state_callback(DRM_STATE_LOGIN);
-        
-        /* Check if 2FA is needed (REQ-5.1) */
-        char auth_buffer[DRM_AUTH_BUFFER_SIZE];
-        memset(auth_buffer, 0, sizeof(auth_buffer));
-        
-        /* Simulate 2FA challenge */
-        /* In real impl, this would check server response */
-        if (0) {  /* Placeholder for 2FA detection */
-            call_state_callback(DRM_STATE_WAITING_2FA);
-            if (!call_auth_callback(DRM_CHALLENGE_2FA, auth_buffer, sizeof(auth_buffer))) {
-                call_state_callback(DRM_STATE_FAILED);
-                return -1;
-            }
-        }
-        
-        /* Fresh login: set new tokens */
-        g_state.storefront_id = strdup("US");
-        g_state.dev_token = strdup("placeholder_dev_token_base64");
-        g_state.music_token = strdup("placeholder_music_token_base64");
-    } else if (!has_cached_tokens) {
-        /* No credentials and no cached tokens */
-        call_state_callback(DRM_STATE_FAILED);
+    /* Transport/cache initialization only: authentication and lease readiness
+     * belong to hybris_fairplay_init. Never synthesize tokens or emit RUNNING
+     * before Apple's real authentication has completed. */
+    if (config->username && config->password) call_state_callback(DRM_STATE_LOGIN);
+    g_state.initialized = 1;
+
+    return 0;
+}
+
+/* Called only after the native Apple authentication/lease setup succeeds. */
+int drm_set_account_tokens(const char *storefront, const char *dev, const char *music)
+{
+    if (!storefront || !dev || !music) return -1;
+    char *sf_copy = strdup(storefront), *dev_copy = strdup(dev), *music_copy = strdup(music);
+    if (!sf_copy || !dev_copy || !music_copy) {
+        free(sf_copy); free(dev_copy); free(music_copy);
         return -1;
     }
-    /* else: using cached tokens, already loaded above */
-    
-    /* Simulate FairPlay initialization */
-    call_state_callback(DRM_STATE_INITIALIZING_FAIRPLAY);
-    
-    /* Placeholder implementation: In production, this would:
-     * - Load Android libraries via libhybris (optional)
-     * - Create request context with device configuration
-     * - Authenticate if credentials provided
-     * - Acquire playback lease from Apple servers
-     * - Initialize FairPlay session */
-    
-    g_state.initialized = 1;
-    
-    /* Save tokens to file system (REQ-10.1) */
+    pthread_mutex_lock(&g_state.lock);
+    free(g_state.storefront_id); free(g_state.dev_token); free(g_state.music_token);
+    g_state.storefront_id = sf_copy;
+    g_state.dev_token = dev_copy;
+    g_state.music_token = music_copy;
     save_account_tokens();
-    
-    call_state_callback(DRM_STATE_RUNNING);
-    
+    pthread_mutex_unlock(&g_state.lock);
     return 0;
 }
 
@@ -2769,9 +2734,10 @@ int drm_device_guid_get(char *out_guid, size_t buf_size)
     /* adi.pb is a protobuf, but we'll store GUID as first 36 bytes for simplicity */
     FILE *f = fopen(adi_path, "rb");
     if (f) {
-        fread(out_guid, 1, 36, f);
+        size_t guid_bytes = fread(out_guid, 1, 36, f);
+        out_guid[guid_bytes] = '\0';
         fclose(f);
-        if (out_guid[0] && out_guid[8] == '-' && out_guid[13] == '-' &&
+        if (guid_bytes == 36 && out_guid[0] && out_guid[8] == '-' && out_guid[13] == '-' &&
             out_guid[18] == '-' && out_guid[23] == '-') {
             out_guid[36] = '\0';
             return 0;

@@ -40,7 +40,7 @@ func testVLCFile(t *testing.T) string {
 // TestVLCSyncStutter simulates the continuous 100ms SetTime drift-correction
 // loop and measures call latency + position accuracy.
 func TestVLCSyncStutter(t *testing.T) {
-	p, err := New()
+	p, err := newPlayer("Apple Music Linux test", "io.github.apple_music_linux.test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -164,7 +164,7 @@ done:
 // to gradually correct drift without seeking. Smooth if VLC applies rate changes
 // by scaling the clock rather than re-decoding.
 func TestVLCRateCorrection(t *testing.T) {
-	p, err := New()
+	p, err := newPlayer("Apple Music Linux test", "io.github.apple_music_linux.test")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

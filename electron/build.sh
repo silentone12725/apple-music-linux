@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 cd "$(dirname "$0")"
 
 # ── Install deps only when missing ───────────────────────────────────────────
 if [ ! -f node_modules/.bin/electron ]; then
-    npm install --save-dev electron electron-builder 2>/dev/null || true
+    npm ci
 fi
+
+# Build before launching so fresh checkouts have an engine and renderer fixes.
+npm run build:drm
+npm run build:go
+npm run build:engine
 
 # ── Bundle VLC libs (audio-only subset; no-op when already bundled) ──────────
 bash ../scripts/bundle-vlc.sh

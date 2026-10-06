@@ -166,6 +166,24 @@
     };
   }
 
+  // src/engine/auth.js
+  function accountSignedIn(status) {
+    const state = status?.state ?? {};
+    if (state.authentication === "failed" || state.session === "expired") return false;
+    return status?.capabilities?.cbcs === true || state.fairplay === "ready" || state.authentication === "logged_in" || state.session === "valid";
+  }
+  function authProgress(status) {
+    const state = status?.state ?? {};
+    if (state.authentication === "challenging" && status.challenge) return "challenge";
+    if (state.authentication === "failed" || state.manager === "failed") return "failed";
+    if (state.authentication === "logging_in" || state.process === "starting") return "pending";
+    if (state.authentication === "logged_in" && state.process === "running" || state.fairplay === "ready" || status?.capabilities?.cbcs === true) return "done";
+    return "pending";
+  }
+  function drmURL(base, endpoint) {
+    return `${base.replace(/\/+$/, "")}/api/v1/drm/${endpoint}`;
+  }
+
   // src/engine/handoff.js
   function playbackMode(sess) {
     if (sess?.capabilities?.video) return "mv";
@@ -188,6 +206,136 @@
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // src/engine/transport.js
+  function createTransportController({ scope, send }) {
+    let tail = Promise.resolve(), desired = null, revision = 0, pending = 0, epoch = 0;
+    return {
+      get desired() {
+        return desired;
+      },
+      get revision() {
+        return revision;
+      },
+      get pending() {
+        return pending > 0;
+      },
+      reset(paused = null) {
+        desired = paused;
+        revision++;
+        epoch++;
+      },
+      request(paused) {
+        if (desired === paused) return tail;
+        desired = paused;
+        revision++;
+        const owner = scope(), issuedEpoch = epoch;
+        pending++;
+        const result = tail.catch(() => {
+        }).then(async () => {
+          if (owner !== scope() || issuedEpoch !== epoch) return;
+          await send(paused);
+        }).finally(() => {
+          pending--;
+        });
+        tail = result;
+        return result;
+      }
+    };
+  }
+  function createNavigationQueue(run) {
+    let tail = Promise.resolve(), cursor = null, count = 0;
+    return {
+      get cursor() {
+        return cursor;
+      },
+      goto(ci, ii) {
+        cursor = { ci, ii };
+        count++;
+        const result = tail.catch(() => {
+        }).then(() => run(ci, ii));
+        tail = result.finally(() => {
+          if (--count === 0) cursor = null;
+        });
+        return tail;
+      }
+    };
+  }
+  async function withNavigationDeadline(operation, ms = 6e3) {
+    let timer;
+    try {
+      return await Promise.race([operation, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("MusicKit navigation timed out")), ms);
+      })]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // src/engine/transport-controls.js
+  function installTransportControls({ root = document, state, command }) {
+    const original = /* @__PURE__ */ new Map();
+    const playIcon = '<svg viewBox="0 0 32 28" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M10 4v20l16-10z"/></svg>';
+    const pauseIcon = '<svg viewBox="0 0 32 28" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M10 4h4v20h-4zm8 0h4v20h-4z"/></svg>';
+    function button(host, action, icon, label) {
+      let b = host.querySelector("[data-aml-transport]");
+      if (!b) {
+        b = root.createElement("button");
+        b.dataset.amlTransport = action;
+        b.dataset.testid = `aml-transport-${action}`;
+        b.style.cssText = "display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;border:0;background:transparent;color:inherit;cursor:pointer";
+        b.onclick = (event) => {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const s = state();
+          if (s.active) command(action === "play" ? s.paused ? "play" : "pause" : action);
+        };
+        host.appendChild(b);
+      }
+      if (b.innerHTML !== icon) b.innerHTML = icon;
+      if (b.getAttribute("aria-label") !== label) b.setAttribute("aria-label", label);
+      return b;
+    }
+    function restore() {
+      for (const [node, display] of original) node.style.display = display;
+      original.clear();
+      root.querySelectorAll("[data-aml-transport]").forEach((b) => b.remove());
+    }
+    function sync() {
+      const s = state();
+      for (const node of original.keys()) if (!node.isConnected) original.delete(node);
+      if (!s.active) {
+        restore();
+        return;
+      }
+      for (const host of root.querySelectorAll("amp-playback-controls-play, amp-playback-controls-item-skip")) {
+        for (const native of host.querySelectorAll("button:not([data-aml-transport])")) {
+          if (!original.has(native)) original.set(native, native.style.display);
+          if (native.style.display !== "none") native.style.display = "none";
+        }
+        if (host.tagName === "AMP-PLAYBACK-CONTROLS-PLAY") {
+          button(host, "play", s.paused ? playIcon : pauseIcon, s.paused ? "Play" : "Pause");
+        } else {
+          const previous = host.getAttribute("direction") === "previous";
+          const action = previous ? "previous" : "next";
+          const icon = `<svg viewBox="0 0 32 28" width="24" height="24" aria-hidden="true"><g fill="currentColor"${previous ? ' transform="translate(32 0) scale(-1 1)"' : ""}><path d="M5 5v18l11-9zm11 0v18l11-9zM27 5h2v18h-2z"/></g></svg>`;
+          const b = button(host, action, icon, previous ? "Previous track" : "Next track");
+          const disabled = previous ? !s.canPrevious : !s.canNext;
+          if (b.disabled !== disabled) b.disabled = disabled;
+          b.style.opacity = disabled ? "0.35" : "";
+        }
+      }
+    }
+    const observer = new MutationObserver((records) => {
+      if (records.some((r) => [...r.addedNodes, ...r.removedNodes].some((n) => n.nodeType === 1 && (n.matches?.("amp-playback-controls-play, amp-playback-controls-item-skip, button") || n.querySelector?.("amp-playback-controls-play, amp-playback-controls-item-skip"))))) sync();
+    });
+    observer.observe(root.documentElement, { childList: true, subtree: true });
+    sync();
+    return { sync, dispose() {
+      observer.disconnect();
+      restore();
+    } };
   }
 
   // src/engine-playback.js
@@ -391,6 +539,7 @@
   var _vlcMode = false;
   var _vlcPosMs = 0;
   var _vlcPaused = false;
+  var _vlcSyncVolume = null;
   var _vlcVolPersist = 100;
   var _amlTransitioning = false;
   var _sessionContainers = [];
@@ -650,6 +799,42 @@
     } catch (_) {
     }
   }
+  var _syncVLCControls = () => {
+  };
+  var _pendingVLCIntent = null;
+  var _vlcStopped = false;
+  var _vlcTransport = createTransportController({
+    scope: () => _sessionId,
+    send: async (paused) => {
+      const response = await fetch(`${ENGINE}/api/v1/vlc/${paused ? "pause" : "resume"}`, {
+        method: "POST",
+        signal: AbortSignal.timeout(4e3)
+      });
+      if (!response.ok) throw new Error(`VLC transport: HTTP ${response.status}`);
+    }
+  });
+  function _requestVLCTransport(paused) {
+    _vlcPaused = paused;
+    _syncVLCControls();
+    const command = _vlcTransport.request(paused);
+    const revision = _vlcTransport.revision;
+    return command.catch((error) => {
+      console.warn("[AML VLC] transport:", error.message);
+      if (_vlcTransport.revision === revision) _vlcTransport.reset();
+    });
+  }
+  var _vlcSeekRevision = 0;
+  function _resetVLCSeekState() {
+    _vlcSeekRevision++;
+    clearTimeout(_vlcSeekTimer);
+    _vlcSeekTimer = null;
+    _vlcSeekFrozen = false;
+    _vlcSeekOffsetMs = 0;
+    _seekBurstLog = 0;
+    _vlcSeekTargetMs = 0;
+    _vlcPostSeek = false;
+  }
+  var _vlcPollGeneration = 0;
   var _vlcPollTimer = null;
   var _vlcSeekTimer = null;
   var _vlcSeekFrozen = false;
@@ -786,13 +971,13 @@
     });
     mkAudio.play = () => {
       if (_vlcMode) {
+        if (_vlcTransport.desired === true) return Promise.resolve();
         console.log(`[AML VLC] audio.play() \u2192 resume`);
         _vlcPaused = false;
         const p2 = new Promise((resolve) => _resolvers.push(resolve));
         mkAudio.dispatchEvent(new Event("playing"));
         if (_vlcLoading) mkAudio.dispatchEvent(new Event("waiting"));
-        fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
-        });
+        _requestVLCTransport(false);
         return p2;
       }
       if (_msePaused || _wcStallPaused) return new Promise(() => {
@@ -826,6 +1011,7 @@
     mk.seekToTime = async function(seekSec) {
       const audio = getMKAudio();
       if (_vlcMode) {
+        const seekRevision = ++_vlcSeekRevision;
         _vlcPosMs = Math.round(seekSec * 1e3);
         _vlcSeekFrozen = true;
         console.log(`[AML VLC] seekToTime(${seekSec.toFixed(3)})  target=${_vlcPosMs}ms  debounce-reset`);
@@ -850,12 +1036,14 @@
             });
             const rtt = (performance.now() - t0).toFixed(0);
             const seekData = await seekResp.json().catch(() => ({}));
+            if (seekRevision !== _vlcSeekRevision) return;
             actualStartMs = seekData.actualStartMs ?? seekTarget;
             console.log(`[AML VLC seek] \u25C4 RECV  target=${seekTarget}ms  engine.actualStart=${actualStartMs}ms  rtt=${rtt}ms`);
             _vlcPosMs = seekTarget;
           } catch (e) {
             console.warn(`[AML VLC seek] \u2717 ERROR`, e);
           }
+          if (seekRevision !== _vlcSeekRevision) return;
           _vlcSeekOffsetMs = 0;
           _vlcPrevState = null;
           _vlcSeekFrozen = false;
@@ -863,8 +1051,7 @@
           if (_vlcWasPlaying) {
             _vlcPaused = false;
             _vlcPostSeek = true;
-            fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
-            });
+            _requestVLCTransport(false);
           }
           console.log(`[AML VLC seek] \u21BA UNFREEZE  uiPos=${_vlcPosMs}ms  postSeek=${_vlcPostSeek}`);
           window.amlBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3, seeked: true });
@@ -1630,6 +1817,7 @@
     await _mseNetworkSeek(sb, audio, ms, seekSec);
   }
   function stopVLCPoll() {
+    _vlcPollGeneration++;
     if (_vlcPollTimer) {
       clearInterval(_vlcPollTimer);
       _vlcPollTimer = null;
@@ -4590,6 +4778,7 @@
       if (delta !== null && delta < -5e3 && _seekBurstLog > 10 && _sessionId && !_vlcSeekFrozen) {
         _seekBurstLog = 0;
         const reloadMs = _vlcSeekTargetMs;
+        const seekRevision = _vlcSeekRevision;
         console.warn(`[AML VLC seek] rewind detected \u0394=${delta}ms \u2014 SeekReload fallback to ${reloadMs}ms`);
         _vlcSeekFrozen = true;
         _vlcPosMs = reloadMs;
@@ -4598,56 +4787,62 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: reloadMs })
         }).then(() => {
+          if (seekRevision !== _vlcSeekRevision) return;
           _vlcSeekFrozen = false;
           _seekBurstLog = 20;
           _vlcPrevState = null;
         }).catch(() => {
-          _vlcSeekFrozen = false;
+          if (seekRevision === _vlcSeekRevision) _vlcSeekFrozen = false;
         });
       }
     } else if (_vlcTickCount % 20 === 0) {
       console.log(`[AML VLC] pos=${posMs}ms state=${state}`);
     }
   }
-  function _vlcHandleEnded(posMs, mkAudio) {
+  function _vlcRetryFrom(posMs, mkAudio, delay) {
+    const sessionId = _sessionId;
+    const assetId = _currentAssetId;
+    setTimeout(async () => {
+      if (_sessionId !== sessionId || !_vlcMode) return;
+      try {
+        const response = await fetch(`${ENGINE}/api/v1/vlc/load`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, assetId, startMs: posMs }),
+          signal: AbortSignal.timeout(15e3)
+        });
+        if (!response.ok) throw new Error(`VLC reload: HTTP ${response.status}`);
+        if (_sessionId !== sessionId) return;
+        _vlcPosMs = posMs;
+        _vlcLoading = true;
+      } catch (error) {
+        if (_sessionId === sessionId) console.warn("[AML VLC] recovery failed:", error.message);
+      } finally {
+        if (_sessionId === sessionId && _vlcMode) startVLCPoll(mkAudio);
+      }
+    }, delay);
+  }
+  function _vlcHandleEnded(posMs, mkAudio, reason = "ended") {
     stopVLCPoll();
-    if (posMs > 2e3) {
-      _vlcPosMs = Math.round(_durationSec * 1e3);
-      mkAudio.dispatchEvent(new Event("timeupdate"));
-    }
     if (posMs < 2e3 && _durationSec > 5 && _vlcRetryCount < 2) {
       _vlcRetryCount++;
       _vlcSeekOffsetMs = 0;
       console.log(`[AML VLC] premature end at posMs=${posMs} \u2014 reload attempt ${_vlcRetryCount}`);
-      setTimeout(() => {
-        if (!_sessionId) return;
-        fetch(`${ENGINE}/api/v1/vlc/load`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: 0 })
-        }).then(() => startVLCPoll(mkAudio)).catch(() => {
-        });
-      }, 1500);
+      _vlcRetryFrom(0, mkAudio, 1500);
       return;
     }
     const trackEndMs = Math.round(_durationSec * 1e3);
-    if (posMs > 2e3 && trackEndMs > 5e3 && posMs < trackEndMs - 3e3 && _vlcRetryCount < 2) {
+    const endWindowMs = reason === "error" ? 3e3 : Math.min(1e4, trackEndMs * 0.1);
+    if (posMs > 2e3 && trackEndMs > 5e3 && posMs < trackEndMs - endWindowMs && _vlcRetryCount < 2) {
       _vlcRetryCount++;
       const resumeMs = posMs;
-      console.warn(`[AML VLC] false end at ${posMs}ms (track=${trackEndMs}ms) \u2014 seeking to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
-      setTimeout(() => {
-        if (!_sessionId) return;
-        fetch(`${ENGINE}/api/v1/vlc/seek`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ posMs: resumeMs, sessionId: _sessionId })
-        }).then(() => {
-          _vlcPosMs = resumeMs;
-          startVLCPoll(mkAudio);
-        }).catch(() => {
-        });
-      }, 500);
+      console.warn(`[AML VLC] false end at ${posMs}ms (track=${trackEndMs}ms) \u2014 reloading to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
+      _vlcRetryFrom(resumeMs, mkAudio, 500);
       return;
+    }
+    if (posMs > 2e3) {
+      _vlcPosMs = Math.round(_durationSec * 1e3);
+      mkAudio.dispatchEvent(new Event("timeupdate"));
     }
     if (_allowCDNTransition) {
       console.log("[AML VLC] ended \u2014 _amlNext suppressed (CDN gate open)");
@@ -4661,32 +4856,34 @@
     if (state === "playing") {
       _vlcPaused = false;
       _stopLyricsFreeze();
-      const wasLoading = _vlcLoading;
       _vlcLoading = false;
-      const fromSeek = _vlcPostSeek;
       _vlcPostSeek = false;
-      if (prev !== "paused" || fromSeek || wasLoading) mkAudio.dispatchEvent(new Event("playing"));
+      mkAudio.dispatchEvent(new Event("playing"));
     }
     if (state === "paused") {
-      if (!_vlcPostSeek) {
+      if (!_vlcPostSeek && !_vlcLoading) {
         _vlcPaused = true;
         mkAudio.dispatchEvent(new Event("pause"));
         _startLyricsFreeze(mkAudio);
       }
     }
-    if (state === "ended" || state === "stopped" && (prev === "playing" || prev === "ended")) {
-      _vlcHandleEnded(posMs, mkAudio);
+    _syncVLCControls();
+    if (state === "error" || state === "ended" || state === "stopped" && (prev === "playing" || prev === "ended")) {
+      _vlcHandleEnded(Math.max(posMs, _vlcPosMs), mkAudio, state);
     }
   }
-  async function _vlcPollTick(mkAudio, mySession) {
-    if (_vlcFetching) return;
+  async function _vlcPollTick(mkAudio, mySession, generation = _vlcPollGeneration) {
+    if (_vlcFetching || generation !== _vlcPollGeneration) return;
     _vlcFetching = true;
+    const transportRevision = _vlcTransport.revision;
     try {
-      const r = await fetch(`${ENGINE}/api/v1/vlc/time`);
-      if (!r.ok || _sessionId !== mySession) return;
+      const r = await fetch(`${ENGINE}/api/v1/vlc/time`, { signal: AbortSignal.timeout(4e3) });
+      if (!r.ok) throw new Error(`VLC status: HTTP ${r.status}`);
+      if (_sessionId !== mySession || generation !== _vlcPollGeneration) return;
       _vlcErrCount = 0;
-      const { posMs, lengthMs, state } = await r.json();
-      if (_sessionId !== mySession) return;
+      const { posMs, lengthMs, state, volume, muted } = await r.json();
+      if (_sessionId !== mySession || generation !== _vlcPollGeneration || transportRevision !== _vlcTransport.revision || _vlcTransport.pending) return;
+      _vlcSyncVolume?.(volume, muted);
       _vlcHandleLength(lengthMs, mkAudio);
       _vlcUpdatePosition(posMs, state, mkAudio);
       if (state === _vlcPrevState) return;
@@ -4696,9 +4893,10 @@
       if (_vlcSeekFrozen) return;
       _vlcHandleStateChange(state, prev, posMs, mkAudio);
     } catch (_) {
-      if (++_vlcErrCount >= 5) stopVLCPoll();
+      if (_sessionId !== mySession || generation !== _vlcPollGeneration) return;
+      if (++_vlcErrCount === 5) mkAudio.dispatchEvent(new Event("waiting"));
     } finally {
-      _vlcFetching = false;
+      if (generation === _vlcPollGeneration) _vlcFetching = false;
     }
   }
   function startVLCPoll(mkAudio) {
@@ -4709,7 +4907,8 @@
     _vlcLengthSet = false;
     _vlcFetching = false;
     const mySession = _sessionId;
-    _vlcPollTimer = setInterval(() => _vlcPollTick(mkAudio, mySession), T().poll);
+    const generation = _vlcPollGeneration;
+    _vlcPollTimer = setInterval(() => _vlcPollTick(mkAudio, mySession, generation), T().poll);
   }
   function waitForLossless(timeoutMs) {
     if (_streamingQuality === "high-quality") return Promise.resolve();
@@ -5052,6 +5251,7 @@
     }
     _vlcMode = false;
     window._amlVlcMode = false;
+    _syncVLCControls();
     _vlcPosMs = 0;
     _vlcPaused = false;
     _stopLyricsFreeze();
@@ -5064,6 +5264,7 @@
     _vlcPostSeek = false;
     _vlcWasPlaying = false;
     _vlcSeekTargetMs = 0;
+    _vlcSyncVolume = null;
     _scVlcReapply = null;
     _nextAlacTried = false;
     _nextAlacRetries = 0;
@@ -5321,8 +5522,11 @@
     console.log(`[AML MSE] AAC stream open +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
   }
   async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
+    _vlcTransport.reset(false);
+    _vlcStopped = false;
     _vlcMode = true;
     window._amlVlcMode = true;
+    _syncVLCControls();
     _allowCDNTransition = false;
     const _silentMs = new MediaSource();
     const _silentUrl = URL.createObjectURL(_silentMs);
@@ -5334,6 +5538,7 @@
     mkAudio.load = () => {
     };
     _vlcPaused = false;
+    _syncVLCControls();
     Object.defineProperty(mkAudio, "paused", {
       get: () => _vlcPaused,
       configurable: true
@@ -5364,6 +5569,15 @@
       } finally {
         _vlcVolSetting = false;
       }
+    };
+    _vlcSyncVolume = (volume, muted) => {
+      if (!Number.isFinite(volume)) return;
+      const requested = Math.round(volume / (_scFactor || 1));
+      if (_vlcVolume === requested && _vlcMuted === muted) return;
+      _vlcVolume = requested;
+      _vlcVolPersist = requested;
+      _vlcMuted = !!muted;
+      _dispatchVolChange();
     };
     Object.defineProperty(mkAudio, "volume", {
       get: () => _vlcVolume / 100,
@@ -5396,12 +5610,11 @@
       configurable: true
     });
     mkAudio.pause = () => {
+      if (_vlcTransport.desired !== true) return;
       console.log(`[AML VLC] pause() \u2192 pause`);
       _vlcPaused = true;
       mkAudio.dispatchEvent(new Event("pause"));
       _startLyricsFreeze(mkAudio);
-      fetch(`${ENGINE}/api/v1/vlc/pause`, { method: "POST" }).catch(() => {
-      });
     };
     _vlcLoading = true;
     const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
@@ -5411,7 +5624,6 @@
       signal: ctrl.signal
     });
     if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
-    _postVlcVol(_vlcMuted ? 0 : _vlcVolume);
     if (ctrl.signal.aborted) return;
     mkAudio.addEventListener("canplay", () => {
       if (!ctrl.signal.aborted) {
@@ -5421,6 +5633,12 @@
       }
     }, { once: true });
     mkAudio.dispatchEvent(new Event("canplay"));
+    if (_pendingVLCIntent !== null) {
+      const paused = _pendingVLCIntent;
+      _pendingVLCIntent = null;
+      await _requestVLCTransport(paused);
+      if (paused) mkAudio.dispatchEvent(new Event("pause"));
+    }
     startVLCPoll(mkAudio);
     console.log(`[AML Engine] VLC playing +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
     ctrl.signal.addEventListener("abort", () => {
@@ -6965,14 +7183,29 @@
     setTimeout(_maybeAutoSync, 2e3);
     const _origMKPlay = mk.play.bind(mk);
     const _origMKPause = mk.pause.bind(mk);
-    mk.play = function() {
+    const _origMKStop = mk.stop?.bind(mk);
+    mk.play = async function() {
       if (_vlcMode) {
-        if (_vlcPaused) {
-          console.log("[AML VLC] mk.play() \u2192 resume");
-          _vlcPaused = false;
-          fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
+        if (_vlcStopped) {
+          _resetVLCSeekState();
+          _vlcTransport.reset(false);
+          _vlcPosMs = 0;
+          _vlcLoading = true;
+          const response = await fetch(`${ENGINE}/api/v1/vlc/load`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: 0 }),
+            signal: AbortSignal.timeout(15e3)
           });
+          if (!response.ok) throw new Error(`VLC restart after stop: HTTP ${response.status}`);
+          _vlcStopped = false;
+          startVLCPoll(getMKAudio());
         }
+        const result = _requestVLCTransport(false);
+        getMKAudio()?.dispatchEvent(new Event("play"));
+        getMKAudio()?.dispatchEvent(new Event("playing"));
+        if (_vlcLoading) getMKAudio()?.dispatchEvent(new Event("waiting"));
+        return result;
       } else if (_activeMvControls) {
         _msePaused = false;
         _activeMvControls.play();
@@ -6984,11 +7217,10 @@
     };
     mk.pause = function() {
       if (_vlcMode) {
-        console.log("[AML VLC] mk.pause() \u2192 pause");
-        _vlcPaused = true;
+        const result = _requestVLCTransport(true);
         getMKAudio()?.dispatchEvent(new Event("pause"));
-        fetch(`${ENGINE}/api/v1/vlc/pause`, { method: "POST" }).catch(() => {
-        });
+        _startLyricsFreeze(getMKAudio());
+        return result;
       } else if (_activeMvControls) {
         _msePaused = true;
         _activeMvControls.pause();
@@ -6998,30 +7230,29 @@
       }
       return _origMKPause();
     };
-    installMKSeekInterceptor(mk);
-    let _amlAdvancing = false;
-    let _amlAdvancingTimer = null;
-    let _amlGotoTarget = null;
-    let _amlGotoTargetId = null;
-    function _clearAdvancing() {
-      _amlAdvancing = false;
-      clearTimeout(_amlAdvancingTimer);
-      _amlAdvancingTimer = null;
-    }
-    async function _amlGoto(ci, ii) {
-      if (_amlAdvancing) {
-        console.log("[AML] _amlGoto busy, ignoring ci=", ci, "ii=", ii);
-        return;
+    mk.stop = async function() {
+      if (!_vlcMode) return _origMKStop?.();
+      await _requestVLCTransport(true);
+      _resetVLCSeekState();
+      stopVLCPoll();
+      const response = await fetch(`${ENGINE}/api/v1/vlc/stop`, {
+        method: "POST",
+        signal: AbortSignal.timeout(4e3)
+      });
+      if (!response.ok) {
+        startVLCPoll(getMKAudio());
+        throw new Error(`VLC stop: HTTP ${response.status}`);
       }
-      _amlAdvancing = true;
-      _amlTransitioning = true;
-      _amlLastGotoMs = performance.now();
-      _amlNavInternal = true;
-      _amlPendingCI = ci;
-      _amlPendingII = ii;
-      const targetFlat = _sessionFlatIdx(ci, ii);
-      _amlGotoTarget = targetFlat;
-      console.log("[AML] _amlGoto ci=", ci, "ii=", ii, "flat=", targetFlat);
+      _vlcStopped = true;
+      _vlcPosMs = 0;
+      _vlcLoading = false;
+      const audio = getMKAudio();
+      audio?.dispatchEvent(new Event("pause"));
+      audio?.dispatchEvent(new Event("timeupdate"));
+      sendMprisStatus("Stopped");
+    };
+    function _prepareMusicKitTransition() {
+      _resetVLCSeekState();
       stopVLCPoll();
       const _gotoAudio = getMKAudio();
       if (_gotoAudio && _nativeSrcSet) {
@@ -7060,6 +7291,78 @@
       }
       _proxyInstalled = false;
       _vlcMode = false;
+      _syncVLCControls();
+    }
+    const _origMKSetQueue = mk.setQueue.bind(mk);
+    mk.setQueue = function(...args) {
+      if (_vlcMode) {
+        _allowCDNTransition = true;
+        _ourBlobUrl = null;
+        _prepareMusicKitTransition();
+      }
+      return _origMKSetQueue(...args);
+    };
+    installMKSeekInterceptor(mk);
+    let _amlAdvancing = false;
+    let _amlAdvancingTimer = null;
+    let _amlGotoTarget = null;
+    let _amlGotoTargetId = null;
+    function _clearAdvancing() {
+      _amlAdvancing = false;
+      clearTimeout(_amlAdvancingTimer);
+      _amlAdvancingTimer = null;
+    }
+    const _navigation = createNavigationQueue(async (ci, ii) => {
+      try {
+        await _amlGotoNow(ci, ii);
+      } catch (error) {
+        console.warn("[AML] navigation:", error.message);
+        _clearAdvancing();
+        _amlGotoTarget = null;
+        _amlGotoTargetId = null;
+        _amlTransitioning = false;
+        _amlNavInternal = false;
+        _amlPendingCI = -1;
+        _amlPendingII = -1;
+        await handleTrackChange(mk);
+      }
+    });
+    function _amlGoto(ci, ii) {
+      return _navigation.goto(ci, ii);
+    }
+    async function _amlGotoNow(ci, ii) {
+      const targetId = _sessionContainers[ci]?.items[ii];
+      if (targetId && targetId === extractItemId(mk.nowPlayingItem)) {
+        _resetVLCSeekState();
+        if (_vlcMode && _sessionId) {
+          _vlcTransport.reset(false);
+          _vlcPaused = false;
+          _vlcPosMs = 0;
+          _vlcLoading = true;
+          const response = await fetch(`${ENGINE}/api/v1/vlc/load`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId: _sessionId, assetId: targetId, startMs: 0 }),
+            signal: AbortSignal.timeout(15e3)
+          });
+          if (!response.ok) throw new Error(`VLC restart: HTTP ${response.status}`);
+          startVLCPoll(getMKAudio());
+        } else {
+          await mk.seekToTime(0);
+          await mk.play();
+        }
+        return;
+      }
+      _amlAdvancing = true;
+      _amlTransitioning = true;
+      _amlLastGotoMs = performance.now();
+      _amlNavInternal = true;
+      _amlPendingCI = ci;
+      _amlPendingII = ii;
+      const targetFlat = _sessionFlatIdx(ci, ii);
+      _amlGotoTarget = targetFlat;
+      console.log("[AML] _amlGoto ci=", ci, "ii=", ii, "flat=", targetFlat);
+      _prepareMusicKitTransition();
       const targetSongId = _sessionContainers[ci]?.items[ii];
       const targetItem = targetSongId ? (mk.queue?.items ?? []).find((it) => extractItemId(it) === targetSongId) : null;
       if (targetItem) sendMprisMetadata(targetItem);
@@ -7079,8 +7382,7 @@
       if (mkDirectIdx >= 0 && !targetIsVideo) {
         _amlGotoTarget = mkDirectIdx;
         _amlGotoTargetId = targetSongId ?? null;
-        await mk.changeToMediaAtIndex(mkDirectIdx).catch(() => {
-        });
+        await withNavigationDeadline(mk.changeToMediaAtIndex(mkDirectIdx));
       } else {
         const allIds = _sessionFlatIds();
         if (!allIds.length) {
@@ -7102,26 +7404,20 @@
           console.log("[AML] _amlGoto mixed/MV session \u2014 targeted setQueue " + JSON.stringify(desc));
           _amlGotoTarget = 0;
           _amlGotoTargetId = targetSongId ?? null;
-          await mk.setQueue(desc).catch(() => {
-          });
-          await mk.changeToMediaAtIndex(0).catch(() => {
-          });
+          await withNavigationDeadline(mk.setQueue(desc));
+          await withNavigationDeadline(mk.changeToMediaAtIndex(0));
         } else if (songIdx >= 0 && songIds.length !== allIds.length) {
           console.log("[AML] _amlGoto mixed session \u2014 songs only, idx=" + songIdx + " of " + songIds.length);
           _amlGotoTarget = songIdx;
           _amlGotoTargetId = targetSongId ?? null;
-          await mk.setQueue({ songs: songIds }).catch(() => {
-          });
-          await mk.changeToMediaAtIndex(songIdx).catch(() => {
-          });
+          await withNavigationDeadline(mk.setQueue({ songs: songIds }));
+          await withNavigationDeadline(mk.changeToMediaAtIndex(songIdx));
         } else {
           const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
           _amlGotoTarget = targetIdx;
           _amlGotoTargetId = targetSongId ?? null;
-          await mk.setQueue({ songs: allIds }).catch(() => {
-          });
-          await mk.changeToMediaAtIndex(targetIdx).catch(() => {
-          });
+          await withNavigationDeadline(mk.setQueue({ songs: allIds }));
+          await withNavigationDeadline(mk.changeToMediaAtIndex(targetIdx));
         }
       }
       _clearAdvancing();
@@ -7131,7 +7427,7 @@
     }
     async function _amlNext(manual = false) {
       const repeat = mk.repeatMode ?? 0;
-      const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+      const ci = _navigation.cursor?.ci ?? _sessionContainerIdx, ii = _navigation.cursor?.ii ?? _sessionItemIdx;
       const cur = _sessionContainers[ci];
       if (repeat === 1 && !manual) {
         if (ci >= 0) await _amlGoto(ci, ii);
@@ -7157,18 +7453,43 @@
       }
     }
     async function _amlPrev() {
-      const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+      const ci = _navigation.cursor?.ci ?? _sessionContainerIdx, ii = _navigation.cursor?.ii ?? _sessionItemIdx;
       if (ci < 0) return;
       if (ii > 0) {
         await _amlGoto(ci, ii - 1);
       } else if (ci > 0) {
         await _amlGoto(ci - 1, _sessionContainers[ci - 1].items.length - 1);
+      } else {
+        await _amlGoto(ci, ii);
       }
     }
     const _mkOrigSkipToNext = mk.skipToNextItem?.bind(mk);
     mk.skipToNextItem = () => _amlNext(true);
     mk.skipToPreviousItem = _amlPrev;
     _amlNextRef = _amlNext;
+    const transportControls = installTransportControls({
+      state: () => {
+        const ci = _navigation.cursor?.ci ?? _sessionContainerIdx;
+        const ii = _navigation.cursor?.ii ?? _sessionItemIdx;
+        const cur = _sessionContainers[ci];
+        return {
+          active: _vlcLive,
+          paused: _pendingVLCIntent ?? _vlcPaused,
+          canPrevious: !!cur,
+          canNext: !!cur && ((mk.repeatMode ?? 0) !== 0 || ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length || mk.queue?.playbackMode === 1)
+        };
+      },
+      command: (action) => {
+        if (!_vlcMode && (action === "play" || action === "pause")) {
+          _pendingVLCIntent = action === "pause";
+          _syncVLCControls();
+          return;
+        }
+        const result = action === "play" ? mk.play() : action === "pause" ? mk.pause() : action === "next" ? _amlNext(true) : _amlPrev();
+        Promise.resolve(result).catch((error) => console.warn("[AML] transport control:", error.message));
+      }
+    });
+    _syncVLCControls = transportControls.sync;
     function _ownedGoto(ids, startId, label, closeGate) {
       const items = ids.slice();
       const target = startId && items.includes(startId) ? startId : items[0];
@@ -7209,10 +7530,11 @@
       ).catch(() => []);
     }
     function _updateTransportButtons() {
-      const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+      _syncVLCControls();
+      const ci = _navigation.cursor?.ci ?? _sessionContainerIdx, ii = _navigation.cursor?.ii ?? _sessionItemIdx;
       const cur = _sessionContainers[ci];
       const repeat = mk.repeatMode ?? 0;
-      const hasPrev = ci > 0 || ii > 0;
+      const hasPrev = !!cur;
       const hasNext = repeat !== 0 || cur && (ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length);
       const allBtns = document.querySelectorAll(
         '[data-testid*="skip-back"], [data-testid*="skip-forward"], [data-testid*="skip-previous"], [data-testid*="skip-next"], [data-testid*="transport-previous"], [data-testid*="transport-next"]'
@@ -7357,6 +7679,10 @@
           break;
         case "pause":
           mk.pause();
+          break;
+        case "stop":
+          mk.stop?.().catch(() => {
+          });
           break;
         case "playpause":
           mk.playbackState === window.MusicKit?.PlaybackStates?.playing ? mk.pause() : mk.play().catch(() => {
@@ -7928,7 +8254,7 @@
           }
           stopVLCPoll();
           unbridgeDuration();
-          const _vlcStopped = leaveLossless({
+          const _vlcStopped2 = leaveLossless({
             live: true,
             nextMode: "aac",
             stop: () => fetch(ENGINE + "/api/v1/vlc/stop", { method: "POST" })
@@ -7963,7 +8289,7 @@
           _allowCDNTransition = false;
           _pendingExternalClickCatalogId = null;
           _pendingExternalClickQueueIdx = -1;
-          return _vlcStopped.then(() => _origSQ.apply(mk, a));
+          return _vlcStopped2.then(() => _origSQ.apply(mk, a));
         };
         mk.changeToMediaAtIndex = (idx) => {
           console.log("[VLC-MK] mk.changeToMediaAtIndex(" + idx + ")");
@@ -8083,7 +8409,7 @@
         _updateTransportButtons();
       }
     });
-    mk.addEventListener("nowPlayingItemDidChange", async () => {
+    async function _onNowPlayingChange() {
       console.log("[NPIDF] fired item=" + (mk.nowPlayingItem?.attributes?.name || "null") + " allowCDN=" + _allowCDNTransition + " amlGotoTarget=" + _amlGotoTarget);
       if (_amlGotoTarget !== null) {
         const item2 = mk.nowPlayingItem;
@@ -8210,10 +8536,24 @@
       } else {
         sendMprisStatus("Stopped");
       }
-    });
+    }
+    mk.addEventListener("nowPlayingItemDidChange", _onNowPlayingChange);
+    let trackFallbackTimer;
     mk.addEventListener("playbackStateDidChange", () => {
       const PS = window.MusicKit?.PlaybackStates;
       console.log(`[AML Engine] state=${mk.playbackState} (playing=${PS?.playing})`);
+      clearTimeout(trackFallbackTimer);
+      if (mk.playbackState === PS?.loading || mk.playbackState === PS?.playing) {
+        trackFallbackTimer = setTimeout(() => {
+          const item = mk.nowPlayingItem;
+          const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id;
+          if (!id || String(id) === String(_currentAssetId)) return;
+          if (_amlGotoTargetId && String(id) !== String(_amlGotoTargetId)) return;
+          if (mk.playbackState !== PS?.loading && mk.playbackState !== PS?.playing) return;
+          console.warn("[AML Engine] recovering missing track-change event");
+          _onNowPlayingChange().catch((e) => console.warn("[AML Engine] track recovery:", e.message));
+        }, 300);
+      }
       const s = mk.playbackState;
       if (s === PS?.playing) {
         if (!_vlcMode || _vlcPosMs > 0) sendMprisStatus("Playing", { isResume: _vlcPaused });
@@ -8221,20 +8561,6 @@
         sendMprisStatus("Paused");
       } else if (s === PS?.stopped || s === PS?.none) {
         sendMprisStatus("Stopped");
-      }
-      if (!_vlcMode) return;
-      if (s === PS?.playing) {
-        if (_vlcPaused) {
-          console.log("[AML VLC] playbackStateDidChange \u2192 playing \u2192 resume");
-          _vlcPaused = false;
-          fetch(`${ENGINE}/api/v1/vlc/resume`, { method: "POST" }).catch(() => {
-          });
-        }
-      } else if (s === PS?.paused) {
-        console.log("[AML VLC] playbackStateDidChange \u2192 paused \u2192 pause");
-        _vlcPaused = true;
-        fetch(`${ENGINE}/api/v1/vlc/pause`, { method: "POST" }).catch(() => {
-        });
       }
     });
     const cache = window._amlSmartCache;
@@ -8417,7 +8743,7 @@
             content: ''; position: absolute; inset: -8%;
             background-image: var(--aml-art-src, none);
             background-size: cover; background-position: center;
-            filter: blur(80px) saturate(1.6);
+            filter: blur(var(--aml-bg-blur, 18px)) saturate(1.6);
         }
         #_amlArtBlur::after {
             content: ''; position: absolute; inset: 0;
@@ -8833,24 +9159,6 @@
       const r = await fetch(`${ENGINE}/api/v1/drm/status`);
       return r.json();
     }
-    const checkDRMStatus = (status, msgEl, t, onDone, onChallenge) => {
-      const auth = status.state?.authentication;
-      const session = status.state?.session;
-      if (session === "valid" || auth === "logged_in" || status.state?.fairplay === "ready" || status.capabilities?.cbcs === true) {
-        clearInterval(t);
-        onDone();
-        return;
-      }
-      if (auth === "challenging") {
-        clearInterval(t);
-        onChallenge();
-        return;
-      }
-      if (auth === "failed") {
-        clearInterval(t);
-        msgEl.textContent = status.message || "Authentication failed.";
-      }
-    };
     function buildAccountSection(drm, onRefresh) {
       const { wrap, body } = makeSection("Engine Account");
       const drmState = drm?.state ?? drm ?? {};
@@ -8860,8 +9168,15 @@
       const fairplayOk = drmState?.fairplay === "ready";
       const sessionOk = drmState?.session === "valid";
       const cbcsOk = drm?.capabilities?.cbcs === true;
-      const isSignedIn = cbcsOk || fairplayOk || authOk && processOk;
+      const isSignedIn = accountSignedIn(drm);
+      let pollTimer;
+      let pollGeneration = 0;
+      function stopPolling() {
+        clearTimeout(pollTimer);
+        pollGeneration++;
+      }
       function renderState() {
+        stopPolling();
         body.innerHTML = "";
         const row = document.createElement("div");
         row.style.cssText = "display:flex;align-items:center;gap:10px;padding:11px 0;";
@@ -8897,6 +9212,7 @@
         body.appendChild(row);
       }
       function renderSignIn() {
+        stopPolling();
         body.innerHTML = "";
         const emailInp = makeInput("email", "Apple ID (email)");
         const passInp = makeInput("password", "Password");
@@ -8913,6 +9229,22 @@
         body.appendChild(passInp);
         body.appendChild(msgEl);
         body.appendChild(btnRow);
+        emailInp.autocomplete = "username";
+        passInp.autocomplete = "current-password";
+        emailInp.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.isComposing) {
+            e.preventDefault();
+            e.stopPropagation();
+            passInp.focus();
+          }
+        });
+        passInp.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.isComposing) {
+            e.preventDefault();
+            e.stopPropagation();
+            goBtn.click();
+          }
+        });
         cancelBtn.onclick = renderState;
         goBtn.onclick = async () => {
           const email = emailInp.value.trim();
@@ -8942,30 +9274,54 @@
             goBtn.textContent = "Sign In";
             return;
           }
+          passInp.value = "";
           msgEl.textContent = "Contacting Apple servers\u2026";
           pollForAuth(msgEl);
         };
       }
       function pollForAuth(msgEl) {
-        let n = 0;
-        const t = setInterval(async () => {
-          if (++n > 60) {
-            clearInterval(t);
-            msgEl.textContent = "Timed out. Refresh to check status.";
+        stopPolling();
+        const generation = pollGeneration;
+        const deadline = Date.now() + 135e3;
+        const poll = async () => {
+          if (generation !== pollGeneration || !body.isConnected) return;
+          if (Date.now() > deadline) {
+            msgEl.textContent = "Sign-in timed out. Close and reopen Settings to retry.";
             return;
           }
           const status = await fetchDRM().catch(() => null);
-          if (!status) return;
-          checkDRMStatus(status, msgEl, t, onRefresh, renderChallenge);
-        }, 1e3);
+          if (generation !== pollGeneration || !body.isConnected) return;
+          const progress = status ? authProgress(status) : "pending";
+          if (progress === "done") {
+            stopPolling();
+            onRefresh();
+            return;
+          }
+          if (progress === "challenge") {
+            stopPolling();
+            if (status.challenge.type === "credentials") renderSignIn();
+            else renderChallenge(status.challenge);
+            return;
+          }
+          if (progress === "failed") {
+            stopPolling();
+            msgEl.textContent = status.message || "Authentication failed. Close and reopen Settings to retry.";
+            return;
+          }
+          pollTimer = setTimeout(poll, 1e3);
+        };
+        pollTimer = setTimeout(poll, 250);
       }
-      function renderChallenge() {
+      function renderChallenge(challenge) {
+        stopPolling();
         body.innerHTML = "";
         const note = document.createElement("div");
         note.style.cssText = FF + "font-size:13px;color:rgba(255,255,255,0.85);padding:10px 0 4px;";
-        note.textContent = "Two-factor authentication \u2014 enter the code sent to your device.";
+        note.textContent = challenge?.description || "Two-factor authentication \u2014 enter the code sent to your device.";
         const codeInp = makeInput("text", "6-digit code");
-        codeInp.maxLength = 8;
+        codeInp.maxLength = 6;
+        codeInp.inputMode = "numeric";
+        codeInp.autocomplete = "one-time-code";
         const errEl = document.createElement("div");
         errEl.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.5);padding:4px 0;min-height:16px;";
         const submitBtn = makeBtn("Submit");
@@ -8974,11 +9330,21 @@
         body.appendChild(codeInp);
         body.appendChild(errEl);
         body.appendChild(submitBtn);
+        codeInp.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.isComposing) {
+            e.preventDefault();
+            e.stopPropagation();
+            submitBtn.click();
+          }
+        });
         submitBtn.onclick = async () => {
           const reply = codeInp.value.trim();
-          if (!reply) return;
+          if (!/^\d{6}$/.test(reply)) {
+            errEl.textContent = "Enter the 6-digit verification code.";
+            return;
+          }
           submitBtn.disabled = true;
-          const r = await fetch(`${ENGINE}api/v1/drm/challenge`, {
+          const r = await fetch(drmURL(ENGINE, "challenge"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ reply })
@@ -8997,7 +9363,10 @@
           pollForAuth(errEl);
         };
       }
-      renderState();
+      if (drm?.challenge && drmState.authentication === "challenging") {
+        if (drm.challenge.type === "credentials") renderSignIn();
+        else renderChallenge(drm.challenge);
+      } else renderState();
       return wrap;
     }
     function getDialog() {
@@ -9621,6 +9990,11 @@
           const d = await fetchDRM().catch(() => null);
           if (!d) return;
           renderStatusRows(d).forEach((row, i) => applyStatusRow(valEls[i].el, row));
+          if (accountSignedIn(d) !== accountSignedIn(drm)) {
+            clearInterval(poll);
+            openSettings();
+            return;
+          }
           if (isResolved(d)) clearInterval(poll);
         }, 2e3);
       }
@@ -9736,6 +10110,16 @@
         window.amlBridge.setZoom(1);
       }));
       dBody.appendChild(makeRow("Zoom", zoomR, null, false));
+      const motionToggle = _amlIOSToggle(
+        prefs.reduceMotion !== false,
+        (v) => window.amlBridge.setTweak("reduceMotion", v)
+      );
+      dBody.appendChild(makeRow(
+        "Reduce animations",
+        motionToggle,
+        "Use still artwork and fewer transitions. Restart required.",
+        false
+      ));
       const toggle = _amlIOSToggle(
         prefs.hideUpsell !== false,
         (v) => window.amlBridge.setTweak("hideUpsell", v)
@@ -10885,7 +11269,10 @@
         dlg.showModal();
         dlg.addEventListener("animationend", () => dlg.classList.remove("aml-opening"), { once: true });
       }
-      const [drm, tools, prefs] = await (_settingsPreload ?? _warmSettingsCache());
+      const [drm, [, tools, prefs]] = await Promise.all([
+        fetchDRM().catch(() => ({ state: {}, capabilities: {}, backend: {} })),
+        _settingsPreload ?? _warmSettingsCache()
+      ]);
       _warmSettingsCache();
       if (myGen !== _settingsGen) {
         _restoreProxy();

@@ -81,7 +81,7 @@ test('handleTrackChange wiring: libvlc liveness is tracked, the stop is awaited,
     assert.ok(body.indexOf('await leaveLossless({') < body.indexOf('await _setupMSEPath'), 'stop precedes the AAC path');
     assert.ok(body.indexOf('await leaveLossless({') < body.indexOf('await startMVPipeline'), 'stop precedes the MV path');
     assert.ok(body.indexOf('_vlcLive = true') < body.indexOf('await _setupVLCPath'), '_vlcLive is set when the ALAC path starts');
-    // the only other /vlc/stop (the MusicKit handoff) goes through leaveLossless too
-    assert.equal(src.split('/api/v1/vlc/stop').length - 1, 2);
+    // Handoffs and explicit transport Stop all await their native response.
+    assert.equal(src.split('/api/v1/vlc/stop').length - 1, 3);
     assert.ok(!/vlc\/stop`?'?, \{ method: 'POST' \}\)\.catch/.test(src), 'no fire-and-forget /vlc/stop');
 });

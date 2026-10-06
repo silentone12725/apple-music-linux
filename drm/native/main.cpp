@@ -52,6 +52,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -109,11 +110,14 @@ static const int kBackoffMaxIdx   = 4;
 static std::mutex               g_recovery_mtx;
 static std::condition_variable  g_recovery_cv;
 static std::queue<int>          g_recovery_q;
+static bool                     g_recovery_stopping = true;
+static std::thread              g_recovery_thread;
 
 static void schedule_recovery(int code)
 {
     {
         std::lock_guard<std::mutex> lk(g_recovery_mtx);
+        if (g_recovery_stopping) return;
         g_recovery_q.push(code);
     }
     g_recovery_cv.notify_one();
@@ -134,8 +138,9 @@ static void recovery_worker()
         {
             std::unique_lock<std::mutex> lk(g_recovery_mtx);
             g_recovery_cv.wait(lk, []{
-                return !g_recovery_q.empty();
+                return g_recovery_stopping || !g_recovery_q.empty();
             });
+            if (g_recovery_stopping) return;
             // Drain the entire queue (coalescing).
             while (!g_recovery_q.empty()) {
                 burst.push_back(g_recovery_q.front());
@@ -184,7 +189,12 @@ static void recovery_worker()
                 "(Apple may still be rejecting — retrying indefinitely)\n",
                 consec_fails + 1, delay);
         }
-        sleep(delay);
+        {
+            std::unique_lock<std::mutex> lk(g_recovery_mtx);
+            if (g_recovery_cv.wait_for(lk, std::chrono::seconds(delay), [] {
+                return g_recovery_stopping;
+            })) return;
+        }
 
         // ── Enter Refreshing state — gate incoming client requests ──────────
         g_recovery_state.store(RecoveryState::Refreshing);
@@ -228,8 +238,29 @@ static void recovery_worker()
 // Called from main() in main.c, after leaseMgr and FHinstance are ready.
 extern "C" void start_recovery_thread(void)
 {
-    std::thread(recovery_worker).detach();
+    std::lock_guard<std::mutex> lk(g_recovery_mtx);
+    if (g_recovery_thread.joinable()) return;
+    g_recovery_stopping = false;
+    g_recovery_state.store(RecoveryState::Running);
+    g_recovery_thread = std::thread(recovery_worker);
     fprintf(stderr, "[+] recovery thread started\n");
+}
+
+/* Stop the worker before callbacks/contexts are torn down. Backoff waits are
+ * interruptible, so shutdown does not have to wait for the 30-second retry. */
+extern "C" void stop_recovery_thread(void)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_recovery_mtx);
+        g_recovery_stopping = true;
+    }
+    g_recovery_cv.notify_all();
+    if (g_recovery_thread.joinable()) g_recovery_thread.join();
+    {
+        std::lock_guard<std::mutex> lk(g_recovery_mtx);
+        while (!g_recovery_q.empty()) g_recovery_q.pop();
+    }
+    g_recovery_state.store(RecoveryState::Running);
 }
 
 // ---------------------------------------------------------------------------

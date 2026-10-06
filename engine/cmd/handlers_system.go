@@ -232,6 +232,8 @@ func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.shutdownCtx.Done():
+			return
 		case <-heartbeat.C:
 			writeEv(s.events.nextID(), "ping", map[string]int64{"ts": time.Now().UnixMilli()}, epochInfo.Generation, false, "")
 		case ev, ok := <-ch:

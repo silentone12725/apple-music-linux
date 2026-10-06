@@ -99,10 +99,13 @@ func (s *APIServer) handleVLCTime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	posMs, lengthMs, state := s.vlcPlayer.Time()
+	volume, muted := s.vlcPlayer.Volume()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"posMs":    posMs,
 		"lengthMs": lengthMs,
 		"state":    state,
+		"volume":   volume,
+		"muted":    muted,
 	})
 }
 

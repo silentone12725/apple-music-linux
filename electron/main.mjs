@@ -1,10 +1,11 @@
 import * as electronMain from 'electron/main';
 const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, net: electronNet } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
+import { createEngineLifecycle, recoverOrphanEngine, isPortFree } from './engine-lifecycle.mjs';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
-process.stdout.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
-process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
+process.stdout.on('error', (e) => { if (!['EPIPE', 'EIO'].includes(e.code)) throw e; });
+process.stderr.on('error', (e) => { if (!['EPIPE', 'EIO'].includes(e.code)) throw e; });
 
 
 import { createRequire } from 'module';
@@ -69,6 +70,8 @@ function _storeFlush() {
 }
 
 // ── Chromium flags ──────────────────────────────────────────────────────────
+// Prefer static decorative artwork; users can opt back into motion in Settings.
+if (loadPrefs().reduceMotion !== false) app.commandLine.appendSwitch('force-prefers-reduced-motion');
 app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 app.commandLine.appendSwitch('enable-features',
     'UseOzonePlatform,WaylandWindowDecorations,' +
@@ -109,9 +112,7 @@ catch { _hasSandbox = false; app.commandLine.appendSwitch('no-sandbox'); }
 
 let win    = null;
 let tray   = null;
-let engineProc = null;
 let isQuitting = false;
-let _engineRestartDelay = 1000; // ms; doubles on each crash, resets on clean uptime
 
 // ── Deep link handling ────────────────────────────────────────────────────────
 // Supported URL forms:
@@ -318,115 +319,59 @@ function ensureEngineConfig() {
     if (changed) writeFileSync(cfgPath, content);
 }
 
-function execFileAsync(cmd, args, opts = {}) {
-    return new Promise(resolve => {
-        execFile(cmd, args, { encoding: 'utf8', ...opts }, (err, stdout) => resolve(err ? '' : stdout));
-    });
-}
-
-async function killStaleEngine(port) {
-    // SIGKILL anything on the port — no graceful shutdown needed for a stale engine.
-    const out = await execFileAsync('ss', ['-tlnpH', `sport = :${port}`],
-        { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const m = out.match(/pid=(\d+)/);
-    if (m) {
-        const pid = parseInt(m[1], 10);
-        console.log(`[AML] Killing stale engine on port ${port} (pid ${pid})`);
-        try { process.kill(pid, 'SIGKILL'); } catch (_) {}
-    }
-
-    // Kill the lock-file owner and remove the lock unconditionally.
-    const drmFilesDir = app.isPackaged
-        ? path.join(CONFIG_DIR, 'drm', 'files')
-        : path.join(__dirname, '..', 'drm', 'files');
-    const lockPath = path.join(drmFilesDir, 'engine-session.lock');
-    try {
-        const pidStr = readFileSync(lockPath, 'utf8').trim();
-        const lockPid = parseInt(pidStr, 10);
-        if (lockPid > 0) {
-            try { process.kill(lockPid, 'SIGKILL'); } catch (_) {}
-            unlinkSync(lockPath);
-            console.log(`[AML] Removed stale session lock (was held by pid ${lockPid})`);
+const engineLifecycle = createEngineLifecycle({
+    isQuitting: () => isQuitting,
+    prepare: async () => {
+        if (!existsSync(ENGINE_BIN)) {
+            throw new Error(`Engine binary not found at ${ENGINE_BIN}`);
         }
-    } catch (_) {}
-}
-
-async function isPortFree(port) {
-    const out = await execFileAsync('ss', ['-tlnH', `sport = :${port}`], { timeout: 1000 });
-    return out.trim() === '';
-}
-
-async function startEngine() {
-    if (engineProc) return;
-    if (!existsSync(ENGINE_BIN)) {
-        console.log('[AML] Engine binary not found at', ENGINE_BIN, '— skipping engine start');
-        return;
-    }
-    await killStaleEngine(ENGINE_PORT);
-    // Wait up to 2 s for the port to be released after SIGKILL.
-    for (let i = 0; i < 20; i++) {
-        if (await isPortFree(ENGINE_PORT)) break;
-        await new Promise(r => setTimeout(r, 100));
-    }
-    ensureEngineConfig();
-    const vlcEnv = existsSync(_vlcDir) ? {
-        LD_LIBRARY_PATH: [_vlcDir, path.join(_ffDir, 'lib'), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
-        VLC_PLUGIN_PATH: path.join(_vlcDir, 'plugins'),
-    } : {};
-    const ffEnv = existsSync(path.join(_ffDir, 'bin', 'ffmpeg'))
-        ? { PATH: [path.join(_ffDir, 'bin'), process.env.PATH].filter(Boolean).join(':') } : {};
-    engineProc = spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
-        cwd: ENGINE_DATA_DIR,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        // Force Go's pure-Go DNS resolver to avoid CGO getaddrinfo SIGSEGV
-        // when the engine makes HTTP requests to Apple's API servers.
-        env: { ...process.env, GODEBUG: 'netdns=go', ...vlcEnv, ...ffEnv },
-    });
-    const onOut = (d) => console.log('[engine]', d.toString().trimEnd());
-    const onErr = (d) => {
-        const line = d.toString().trimEnd();
-        console.error('[engine]', line);
-        // Unprivileged user namespaces disabled (Ubuntu 23.10+, Debian 12+ with AppArmor).
-        // The DRM binary needs clone(CLONE_NEWUSER|CLONE_NEWPID) — surface this clearly.
-        if (line.includes('operation not permitted') || line.includes('unshare') ||
-            line.includes('clone') || line.includes('user namespace')) {
-            dialog.showErrorBox(
-                'Kernel restriction detected',
-                'The FairPlay DRM binary requires unprivileged user namespaces, which are disabled on this system.\n\n' +
-                'To fix:\n  sudo sysctl -w kernel.unprivileged_userns_clone=1\n\n' +
-                'Or permanently in /etc/sysctl.d/99-userns.conf:\n  kernel.unprivileged_userns_clone = 1'
-            );
+        const drmFilesDir = app.isPackaged
+            ? path.join(CONFIG_DIR, 'drm', 'files')
+            : path.join(__dirname, '..', 'drm', 'files');
+        await recoverOrphanEngine({
+            lockPath: path.join(drmFilesDir, 'engine-session.lock'),
+            binary: ENGINE_BIN, dataDir: ENGINE_DATA_DIR, port: ENGINE_PORT,
+        });
+        let portFree = false;
+        for (let i = 0; i < 20 && !isQuitting; i++) {
+            if (await isPortFree(ENGINE_PORT)) { portFree = true; break; }
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
-    };
-    engineProc.stdout.on('data', onOut);
-    engineProc.stderr.on('data', onErr);
-    const startTime = Date.now();
-    engineProc.on('exit', (code) => {
-        console.log('[AML] Engine exited (code', code ?? 0, ')');
-        engineProc = null;
         if (isQuitting) return;
-        // Reset backoff if engine ran for >30s (healthy uptime), otherwise double it.
-        if (Date.now() - startTime > 30_000) {
-            _engineRestartDelay = 1000;
-        } else {
-            _engineRestartDelay = Math.min(_engineRestartDelay * 2, 30_000);
+        if (!portFree) {
+            throw new Error(`Engine port ${ENGINE_PORT} is already in use. Close the other player or service and restart Apple Music.`);
         }
-        console.log('[AML] Restarting engine in', _engineRestartDelay, 'ms…');
-        setTimeout(() => startEngine(), _engineRestartDelay);
-    });
-    console.log('[AML] Engine started on port', ENGINE_PORT, '(pid', engineProc.pid, ')');
-}
+        ensureEngineConfig();
+    },
+    spawn: () => {
+        const vlcEnv = existsSync(_vlcDir) ? {
+            LD_LIBRARY_PATH: [_vlcDir, path.join(_ffDir, 'lib'), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
+            VLC_PLUGIN_PATH: path.join(_vlcDir, 'plugins'),
+        } : {};
+        const ffEnv = existsSync(path.join(_ffDir, 'bin', 'ffmpeg'))
+            ? { PATH: [path.join(_ffDir, 'bin'), process.env.PATH].filter(Boolean).join(':') } : {};
+        return spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
+            cwd: ENGINE_DATA_DIR,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            // Keep Go DNS independent of CGO's resolver in the DRM process.
+            env: { ...process.env, GODEBUG: 'netdns=go', ...vlcEnv, ...ffEnv },
+        });
+    },
+    killDelay: 3000, // allow normal VLC/native teardown before forced termination
+    onOutput: data => console.log('[engine]', data.toString().trimEnd()),
+    onStderr: data => {
+        const line = data.toString().trimEnd();
+        console.error('[engine]', line);
 
-function stopEngine() {
-    if (!engineProc) return;
-    const proc = engineProc;
-    engineProc = null;
-    proc.kill('SIGTERM');
-    // SIGTERM lets the Go engine call vlcPlayer.Close() to stop audio immediately,
-    // then drain its shutdown sequence. SIGKILL after 800ms is a safety net in case
-    // the engine hangs — keeps total quit time under ~1s.
-    setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} }, 800);
-}
+    },
+    onError: error => {
+        console.error('[AML] Engine startup failed:', error.message);
+        if (!isQuitting) dialog.showErrorBox('Playback engine could not start', error.message);
+    },
+});
+
+function startEngine() { return engineLifecycle.start(); }
+function stopEngine() { return engineLifecycle.stop(); }
 
 // ── Compositor / blur detection ───────────────────────────────────────────────
 const _isWayland = !!process.env.WAYLAND_DISPLAY;
@@ -836,7 +781,7 @@ function createWindow() {
     });
 
     win.on('page-title-updated', (e) => e.preventDefault());
-    win.loadURL('https://music.apple.com');
+    win.loadURL('https://music.apple.com').catch(e => console.error('[AML] Apple Music load failed:', e.message));
 
     // KDE X11: set the blur atom before the window is mapped.
     // ready-to-show fires after Chromium's first paint but before win.show(),
@@ -1325,15 +1270,10 @@ function createWindow() {
         if (_httpsHost(url)) shell.openExternal(url);
     });
 
-    win.webContents.setWindowOpenHandler(({ url }) => {
-        if (_IN_WINDOW_HOSTS.has(_httpsHost(url))) {
-            win.loadURL(url);
-            return { action: 'deny' };
-        }
-        // Only open safe https:// URLs externally; drop file://, app://, etc.
-        if (url.startsWith('https://')) shell.openExternal(url);
-        return { action: 'deny' };
-    });
+    // Keep the opener alive: MusicKit sign-in uses a popup and communicates
+    // completion back to the original player. Navigating the player loses it.
+    configureAuthPopups(win.webContents, _navigationAllowed);
+
 
     win.webContents.on('did-navigate', () => {
         // Only show if the initial ready-signal already fired; don't interrupt the
@@ -1352,8 +1292,33 @@ function createWindow() {
     win.on('closed', () => { win = null; });
 }
 
-// Hosts allowed to load inside the privileged main window (Apple Music + sign-in).
-const _IN_WINDOW_HOSTS = new Set(['music.apple.com', 'appleid.apple.com', 'idmsa.apple.com']);
+// Authentication popups retain the caller's partition and window.opener.
+// No preload bridge is exposed to provider pages. Blank popups are needed by
+// sites which open first, then navigate; their subsequent navigation is gated.
+function configureAuthPopups(contents, allowed) {
+    contents.setWindowOpenHandler(({ url }) => {
+        if (url === 'about:blank' || allowed(url)) {
+            return { action: 'allow', overrideBrowserWindowOptions: {
+                width: 520, height: 760, show: true, autoHideMenuBar: true,
+                backgroundColor: '#1c1c1e',
+                webPreferences: { preload: path.join(__dirname, 'auth-preload.cjs'), contextIsolation: true, nodeIntegration: false,
+                    sandbox: _hasSandbox },
+            } };
+        }
+        if (_httpsHost(url)) shell.openExternal(url).catch(() => {});
+        return { action: 'deny' };
+    });
+    contents.on('did-create-window', (child) => {
+        const gate = (event, url) => {
+            if (allowed(url)) return;
+            event.preventDefault();
+            if (_httpsHost(url)) shell.openExternal(url).catch(() => {});
+        };
+        child.webContents.on('will-navigate', gate);
+        child.webContents.on('will-redirect', gate);
+        configureAuthPopups(child.webContents, allowed);
+    });
+}
 
 // Hostname of an https:// URL, or null. Origin decisions must compare parsed
 // hostnames: substring/prefix tests also accept music.apple.com.attacker.example.
@@ -2232,7 +2197,12 @@ function openLastfmAuthWindow(url) {
             "try{document.documentElement.style.colorScheme='dark';}catch(e){}").catch(() => {});
     });
     _lastfmAuthWin.on('closed', () => { _lastfmAuthWin = null; });
-    _lastfmAuthWin.loadURL(url);
+    configureAuthPopups(_lastfmAuthWin.webContents, (u) => {
+        const host = _httpsHost(u);
+        return host === 'last.fm' || host?.endsWith('.last.fm') ||
+            host === 'accounts.google.com' || host === 'www.facebook.com';
+    });
+    _lastfmAuthWin.loadURL(url).catch(e => console.error('[AML] Last.fm login load failed:', e.message));
 }
 
 ipcMain.handle('lastfm:auth', async () => {
@@ -2487,17 +2457,12 @@ function createTray() {
                     _storeDirty = true;
                     _storeFlushSync();
                 } catch (_) {}
-                app.relaunch(); isQuitting = true; app.exit(0);
+                app.relaunch(); app.quit();
             },
         },
         {
             label: 'Exit',
-            click: () => {
-                isQuitting = true;
-                stopEngine();
-                if (tray) { tray.destroy(); tray = null; }
-                app.exit(0);
-            },
+            click: () => app.quit(),
         },
     ]);
 
@@ -2635,14 +2600,20 @@ app.whenReady().then(() => {
     const DENIED_PERMISSIONS = new Set([
         'media', 'geolocation', 'midi', 'midiSysex', 'hid', 'serial', 'usb', 'bluetooth',
         'display-capture', 'clipboard-read', 'idle-detection', 'fileSystem', 'window-management',
-        'openExternal', 'speaker-selection', 'storage-access', 'top-level-storage-access',
+        'openExternal', 'speaker-selection',
     ]);
     s.setPermissionRequestHandler((wc, perm, cb) => {
-        const deny = DENIED_PERMISSIONS.has(perm);
+        const storage = perm === 'storage-access' || perm === 'top-level-storage-access';
+        const deny = DENIED_PERMISSIONS.has(perm) || (storage && !_navigationAllowed(wc?.getURL()));
         if (deny) console.warn(`[AML] denied permission request: ${perm}`);
         cb(!deny);
     });
-    s.setPermissionCheckHandler((wc, perm) => !DENIED_PERMISSIONS.has(perm));
+    s.setPermissionCheckHandler((wc, perm, origin) => {
+        if (perm === 'storage-access' || perm === 'top-level-storage-access') {
+            return _navigationAllowed(origin) && _navigationAllowed(wc?.getURL());
+        }
+        return !DENIED_PERMISSIONS.has(perm);
+    });
 
     // Trust the engine's self-signed loopback cert so <video src="https://127.0.0.1:PORT/…">
     // loads. This lets MV video use a real HTTPS origin → Chrome's native, reliable
@@ -2839,10 +2810,19 @@ app.on('before-quit', (e) => {
     // sync-writing to disk and really quitting.
     try { win?.webContents?.send('app:flush-and-quit'); } catch (_) {}
     globalShortcut.unregisterAll();
-    setTimeout(() => {
+    setTimeout(async () => {
         _storeFlushSync();
-        stopEngine();
-        app.quit();
+        session.fromPartition('persist:apple-music').flushStorageData();
+        let flushDeadline;
+        await Promise.race([
+            session.fromPartition('persist:apple-music').cookies.flushStore().catch(() => {}),
+            new Promise(resolve => { flushDeadline = setTimeout(resolve, 2000); }),
+        ]);
+        clearTimeout(flushDeadline);
+        await stopEngine();
+        // Storage and engine cleanup are complete. Web-player unload handlers
+        // must not veto explicit quit and leave a window with a stopped engine.
+        app.exit(0);
     }, 300);
 });
 
