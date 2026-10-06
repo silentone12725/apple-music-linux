@@ -72,6 +72,10 @@
         "to": "vlc"
       },
       {
+        "from": "../third_party/ffmpeg",
+        "to": "ffmpeg"
+      },
+      {
         "from": "../assets/tray-icon.png",
         "to": "tray-icon.png"
       },

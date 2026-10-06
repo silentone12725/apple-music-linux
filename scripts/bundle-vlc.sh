@@ -82,6 +82,38 @@ for need in access/libimem_plugin.so demux/libmp4_plugin.so audio_output/libpuls
     fi
 done
 
+# Libraries the plugins link that other distros (and the Flatpak runtime) do not provide. The
+# FFmpeg libraries are not among them: they ship in third_party/ffmpeg (a minimal build whose
+# sonames match these plugins) and reach VLC through LD_LIBRARY_PATH.
+for lib in libvlc_pulse.so.0 libsoxr.so.0 libfaad.so.2 libdvbpsi.so.10 libaribb24.so.0 liba52.so.0; do
+    real=""
+    for d in "$LIBDIR" "$LIBDIR/vlc"; do   # libvlc_pulse lives in the vlc subdirectory
+        [ -e "$d/$lib" ] && { real="$(readlink -f "$d/$lib")"; break; }
+    done
+    if [ -n "$real" ] && [ -f "$real" ]; then
+        cp "$real" "$DEST/$lib"
+    else
+        echo "warning: $lib not found under $LIBDIR; the plugin that needs it will not load" >&2
+    fi
+done
+
+# Every library a bundled plugin links must resolve inside the bundle or be a library every
+# system has. FFmpeg and the support libraries above resolving from /usr/lib would work here and
+# fail on the next machine, so insist they come from the bundle.
+FFLIB="$REPO/third_party/ffmpeg/lib"
+[ -d "$FFLIB" ] || { echo "error: $FFLIB is missing (git lfs pull?)" >&2; exit 1; }
+bad=0
+for plug in "$P/codec/libavcodec_plugin.so" "$P/demux/libavformat_plugin.so" "$P/audio_output/libpulse_plugin.so"; do
+    [ -f "$plug" ] || continue
+    out="$(LD_LIBRARY_PATH="$DEST:$FFLIB" ldd "$plug" 2>/dev/null)"
+    for dep in libavcodec libavformat libavutil libvlc_pulse; do
+        line="$(grep "^[[:space:]]*$dep\." <<<"$out" || true)"
+        [ -z "$line" ] && continue
+        case "$line" in *"$DEST"/*|*"$FFLIB"/*) ;; *) echo "error: $(basename "$plug") resolves $dep outside the bundle: $line" >&2; bad=1 ;; esac
+    done
+done
+[ "$bad" = 0 ] || exit 1
+
 # Regenerate the plugin cache so VLC does not scan on every start.
 vlc-cache-gen "$P" 2>/dev/null || true
 

@@ -8,7 +8,7 @@
 #   1. libdrm_client.so   make -C drm             (C client + vendored wrapper)
 #   2. engine             scripts/build-engine.sh (Go, CGO, native_backend)
 #   3. renderer bundles   scripts/build-renderer.sh
-#   4. VLC subset         scripts/bundle-vlc.sh
+#   4. VLC subset         scripts/bundle-vlc.sh (+ the prebuilt minimal FFmpeg, third_party/ffmpeg)
 #   5. electron-builder   --dir → linux-unpacked
 #   6. verification       packaged files byte-equal to the fresh build
 #   7. self-extracting archive (tar | zstd)
@@ -65,7 +65,8 @@ done
 # A Git LFS pointer file is ~130 bytes of text, not a library: a clone made without
 # `git lfs pull` would otherwise package garbage.
 real_binary() { [ -s "$1" ] && ! head -c 64 "$1" | grep -q 'git-lfs'; }
-for f in "$DRM/libhybris-core.so" "$DRM/hybris-linker/q.so" "$ELECTRON/icon.png" "$REPO/assets/tray-icon.png"; do
+for f in "$DRM/libhybris-core.so" "$DRM/hybris-linker/q.so" "$ELECTRON/icon.png" "$REPO/assets/tray-icon.png" \
+         "$REPO/third_party/ffmpeg/bin/ffmpeg" "$REPO/third_party/ffmpeg/lib/libavcodec.so.63"; do
     real_binary "$f" || die "$f is missing or an unresolved Git LFS pointer (run 'git lfs pull')"
 done
 # The Android libraries must be exactly the manifest: the loader follows every dependency, so a
@@ -112,6 +113,7 @@ else
     cp "$ELECTRON/icon.png" "$R/icon.png"
     cp "$REPO/assets/tray-icon.png" "$R/tray-icon.png"
     rm -rf "$R/vlc" && cp -r "$RES_SRC/vlc" "$R/vlc"
+    rm -rf "$R/ffmpeg" && cp -a "$REPO/third_party/ffmpeg" "$R/ffmpeg"
     # the renderer bundles were refreshed in step 3 (build-renderer.sh updates this directory)
 fi
 rm -rf "$STAGE"
@@ -122,7 +124,9 @@ RES="$UNPACKED/resources"
 # ── 6. Verify the package against the fresh build ────────────────────────────
 echo "[6/7] Verifying package contents..."
 for f in engine libdrm_client.so libhybris-core.so hybris-linker/q.so \
-         vlc/libvlc.so.5 vlc/libvlccore.so.9 vlc/plugins tray-icon.png icon.png app.asar; do
+         vlc/libvlc.so.5 vlc/libvlccore.so.9 vlc/plugins vlc/libvlc_pulse.so.0 \
+         ffmpeg/bin/ffmpeg ffmpeg/lib/libavcodec.so.63 ffmpeg/lib/libavutil.so.61 ffmpeg/lib/libavformat.so.63 \
+         tray-icon.png icon.png app.asar; do
     [ -e "$RES/$f" ] || die "packaged resources/$f missing — the installed app would not work"
 done
 if [ -e "$RES/rootfs/data" ]; then
@@ -137,6 +141,8 @@ same() { cmp -s "$1" "$2" || die "$3 in the package differs from the fresh build
 same "$RES_SRC/engine"           "$RES/engine"             "resources/engine"
 same "$DRM/libdrm_client.so"     "$RES/libdrm_client.so"   "resources/libdrm_client.so"
 same "$DRM/libhybris-core.so"    "$RES/libhybris-core.so"  "resources/libhybris-core.so"
+same "$REPO/third_party/ffmpeg/bin/ffmpeg" "$RES/ffmpeg/bin/ffmpeg" "resources/ffmpeg/bin/ffmpeg"
+same "$REPO/third_party/ffmpeg/lib/libavcodec.so.63" "$RES/ffmpeg/lib/libavcodec.so.63" "resources/ffmpeg/lib/libavcodec.so.63"
 
 # The engine must actually link the DRM library (a build without the native_backend tag has
 # no DRM and silently falls back to AAC-only), and find it next to itself.

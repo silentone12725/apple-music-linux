@@ -198,6 +198,12 @@ const _vlcPkgDir  = path.join(process.resourcesPath, 'vlc');
 const _vlcDevDir  = path.join(__dirname, 'dist', 'resources', 'vlc');
 const _vlcDir     = app.isPackaged ? _vlcPkgDir : (existsSync(_vlcDevDir) ? _vlcDevDir : _vlcPkgDir);
 
+// Prebuilt minimal FFmpeg (third_party/ffmpeg): its binary does the engine's music-video remux and
+// export work (the engine finds "ffmpeg" on PATH), and its libraries are the ones VLC's libavcodec
+// plugin loads. Bundled so no package depends on the host's FFmpeg version.
+const _ffDir = app.isPackaged ? path.join(process.resourcesPath, 'ffmpeg')
+                              : path.join(__dirname, '..', 'third_party', 'ffmpeg');
+
 const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
 const ENGINE_PORT = 20025;
 
@@ -364,15 +370,17 @@ async function startEngine() {
     }
     ensureEngineConfig();
     const vlcEnv = existsSync(_vlcDir) ? {
-        LD_LIBRARY_PATH: [_vlcDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
+        LD_LIBRARY_PATH: [_vlcDir, path.join(_ffDir, 'lib'), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
         VLC_PLUGIN_PATH: path.join(_vlcDir, 'plugins'),
     } : {};
+    const ffEnv = existsSync(path.join(_ffDir, 'bin', 'ffmpeg'))
+        ? { PATH: [path.join(_ffDir, 'bin'), process.env.PATH].filter(Boolean).join(':') } : {};
     engineProc = spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
         cwd: ENGINE_DATA_DIR,
         stdio: ['ignore', 'pipe', 'pipe'],
         // Force Go's pure-Go DNS resolver to avoid CGO getaddrinfo SIGSEGV
         // when the engine makes HTTP requests to Apple's API servers.
-        env: { ...process.env, GODEBUG: 'netdns=go', ...vlcEnv },
+        env: { ...process.env, GODEBUG: 'netdns=go', ...vlcEnv, ...ffEnv },
     });
     const onOut = (d) => console.log('[engine]', d.toString().trimEnd());
     const onErr = (d) => {

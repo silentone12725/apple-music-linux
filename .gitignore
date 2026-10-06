@@ -176,3 +176,4 @@ drm/*.o
 .flatpak-build/
 .flatpak-builder/
 .flatpak-repo/
+.ffmpeg-build/
