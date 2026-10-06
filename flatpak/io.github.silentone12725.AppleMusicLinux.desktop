@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Apple Music
+GenericName=Music Player
+Comment=Apple Music desktop client for Linux
+Exec=apple-music-linux %u
+Icon=io.github.silentone12725.AppleMusicLinux
+Type=Application
+Categories=AudioVideo;Music;Network;
+StartupWMClass=Apple Music
+MimeType=x-scheme-handler/aml;x-scheme-handler/ame;
+Keywords=music;apple;streaming;

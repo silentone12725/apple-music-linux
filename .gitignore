@@ -171,3 +171,8 @@ drm/corefp_probe
 drm/embedded_blobs/
 drm/files/
 drm/*.o
+
+# Flatpak build output
+.flatpak-build/
+.flatpak-builder/
+.flatpak-repo/

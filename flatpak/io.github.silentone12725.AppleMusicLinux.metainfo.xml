@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.silentone12725.AppleMusicLinux</id>
+  <name>Apple Music Linux</name>
+  <summary>Unofficial Apple Music desktop client</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <url type="homepage">https://github.com/silentone12725/apple-music-linux</url>
+  <url type="bugtracker">https://github.com/silentone12725/apple-music-linux/issues</url>
+  <description>
+    <p>An independent, open-source desktop client for Apple Music on Linux, with lossless and Hi-Res playback, music videos, word-synced lyrics, crossfade, MPRIS2 and desktop themes. An Apple Music subscription is required. Not affiliated with Apple.</p>
+  </description>
+  <launchable type="desktop-id">io.github.silentone12725.AppleMusicLinux.desktop</launchable>
+  <releases>
+    <release version="1.4.0" date="2026-10-05"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
