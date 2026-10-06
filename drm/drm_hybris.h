@@ -101,7 +101,7 @@ void *hybris_open_kd_ctx_from_uri(const char *adam, const char *uri);
  * Returns 0 on success, -1 on failure. Safe to call multiple times.
  */
 int hybris_fairplay_init(const char *base_dir, const char *device_info,
-                         const char *lib64_dir);
+                         const char *lib64_dir, const char *username, const char *password);
 
 /* 1 while the lease recovery state machine is not in its Running state. */
 int hybris_lease_recovery_active(void);

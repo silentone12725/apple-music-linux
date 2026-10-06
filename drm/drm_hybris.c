@@ -88,7 +88,8 @@ typedef void (*pcontext_ctor_str_ulong_fn)(
 
 /* ── Forward declarations ────────────────────────────────────────────────────*/
 
-int hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir);
+int hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir,
+                         const char *username, const char *password);
 
 /* ── Global module state ─────────────────────────────────────────────────────*/
 
@@ -313,7 +314,7 @@ static void wrapper_state_cb(const char *state, void *ud)
 }
 
 int hybris_fairplay_init(const char *base_dir, const char *device_info,
-                         const char *lib64_dir)
+                         const char *lib64_dir, const char *username, const char *password)
 {
     if (!g_hybris.initialized || !g_hybris.appmusic_available) return -1;
     if (g_hybris.fairplay_inited) return 0;
@@ -323,6 +324,10 @@ int hybris_fairplay_init(const char *base_dir, const char *device_info,
     cfg.base_dir    = base_dir;
     cfg.lib64_dir   = lib64_dir;
     cfg.device_info = device_info;
+    /* NULL for session reuse; set for a first login, which must happen here: the library's
+     * own account database is empty until it has logged in. */
+    cfg.username    = username;
+    cfg.password    = password;
     cfg.state_cb    = wrapper_state_cb;
 
     int rc = aml_lib_init_guarded(&cfg);

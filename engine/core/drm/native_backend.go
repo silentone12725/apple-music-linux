@@ -45,7 +45,7 @@ int   drm_is_recovery_active(void);
 
 // ── drm_hybris.h declarations (libCoreFP.so / libandroidappmusic.so via hybris) ──
 int   hybris_backend_init(const char *hybris_linker_dir, const char *lib64_dir, const char *hybris_core_path);
-int   hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir);
+int   hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir, const char *username, const char *password);
 int   hybris_backend_decrypt(void *ctx, uint32_t selector, uint8_t *data, uint32_t len);
 void *hybris_backend_open_kd_ctx(const uint8_t *ckc_data, uint32_t ckc_len, uint32_t selector);
 void  hybris_backend_close_kd_ctx(void *ctx);
@@ -313,7 +313,18 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 			cBaseDirFP := C.CString(baseDir)
 			cDevInfoFP := C.CString(cfg.DeviceInfo)
 			cLib64FP := C.CString(lib64Dir)
-			fpret := C.hybris_fairplay_init(cBaseDirFP, cDevInfoFP, cLib64FP)
+			// A first login has to happen inside this call (the library's account database is
+			// empty until it has logged in); session reuse passes no credentials.
+			var cUserFP, cPassFP *C.char
+			if cfg.Credentials.Email != "" && cfg.Credentials.Password != "" {
+				cUserFP = C.CString(cfg.Credentials.Email)
+				cPassFP = C.CString(cfg.Credentials.Password)
+			}
+			fpret := C.hybris_fairplay_init(cBaseDirFP, cDevInfoFP, cLib64FP, cUserFP, cPassFP)
+			if cUserFP != nil {
+				C.free(unsafe.Pointer(cUserFP))
+				C.free(unsafe.Pointer(cPassFP))
+			}
 			C.free(unsafe.Pointer(cBaseDirFP))
 			C.free(unsafe.Pointer(cDevInfoFP))
 			C.free(unsafe.Pointer(cLib64FP))
