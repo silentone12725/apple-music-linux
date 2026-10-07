@@ -77,6 +77,10 @@ drm/rootfs/mpl_db/
 # ── DRM client (native backend) build artifacts ───────────────────────────────
 # Built from drm/ via make; not source.
 drm/libdrm_client.so
+drm/tests/test_fairplay
+drm/tests/test_device
+drm/tests/test_fp_exchange
+drm/*.o
 
 # ── DRM / Android container runtime state ─────────────────────────────────────
 # These files are written by the running DRM process and must not be committed.

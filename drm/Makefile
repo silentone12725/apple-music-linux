@@ -4,28 +4,34 @@
 
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -pedantic -std=c11 -fPIC -O2 -g -Wno-format-truncation
-LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -Wl,-z,relro,-z,now
+LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -lcurl -Wl,-z,relro,-z,now
 LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
 
 # Core source files
-SRCS = drm_client.c fairplay.c fairplay_device.c
+SRCS = drm_client.c fairplay.c fairplay_device.c \
+       fp_spc_builder.c fp_ckc_parser.c fp_key_unwrapper.c \
+       fp_http_client.c fp_license_exchange.c
 OBJS = $(SRCS:.c=.o)
 
 # Target library
 TARGET = libdrm_client.so
 
 # Headers
-HEADERS = drm_client.h drm_types.h fairplay.h fairplay_device.h
+HEADERS = drm_client.h drm_types.h fairplay.h fairplay_device.h \
+          fp_spc_builder.h fp_ckc_parser.h fp_key_unwrapper.h \
+          fp_http_client.h fp_license_exchange.h
 
 # Test files
-TEST_SRC = tests/test_drm_client.c
-TEST_TARGET = tests/test_drm_client
-TEST_REAL_SRC = tests/test_drm_realworld.c
-TEST_REAL_TARGET = tests/test_drm_realworld
+TEST_SRC = tests/test_fairplay.c
+TEST_TARGET = tests/test_fairplay
+TEST_DEVICE_SRC = tests/test_device.c
+TEST_DEVICE_TARGET = tests/test_device
+TEST_EXCHANGE_SRC = tests/test_fp_exchange.c
+TEST_EXCHANGE_TARGET = tests/test_fp_exchange
 LDFLAGS_REAL = -lpthread -lcrypto -lcurl -fno-stack-protector
 
 # Default target
-all: $(TARGET) $(TEST_TARGET) $(TEST_REAL_TARGET)
+all: $(TARGET) $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET)
 
 # ── Library link ─────────────────────────────────────────────────────────────
 
@@ -43,15 +49,18 @@ fairplay_device.o: fairplay_device.c $(HEADERS)
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 $(TEST_TARGET): $(TEST_SRC) $(TARGET)
-	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_TEST)
+	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_TEST) -lcurl
 
-$(TEST_REAL_TARGET): $(TEST_REAL_SRC) $(TARGET)
+$(TEST_DEVICE_TARGET): $(TEST_DEVICE_SRC) $(TARGET)
 	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_REAL)
+
+$(TEST_EXCHANGE_TARGET): $(TEST_EXCHANGE_SRC) $(TARGET)
+	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_TEST)
 
 # ── Utility targets ───────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(OBJS) $(TEST_TARGET) $(TEST_REAL_TARGET) $(TARGET)
+	rm -f $(OBJS) $(TEST_TARGET) $(TEST_REAL_TARGET) $(TEST_EXCHANGE_TARGET) $(TARGET)
 
 release: $(TARGET)
 	rm -f $(OBJS)
@@ -68,23 +77,32 @@ uninstall:
 	rm -f $(DESTDIR)/usr/include/drm_types.h
 
 test: $(TEST_TARGET)
-	@echo "Running acceptance tests..."
+	@echo "Running FairPlay tests..."
 	@LD_LIBRARY_PATH=. $(TEST_TARGET); exit $$?
 
-test-realworld: $(TEST_REAL_TARGET)
-	@echo "Running real-world tests..."
-	@LD_LIBRARY_PATH=. $(TEST_REAL_TARGET); exit $$?
+test-device: $(TEST_DEVICE_TARGET)
+	@echo "Running device tests..."
+	@LD_LIBRARY_PATH=. $(TEST_DEVICE_TARGET); exit $$?
 
-test-all:
+test-exchange: $(TEST_EXCHANGE_TARGET)
+	@echo "Running license exchange tests..."
+	@LD_LIBRARY_PATH=. $(TEST_EXCHANGE_TARGET); exit $$?
+
+test-all: $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET)
 	@echo "========================================"
 	@echo "Running ALL Tests"
 	@echo "========================================"
 	@LD_LIBRARY_PATH=. $(TEST_TARGET) && \
 	echo "" && \
 	echo "========================================" && \
-	echo "Running Real-World Tests" && \
+	echo "Running Device Tests" && \
 	echo "========================================" && \
-	LD_LIBRARY_PATH=. $(TEST_REAL_TARGET)
+	LD_LIBRARY_PATH=. $(TEST_DEVICE_TARGET) && \
+	echo "" && \
+	echo "========================================" && \
+	echo "Running Exchange Tests" && \
+	echo "========================================" && \
+	LD_LIBRARY_PATH=. $(TEST_EXCHANGE_TARGET)
 
 analyze:
 	clang-analyze $(CFLAGS) -c $(SRCS)
@@ -104,5 +122,23 @@ coverage: LDFLAGS_LIB += --coverage
 coverage: LDFLAGS_TEST += --coverage
 coverage: clean all
 
-.PHONY: all clean release install uninstall test test-realworld test-all \
+# ── License exchange module compilation rules ────────────────────────────────
+
+fp_spc_builder.o: fp_spc_builder.c fp_spc_builder.h fairplay.h fairplay_device.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+fp_ckc_parser.o: fp_ckc_parser.c fp_ckc_parser.h fairplay.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+fp_key_unwrapper.o: fp_key_unwrapper.c fp_key_unwrapper.h fairplay.h fairplay_device.h fp_ckc_parser.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+fp_http_client.o: fp_http_client.c fp_http_client.h fairplay.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+fp_license_exchange.o: fp_license_exchange.c fp_license_exchange.h \
+    fp_spc_builder.h fp_ckc_parser.h fp_http_client.h fp_key_unwrapper.h fairplay.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+.PHONY: all clean release install uninstall test test-device test-exchange test-all \
         analyze format-check format valgrind-test coverage

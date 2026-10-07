@@ -1719,22 +1719,65 @@ fp_error_t fairplay_key_wrap(
     
     if (key_type == FP_KEY_TYPE_RSA) {
         /* RSAES-OAEP with SHA-256 */
-        RSA *rsa = EVP_PKEY_get1_RSA(pkey);
-        if (!rsa) {
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (!pctx) {
             free(wrapped);
             EVP_PKEY_free(pkey);
-            return FP_ERR_INVALID_PUBLIC_KEY;
+            return FP_ERR_OUT_OF_MEMORY;
         }
         
-        wrapped_len = (size_t)RSA_public_encrypt(
-            (int)content_key_size,
-            content_key,
-            wrapped,
-            rsa,
-            RSA_PKCS1_OAEP_PADDING
-        );
+        if (EVP_PKEY_encrypt_init(pctx) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(wrapped);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_WRAPPING_FAILED;
+        }
         
-        RSA_free(rsa);
+        if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_OAEP_PADDING) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(wrapped);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_WRAPPING_FAILED;
+        }
+        
+        if (EVP_PKEY_CTX_set_rsa_oaep_md(pctx, EVP_sha256()) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(wrapped);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_WRAPPING_FAILED;
+        }
+        
+        /* Get required size first */
+        if (EVP_PKEY_encrypt(pctx, NULL, &wrapped_len,
+                            content_key, content_key_size) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(wrapped);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_WRAPPING_FAILED;
+        }
+        
+        /* Reallocate if needed */
+        if (wrapped_len > max_wrapped_size) {
+            uint8_t *new_wrapped = realloc(wrapped, wrapped_len);
+            if (!new_wrapped) {
+                EVP_PKEY_CTX_free(pctx);
+                free(wrapped);
+                EVP_PKEY_free(pkey);
+                return FP_ERR_OUT_OF_MEMORY;
+            }
+            wrapped = new_wrapped;
+        }
+        
+        /* Now encrypt */
+        if (EVP_PKEY_encrypt(pctx, wrapped, &wrapped_len,
+                            content_key, content_key_size) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(wrapped);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_WRAPPING_FAILED;
+        }
+        
+        EVP_PKEY_CTX_free(pctx);
     } else {
         /* For EC keys, use EVP_PKEY_CTX for encryption */
         EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
@@ -1816,31 +1859,66 @@ fp_error_t fairplay_key_unwrap(
     size_t content_len = 0;
     
     if (key_type == FP_KEY_TYPE_RSA) {
-        /* RSAES-OAEP */
-        RSA *rsa = EVP_PKEY_get1_RSA(pkey);
-        if (!rsa) {
+        /* RSAES-OAEP with SHA-256 */
+        EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);
+        if (!pctx) {
             free(content);
             EVP_PKEY_free(pkey);
-            return FP_ERR_INVALID_PRIVATE_KEY;
+            return FP_ERR_OUT_OF_MEMORY;
         }
         
-        int decrypted_len = RSA_private_decrypt(
-            (int)wrapped_key_size,
-            wrapped_key,
-            content,
-            rsa,
-            RSA_PKCS1_OAEP_PADDING
-        );
-        
-        RSA_free(rsa);
-        
-        if (decrypted_len <= 0) {
+        if (EVP_PKEY_decrypt_init(pctx) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
             free(content);
             EVP_PKEY_free(pkey);
             return FP_ERR_KEY_UNWRAPPING_FAILED;
         }
         
-        content_len = (size_t)decrypted_len;
+        if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_OAEP_PADDING) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(content);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_UNWRAPPING_FAILED;
+        }
+        
+        if (EVP_PKEY_CTX_set_rsa_oaep_md(pctx, EVP_sha256()) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(content);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_UNWRAPPING_FAILED;
+        }
+        
+        /* Get required size first */
+        if (EVP_PKEY_decrypt(pctx, NULL, &content_len,
+                            wrapped_key, wrapped_key_size) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(content);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_UNWRAPPING_FAILED;
+        }
+        
+        /* Reallocate if needed */
+        if (content_len > max_content_size) {
+            uint8_t *new_content = realloc(content, content_len);
+            if (!new_content) {
+                EVP_PKEY_CTX_free(pctx);
+                free(content);
+                EVP_PKEY_free(pkey);
+                return FP_ERR_OUT_OF_MEMORY;
+            }
+            content = new_content;
+        }
+        
+        /* Now decrypt */
+        if (EVP_PKEY_decrypt(pctx, content, &content_len,
+                            wrapped_key, wrapped_key_size) <= 0) {
+            EVP_PKEY_CTX_free(pctx);
+            free(content);
+            EVP_PKEY_free(pkey);
+            return FP_ERR_KEY_UNWRAPPING_FAILED;
+        }
+        
+        EVP_PKEY_CTX_free(pctx);
     } else {
         /* EC unwrapping using EVP_PKEY_CTX */
         EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(pkey, NULL);

@@ -14,6 +14,7 @@
 #include <openssl/aes.h>
 
 #include "fairplay.h"
+#include "fp_license_exchange.h"
 
 /* ── Test Counters ─────────────────────────────────────────────────────────*/
 
@@ -103,17 +104,17 @@ TEST(aes_decryption)
 TEST(init_shutdown)
 {
     int success = 1;
-    
+
     for (int i = 0; i < 5; i++) {
-        if (fp_init() != 0) {
+        if (fairplay_init() != FP_OK) {
             success = 0;
             break;
         }
-        fp_shutdown();
+        fairplay_shutdown();
     }
-    
-    if (success && fp_init() != 0) success = 0;
-    
+
+    if (success && fairplay_init() != FP_OK) success = 0;
+
     return success;
 }
 
@@ -121,12 +122,16 @@ TEST(init_shutdown)
 
 TEST(null_params)
 {
+    drm_key_context_t *key_ctx = NULL;
     int success = 1;
-    
-    if (fp_open_key_context(NULL, "skd://test") != NULL) success = 0;
-    if (fp_open_key_context("test", NULL) != NULL) success = 0;
-    if (fp_open_key_context("", "skd://") != NULL) success = 0;
-    
+
+    /* NULL storage_path */
+    if (fp_acquire_content_key(NULL, "skd://test", NULL, NULL, &key_ctx) == FP_OK) success = 0;
+    /* NULL media_uri */
+    if (fp_acquire_content_key("/tmp", NULL, NULL, NULL, &key_ctx) == FP_OK) success = 0;
+    /* NULL out pointer */
+    if (fp_acquire_content_key("/tmp", "skd://test", NULL, NULL, NULL) == FP_OK) success = 0;
+
     return success;
 }
 
@@ -152,10 +157,10 @@ TEST(iv_modes)
 
 TEST(memory_safety)
 {
-    /* Test that fp_init/fp_shutdown can be called multiple times */
+    /* fairplay_init/shutdown must be callable multiple times without crash */
     for (int i = 0; i < 10; i++) {
-        fp_init();
-        fp_shutdown();
+        fairplay_init();
+        fairplay_shutdown();
     }
     return 1;
 }
@@ -167,22 +172,22 @@ int main(void)
     printf("========================================\n");
     printf("FairPlay DRM Test Suite\n");
     printf("========================================\n\n");
-    
+
     printf("Initializing FairPlay module...\n");
-    if (fp_init() != 0) {
+    if (fairplay_init() != FP_OK) {
         fprintf(stderr, "Failed to initialize FairPlay\n");
         return 1;
     }
     printf("OK\n\n");
-    
+
     printf("Running tests:\n\n");
-    
+
     RUN_TEST(init_shutdown);
     RUN_TEST(null_params);
     RUN_TEST(iv_modes);
     RUN_TEST(aes_decryption);
     RUN_TEST(memory_safety);
-    
+
     printf("\n========================================\n");
     printf("Test Summary\n");
     printf("========================================\n");
@@ -190,8 +195,8 @@ int main(void)
     printf("  Passed: %d\n", tests_passed);
     printf("  Failed: %d\n", tests_failed);
     printf("========================================\n\n");
-    
-    fp_shutdown();
-    
+
+    fairplay_shutdown();
+
     return (tests_failed == 0) ? 0 : 1;
 }
