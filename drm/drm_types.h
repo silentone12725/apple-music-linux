@@ -107,9 +107,6 @@ struct drm_key_context {
     uint64_t sample_number;        /* Current sample counter for IV derivation */
     int ref_count;                 /* Reference count for caching */
     pthread_mutex_t lock;          /* Thread safety for ref_count */
-    void *hybris_ctx;              /* non-NULL: hybris SVFootHillPContext for this key */
-    int   hybris_ctx_alien;        /* 1 = owned by libandroidappmusic.so, do not free */
-    unsigned hybris_epoch;         /* lease-refresh epoch the hybris_ctx was derived under */
 };
 
 /**

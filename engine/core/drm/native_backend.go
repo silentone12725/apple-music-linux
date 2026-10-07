@@ -43,16 +43,6 @@ int   drm_set_key_context_key(drm_key_context_handle_t key_context, const uint8_
 int   drm_decrypt_itun(drm_adam_id_t asset_id, uint8_t *sample_data, uint32_t input_size, uint32_t *output_size);
 int   drm_is_recovery_active(void);
 
-// ── drm_hybris.h declarations (libCoreFP.so / libandroidappmusic.so via hybris) ──
-int   hybris_backend_init(const char *hybris_linker_dir, const char *lib64_dir, const char *hybris_core_path);
-int   hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir, const char *username, const char *password);
-int   hybris_backend_decrypt(void *ctx, uint32_t selector, uint8_t *data, uint32_t len);
-void *hybris_backend_open_kd_ctx(const uint8_t *ckc_data, uint32_t ckc_len, uint32_t selector);
-void  hybris_backend_close_kd_ctx(void *ctx);
-void *hybris_open_kd_ctx_from_uri(const char *adam, const char *uri);
-void  hybris_corefp_probe(void);
-void  hybris_backend_shutdown(void);
-
 // ── CGO bridge function pointers ────────────────────────────────────────────
 extern void nativeBridgeAuth(char *ctype, char *buf, int size, void *ud);
 extern void nativeBridgeState(char *state, void *ud);
@@ -66,7 +56,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"path/filepath"
 	"runtime/cgo"
 	"strings"
@@ -89,10 +78,7 @@ type nativeBackend struct {
 	// Global state callback channel for C callbacks
 	stateCh      chan string
 	stateHandle  cgo.Handle
-	hybrisReady  bool          // whether hybris backend (libCoreFP.so / libandroidappmusic.so) loaded
-	cachedDevTok string        // MusicKit developer JWT, fetched once on Start
-	fpReady      chan struct{} // closed once hybris + FairPlay init succeeded
-	fpOnce       sync.Once
+	cachedDevTok string // MusicKit developer JWT, fetched once on Start
 
 	// In-flight accounting for calls into the C library (guarded by mu). Stop must not
 	// tear the library down under a running call, and key contexts handed out by one
@@ -138,7 +124,6 @@ func (b *nativeBackend) currentGen() uint64 {
 func NewNativeBackend(drmDir string) DRMBackend {
 	b := &nativeBackend{
 		drmDir:  drmDir,
-		fpReady: make(chan struct{}),
 		eventCh: make(chan DRMEvent, 16),
 		stateCh: make(chan string, 16),
 	}
@@ -166,61 +151,13 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		baseDir = filepath.Join(b.drmDir, "files")
 	}
 
-	// Locate the Android lib64 for the hybris backend.
-	// Try, in order:
-	//   1. $AML_VSEG_DRM/rootfs/system/lib64  (explicit override)
-	//   2. <drmDir>/rootfs/system/lib64        (lib64 bundled next to drm_client.so)
-	//   3. <repoParent>/apple-music-linux-vseg/drm/rootfs/system/lib64  (sibling repo)
-	lib64Dir := ""
-	candidates := []string{}
-	if vsegEnv := os.Getenv("AML_VSEG_DRM"); vsegEnv != "" {
-		candidates = append(candidates, filepath.Join(vsegEnv, "rootfs", "system", "lib64"))
-	}
-	if b.drmDir != "" {
-		candidates = append(candidates, filepath.Join(b.drmDir, "rootfs", "system", "lib64"))
-		// sibling vseg repo: go up from drm/ → repo root → parent → vseg
-		repoRoot := filepath.Dir(b.drmDir)
-		candidates = append(candidates, filepath.Join(filepath.Dir(repoRoot), "apple-music-linux-vseg", "drm", "rootfs", "system", "lib64"))
-	}
-	// The repo's own drm/ (the parent of drmDir when drmDir is a subdirectory) and the per-user
-	// dir ensureUserDRM() populates are valid roots too.
-	userDRM := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		userDRM = filepath.Join(home, ".config", "apple-music-linux", "drm")
-	}
-	if b.drmDir != "" {
-		candidates = append(candidates, filepath.Join(filepath.Dir(b.drmDir), "rootfs", "system", "lib64"))
-	}
-	if userDRM != "" {
-		candidates = append(candidates, filepath.Join(userDRM, "rootfs", "system", "lib64"))
-	}
-	for _, c := range candidates {
-		// A usable lib64 holds the bionic system libs, not just a few app libs.
-		if _, err := os.Stat(filepath.Join(c, "libc.so")); err == nil {
-			lib64Dir = c
-			break
-		}
-	}
-
-	if lib64Dir != "" {
-		n := 0
-		if ents, err := os.ReadDir(lib64Dir); err == nil {
-			n = len(ents)
-		}
-		log.Printf("[drm] Android libraries: %s (%d files)", lib64Dir, n)
-	}
-
 	// Prepare config
 	cBaseDir := C.CString(baseDir)
-	var cLib64Dir *C.char
-	if lib64Dir != "" {
-		cLib64Dir = C.CString(lib64Dir)
-	}
 	cDeviceInfo := C.CString(cfg.DeviceInfo)
 
 	drmConfig := C.drm_config{
 		base_directory:  cBaseDir,
-		lib64_directory: cLib64Dir,
+		lib64_directory: nil,
 		username:        nil,
 		password:        nil,
 		device_info:     cDeviceInfo,
@@ -243,9 +180,6 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 
 	// Clean up strings
 	C.free(unsafe.Pointer(cBaseDir))
-	if cLib64Dir != nil {
-		C.free(unsafe.Pointer(cLib64Dir))
-	}
 	C.free(unsafe.Pointer(cDeviceInfo))
 	if drmConfig.username != nil {
 		C.free(unsafe.Pointer(drmConfig.username))
@@ -268,83 +202,7 @@ func (b *nativeBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		log.Printf("[drm] native: dev token fetch failed: %v", err)
 	}
 
-	// Initialise the hybris backend (libCoreFP.so + libandroidappmusic.so).
-	// The Android libs are embedded in libdrm_client.so; only the linker shim
-	// (hybris-linker/q.so) and the bionic system libs (lib64) come from disk.
-	// libhybris exit()s the process if q.so is missing, so verify it first.
-	linkerDir := ""
-	{
-		roots := []string{}
-		if lib64Dir != "" {
-			roots = append(roots, filepath.Dir(filepath.Dir(filepath.Dir(lib64Dir))))
-		}
-		if b.drmDir != "" {
-			roots = append(roots, b.drmDir, filepath.Dir(b.drmDir))
-		}
-		if userDRM != "" {
-			roots = append(roots, userDRM)
-		}
-		for _, r := range roots {
-			if _, err := os.Stat(filepath.Join(r, "hybris-linker", "q.so")); err == nil {
-				linkerDir = filepath.Join(r, "hybris-linker")
-				break
-			}
-		}
-	}
-	// fpState is what the initial event reports. stateLoop is already running, so the
-	// wrapper's RUNNING callback may have emitted Ready during init; the initial event
-	// must agree with that instead of resetting the manager to Initializing.
-	fpState := FairPlayInitializing
-	if linkerDir == "" || lib64Dir == "" {
-		log.Printf("[drm] hybris backend: not available (linker=%q lib64=%q)", linkerDir, lib64Dir)
-	} else {
-		coreSOPath := ""
-		cLinkerDir := C.CString(linkerDir)
-		cLib64Dir2 := C.CString(lib64Dir)
-		cCorePath := C.CString(coreSOPath)
-		hret := C.hybris_backend_init(cLinkerDir, cLib64Dir2, cCorePath)
-		C.free(unsafe.Pointer(cLinkerDir))
-		C.free(unsafe.Pointer(cLib64Dir2))
-		C.free(unsafe.Pointer(cCorePath))
-		if hret == 0 {
-			b.hybrisReady = true
-			log.Printf("[drm] hybris backend: ready (libCoreFP.so + libandroidappmusic.so)")
-			// Initialize FairPlay credential context (RequestContext + lease manager)
-			cBaseDirFP := C.CString(baseDir)
-			cDevInfoFP := C.CString(cfg.DeviceInfo)
-			cLib64FP := C.CString(lib64Dir)
-			// A first login has to happen inside this call (the library's account database is
-			// empty until it has logged in); session reuse passes no credentials.
-			var cUserFP, cPassFP *C.char
-			if cfg.Credentials.Email != "" && cfg.Credentials.Password != "" {
-				cUserFP = C.CString(cfg.Credentials.Email)
-				cPassFP = C.CString(cfg.Credentials.Password)
-			}
-			fpret := C.hybris_fairplay_init(cBaseDirFP, cDevInfoFP, cLib64FP, cUserFP, cPassFP)
-			if cUserFP != nil {
-				C.free(unsafe.Pointer(cUserFP))
-				C.free(unsafe.Pointer(cPassFP))
-			}
-			C.free(unsafe.Pointer(cBaseDirFP))
-			C.free(unsafe.Pointer(cDevInfoFP))
-			C.free(unsafe.Pointer(cLib64FP))
-			if fpret == 0 {
-				fpState = FairPlayReady
-				log.Printf("[drm] hybris FairPlay init: ok")
-				b.fpOnce.Do(func() { close(b.fpReady) })
-				go b.warmDefaultKeyContext()
-			} else {
-				log.Printf("[drm] hybris FairPlay init: failed (rc=%d) — key exchange may fail", int(fpret))
-				fpState = FairPlayFailed
-			}
-			// The probe dumps every libCoreFP export's return value; only useful when debugging.
-			if os.Getenv("AML_DRM_DEBUG") != "" {
-				C.hybris_corefp_probe()
-			}
-		} else {
-			log.Printf("[drm] hybris backend: not available (vseg rootfs absent or load failed)")
-		}
-	}
+	fpState := FairPlayReady
 
 	b.running = true
 	b.gen++
@@ -418,10 +276,6 @@ func (b *nativeBackend) Stop() error {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.hybrisReady {
-		C.hybris_backend_shutdown()
-		b.hybrisReady = false
-	}
 	C.drm_shutdown()
 	return nil
 }
@@ -627,15 +481,6 @@ func (b *nativeBackend) DialCBCS(ctx context.Context) (net.Conn, error) {
 		defer server.Close()
 		err := serveCBCS(ctx, server, func(adamID, uri string) (decrypt func([]byte) error, err error) {
 			log.Printf("[drm] DialCBCS: opening key context for adamID=%s uri=%s", adamID, uri)
-
-			// No zero-key fallback: content keys are only valid via FairPlay.
-			select {
-			case <-b.fpReady:
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(30 * time.Second):
-				return nil, fmt.Errorf("FairPlay not initialised after 30s; refusing to decrypt asset %s", adamID)
-			}
 
 			// Parse key URI to extract kidBase64 and uriPrefix
 			// Format: skd://itunes.apple.com/p1484937438/c6,kidBase64

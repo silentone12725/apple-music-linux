@@ -1,428 +1,653 @@
 /*
- * drm_client.h — Public API for the DRM client.
+ * drm_client.h - DRM Client API
+ * 
+ * Version: 2.0
+ * Date: 2026-10-07
+ * 
+ * Clean-room implementation of FairPlay DRM client for Linux.
+ * Independently authored by AML DRM Team.
  *
- * Clean-room implementation based on DRM_CLEANROOM_SPEC.md.
- * Does not reference the proprietary wrapper/drm_lib.* implementation.
+ * This header defines the high-level DRM client API for:
+ * - License acquisition
+ * - HLS manifest parsing
+ * - Content decryption workflow
  *
- * Thread safety: All functions are safe to call from multiple threads.
- * drm_init() must complete before any other call.
+ * Compile with: gcc -std=c11 -pedantic -Wall -Wextra
+ * Link with: -lssl -lcrypto -lpthread
  */
 
-#pragma once
+#ifndef DRM_CLIENT_H
+#define DRM_CLIENT_H
 
-#include "drm_types.h"
+#include "fairplay.h"
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ── Lifecycle Functions ────────────────────────────────────────────────────*/
+/* =============================================================================
+ * Version Information
+ * ============================================================================= */
+
+#define DRM_CLIENT_VERSION_MAJOR  2
+#define DRM_CLIENT_VERSION_MINOR  0
+#define DRM_CLIENT_VERSION_PATCH  0
+#define DRM_CLIENT_VERSION_STRING "2.0.0"
+
+const char *drm_client_version(void);
+void drm_client_version_components(int *major, int *minor, int *patch);
+
+/* =============================================================================
+ * Configuration (REQ-002)
+ * ============================================================================= */
 
 /**
- * Initialize the DRM client and acquire playback license.
- *
- * This function blocks until the FairPlay lease is acquired and account
- * tokens are cached. It may take 5-30 seconds depending on network and
- * authentication status.
- *
- * @param config  Initialization configuration (must remain valid during call)
- * @return        0 on success, -1 on failure
- *
- * @note          Must be called exactly once before any other drm_* function.
- * @note          If username/password are NULL, cached credentials are used.
- * @note          State callback is called with "RUNNING" on success.
+ * DRM Client Configuration
+ * 
+ * Required fields:
+ * - license_server_url: URL of the license acquisition server
+ * - user_agent: User-Agent string for HTTP requests
+ * 
+ * Optional fields (use defaults if not set):
+ * - timeout_seconds: HTTP timeout (default: 30)
+ * - max_retries: Maximum retry attempts (default: 3)
+ * - proxy_host, proxy_port: HTTP proxy settings
  */
-int drm_init(const struct drm_config *config);
+typedef struct {
+    const char *license_server_url;  /* Required (REQ-002) */
+    const char *user_agent;          /* Required (REQ-002) */
+    
+    const char *proxy_host;          /* Optional */
+    int proxy_port;                  /* Optional */
+    
+    int timeout_seconds;             /* Required, default 30 (REQ-027) */
+    int max_retries;                 /* Optional, default 3 (REQ-029) */
+    
+    /* Extended options */
+    bool verify_ssl;                 /* Verify SSL certificates (default: true) */
+    const char *client_id;           /* Optional client identifier */
+    const char *device_id;           /* Optional device identifier (REQ-023) */
+} drm_config_t;
 
 /**
- * Release all DRM resources.
- *
- * After this function returns, no further calls to drm_* functions are valid
- * until drm_init() is called again.
- *
- * @note          Cached tokens in base_directory are preserved.
- * @note          No other API calls should be made during shutdown.
+ * Initialize configuration with defaults.
  */
-void drm_shutdown(void);
+void drm_config_init(drm_config_t *config);
 
-/* ── Account Functions ──────────────────────────────────────────────────────*/
+/* =============================================================================
+ * DRM Client Handle
+ * ============================================================================= */
 
 /**
- * Retrieve cached account information.
- *
- * Returns a JSON string containing storefront_id, dev_token, and music_token.
- *
- * @return        malloc'd JSON string (caller must free), or NULL on error
- *
- * @note          Returns NULL if drm_init() was not called or failed.
- * @note          Caller is responsible for freeing the returned string.
+ * DRM Client Handle (REQ-003)
+ * 
+ * Opaque handle to a DRM client instance.
  */
-char *drm_get_account(void);
-
-/* ── URL Retrieval Functions ────────────────────────────────────────────────*/
+typedef struct drm_client drm_client_t;
 
 /**
- * Get HLS playlist URL for streaming.
- *
- * Returns the HTTPS URL for the m3u8 playlist for the given asset.
- *
- * @param asset_id  Apple Music asset ID (64-bit)
- * @return          malloc'd URL string (caller must free), or NULL on error
- *
- * @note            URL is valid until lease expires (typically 24 hours).
- * @note            Caller is responsible for freeing the returned string.
+ * Create a DRM client instance.
+ * 
+ * @param config Configuration structure (must remain valid during client lifetime)
+ * @param out_client Output: newly created client
+ * @return DRM_OK on success, error code otherwise
  */
-char *drm_get_hls_url(drm_adam_id_t asset_id);
+fp_error_t drm_client_create(const drm_config_t *config, drm_client_t **out_client);
 
 /**
- * Get progressive MP4 URL and download key.
- *
- * Returns the progressive download URL and optional download key for offline
- * playback. Also indicates if an itun decryptor is available.
- *
- * @param asset_id        Apple Music asset ID
- * @param out_url         Output: malloc'd URL string (caller must free)
- * @param out_download_key Output: malloc'd download key (caller must free)
- * @param out_has_decryptor Output: 1 if itun decryptor available, 0 otherwise
- * @return                0 on success, -1 on failure
- *
- * @note                  out_url and out_download_key are NULL on failure.
- * @note                  Caller is responsible for freeing output strings.
- * @note                  Call drm_get_progressive_url() before drm_decrypt_itun().
+ * Destroy a DRM client instance.
+ * 
+ * @param client Client to destroy (may be NULL)
  */
-int drm_get_progressive_url(
-    drm_adam_id_t asset_id,
-    char **out_url,
-    char **out_download_key,
-    int *out_has_decryptor
-);
-
-/* ── Key Delivery Functions ─────────────────────────────────────────────────*/
+void drm_client_destroy(drm_client_t *client);
 
 /**
- * Open a FairPlay key delivery context for an asset.
- *
- * Creates or retrieves a cached key context for the given asset and media URI.
- * The context is used for sample decryption.
- *
- * @param asset_id_str  Asset ID as string
- * @param media_uri     Media URI from playlist or asset info
- * @return              Key context handle (opaque), or NULL on failure
- *
- * @note                Context is cached internally; repeated calls return same handle.
- * @note                Context is valid until drm_shutdown() is called.
- * @note                Context contains AES-128 keys for CBCS decryption.
+ * Get the last error for a client.
+ * 
+ * @param client DRM client
+ * @return Last error code
  */
-drm_key_context_handle_t drm_open_key_context(
-    const char *asset_id_str,
-    const char *media_uri
-);
+fp_error_t drm_client_get_error(const drm_client_t *client);
 
 /**
- * Set the AES key and IV for a key context.
- *
- * After drm_open_key_context() creates a context with zero keys, call this
- * function to set the actual FairPlay content key obtained from license fetch.
- *
- * @param key_context   Handle from drm_open_key_context()
- * @param aes_key       16-byte AES-128 key
- * @param iv            16-byte initialization vector
- * @return              0 on success, -1 on failure
- *
- * @note                Must be called before any drm_decrypt_sample() calls.
- * @note                The key and IV are copied internally; caller can free them.
+ * Get human-readable error message.
+ * 
+ * @param client DRM client
+ * @return Error message string
  */
-int drm_set_key_context_key(
-    drm_key_context_handle_t key_context,
-    const uint8_t *aes_key,
-    const uint8_t *iv
-);
+const char *drm_client_get_error_message(const drm_client_t *client);
 
-/* ── Decryption Functions ───────────────────────────────────────────────────*/
+/* =============================================================================
+ * License Acquisition (REQ-021 through REQ-040)
+ * ============================================================================= */
 
 /**
- * Decrypt a FairPlay-encrypted audio/video sample.
- *
- * Decrypts the sample in-place using AES-128 CBC with FairPlay-specific IV
- * derivation. The sample must be aligned to 16-byte boundary.
- *
- * @param key_context   Handle from drm_open_key_context()
- * @param sample_data   Encrypted sample (decrypted in-place)
- * @param sample_size   Sample size in bytes (must be multiple of 16)
- * @return              0 on success, -1 on failure
- *
- * @note                sample_data is modified in-place.
- * @note                sample_size is unchanged after decryption.
- * @note                Sample must be aligned to 16-byte boundary.
+ * License Request Options
  */
-int drm_decrypt_sample(
-    drm_key_context_handle_t key_context,
-    uint8_t *sample_data,
-    uint32_t sample_size
-);
+typedef struct {
+    const fp_kid_t *content_id;      /* Required: Content/Key ID */
+    const char *pssh_b64;            /* Optional: Base64-encoded PSSH */
+    const char *session_id;          /* Optional: Session identifier */
+    bool force_renewal;              /* Force license renewal */
+} drm_license_request_t;
 
 /**
- * Decrypt a FairPlay-encrypted sample with explicit sample number.
- *
- * Same as drm_decrypt_sample() but allows specifying the sample number
- * explicitly. This is useful when the sample counter should be maintained
- * externally (e.g., per CBCS stream rather than per key context).
- *
- * @param key_context   Handle from drm_open_key_context()
- * @param sample_data   Encrypted sample (decrypted in-place)
- * @param sample_size   Sample size in bytes (must be multiple of 16)
- * @param sample_number Explicit sample number for IV derivation
- * @return              0 on success, -1 on failure
- *
- * @note                sample_data is modified in-place.
- * @note                sample_number is used for IV derivation (not incremented).
- * @note                Sample must be aligned to 16-byte boundary.
+ * License Response
  */
-int drm_decrypt_sample_at(
-    drm_key_context_handle_t key_context,
-    uint8_t *sample_data,
-    uint32_t sample_size,
-    uint64_t sample_number
+typedef struct {
+    fp_kid_t content_id;             /* Content ID from response */
+    fp_key_t decryption_key;         /* Decryption key (REQ-034, REQ-035) */
+    uint64_t expires_at;             /* Expiration time (REQ-036) */
+    uint64_t lease_duration;         /* Lease duration in seconds (REQ-037) */
+    
+    /* Optional fields */
+    char *ckc_data;                  /* CKC data (allocated, free with drm_license_free) */
+    size_t ckc_size;
+    char *session_id;                /* Session ID (allocated) */
+    
+    bool has_key;                    /* Whether decryption key was provided */
+    bool is_persistent;              /* Whether license is persistent */
+} drm_license_t;
+
+/**
+ * Request a license for content.
+ * 
+ * Generates a license request (REQ-021, REQ-022), sends it to the license server
+ * (REQ-024 through REQ-026), and parses the response (REQ-031 through REQ-034).
+ * 
+ * Implements retry logic with exponential backoff (REQ-028, REQ-030).
+ * 
+ * @param client DRM client
+ * @param request License request parameters
+ * @param out_license Output: license response (must be freed with drm_license_free)
+ * @return DRM_OK on success, error code otherwise
+ */
+fp_error_t drm_client_acquire_license(
+    drm_client_t *client,
+    const drm_license_request_t *request,
+    drm_license_t **out_license
 );
 
 /**
- * Decrypt a sample using the sample's first ciphertext block as the IV
- * derivation input. This matches the standalone Android wrapper's fallback
- * path, which derives a 16-byte value from the key-delivery context and the
- * first block rather than maintaining a process-global sample counter.
+ * Free a license response.
+ * 
+ * @param license License to free (may be NULL)
  */
-int drm_decrypt_sample_with_sample_iv(
-    drm_key_context_handle_t key_context,
-    uint8_t *sample_data,
-    uint32_t sample_size
+void drm_license_free(drm_license_t *license);
+
+/**
+ * Renew an existing license (REQ-046).
+ * 
+ * @param client DRM client
+ * @param session_id Session ID from original license
+ * @param out_license Output: renewed license
+ * @return DRM_OK on success, error code otherwise
+ */
+fp_error_t drm_client_renew_license(
+    drm_client_t *client,
+    const char *session_id,
+    drm_license_t **out_license
+);
+
+/* =============================================================================
+ * HLS Manifest Parsing (REQ-101 through REQ-110)
+ * ============================================================================= */
+
+/**
+ * HLS Key Format
+ */
+typedef enum {
+    DRM_HLS_KEY_NONE = 0,
+    DRM_HLS_KEY_AES128 = 1,    /* METHOD=AES-128 (REQ-104) */
+    DRM_HLS_KEY_SAMPLES = 2,   /* METHOD=SAMPLE-AES */
+    DRM_HLS_KEY_CENC = 3       /* METHOD=CENC */
+} drm_hls_key_format_t;
+
+/**
+ * HLS Key Information (extracted from EXT-X-KEY)
+ */
+typedef struct {
+    drm_hls_key_format_t format;   /* Encryption method (REQ-104) */
+    char *uri;                     /* KEYURI (REQ-103) */
+    uint8_t iv[16];                /* IV from manifest (REQ-105) */
+    bool has_iv;                   /* Whether IV was specified */
+    char *method;                  /* METHOD string */
+    char *format_strings;          /* FORMAT strings */
+} drm_hls_key_t;
+
+/**
+ * HLS Segment Information
+ */
+typedef struct {
+    char *uri;                     /* Segment URI */
+    double duration;               /* Segment duration in seconds */
+    uint64_t media_sequence;       /* Media sequence number */
+    bool is_encrypted;             /* Whether segment is encrypted */
+    drm_hls_key_t *key;            /* Associated key (if encrypted) */
+} drm_hls_segment_t;
+
+/**
+ * HLS Manifest Information
+ */
+typedef struct {
+    char *playlist_uri;            /* Original playlist URI */
+    double target_duration;        /* TARGETDURATION */
+    uint64_t media_sequence;       /* First media sequence number */
+    bool is_vod;                   /* Whether this is VOD (ENDLIST) */
+    
+    /* Segment information */
+    drm_hls_segment_t *segments;   /* Array of segments (allocated) */
+    size_t segment_count;          /* Number of segments */
+    
+    /* Key information */
+    drm_hls_key_t *keys;           /* Array of unique keys (allocated) */
+    size_t key_count;              /* Number of unique keys */
+} drm_hls_manifest_t;
+
+/**
+ * Parse an HLS manifest.
+ * 
+ * @param client DRM client
+ * @param manifest_url URL of the HLS manifest
+ * @param out_manifest Output: parsed manifest (must be freed with drm_hls_manifest_free)
+ * @return DRM_OK on success, error code otherwise
+ */
+fp_error_t drm_client_parse_hls_manifest(
+    drm_client_t *client,
+    const char *manifest_url,
+    drm_hls_manifest_t **out_manifest
 );
 
 /**
- * Decrypt an itun-encrypted progressive sample.
- *
- * Decrypts the sample using the itun decryptor created by
- * drm_get_progressive_url(). Output size may differ from input due to padding.
- *
- * @param asset_id      Must match drm_get_progressive_url() call
- * @param sample_data   Encrypted sample (decrypted in-place)
- * @param input_size    Input sample size in bytes
- * @param output_size   Output: decrypted sample size in bytes
- * @return              0 on success, -1 on failure
- *
- * @note                drm_get_progressive_url() must be called first.
- * @note                output_size may be less than input_size (padding removed).
- * @note                sample_data buffer must accommodate output_size bytes.
+ * Parse HLS manifest from data.
+ * 
+ * @param client DRM client
+ * @param manifest_data Manifest content
+ * @param manifest_size Size of manifest data
+ * @param base_url Base URL for resolving relative URIs (REQ-106)
+ * @param out_manifest Output: parsed manifest
+ * @return DRM_OK on success, error code otherwise
  */
-int drm_decrypt_itun(
-    drm_adam_id_t asset_id,
-    uint8_t *sample_data,
-    uint32_t input_size,
-    uint32_t *output_size
+fp_error_t drm_client_parse_hls_manifest_data(
+    drm_client_t *client,
+    const char *manifest_data,
+    size_t manifest_size,
+    const char *base_url,
+    drm_hls_manifest_t **out_manifest
 );
 
 /**
- * Decrypt multiple FairPlay-encrypted samples in a batch.
- *
- * Optimized version of drm_decrypt_sample() for decrypting multiple samples
- * from the same key context. Reduces lock contention and improves throughput.
- *
- * @param key_context   Handle from drm_open_key_context()
- * @param samples       Array of sample data pointers (decrypted in-place)
- * @param sample_sizes  Array of sample sizes (must all be multiples of 16)
- * @param count         Number of samples to decrypt
- * @return              0 on success, -1 on first failure (remaining samples untouched)
- *
- * @note                All samples are decrypted in-place.
- * @note                Sample sizes are unchanged after decryption.
- * @note                All samples must be aligned to 16-byte boundary.
- * @note                If decryption fails, no samples are modified.
+ * Free an HLS manifest.
+ * 
+ * @param manifest Manifest to free (may be NULL)
  */
-int drm_decrypt_samples_batch(
-    drm_key_context_handle_t key_context,
-    uint8_t **samples,
-    const uint32_t *sample_sizes,
-    uint32_t count
+void drm_hls_manifest_free(drm_hls_manifest_t *manifest);
+
+/* =============================================================================
+ * Content Decryption Workflow
+ * ============================================================================= */
+
+/**
+ * Decrypt an HLS segment.
+ * 
+ * High-level function that:
+ * 1. Looks up the appropriate key for the segment
+ * 2. Derives or uses the IV
+ * 3. Decrypts the segment data
+ * 
+ * @param client DRM client
+ * @param manifest HLS manifest containing key information
+ * @param segment_index Index of segment to decrypt (0-based)
+ * @param segment_data Encrypted segment data
+ * @param segment_size Size of segment data
+ * @param out_decrypted Output buffer for decrypted data
+ * @param decrypted_size Output: size of decrypted data
+ * @param max_decrypted_size Maximum output buffer size
+ * @return DRM_OK on success, error code otherwise
+ */
+fp_error_t drm_client_decrypt_segment(
+    drm_client_t *client,
+    const drm_hls_manifest_t *manifest,
+    size_t segment_index,
+    const uint8_t *segment_data,
+    size_t segment_size,
+    uint8_t *out_decrypted,
+    size_t *decrypted_size,
+    size_t max_decrypted_size
 );
 
-/* ── Status Functions ───────────────────────────────────────────────────────*/
+/**
+ * Get the required output buffer size for a segment.
+ * 
+ * @param segment_size Size of encrypted segment
+ * @return Required output buffer size
+ */
+size_t drm_client_decrypt_segment_size(size_t segment_size);
+
+/* =============================================================================
+ * Key Store Integration
+ * ============================================================================= */
 
 /**
- * Check if lease recovery is currently in progress.
- *
- * @return  1 if lease recovery is in progress, 0 otherwise
- *
- * @note    Recovery is automatic; application does not need to trigger it.
- * @note    Application can display "Refreshing license..." when this returns 1.
+ * Get the internal key store from a client.
+ * 
+ * @param client DRM client
+ * @return Key store handle, or NULL if not available
  */
-int drm_is_recovery_active(void);
-
-/* ── Performance Helpers (for testing) ──────────────────────────────────────*/
+fp_key_store_t *drm_client_get_key_store(drm_client_t *client);
 
 /**
- * Get current time in seconds (for performance testing).
- *
- * @return  Current time in seconds since epoch
+ * Add a key directly to the client's key store.
+ * 
+ * @param client DRM client
+ * @param kid Key identifier
+ * @param key Decryption key
+ * @param expires_at Expiration timestamp
+ * @return DRM_OK on success, error code otherwise
  */
-double drm_get_time_seconds(void);
+fp_error_t drm_client_add_key(
+    drm_client_t *client,
+    const fp_kid_t *kid,
+    const fp_key_t *key,
+    uint64_t expires_at
+);
 
 /**
- * Get current time in milliseconds (for performance testing).
- *
- * @return  Current time in milliseconds since epoch
+ * Get a key from the client's key store.
+ * 
+ * @param client DRM client
+ * @param kid Key identifier
+ * @param out_key Output: decryption key
+ * @return DRM_OK on success, FP_ERR_KEY_NOT_FOUND otherwise
  */
-double drm_get_time_ms(void);
+fp_error_t drm_client_get_key(
+    drm_client_t *client,
+    const fp_kid_t *kid,
+    fp_key_t *out_key
+);
 
-/* ── HTTPS / Network Functions (for Apple API communication) ────────────────*/
-
-/**
- * Initialize HTTPS connection pool for Apple API calls.
- *
- * Sets up SSL context with certificate validation and connection pooling.
- * Must be called after drm_init().
- *
- * @param use_http2  1 to enable HTTP/2, 0 for HTTP/1.1 only
- * @return           0 on success, -1 on failure
- *
- * @note             Enables certificate pinning for Apple domains.
- * @note             Connection pool size is limited to 16 concurrent connections.
- */
-int drm_https_init(int use_http2);
+/* =============================================================================
+ * PSSH Handling
+ * ============================================================================= */
 
 /**
- * Shutdown HTTPS connection pool.
- *
- * Closes all pooled connections and releases SSL resources.
- *
- * @note             Called automatically by drm_shutdown().
+ * Extract KID from PSSH data.
+ * 
+ * @param client DRM client
+ * @param pssh_data PSSH box data
+ * @param pssh_size Size of PSSH data
+ * @param out_kid Output: extracted KID
+ * @return DRM_OK on success, error code otherwise
  */
-void drm_https_shutdown(void);
+fp_error_t drm_client_extract_kid_from_pssh(
+    drm_client_t *client,
+    const uint8_t *pssh_data,
+    size_t pssh_size,
+    fp_kid_t *out_kid
+);
 
 /**
- * Fetch data from Apple API endpoint over HTTPS.
- *
- * @param url        HTTPS URL (e.g., https://buy.itunes.apple.com/...)
- * @param method     HTTP method (GET, POST, PUT, DELETE)
- * @param body       Request body (NULL for GET)
- * @param body_len   Request body length
- * @param out_data   Output: malloc'd response body (caller must free)
- * @param out_len    Output: response body length
- * @param out_status Output: HTTP status code
- * @return           0 on success, -1 on failure
- *
- * @note             Handles redirects automatically (max 5).
- * @note             Uses connection pooling for repeated calls.
- * @note             Implements exponential backoff retry (3 attempts).
+ * Generate PSSH from KID.
+ * 
+ * Creates a FairPlay PSSH box for the given KID.
+ * 
+ * @param client DRM client
+ * @param kid Key identifier
+ * @param out_pssh Output buffer for PSSH data
+ * @param pssh_size Output: size of PSSH data
+ * @param max_pssh_size Maximum output buffer size
+ * @return DRM_OK on success, DRM_ERR_BUFFER_TOO_SMALL otherwise
  */
-int drm_https_fetch(
+fp_error_t drm_client_generate_pssh(
+    drm_client_t *client,
+    const fp_kid_t *kid,
+    uint8_t *out_pssh,
+    size_t *pssh_size,
+    size_t max_pssh_size
+);
+
+/* =============================================================================
+ * HTTP Helpers
+ * ============================================================================= */
+
+/**
+ * HTTP Response structure
+ */
+typedef struct {
+    int status_code;               /* HTTP status code */
+    char *status_text;             /* Status text (allocated) */
+    
+    char *body;                    /* Response body (allocated) */
+    size_t body_size;              /* Size of response body */
+    
+    char *content_type;            /* Content-Type header (allocated) */
+    char *content_length;          /* Content-Length header (allocated) */
+} drm_http_response_t;
+
+/**
+ * Perform an HTTP GET request.
+ * 
+ * @param client DRM client
+ * @param url URL to fetch
+ * @param out_response Output: HTTP response
+ * @return DRM_OK on success, error code otherwise
+ */
+fp_error_t drm_client_http_get(
+    drm_client_t *client,
     const char *url,
-    const char *method,
-    const uint8_t *body,
-    uint32_t body_len,
-    uint8_t **out_data,
-    uint32_t *out_len,
-    int *out_status
+    drm_http_response_t **out_response
 );
 
-/* ── Cookie Management ──────────────────────────────────────────────────────*/
+/**
+ * Perform an HTTP POST request.
+ * 
+ * @param client DRM client
+ * @param url URL to POST to
+ * @param body Request body
+ * @param body_size Size of request body
+ * @param content_type Content-Type header
+ * @param out_response Output: HTTP response
+ * @return DRM_OK on success, error code otherwise
+ */
+fp_error_t drm_client_http_post(
+    drm_client_t *client,
+    const char *url,
+    const char *body,
+    size_t body_size,
+    const char *content_type,
+    drm_http_response_t **out_response
+);
 
 /**
- * Initialize cookie jar.
- *
- * Loads cookies from drm/files/cookies.txt if it exists.
- *
- * @return  0 on success, -1 on failure
+ * Free an HTTP response.
+ * 
+ * @param response Response to free (may be NULL)
  */
-int drm_cookie_init(void);
+void drm_http_response_free(drm_http_response_t *response);
+
+/* =============================================================================
+ * URL Utilities
+ * ============================================================================= */
 
 /**
- * Shutdown cookie jar and save cookies to disk.
+ * Resolve a relative URL against a base URL.
+ * 
+ * @param base_url Base URL
+ * @param relative_url Relative URL
+ * @param out_resolved Output buffer for resolved URL
+ * @param resolved_size Output: size of resolved URL
+ * @param max_resolved_size Maximum output buffer size
+ * @return DRM_OK on success, DRM_ERR_BUFFER_TOO_SMALL otherwise
  */
-void drm_cookie_shutdown(void);
+fp_error_t drm_client_resolve_url(
+    drm_client_t *client,
+    const char *base_url,
+    const char *relative_url,
+    char *out_resolved,
+    size_t *resolved_size,
+    size_t max_resolved_size
+);
+
+/* =============================================================================
+ * Callbacks (for async operations)
+ * ============================================================================= */
 
 /**
- * Get cookie header value for a URL.
- *
- * @param url     Target URL
- * @param out_buf Output buffer for "name=value; name2=value2" string
- * @param buf_size Size of out_buf
- * @return        0 on success, -1 on failure
+ * License callback function type
  */
-int drm_cookie_get_for_url(const char *url, char *out_buf, size_t buf_size);
+typedef void (*drm_license_callback)(
+    fp_error_t error,
+    drm_license_t *license,
+    void *user_data
+);
 
 /**
- * Parse and store Set-Cookie headers from response.
- *
- * @param set_cookie  Set-Cookie header value(s)
+ * HTTP callback function type
  */
-void drm_cookie_parse_set_cookie(const char *set_cookie);
+typedef void (*drm_http_callback)(
+    fp_error_t error,
+    drm_http_response_t *response,
+    void *user_data
+);
 
 /**
- * Store one Set-Cookie header value received from `host`.
- *
- * Replaces an existing cookie with the same name/domain/path, rejects a Domain
- * attribute `host` does not belong to, and treats a cookie without Domain as
- * host-only. The jar is saved atomically (mode 0600) after every change.
+ * Set license acquisition callback.
+ * 
+ * @param client DRM client
+ * @param callback Callback function
+ * @param user_data User data passed to callback
  */
-void drm_cookie_parse_set_cookie_for_host(const char *set_cookie, const char *host);
+void drm_client_set_license_callback(
+    drm_client_t *client,
+    drm_license_callback callback,
+    void *user_data
+);
+
+/* =============================================================================
+ * Statistics and Debugging
+ * ============================================================================= */
 
 /**
- * Like drm_cookie_init(), with an explicit directory (the jar lives in
- * <dir>/cookies.txt). Replaces the in-memory jar with the file's contents.
- *
- * @return 0 on success (including "no file yet"), -1 if dir is NULL
+ * DRM Client Statistics
  */
-int drm_cookie_init_at(const char *dir);
-
-/* ── JWT Token Parsing ──────────────────────────────────────────────────────*/
+typedef struct {
+    uint64_t licenses_requested;    /* Total license requests */
+    uint64_t licenses_success;      /* Successful license requests */
+    uint64_t licenses_failed;       /* Failed license requests */
+    
+    uint64_t segments_decrypted;    /* Total segments decrypted */
+    uint64_t bytes_decrypted;       /* Total bytes decrypted */
+    
+    uint64_t http_requests;         /* Total HTTP requests */
+    uint64_t http_retries;          /* Total HTTP retries */
+    
+    uint32_t active_sessions;       /* Current active sessions */
+    uint32_t keys_stored;           /* Current keys in store */
+} drm_client_stats_t;
 
 /**
- * Parse JWT token and extract claims.
- *
- * @param token       JWT token string
- * @param out_payload Output: malloc'd JSON payload (caller must free)
- * @param out_len     Output: payload length
- * @return            0 on success, -1 on failure
+ * Get client statistics.
+ * 
+ * @param client DRM client
+ * @param stats Output: statistics structure
  */
-int drm_jwt_parse(const char *token, char **out_payload, uint32_t *out_len);
+void drm_client_get_stats(drm_client_t *client, drm_client_stats_t *stats);
 
 /**
- * Extract claim value from JWT payload.
- *
- * @param payload     JSON payload from drm_jwt_parse()
- * @param claim       Claim name (e.g., "sub", "email", "name")
- * @param out_value   Output: malloc'd claim value (caller must free)
- * @return            0 on success, -1 if claim not found
+ * Reset client statistics.
+ * 
+ * @param client DRM client
  */
-int drm_jwt_get_claim(const char *payload, const char *claim, char **out_value);
+void drm_client_reset_stats(drm_client_t *client);
 
-/* ── Device GUID Management ─────────────────────────────────────────────────*/
-
-/**
- * Get or generate device GUID.
- *
- * Loads from adi.pb if exists, otherwise generates new UUID.
- *
- * @param out_guid    Output: 36-char UUID string (with hyphens)
- * @param buf_size    Size of out_guid (must be >= 37)
- * @return            0 on success, -1 on failure
- */
-int drm_device_guid_get(char *out_guid, size_t buf_size);
+/* =============================================================================
+ * Logging
+ * ============================================================================= */
 
 /**
- * Set device GUID (for initial configuration).
- *
- * @param guid        36-char UUID string (with hyphens)
- * @return            0 on success, -1 on failure
+ * Log level
  */
-int drm_device_guid_set(const char *guid);
+typedef enum {
+    DRM_LOG_ERROR = 0,
+    DRM_LOG_WARN = 1,
+    DRM_LOG_INFO = 2,
+    DRM_LOG_DEBUG = 3,
+    DRM_LOG_VERBOSE = 4
+} drm_log_level_t;
 
 /**
- * Check if device GUID is configured.
- *
- * @return  1 if configured, 0 if not
+ * Log callback function type
  */
-int drm_device_guid_is_configured(void);
+typedef void (*drm_log_callback)(
+    drm_log_level_t level,
+    const char *message,
+    void *user_data
+);
+
+/**
+ * Set the log level.
+ * 
+ * @param level Log level
+ */
+void drm_client_set_log_level(drm_log_level_t level);
+
+/**
+ * Set the log callback.
+ * 
+ * @param callback Log callback function
+ * @param user_data User data passed to callback
+ */
+void drm_client_set_log_callback(drm_log_callback callback, void *user_data);
+
+/* =============================================================================
+ * Convenience Functions
+ * ============================================================================= */
+
+/**
+ * Initialize DRM client with default configuration.
+ * 
+ * Convenience function that creates a client with sensible defaults.
+ * 
+ * @param license_server_url License server URL
+ * @param out_client Output: newly created client
+ * @return DRM_OK on success, error code otherwise
+ */
+fp_error_t drm_client_create_default(
+    const char *license_server_url,
+    drm_client_t **out_client
+);
+
+/**
+ * Quick decrypt function.
+ * 
+ * Convenience function for simple decryption scenarios.
+ * 
+ * @param kid Key ID
+ * @param key Decryption key
+ * @param iv Initialization vector
+ * @param ciphertext Encrypted data
+ * @param ciphertext_size Size of ciphertext
+ * @param out_plaintext Output buffer
+ * @param plaintext_size Output: plaintext size
+ * @param max_plaintext_size Maximum output size
+ * @return DRM_OK on success, error code otherwise
+ */
+fp_error_t drm_quick_decrypt(
+    const fp_kid_t *kid,
+    const fp_key_t *key,
+    const fp_iv_t *iv,
+    const uint8_t *ciphertext,
+    size_t ciphertext_size,
+    uint8_t *out_plaintext,
+    size_t *plaintext_size,
+    size_t max_plaintext_size
+);
 
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* DRM_CLIENT_H */
