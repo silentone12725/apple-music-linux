@@ -730,7 +730,13 @@
   function _warnIfOurSourceCleared(el, how) {
     if (!_activeMs || _activeMs.readyState === "closed" || !_ourBlobUrl) return;
     if (how.startsWith("src=") && how !== 'src=""') return;
-    console.warn("[AML MSE] our MediaSource is being detached by " + how + "\n" + (new Error().stack || "").split("\n").slice(2, 8).join("\n"));
+    console.warn("[AML MSE] our MediaSource is being detached by " + how + "\n" + (() => {
+      const l = Error.stackTraceLimit;
+      Error.stackTraceLimit = 30;
+      const st = (new Error().stack || "").split("\n").slice(2, 22).join("\n");
+      Error.stackTraceLimit = l;
+      return st;
+    })());
   }
   function blockAppleCDN() {
     if (window.__amlCDNBlocked) return;
@@ -5158,6 +5164,42 @@
       }
     }
   }
+  function _traceMediaSource(ms, sb, audio) {
+    const t0 = performance.now();
+    const at = () => "+" + ((performance.now() - t0) / 1e3).toFixed(2) + "s";
+    const stack = () => {
+      const l = Error.stackTraceLimit;
+      Error.stackTraceLimit = 30;
+      const st = (new Error().stack || "").split("\n").slice(2, 20).join("\n");
+      Error.stackTraceLimit = l;
+      return st;
+    };
+    const eos = ms.endOfStream.bind(ms);
+    ms.endOfStream = function(...a) {
+      console.warn("[AML MSE] " + at() + " endOfStream(" + a.join(",") + ") ms=" + ms.readyState + " updating=" + sb.updating + " caller:\n" + stack());
+      return eos(...a);
+    };
+    for (const ev of ["sourceended", "sourceclose", "sourceopen"]) {
+      ms.addEventListener(ev, () => console.warn("[AML MSE] " + at() + " MediaSource " + ev + " readyState=" + ms.readyState));
+    }
+    let n = 0, bytes = 0;
+    const app = sb.appendBuffer.bind(sb);
+    const cap = window.__aacCapture = { chunks: [], at: Date.now() };
+    sb.appendBuffer = function(d) {
+      n++;
+      bytes += d.byteLength;
+      try {
+        cap.chunks.push(new Uint8Array(d.buffer ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength) : d.slice(0)));
+      } catch (_) {
+      }
+      if (ms.readyState !== "open") console.warn("[AML MSE] " + at() + " append #" + n + " (" + d.byteLength + " B, total " + bytes + ") while ms=" + ms.readyState + " updating=" + sb.updating + " audio.error=" + (audio.error ? audio.error.code + " " + audio.error.message : "none"));
+      const r = app(d);
+      if (!sb.updating && ms.readyState === "open") console.warn("[AML MSE] " + at() + " append #" + n + " (" + d.byteLength + " B) was DROPPED: the SourceBuffer rejected it and the guard swallowed the error");
+      return r;
+    };
+    sb.addEventListener("error", () => console.warn("[AML MSE] " + at() + " SourceBuffer error after append #" + n + " (" + bytes + " B) ms=" + ms.readyState));
+    audio.addEventListener("error", () => console.warn("[AML MSE] " + at() + " audio error " + (audio.error ? audio.error.code + " " + audio.error.message : "none") + " ms=" + ms.readyState), { once: true });
+  }
   async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
     _seekable = sess.capabilities?.seekable ?? false;
     _chunkCache = { sessionId: _sessionId, chunks: [], byteSize: 0 };
@@ -5186,6 +5228,7 @@
       }
     }
     const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+    _traceMediaSource(ms, sb, mkAudio);
     sb.addEventListener("error", () => {
       console.error("[AML MSE] SourceBuffer error \u2014 audio.error=" + (mkAudio.error ? mkAudio.error.code + " " + mkAudio.error.message : "none") + " src=" + (mkAudio.currentSrc ? mkAudio.currentSrc.slice(0, 24) : "(empty)") + " ms=" + ms.readyState + " updating=" + sb.updating + " buf=" + (sb.buffered.length > 0 ? sb.buffered.start(0).toFixed(1) + "-" + sb.buffered.end(sb.buffered.length - 1).toFixed(1) + "s" : "empty"));
     });

@@ -106,8 +106,6 @@ chmod +x \
     "$INSTALL_DIR/chrome_crashpad_handler" \
     "$INSTALL_DIR/resources/engine"
 
-chmod -R +x "$INSTALL_DIR/resources/hybris-linker" 2>/dev/null || true
-
 # chrome-sandbox: needs setuid root for the Chromium sandbox.
 # Without it we fall back to --no-sandbox in the launcher (safe for local use).
 if [ "$SYSTEM" = "1" ] && [ "$(id -u)" = "0" ]; then

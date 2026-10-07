@@ -8,7 +8,7 @@ LDFLAGS_LIB = -shared -lpthread -lcrypto -lssl -ldl -lcurl -Wl,-z,relro,-z,now
 LDFLAGS_TEST = -lpthread -lcrypto -lssl -fno-stack-protector
 
 # Core source files
-SRCS = drm_client.c fairplay.c fairplay_device.c \
+SRCS = drm_client.c drm_linux.c fairplay.c fairplay_device.c \
        fp_spc_builder.c fp_ckc_parser.c fp_key_unwrapper.c \
        fp_http_client.c fp_license_exchange.c
 OBJS = $(SRCS:.c=.o)
@@ -21,6 +21,10 @@ HEADERS = drm_client.h drm_types.h fairplay.h fairplay_device.h \
           fp_spc_builder.h fp_ckc_parser.h fp_key_unwrapper.h \
           fp_http_client.h fp_license_exchange.h
 
+# Linux shim compilation rule
+drm_linux.o: drm_linux.c drm_types.h fairplay.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # Test files
 TEST_SRC = tests/test_fairplay.c
 TEST_TARGET = tests/test_fairplay
@@ -28,9 +32,11 @@ TEST_DEVICE_SRC = tests/test_device.c
 TEST_DEVICE_TARGET = tests/test_device
 TEST_EXCHANGE_SRC = tests/test_fp_exchange.c
 TEST_EXCHANGE_TARGET = tests/test_fp_exchange
+TEST_LIVE_SRC = tests/test_live_exchange.c
+TEST_LIVE_TARGET = tests/test_live_exchange
 LDFLAGS_REAL = -lpthread -lcrypto -lcurl -fno-stack-protector
 
-# Default target
+# Default target (live test excluded — requires real credentials)
 all: $(TARGET) $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET)
 
 # ── Library link ─────────────────────────────────────────────────────────────
@@ -56,6 +62,9 @@ $(TEST_DEVICE_TARGET): $(TEST_DEVICE_SRC) $(TARGET)
 
 $(TEST_EXCHANGE_TARGET): $(TEST_EXCHANGE_SRC) $(TARGET)
 	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_TEST)
+
+$(TEST_LIVE_TARGET): $(TEST_LIVE_SRC) $(TARGET)
+	$(CC) $(CFLAGS) -I. -o $@ $< -L. -ldrm_client $(LDFLAGS_REAL)
 
 # ── Utility targets ───────────────────────────────────────────────────────────
 
@@ -87,6 +96,10 @@ test-device: $(TEST_DEVICE_TARGET)
 test-exchange: $(TEST_EXCHANGE_TARGET)
 	@echo "Running license exchange tests..."
 	@LD_LIBRARY_PATH=. $(TEST_EXCHANGE_TARGET); exit $$?
+
+test-live: $(TEST_LIVE_TARGET)
+	@echo "Running live FPS license server test..."
+	@LD_LIBRARY_PATH=. $(TEST_LIVE_TARGET) files/
 
 test-all: $(TEST_TARGET) $(TEST_DEVICE_TARGET) $(TEST_EXCHANGE_TARGET)
 	@echo "========================================"
@@ -140,5 +153,5 @@ fp_license_exchange.o: fp_license_exchange.c fp_license_exchange.h \
     fp_spc_builder.h fp_ckc_parser.h fp_http_client.h fp_key_unwrapper.h fairplay.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-.PHONY: all clean release install uninstall test test-device test-exchange test-all \
-        analyze format-check format valgrind-test coverage
+.PHONY: all clean release install uninstall test test-device test-exchange test-live \
+        test-all analyze format-check format valgrind-test coverage

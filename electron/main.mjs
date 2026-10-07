@@ -10,7 +10,7 @@ process.stderr.on('error', (e) => { if (e.code !== 'EPIPE') throw e; });
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, symlinkSync, rmSync, createWriteStream, createReadStream, readdirSync, cpSync } from 'fs';
+import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, createReadStream, readdirSync, cpSync } from 'fs';
 import { readFile as readFileAsync, writeFile as writeFileAsync } from 'fs/promises';
 import os from 'os';
 import { isatty } from 'tty';
@@ -213,74 +213,39 @@ const ENGINE_PORT = 20025;
 const DEBUG_OUTPUT = process.env.AML_DEBUG === '1' || [0, 1, 2].some((fd) => { try { return isatty(fd); } catch { return false; } });
 
 // ── User DRM dir setup ────────────────────────────────────────────────────────
-// DRM runs in-process (NativeBackend, libdrm_client.so next to the engine).
-// The engine takes its DRM directory from dirname(drm-binary-path) and expects
-// the dev layout there:
-//   <dir>/rootfs/system/lib64   Android libs
-//   <dir>/rootfs/data/...       writable session (mpl_db, tokens)
-//   <dir>/hybris-linker/        Android linker shim
-// The packaged bundle is read-only, so build that layout in a user dir: link
-// the bundle's read-only parts (rootfs/system, rootfs/etc, hybris-linker) and
-// keep only rootfs/data writable there. The drm-native path is only a
-// directory marker — nothing is executed.
+// DRM runs in-process (NativeBackend + libdrm_client.so).
+// libdrm_client.so has no Android/hybris dependencies — only OpenSSL + libcurl.
+// The only writable state it needs is drm/files/ (MUSIC_TOKEN, STOREFRONT_ID,
+// mpl_db/) which lives in the user config dir for packaged builds.
 function ensureUserDRM() {
-    const userDir       = path.join(CONFIG_DIR, 'drm');
-    const userRootfs    = path.join(userDir, 'rootfs');
-    const bundledRootfs = path.join(process.resourcesPath, 'rootfs');
-
+    const userDir = path.join(CONFIG_DIR, 'drm');
     mkdirSync(userDir, { recursive: true });
 
-    // Link, never copy, the read-only rootfs parts: a copy made by an older
-    // release goes stale when the bundle changes (e.g. a new Android lib such
-    // as libdl.so), and dlopen then fails. Relinked every launch because an
-    // AppImage mounts at a new /tmp/.mount_* path each run. rmSync removes the
-    // app-managed copy/link from earlier launches; it never follows a symlink.
-    mkdirSync(path.join(userRootfs, 'data', 'data', 'com.apple.android.music', 'files'), { recursive: true });
-    for (const sub of ['system', 'etc']) {
-        const target = path.join(bundledRootfs, sub);
-        if (!existsSync(target)) continue;
-        const link = path.join(userRootfs, sub);
-        try {
-            rmSync(link, { recursive: true, force: true });
-            symlinkSync(target, link, 'dir');
-        } catch (e) { console.error(`[AML] rootfs/${sub} link failed — DRM may be unavailable:`, e.message); }
+    // Clean up stale artefacts from the old hybris-based DRM path.
+    for (const stale of ['drm-rootless', 'drm-native', 'hybris-linker']) {
+        try { unlinkSync(path.join(userDir, stale)); } catch {}
     }
 
-    const linkerLink = path.join(userDir, 'hybris-linker');
-    try { unlinkSync(linkerLink); } catch {}
-    const bundledLinker = path.join(process.resourcesPath, 'hybris-linker');
-    if (existsSync(bundledLinker)) {
-        try { symlinkSync(bundledLinker, linkerLink, 'dir'); }
-        catch (e) { console.error('[AML] hybris-linker link failed — DRM will be unavailable:', e.message); }
-    }
-
-    // Launcher script left by pre-hybris installs (subprocess DRM).
-    try { unlinkSync(path.join(userDir, 'drm-rootless')); } catch {}
-
-    return { drmMarker: path.join(userDir, 'drm-native'), userRootfs };
+    return path.join(userDir, 'files');
 }
 
 function ensureEngineConfig() {
     mkdirSync(ENGINE_DATA_DIR, { recursive: true });
     const cfgPath = path.join(ENGINE_DATA_DIR, 'config.yaml');
 
-    let drmBin, drmBase;
+    let drmBase;
     if (app.isPackaged) {
-        const { drmMarker, userRootfs } = ensureUserDRM();
-        drmBin  = drmMarker;
-        // The session (tokens, account database) must be writable and survive updates, so it
-        // lives in the user's config dir. The bundle (an AppImage mount, /opt, a Flatpak /app)
-        // can be read-only: the engine failed to start there.
-        drmBase = path.join(CONFIG_DIR, 'drm', 'files');
+        // Session tokens (MUSIC_TOKEN, STOREFRONT_ID, mpl_db/) must survive app updates
+        // and live in the user config dir (the AppImage/bundle root may be read-only).
+        drmBase = ensureUserDRM();
         const legacyBase = path.join(__dirname, '..', 'drm', 'files');
         if (!existsSync(drmBase) && existsSync(legacyBase)) {
-            try { cpSync(legacyBase, drmBase, { recursive: true }); } // sessions saved inside the install dir by older builds
+            try { cpSync(legacyBase, drmBase, { recursive: true }); }
             catch (e) { console.error('[AML] could not migrate the DRM session:', e.message); }
         }
         mkdirSync(drmBase, { recursive: true });
     } else {
-        // Dev: the repo's own drm/ directory — it holds libdrm_client.so, rootfs/ and files/.
-        drmBin  = path.join(__dirname, '..', 'drm');
+        // Dev: use the repo's own drm/files/ directly.
         drmBase = path.join(__dirname, '..', 'drm', 'files');
     }
 
@@ -295,17 +260,18 @@ function ensureEngineConfig() {
             'get-m3u8-mode: hires',
             'aac-type: aac-lc',
             'alac-max: 192000',
-            `drm-binary-path: "${drmBin}"`,
             `drm-base-dir: "${drmBase}"`,
         ].join('\n') + '\n';
         writeFileSync(cfgPath, stub);
         return;
     }
 
-    // Patch existing config: add missing drm paths or update stale ones.
+    // Patch existing config: add missing drm-base-dir or update a stale one.
+    // Remove stale drm-binary-path lines left by older builds (no longer used).
     let content = readFile(cfgPath, 'utf8');
-    let changed = false;
-    for (const [key, val] of [['drm-binary-path', drmBin], ['drm-base-dir', drmBase]]) {
+    content = content.replace(/^drm-binary-path:.*\n?/m, '');
+    let changed = content !== readFile(cfgPath, 'utf8');
+    for (const [key, val] of [['drm-base-dir', drmBase]]) {
         const line = `${key}: "${val}"`;
         if (!content.includes(`${key}:`)) {
             content += `${line}\n`;

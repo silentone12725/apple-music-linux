@@ -10,7 +10,7 @@
 #                                runs; rebuild with `npm run build:go` and `make -C drm`
 #   scripts/clean.sh --dry-run   list what would be removed, remove nothing (combine with the above)
 #
-# Never touched: sources, node_modules, drm/files (your Apple session), drm/rootfs.
+# Never touched: sources, node_modules, drm/files (your Apple session).
 
 set -euo pipefail
 

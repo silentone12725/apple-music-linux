@@ -80,6 +80,7 @@ drm/libdrm_client.so
 drm/tests/test_fairplay
 drm/tests/test_device
 drm/tests/test_fp_exchange
+drm/tests/test_live_exchange
 drm/*.o
 
 # ── DRM / Android container runtime state ─────────────────────────────────────
@@ -181,3 +182,12 @@ drm/*.o
 .flatpak-builder/
 .flatpak-repo/
 .ffmpeg-build/
+
+# ── Local-only research material and tooling (never publish) ──────────────────
+/.mcp.json
+/resources/
+/AppleInc.*/
+/drm/rootfs/
+/drm/native/
+/drm/hybris-linker/
+/drm/libhybris-core.so

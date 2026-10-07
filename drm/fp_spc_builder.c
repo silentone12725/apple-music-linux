@@ -182,34 +182,55 @@ static fp_error_t fp_build_auth_data(
 
 fp_error_t fp_parse_skd_uri(const char *uri, uint8_t kid[16]) {
     if (!uri || !kid) return FP_ERR_NULL_POINTER;
-    
-    /* Find the KID portion (hex string after last '/') */
-    const char *last_slash = strrchr(uri, '/');
-    if (!last_slash || last_slash == uri) {
+
+    /* Two URI forms observed in the wild:
+     *
+     *  (1) Hex KID:  skd://<32 hex chars>[?...]
+     *      Used by some content distributors; the 16-byte KID is embedded
+     *      directly as a lowercase hex string after "skd://".
+     *
+     *  (2) Apple Music path:  skd://itunes.apple.com/p<id>/c<id>
+     *      The URI is a content identifier, not a hex KID. Derive 16 bytes
+     *      by taking the first 16 bytes of SHA-256(uri).
+     */
+
+    const char *skd_prefix = "skd://";
+    size_t prefix_len = 6;
+    if (strncmp(uri, skd_prefix, prefix_len) != 0) {
         return FP_ERR_PSSH_PARSE_FAILED;
     }
-    
-    const char *kid_start = last_slash + 1;
-    const char *question_mark = strchr(kid_start, '?');
-    size_t kid_hex_len = question_mark ? 
-                        (size_t)(question_mark - kid_start) : 
-                        strlen(kid_start);
-    
-    /* KID should be 32 hex characters (16 bytes) */
-    if (kid_hex_len != 32) {
-        return FP_ERR_PSSH_PARSE_FAILED;
-    }
-    
-    /* Convert hex to binary */
-    for (size_t i = 0; i < 16; i++) {
-        uint8_t high = hex_char_to_value(kid_start[i * 2]);
-        uint8_t low = hex_char_to_value(kid_start[i * 2 + 1]);
-        if (high == 0xFF || low == 0xFF) {
-            return FP_ERR_PSSH_PARSE_FAILED;
+
+    const char *after_prefix = uri + prefix_len;
+
+    /* Form (1): exactly 32 hex chars (optionally followed by '?') */
+    const char *question_mark = strchr(after_prefix, '?');
+    size_t segment_len = question_mark ?
+                         (size_t)(question_mark - after_prefix) :
+                         strlen(after_prefix);
+
+    if (strchr(after_prefix, '/') == NULL && segment_len == 32) {
+        /* Validate and decode hex KID */
+        bool all_hex = true;
+        for (size_t i = 0; i < 32 && all_hex; i++) {
+            uint8_t v = hex_char_to_value(after_prefix[i]);
+            if (v == 0xFF) all_hex = false;
         }
-        kid[i] = (high << 4) | low;
+        if (all_hex) {
+            for (size_t i = 0; i < 16; i++) {
+                uint8_t high = hex_char_to_value(after_prefix[i * 2]);
+                uint8_t low  = hex_char_to_value(after_prefix[i * 2 + 1]);
+                kid[i] = (high << 4) | low;
+            }
+            return FP_OK;
+        }
     }
-    
+
+    /* Form (2): path-style URI — derive KID as first 16 bytes of SHA-256(uri) */
+    unsigned char digest[32];
+    if (EVP_Digest(uri, strlen(uri), digest, NULL, EVP_sha256(), NULL) != 1) {
+        return FP_ERR_PSSH_PARSE_FAILED;
+    }
+    memcpy(kid, digest, 16);
     return FP_OK;
 }
 

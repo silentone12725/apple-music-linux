@@ -22,8 +22,6 @@ die() { echo "Error: $*" >&2; exit 1; }
 
 [ -x "$REPO/electron/dist/linux-unpacked/apple-music-linux" ] \
     || die "electron/dist/linux-unpacked not found — run scripts/build-installer.sh or 'npm run dist' first"
-[ ! -e "$REPO/electron/dist/linux-unpacked/resources/rootfs/data" ] \
-    || die "resources/rootfs/data present — it holds a personal Apple session; refusing to package it"
 command -v flatpak >/dev/null 2>&1 || die "flatpak is required"
 
 if command -v flatpak-builder >/dev/null 2>&1; then
