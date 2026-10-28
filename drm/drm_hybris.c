@@ -17,6 +17,16 @@
 #include <stdint.h>
 #include <pthread.h>
 
+extern void hybris_bind_lib_handles(void *ssc, void *apm, void *core);
+
+/* Windows loads these libraries RTLD_GLOBAL so the later symbol lookups through the
+ * wrapper see them; the Linux flags are unchanged. */
+#ifdef _WIN32
+#define HYBRIS_WIN_RTLD_GLOBAL RTLD_GLOBAL
+#else
+#define HYBRIS_WIN_RTLD_GLOBAL 0
+#endif
+
 #ifdef _WIN32
 /* The Windows loader path does not use POSIX dlopen/dlsym.  Keep only the
  * flag values needed by the Android linker API. */
@@ -49,13 +59,26 @@ static int hybris_setenv(const char *name, const char *value, int overwrite)
  */
 static __attribute__((aligned(64))) uint64_t g_bionic_tls_slots[32];
 static __attribute__((aligned(16))) uint64_t g_bionic_pthread_stub[64];
+static uint64_t g_host_fs_base;
+static int g_host_fs_saved;
 
-static void setup_bionic_fs_base_win(void) {
-    memset(g_bionic_tls_slots,   0, sizeof(g_bionic_tls_slots));
+void hybris_guest_fs_enter(void)
+{
+    __asm__ volatile("wrfsbase %0" ::"r"((uint64_t)(uintptr_t)g_bionic_tls_slots) : "memory");
+}
+
+void hybris_guest_fs_leave(void)
+{
+    __asm__ volatile("wrfsbase %0" ::"r"(g_host_fs_base) : "memory");
+}
+
+static void setup_bionic_fs_base_win(void)
+{
+    memset(g_bionic_tls_slots, 0, sizeof(g_bionic_tls_slots));
     memset(g_bionic_pthread_stub, 0, sizeof(g_bionic_pthread_stub));
     g_bionic_tls_slots[0] = (uint64_t)(uintptr_t)g_bionic_tls_slots;    /* self */
     g_bionic_tls_slots[1] = (uint64_t)(uintptr_t)g_bionic_pthread_stub; /* tid  */
-    __asm__ volatile("wrfsbase %0" :: "r"((uint64_t)(uintptr_t)g_bionic_tls_slots) : "memory");
+    __asm__ volatile("wrfsbase %0" ::"r"((uint64_t)(uintptr_t)g_bionic_tls_slots) : "memory");
 }
 #else
 #include <dlfcn.h>
@@ -153,9 +176,15 @@ int hybris_backend_init(
      * android_dlopen calls see a valid fs base.
      */
 #ifdef _WIN32
-    fprintf(stderr, "[drm] calling setup_bionic_fs_base_win\n"); fflush(stderr);
+    fprintf(stderr, "[drm] calling setup_bionic_fs_base_win\n");
+    fflush(stderr);
+    if (!g_host_fs_saved) {
+        __asm__ volatile("rdfsbase %0" : "=r"(g_host_fs_base));
+        g_host_fs_saved = 1;
+    }
     setup_bionic_fs_base_win();
-    fprintf(stderr, "[drm] fs base set, tls[0]=%p\n", (void*)(uintptr_t)g_bionic_tls_slots[0]); fflush(stderr);
+    fprintf(stderr, "[drm] fs base set, tls[0]=%p\n", (void *)(uintptr_t)g_bionic_tls_slots[0]);
+    fflush(stderr);
 #endif
 
     /*
@@ -184,23 +213,29 @@ int hybris_backend_init(
     g_hybris.android_dlclose = NULL; /* not exposed by embedded loader */
 
     /* libandroidappmusic.so depends on libCoreFP.so; load it first. */
-    fprintf(stderr, "[drm] loading libCoreFP.so\n"); fflush(stderr);
-    g_hybris.corefp_handle = g_hybris.android_dlopen("libCoreFP.so", RTLD_NOW);
-    fprintf(stderr, "[drm] libCoreFP.so handle=%p\n", g_hybris.corefp_handle); fflush(stderr);
+    fprintf(stderr, "[drm] loading libCoreFP.so\n");
+    fflush(stderr);
+    g_hybris.corefp_handle = g_hybris.android_dlopen("libCoreFP.so", RTLD_NOW | HYBRIS_WIN_RTLD_GLOBAL);
+    fprintf(stderr, "[drm] libCoreFP.so handle=%p\n", g_hybris.corefp_handle);
+    fflush(stderr);
     if (!g_hybris.corefp_handle)
         fprintf(stderr, "[hybris] libCoreFP.so: load failed\n");
 
     /* ── Load libandroidappmusic.so (proven path) ── */
     /* Must also load libstoreservicescore.so first (dependency) */
-    fprintf(stderr, "[drm] loading libstoreservicescore.so\n"); fflush(stderr);
+    fprintf(stderr, "[drm] loading libstoreservicescore.so\n");
+    fflush(stderr);
     g_hybris.ssc_handle = g_hybris.android_dlopen("libstoreservicescore.so", RTLD_NOW | RTLD_GLOBAL);
-    fprintf(stderr, "[drm] libstoreservicescore.so handle=%p\n", g_hybris.ssc_handle); fflush(stderr);
+    fprintf(stderr, "[drm] libstoreservicescore.so handle=%p\n", g_hybris.ssc_handle);
+    fflush(stderr);
     if (!g_hybris.ssc_handle)
         fprintf(stderr, "[hybris] libstoreservicescore.so: load failed (may still work)\n");
 
-    fprintf(stderr, "[drm] loading libandroidappmusic.so\n"); fflush(stderr);
-    g_hybris.appmusic_handle = g_hybris.android_dlopen("libandroidappmusic.so", RTLD_NOW);
-    fprintf(stderr, "[drm] libandroidappmusic.so handle=%p\n", g_hybris.appmusic_handle); fflush(stderr);
+    fprintf(stderr, "[drm] loading libandroidappmusic.so\n");
+    fflush(stderr);
+    g_hybris.appmusic_handle = g_hybris.android_dlopen("libandroidappmusic.so", RTLD_NOW | HYBRIS_WIN_RTLD_GLOBAL);
+    fprintf(stderr, "[drm] libandroidappmusic.so handle=%p\n", g_hybris.appmusic_handle);
+    fflush(stderr);
     if (g_hybris.appmusic_handle) {
 #ifdef _WIN32
         void *nfc_symbol = g_hybris.android_dlsym(
@@ -226,8 +261,18 @@ int hybris_backend_init(
         return -1;
     }
 
+#ifdef _WIN32
+    /* Share the handles opened above with the native wrapper. Its symbol
+     * forwarding layer must not open the same guest libraries a second time. */
+    hybris_bind_lib_handles(g_hybris.ssc_handle, g_hybris.appmusic_handle,
+                            g_hybris.corefp_handle);
+#endif
+
     g_hybris.initialized = 1;
     DRM_DEBUG("[hybris] initialized\n");
+#ifdef _WIN32
+    hybris_guest_fs_leave();
+#endif
     pthread_mutex_unlock(&g_hybris.lock);
     return 0;
 }

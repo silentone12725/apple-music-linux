@@ -265,7 +265,7 @@ int split_string_safe(const char *str, const char *delim, char **components,
     return count;
 }
 
-static void dialogHandler(long j, struct shared_ptr *protoDialogPtr,
+static void __attribute__((sysv_abi)) dialogHandler(int64_t j, struct shared_ptr *protoDialogPtr,
                           struct shared_ptr *respHandler) {
     const char *const title = std_string_data(
         _ZNK17storeservicescore14ProtocolDialog5titleEv(protoDialogPtr->obj));
@@ -311,7 +311,7 @@ static void dialogHandler(long j, struct shared_ptr *protoDialogPtr,
         apInf.obj, &j, &diagResp);
 }
 
-static void credentialHandler(struct shared_ptr *credReqHandler,
+static void __attribute__((sysv_abi)) credentialHandler(struct shared_ptr *credReqHandler,
                               struct shared_ptr *credRespHandler) {
     const uint8_t need2FA =
         _ZNK17storeservicescore18CredentialsRequest28requiresHSA2VerificationCodeEv(
@@ -372,6 +372,7 @@ static void credentialHandler(struct shared_ptr *credReqHandler,
     struct shared_ptr credResp = {.obj = ptr + 24, .ctrl_blk = ptr};
     _ZN17storeservicescore19CredentialsResponseC1Ev(credResp.obj);
 
+    DRM_DEBUG("[.] credential payload lengths: username=%zu password=%zu\n", amUsername ? strlen(amUsername) : 0, amPassword ? strlen(amPassword) : 0);
     union std_string username = new_std_string(amUsername);
     _ZN17storeservicescore19CredentialsResponse11setUserNameERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
         credResp.obj, &username);
@@ -408,8 +409,10 @@ void drm_init_internal(void) {
     // }
     union std_string conf1 = new_std_string(device_infos[8]);
     union std_string conf2 = new_std_string("");
+    DRM_DEBUG("[trace] before FootHillConfig\n");
     _ZN14FootHillConfig6configERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE(
         &conf1);
+    DRM_DEBUG("[trace] after FootHillConfig\n");
 
     // union std_string root = new_std_string("/");
     // union std_string natLib = new_std_string("/system/lib64/");
@@ -418,13 +421,17 @@ void drm_init_internal(void) {
     //     foothill, &root, &natLib);
     // _ZN8FootHill24defaultContextIdentifierEv(foothill);
 
+    DRM_DEBUG("[trace] before DeviceGUID::instance\n");
     _ZN17storeservicescore10DeviceGUID8instanceEv(&g_GUID);
+    DRM_DEBUG("[trace] after DeviceGUID::instance obj=%p\n", g_GUID.obj);
 
     static uint8_t ret[88];
     static unsigned int conf3 = 29;
     static uint8_t conf4 = 1;
+    DRM_DEBUG("[trace] before DeviceGUID::configure\n");
     _ZN17storeservicescore10DeviceGUID9configureERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_RKjRKb(
         &ret, g_GUID.obj, &conf1, &conf2, &conf3, &conf4);
+    DRM_DEBUG("[trace] after DeviceGUID::configure\n");
 }
 
 struct shared_ptr drm_init_ctx(void) {
@@ -552,10 +559,17 @@ uint8_t login(struct shared_ptr reqCtx) {
 
         struct shared_ptr *err = _ZNK17storeservicescore20AuthenticateResponse5errorEv(resp->obj);
         if (err != NULL && err->obj != NULL) {
-            int code = _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err->obj);
+            int code = store_error_code(err->obj);
             const char *what = _ZNK17storeservicescore19StoreErrorCondition4whatEv(err->obj);
+#ifdef _WIN32
+            /* StoreErrorCondition keeps the platform error code 80 bytes in. */
+            int64_t external_code = *(int64_t *)((char *)err->obj + 80);
+            fprintf(stderr, "[!] auth error: code=%d, external=%lld, message=%s\n", code, (long long)external_code, what ? what : "none");
+#else
             fprintf(stderr, "[!] auth error: code=%d, message=%s\n", code, what ? what : "none");
+#endif
         } else {
+
             fprintf(stderr, "[!] auth failed: response type %d\n", respType);
         }
     }
@@ -627,6 +641,23 @@ void *getKdContext(const char *const adam,
             return cached;
     }
 
+#ifdef _WIN32
+    /* The Android key-session path assumes a device token exists. If token
+     * acquisition failed, it can throw from the guest library while trying
+     * to negotiate a key. Fail the request cleanly and let auth recover. */
+    if (g_dev_token == NULL || g_dev_token[0] == '\0') {
+        fprintf(stderr, "[drm] key context unavailable: device token is missing\n");
+        return NULL;
+    }
+    /* Do not enter the Android key-session path until Windows has a live
+     * FairPlay subscription status. On an empty status vector the guest
+     * library throws while processing the placeholder startup key and its
+     * unwinder crashes the host process. */
+    if (!offlineFlag) {
+        fprintf(stderr, "[drm] key context unavailable: Windows FairPlay subscription is not active\n");
+        return NULL;
+    }
+#endif
     DRM_DEBUG("[.] adamId: %s, uri: %s\n", adam, uri);
 
     union std_string defaultId = new_std_string(adam);
@@ -1920,7 +1951,7 @@ char *get_music_user_token(char *guid, char *authToken, struct shared_ptr reqCtx
     _ZN17storeservicescore10URLRequest3runEv(urlRequest);
     struct shared_ptr *err = _ZNK17storeservicescore10URLRequest5errorEv(urlRequest);
     if (err->obj != NULL) {
-        int code = _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err->obj);
+        int code = store_error_code(err->obj);
         const char *what = _ZNK17storeservicescore19StoreErrorCondition4whatEv(err->obj);
         fprintf(stderr, "[!] createMusicToken error: code=%d, message=%s\n", code, what ? what : "none");
         return NULL;
@@ -1968,7 +1999,7 @@ char* get_dev_token(struct shared_ptr reqCtx) {
     _ZN17storeservicescore10URLRequest3runEv(urlRequest);
     struct shared_ptr *err = _ZNK17storeservicescore10URLRequest5errorEv(urlRequest);
     if (err->obj != NULL) {
-        int code = _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err->obj);
+        int code = store_error_code(err->obj);
         const char *what = _ZNK17storeservicescore19StoreErrorCondition4whatEv(err->obj);
         fprintf(stderr, "[!] devToken error: code=%d, message=%s\n", code, what ? what : "none");
         return NULL;

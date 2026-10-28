@@ -33,14 +33,33 @@ struct std_vector {
 };
 
 static inline union std_string new_std_string(const char *s) {
+#ifdef _WIN32
+	/* Android libc++ uses a tagged 24-byte string. The old Windows bridge
+	 * emitted cap=1 for every input, which marks a long string with zero
+	 * capacity. Copying that value inside libandroidappmusic can throw and
+	 * crash the guest unwinder. Encode short strings inline and long strings
+	 * with a valid even capacity plus the long-string tag bit. */
+	size_t n = strlen(s);
+	union std_string str = {0};
+	if (n <= 22) {
+		str.mark = (uint8_t)(n << 1);
+		memcpy(str.str, s, n);
+		str.str[n] = '\0';
+	} else {
+		str.cap = ((n + 1) & ~(size_t)1) | (size_t)1;
+		str.size = n;
+		str.data = s;
+	}
+	return str;
+#else
 	union std_string str = {
 		.cap = 1,
 		.size = strlen(s),
 		.data = s,
 	};
 	return str;
+#endif
 }
-
 static inline struct std_vector new_std_vector(void *begin) {
     struct std_vector vector = {
         .begin = begin,
@@ -92,10 +111,10 @@ extern void _ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentatio
 
 extern void
 _ZN20androidstoreservices28AndroidPresentationInterface16setDialogHandlerEPFvlNSt6__ndk110shared_ptrIN17storeservicescore14ProtocolDialogEEENS2_INS_36AndroidProtocolDialogResponseHandlerEEEE(
-	void *, void (*)(long, struct shared_ptr *, struct shared_ptr *));
+	void *, void (__attribute__((sysv_abi)) *)(int64_t, struct shared_ptr *, struct shared_ptr *));
 extern void
 _ZN20androidstoreservices28AndroidPresentationInterface21setCredentialsHandlerEPFvNSt6__ndk110shared_ptrIN17storeservicescore18CredentialsRequestEEENS2_INS_33AndroidCredentialsResponseHandlerEEEE(
-	void *, void (*)(struct shared_ptr *, struct shared_ptr *));
+	void *, void (__attribute__((sysv_abi)) *)(struct shared_ptr *, struct shared_ptr *));
 
 extern void
 _ZN17storeservicescore14RequestContext24setPresentationInterfaceERKNSt6__ndk110shared_ptrINS_21PresentationInterfaceEEE(
@@ -132,7 +151,7 @@ extern uint8_t _ZNK17storeservicescore18CredentialsRequest28requiresHSA2Verifica
 
 extern void
 _ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKlRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE(
-	void *, long *j, struct shared_ptr *);
+	void *, int64_t *j, struct shared_ptr *);
 // androidstoreservices::AndroidPresentationInterface::handleCredentialsResponse(std::__ndk1::shared_ptr<storeservicescore::CredentialsResponse>
 // const&)
 extern void
@@ -289,7 +308,20 @@ extern struct std_vector _ZNK17storeservicescore16PurchaseResponse5itemsEv(void 
 extern struct std_vector _ZNK17storeservicescore12PurchaseItem6assetsEv(void *);
 extern union std_string *_ZNK17storeservicescore13PurchaseAsset3URLEv(void *, void *);
 extern union std_string *_ZNK17storeservicescore13PurchaseAsset11downloadKeyEv(void *, void *);
+#ifdef _WIN32
+/* On Windows the bridge returns a pointer to the error code object. */
+struct native_error_code { int value; int padding; void *category; };
+extern struct native_error_code *_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *);
+static inline int store_error_code(void *err) {
+	struct native_error_code *c = _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err);
+	return c ? c->value : -1;
+}
+#else
 extern int _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *);
+static inline int store_error_code(void *err) {
+	return _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err);
+}
+#endif
 extern const char *_ZNK17storeservicescore19StoreErrorCondition4whatEv(void *);
 extern struct shared_ptr *_ZNK17storeservicescore20AuthenticateResponse5errorEv(void *);
 extern union std_string *_ZNK17storeservicescore20AuthenticateResponse15customerMessageEv(void *);

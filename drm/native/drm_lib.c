@@ -63,6 +63,10 @@ extern void          *g_drm_state_ud;
 extern void hybris_init_callbacks(void);
 extern void start_recovery_thread(void);
 extern int hybris_init_libs(const char *lib64_path);
+#ifdef _WIN32
+extern void hybris_guest_fs_enter(void);
+extern void hybris_guest_fs_leave(void);
+#endif
 
 /* account helpers */
 extern char *get_account_storefront_id(struct shared_ptr reqCtx);
@@ -106,9 +110,9 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     g_drm_state_cb = cfg->state_cb;
     g_drm_state_ud = cfg->state_ud;
 
-    /* If the Android lib64 dir is provided, initialise hybris now.
-     * The hybris_ctor constructor may have been a no-op (env var not set at
-     * load time when running in-process), so we re-run init here. */
+    /* The wrapper keeps its own handles for symbol forwarding.  Initialize
+     * those handles here; hybris_init_libs() is idempotent, so this reuses the
+     * namespace already opened by the backend rather than reloading it. */
     if (cfg->lib64_dir && cfg->lib64_dir[0]) {
         setenv("HYBRIS_ANDROID_LIB64", cfg->lib64_dir, 1);
         if (hybris_init_libs(cfg->lib64_dir) != 0) {
@@ -160,6 +164,11 @@ int drm_lib_init(const drm_lib_config_t *cfg)
      * Run the exact same sequence as main() up to RUNNING state.
      * hybris_init_libs() was already called by hybris_ctor.c's __attribute__((constructor)).
      */
+#ifdef _WIN32
+    /* q.so rewrites normal guest TLS accesses to its Windows TLS backend;
+     * leave the host TEB installed while entering the wrapper. */
+    hybris_guest_fs_leave();
+#endif
     drm_init_internal();
     hybris_init_callbacks();
 
@@ -167,6 +176,9 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     if (reqCtx.obj == NULL) {
         fprintf(stderr, "[drm_lib] drm_init_ctx failed\n");
         g_init_result = -1;
+#ifdef _WIN32
+        hybris_guest_fs_leave();
+#endif
         pthread_mutex_unlock(&g_init_mutex);
         return -1;
     }
@@ -177,6 +189,9 @@ int drm_lib_init(const drm_lib_config_t *cfg)
         if (!login(reqCtx)) {
             fprintf(stderr, "[drm_lib] login failed\n");
             g_init_result = -1;
+#ifdef _WIN32
+            hybris_guest_fs_leave();
+#endif
             pthread_mutex_unlock(&g_init_mutex);
             return -1;
         }
@@ -207,11 +222,48 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     if (!g_storefront_id) {
         fprintf(stderr, "[drm_lib] failed to get storefront ID\n");
         g_init_result = -1;
+#ifdef _WIN32
+        hybris_guest_fs_leave();
+#endif
         pthread_mutex_unlock(&g_init_mutex);
         return -1;
     }
     DRM_DEBUG("[drm_lib] storefront_id=%s, get_dev_token\n", g_storefront_id);
     g_dev_token = get_dev_token(reqCtx);
+#ifdef _WIN32
+    if (!g_dev_token && cfg->base_dir && !g_music_token) {
+        /* The device-token endpoint can be unavailable while an authenticated
+         * Music token from the app session is still usable. Try that cache
+         * before failing init. */
+        char tok_path[1024];
+        snprintf(tok_path, sizeof(tok_path), "%s/MUSIC_TOKEN", cfg->base_dir);
+        FILE *tf = fopen(tok_path, "r");
+        if (tf) {
+            char buf[8192];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, tf);
+            fclose(tf);
+            buf[n] = '\0';
+            while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' ')) buf[--n] = '\0';
+            if (n > 0) {
+                g_music_token = strdup(buf);
+                fprintf(stderr, "[drm_lib] dev token unavailable; using cached MUSIC_TOKEN (%zu bytes)\n", n);
+            }
+        }
+    }
+    if (!g_dev_token && !g_music_token) {
+        fprintf(stderr, "[drm_lib] failed to get dev token and no cached MUSIC_TOKEN is available\n");
+        g_init_result = -1;
+#ifdef _WIN32
+        hybris_guest_fs_leave();
+#endif
+        pthread_mutex_unlock(&g_init_mutex);
+        return -1;
+    }
+    if (g_dev_token) {
+        DRM_DEBUG("[drm_lib] dev_token ok, get_music_token\n");
+        g_music_token = get_music_user_token(get_guid(), g_dev_token, reqCtx);
+    }
+#else
     if (!g_dev_token) {
         fprintf(stderr, "[drm_lib] failed to get dev token\n");
         g_init_result = -1;
@@ -220,6 +272,7 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     }
     DRM_DEBUG("[drm_lib] dev_token ok, get_music_token\n");
     g_music_token = get_music_user_token(get_guid(), g_dev_token, reqCtx);
+#endif
     if (!g_music_token && cfg->base_dir) {
         /* createMusicToken failed (session may be expired) — fall back to the
          * MUSIC_TOKEN stored in drm/files/ by the web-session path. */
@@ -241,6 +294,9 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     if (!g_music_token) {
         fprintf(stderr, "[drm_lib] failed to get music token\n");
         g_init_result = -1;
+#ifdef _WIN32
+        hybris_guest_fs_leave();
+#endif
         pthread_mutex_unlock(&g_init_mutex);
         return -1;
     }
@@ -258,6 +314,9 @@ int drm_lib_init(const drm_lib_config_t *cfg)
         g_drm_state_cb("RUNNING", g_drm_state_ud);
 
     g_init_result = 0;
+#ifdef _WIN32
+    hybris_guest_fs_leave();
+#endif
     pthread_mutex_unlock(&g_init_mutex);
     return 0;
 }

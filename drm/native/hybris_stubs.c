@@ -24,6 +24,16 @@ extern void android_update_LD_LIBRARY_PATH(const char *path);
 
 static void *h_ssc = NULL;  /* libstoreservicescore.so */
 static void *h_apm = NULL;  /* libandroidappmusic.so   */
+static void *h_core = NULL; /* libCoreFP.so             */
+
+/* The backend opens these libraries once while probing FairPlay. Re-opening
+ * them through q.so on Windows can re-enter the guest linker and crash, so
+ * the backend hands its existing handles to this resolver. */
+void hybris_bind_lib_handles(void *ssc, void *apm, void *core) {
+    if (ssc) h_ssc = ssc;
+    if (apm) h_apm = apm;
+    if (core) h_core = core;
+}
 
 /* ── vtable data arrays ──────────────────────────────────────────────────────
  * import.h declares these as "extern void *_ZTV...;" (single pointer).
@@ -44,8 +54,12 @@ void *_ZTVNSt6__ndk120__shared_ptr_emplaceIN13mediaplatform11HTTPMessageENS_9all
 
 /* ── symbol resolver ─────────────────────────────────────────────────────── */
 static void *sym(const char *name) {
+    int dbg = drm_lib_debug_enabled();
+    if (dbg) fprintf(stderr, "[trace] resolve %s h_ssc=%p h_apm=%p\n", name, h_ssc, h_apm);
     void *p = android_dlsym(h_ssc, name);
     if (!p) p = android_dlsym(h_apm, name);
+    if (!p && h_core) p = android_dlsym(h_core, name);
+    if (dbg) fprintf(stderr, "[trace] resolve %s -> %p\n", name, p);
     if (!p) { fprintf(stderr, "[hybris] FATAL: %s\n", name); abort(); }
     return p;
 }
@@ -82,6 +96,14 @@ static void setup_bionic_fs_base(void) {
  * take the whole engine down instead of just disabling DRM. */
 int hybris_init_libs(const char *lib64) {
     char path[512];
+
+    /* hybris_backend_init() loads the Android libraries before
+     * hybris_fairplay_init() enters drm_lib_init().  Library mode calls this
+     * function from both paths, so do not reconfigure q.so or reload the
+     * already-loaded namespace on the second call. */
+#ifdef _WIN32
+    if (h_ssc && h_apm) return 0;
+#endif
 
     /* pre-load implicit system libs so verneed checks pass.
      * On Windows the Q linker handles bionic (libc/libm/libdl) through its own
@@ -320,6 +342,9 @@ void _ZN17storeservicescore14RequestContext24setFairPlayDirectoryPathERKNSt6__nd
 void _ZN14FootHillConfig6configERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE(union std_string *cfg) {
     static void (__attribute__((sysv_abi)) *fn)(union std_string*) = NULL;
     if (!fn) fn = sym("_ZN14FootHillConfig6configERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE");
+    if (drm_lib_debug_enabled())
+        fprintf(stderr, "[trace] FootHill fn=%p cfg=%p cap=%zx size=%zx data=%p\n",
+                (void *)fn, (void *)cfg, cfg->cap, cfg->size, (void *)cfg->data);
     fn(cfg);
 }
 
@@ -337,14 +362,14 @@ void _ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentationInterf
 }
 
 void _ZN20androidstoreservices28AndroidPresentationInterface16setDialogHandlerEPFvlNSt6__ndk110shared_ptrIN17storeservicescore14ProtocolDialogEEENS2_INS_36AndroidProtocolDialogResponseHandlerEEEE(
-    void *obj, void (*handler)(long, struct shared_ptr *, struct shared_ptr *)) {
+    void *obj, void (__attribute__((sysv_abi)) *handler)(int64_t, struct shared_ptr *, struct shared_ptr *)) {
     static void (__attribute__((sysv_abi)) *fn)(void*,void*) = NULL;
     if (!fn) fn = sym("_ZN20androidstoreservices28AndroidPresentationInterface16setDialogHandlerEPFvlNSt6__ndk110shared_ptrIN17storeservicescore14ProtocolDialogEEENS2_INS_36AndroidProtocolDialogResponseHandlerEEEE");
     fn(obj,(void*)handler);
 }
 
 void _ZN20androidstoreservices28AndroidPresentationInterface21setCredentialsHandlerEPFvNSt6__ndk110shared_ptrIN17storeservicescore18CredentialsRequestEEENS2_INS_33AndroidCredentialsResponseHandlerEEEE(
-    void *obj, void (*handler)(struct shared_ptr *, struct shared_ptr *)) {
+    void *obj, void (__attribute__((sysv_abi)) *handler)(struct shared_ptr *, struct shared_ptr *)) {
     static void (__attribute__((sysv_abi)) *fn)(void*,void*) = NULL;
     if (!fn) fn = sym("_ZN20androidstoreservices28AndroidPresentationInterface21setCredentialsHandlerEPFvNSt6__ndk110shared_ptrIN17storeservicescore18CredentialsRequestEEENS2_INS_33AndroidCredentialsResponseHandlerEEEE");
     fn(obj,(void*)handler);
@@ -490,8 +515,8 @@ uint8_t _ZNK17storeservicescore18CredentialsRequest28requiresHSA2VerificationCod
 }
 
 void _ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKlRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE(
-    void *obj, long *j, struct shared_ptr *resp) {
-    static void (__attribute__((sysv_abi)) *fn)(void*,long*,struct shared_ptr*) = NULL;
+    void *obj, int64_t *j, struct shared_ptr *resp) {
+    static void (__attribute__((sysv_abi)) *fn)(void*,int64_t*,struct shared_ptr*) = NULL;
     if (!fn) fn = sym("_ZN20androidstoreservices28AndroidPresentationInterface28handleProtocolDialogResponseERKlRKNSt6__ndk110shared_ptrIN17storeservicescore22ProtocolDialogResponseEEE");
     fn(obj,j,resp);
 }
@@ -800,11 +825,19 @@ union std_string *_ZNK17storeservicescore13PurchaseAsset11downloadKeyEv(void *ob
     if (!fn) fn = sym("_ZNK17storeservicescore13PurchaseAsset11downloadKeyEv");
     return fn(obj,out);
 }
+#ifdef _WIN32
+struct native_error_code *_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *obj) {
+    static struct native_error_code *(__attribute__((sysv_abi)) *fn)(void *) = NULL;
+    if (!fn) fn = sym("_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv");
+    return fn(obj);
+}
+#else
 int _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *obj) {
     static int (__attribute__((sysv_abi)) *fn)(void*) = NULL;
     if (!fn) fn = sym("_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv");
     return fn(obj);
 }
+#endif
 const char *_ZNK17storeservicescore19StoreErrorCondition4whatEv(void *obj) {
     static const char *(__attribute__((sysv_abi)) *fn)(void*) = NULL;
     if (!fn) fn = sym("_ZNK17storeservicescore19StoreErrorCondition4whatEv");
