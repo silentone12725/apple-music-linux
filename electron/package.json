@@ -39,6 +39,10 @@
       "**/*",
       "!node_modules/.bin",
       "!**/*.map",
+      "!native/**/*.cpp",
+      "!native/**/*.h",
+      "!native/**/*.cmd",
+      "!native/**/*.dll",
       "!test-*.html",
       "!dist/**"
     ],
@@ -120,12 +124,16 @@
           ]
         }
       ],
-      "icon": "icon.png",
+      "icon": "icon.ico",
       "artifactName": "adam-setup-${version}.${ext}",
       "extraResources": [
         {
           "from": "dist/resources-win",
           "to": "."
+        },
+        {
+          "from": "native/composition-backdrop.dll",
+          "to": "composition-backdrop.dll"
         }
       ]
     },

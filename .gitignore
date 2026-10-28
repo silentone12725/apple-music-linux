@@ -189,3 +189,9 @@ drm/*.o
 # No trailing slash: in a dev checkout drm/rootfs is often a symlink.
 /drm/rootfs
 /drm/native/
+
+# ── Windows composition backdrop: built by electron/native/build-composition-backdrop.cmd ──
+electron/native/*.dll
+electron/native/*.obj
+electron/native/*.lib
+electron/native/*.exp

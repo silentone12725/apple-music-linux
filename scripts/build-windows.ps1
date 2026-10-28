@@ -111,6 +111,16 @@ $ff = Join-Path $Repo 'third_party\ffmpeg-win'
 if (-not (Test-Path "$ff\bin\ffmpeg.exe")) { throw "third_party\ffmpeg-win\bin\ffmpeg.exe is missing (git lfs pull, or run scripts/build-ffmpeg-windows.sh from an MSYS2 UCRT64 shell)" }
 Copy-Item $ff (Join-Path $Out 'ffmpeg') -Recurse
 
+# The window blur: a native Windows Composition backdrop (electron\native). It is a build output, not committed;
+# electron-builder packs it as resources\composition-backdrop.dll. Needs Visual Studio 2022 Build Tools and the
+# Windows 10/11 SDK (the C++/WinRT headers), see native\build-composition-backdrop.cmd.
+$Backdrop = Join-Path $Electron 'native\composition-backdrop.dll'
+if (-not (Test-Path $Backdrop)) {
+    Write-Host '      building composition-backdrop.dll'
+    cmd /c "`"$Electron\native\build-composition-backdrop.cmd`""
+    if (-not (Test-Path $Backdrop)) { throw 'composition-backdrop.dll was not built (install Visual Studio 2022 Build Tools with the Windows SDK)' }
+}
+
 # ── 5. Renderer bundles ──────────────────────────────────────────────────────
 Write-Host '[5/6] renderer bundles'
 Push-Location $Electron
