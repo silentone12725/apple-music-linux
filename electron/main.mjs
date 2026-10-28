@@ -30,8 +30,8 @@ import { parseByteRange } from './range.mjs';
 import { shouldShowOffline, offlineHash } from './load-failure.mjs';
 import { runCleanupThrottled, cleanupCache } from './config-cleanup.mjs';
 import { gnomeWallpaperPath } from './wallpaper.mjs';
-import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS, ACRYLIC_TITLEBAR_HEIGHT } from './acrylic.mjs';
-import { setAccent } from './acrylic-accent.mjs';
+import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS } from './acrylic.mjs';
+import { setCompositionBackdrop, setNativeCaptionDrag, removeCompositionBackdrop } from './composition-backdrop.mjs';
 import { cleanBlur, cleanGlassOpacity, sidebarOpacityControl, artNavAlpha } from './src/engine/sidebar-glass.js';
 
 const require = createRequire(import.meta.url);
@@ -171,15 +171,15 @@ if (IS_LINUX) {
 let win    = null;
 let tray   = null;
 const linkSchemes = createLinkSchemeManager({ app, loadPrefs, savePrefs });
-// Windows blur theme: a system acrylic window (see acrylic.mjs). `kind` is 'material' (DWM backdrop, Windows 11
-// 22H2+) or 'accent' (Windows 10 and early Windows 11); ADAM_ACRYLIC_BACKEND=accent forces the second for testing.
+// Windows blur theme uses the local Composition Gaussian backend on both supported Windows versions.
 const _acrylicBackend = !IS_WIN ? null
-    : process.env.ADAM_ACRYLIC_BACKEND === 'accent' ? { kind: 'accent', accentState: 4, materials: ['acrylic', 'none'] }
     : acrylicBackend(os.release());
 const _acrylicSettings = () => normalizeAcrylic(loadPrefs().winAcrylic, _acrylicBackend?.materials);
-// No native title bar on the acrylic window: the material has to reach the top edge, and overlays in the page
-// cannot colour a native caption. Windows draws only the window buttons, over a transparent strip.
-const _titleBarOverlay = () => ({ color: '#00000000', symbolColor: nativeTheme.shouldUseDarkColors ? '#ffffff' : '#000000', height: ACRYLIC_TITLEBAR_HEIGHT });
+// Windows window/taskbar icon when running from source: a packaged build's icon is stamped into adam.exe by the installer.
+const _devWindowIcon = IS_WIN && !app.isPackaged ? { icon: path.join(__dirname, 'icon.ico') } : {};
+if (_acrylicBackend) nativeTheme.on('updated', () => {
+    if (_acrylicSettings().theme === 'system') _applyAcrylic();
+});
 let winIntegration = null; // Windows only: SMTC, taskbar buttons, jump list, login item
 const _startHidden = process.argv.includes('--hidden');
 let isQuitting = false;
@@ -823,12 +823,14 @@ function createWindow() {
         // the desktop behind the window with its own blur effect, giving
         // us the visionOS "glass over room" look for free.
         backgroundColor: '#00000000',
-        // Windows: DWM cannot draw a system material behind a layered transparent window, so the window is
-        // not transparent and the page is (see _applyAcrylic).
-        transparent: !IS_WIN,
-        ...(_acrylicBackend?.kind === 'material' ? { backgroundMaterial: _acrylicSettings().material } : {}),
-        ...(_acrylicBackend ? { titleBarStyle: 'hidden', titleBarOverlay: _titleBarOverlay() } : {}),
+        // The compositor backdrop shows through a transparent page, so the window itself must NOT be transparent:
+        // Electron strips WS_THICKFRAME and WS_CAPTION from a transparent window, and without them Windows will
+        // not snap it by dragging to an edge or animate maximize and restore. Elsewhere the glass is CSS and the
+        // window stays transparent.
+        transparent: !_acrylicBackend,
+        ...(_acrylicBackend ? { frame: false, hasShadow: true, maximizable: true } : {}),
         show: false,
+        ..._devWindowIcon,
         title: 'Adam',
         webPreferences: {
             preload: path.join(__dirname, 'preload.cjs'),
@@ -841,8 +843,8 @@ function createWindow() {
         },
     });
 
-    if (_acrylicBackend?.kind === 'accent') _applyAcrylic();
-    if (_acrylicBackend) nativeTheme.on('updated', () => { if (!win.isDestroyed()) win.setTitleBarOverlay({ symbolColor: _titleBarOverlay().symbolColor }); });
+    if (_acrylicBackend && IS_WIN) setNativeCaptionDrag(win);
+    if (_acrylicBackend) _applyAcrylic();
 
     win.on('page-title-updated', (e) => e.preventDefault());
     let initialLoadRetried = false;
@@ -1389,7 +1391,7 @@ function createWindow() {
         if (!isQuitting) {
             e.preventDefault();
             win.hide();
-        }
+        } else removeCompositionBackdrop(win);
     });
 
     win.on('closed', () => { win = null; });
@@ -1746,17 +1748,16 @@ function _applyAcrylicPage() {
 
 function _applyAcrylicMaterial(w, s) {
     try {
-        if (_acrylicBackend.kind === 'material') w.setBackgroundMaterial(s.material);
-        else setAccent(w, s.material === 'none' ? 0 : _acrylicBackend.accentState);
-    } catch (e) { console.warn('[Adam] acrylic material:', e.message); }
+        setCompositionBackdrop(w, s);
+    } catch (e) { console.warn('[Adam] Windows Composition backdrop:', e.message); }
 }
 
 // Pushes the saved settings to the windows: the material, and the native theme while the blur theme is on.
 function _applyAcrylic() {
     if (!_acrylicBackend) return;
     const s = _acrylicSettings();
-    for (const w of _acrylicWindows()) _applyAcrylicMaterial(w, s);
     if (_resolveThemeMode(loadPrefs()) === 'blur') nativeTheme.themeSource = s.theme;
+    for (const w of _acrylicWindows()) _applyAcrylicMaterial(w, s);
     _applyAcrylicPage();
 }
 
@@ -2597,11 +2598,9 @@ function createMiniPlayer() {
         height: 150,
         useContentSize: true,
         frame: false,
-        // Windows: the window itself is the acrylic (a transparent window cannot show a system material), the
-        // page is transparent over it. Elsewhere it stays a transparent window drawing its own glass.
-        transparent: !_acrylicBackend,
+        // Both windows expose the same per-window Composition host backdrop.
+        transparent: true,
         backgroundColor: '#00000000',
-        ...(_acrylicBackend?.kind === 'material' ? { backgroundMaterial: _acrylicSettings().material } : {}),
         hasShadow: true,
         resizable: false,
         maximizable: false,
@@ -2609,6 +2608,7 @@ function createMiniPlayer() {
         fullscreenable: false,
         skipTaskbar: true,
         alwaysOnTop: true,
+        ..._devWindowIcon,
         title: 'Adam — Mini Player',
         webPreferences: {
             preload: path.join(__dirname, 'miniplayer-preload.cjs'),
@@ -2624,7 +2624,7 @@ function createMiniPlayer() {
     });
     miniWin.setAlwaysOnTop(true, 'floating');
     if (_acrylicBackend) {
-        if (_acrylicBackend.kind === 'accent') _applyAcrylicMaterial(miniWin, _acrylicSettings());
+        _applyAcrylicMaterial(miniWin, _acrylicSettings());
         miniWin.webContents.on('did-finish-load', _applyAcrylicPage);
     }
     miniWin.loadFile(path.join(__dirname, 'miniplayer.html'));
@@ -2636,6 +2636,7 @@ function createMiniPlayer() {
         sendMiniState({ metadata: _lastMprisMetadata, status: _lastMprisStatus, position: _lastMprisPosition });
         try { win?.webContents.send('miniplayer:sync'); } catch (_) {}
     });
+    miniWin.on('close', () => removeCompositionBackdrop(miniWin));
     miniWin.on('closed', () => { miniWin = null; restoreMainFromMini(); });
 }
 
@@ -2687,35 +2688,20 @@ function createTray() {
     };
 
     const buildTrayMenu = () => Menu.buildFromTemplate([
+        { label: 'Show/Hide Window', click: toggleWindow },
         {
-            label: 'Show/Hide Window',
-            click: toggleWindow,
+            label: 'Maximise/Restore',
+            click: () => {
+                if (!win || win.isDestroyed()) return;
+                if (win.isMaximized()) win.unmaximize(); else win.maximize();
+            },
         },
         { type: 'separator' },
-        {
-            label: 'Play/Pause',
-            click: () => sendPlayback('playpause'),
-        },
-        {
-            label: 'Next',
-            click: () => sendPlayback('next'),
-        },
-        {
-            label: 'Previous',
-            click: () => sendPlayback('previous'),
-        },
+        { label: 'Play/Pause', click: () => sendPlayback('playpause') },
+        { label: 'Next', click: () => sendPlayback('next') },
+        { label: 'Previous', click: () => sendPlayback('previous') },
         { type: 'separator' },
-        {
-            label: (miniWin && !miniWin.isDestroyed()) ? 'Hide Mini Player' : 'Mini Player',
-            click: () => toggleMiniPlayer(),
-        },
-        ...(winIntegration ? [{
-            label: 'Launch at login',
-            type: 'checkbox',
-            checked: winIntegration.getOpenAtLogin(),
-            enabled: app.isPackaged,
-            click: (item) => winIntegration.setOpenAtLogin(item.checked),
-        }] : []),
+        { label: (miniWin && !miniWin.isDestroyed()) ? 'Hide Mini Player' : 'Mini Player', click: toggleMiniPlayer },
         { type: 'separator' },
         {
             label: 'Restart App',
@@ -2731,15 +2717,10 @@ function createTray() {
                 app.relaunch(); app.quit();
             },
         },
-        {
-            label: 'Exit',
-            click: () => app.quit(),
-        },
+        { label: 'Exit', click: () => app.quit() },
     ]);
 
     tray.setContextMenu(buildTrayMenu());
-
-    // Rebuild menu on each right-click so Show/Hide label is current.
     tray.on('right-click', () => tray.setContextMenu(buildTrayMenu()));
 
     // Left-click toggles the window. (Note: many Linux tray hosts —

@@ -9159,11 +9159,9 @@ window.adamGetQueueInfo = function () {
         return '#'+[f(0),f(8),f(4)].map(x=>Math.round(x*255).toString(16).padStart(2,'0')).join('');
     }
 
-    // Windows blur theme: the system acrylic window. Material and theme change the window itself; tint and
-    // luminosity are layers over it, so 0 shows the material unchanged.
+    // Windows blur theme: a per-window host-backdrop Gaussian, with every control persisted by the main process.
     function _adamRenderAcrylicControls(container, info) {
         container.innerHTML = '';
-        const MATERIAL_LABELS = { acrylic: 'Acrylic', mica: 'Mica', tabbed: 'Mica Alt', auto: 'Auto', none: 'None (solid)' };
         const THEME_LABELS = { system: 'System', light: 'Light', dark: 'Dark' };
         const cur = { ...info };
         const send = patch => { Object.assign(cur, patch); window.adamBridge.setAcrylic(patch); };
@@ -9177,14 +9175,14 @@ window.adamGetQueueInfo = function () {
             el.onchange = () => onChange(el.value);
             return el;
         }
-        function slider(value, onChange) {
+        function slider(value, onChange, { min = 0, max = 1, step = 0.01, format = v => Number(v).toFixed(2) } = {}) {
             const val = document.createElement('span');
-            val.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:34px;text-align:right;';
+            val.style.cssText = FF + 'font-size:12px;color:rgba(255,255,255,0.5);width:52px;text-align:right;';
             const sl = document.createElement('input');
-            sl.type = 'range'; sl.min = 0; sl.max = 1; sl.step = 0.01;
+            sl.type = 'range'; sl.min = min; sl.max = max; sl.step = step;
             sl.style.cssText = 'width:150px;accent-color:#fc3c44;margin:0 10px;';
-            const show = v => { sl.value = v; val.textContent = Number(v).toFixed(2); };
-            sl.oninput = () => { val.textContent = Number(sl.value).toFixed(2); onChange(+sl.value); };
+            const show = v => { sl.value = v; val.textContent = format(+v); };
+            sl.oninput = () => { val.textContent = format(+sl.value); onChange(+sl.value); };
             show(value);
             const wrap = document.createElement('div');
             wrap.style.cssText = 'display:flex;align-items:center;';
@@ -9192,16 +9190,22 @@ window.adamGetQueueInfo = function () {
             wrap.set = show;
             return wrap;
         }
-        const materialSel = select(MATERIAL_LABELS, info.materials, cur.material, v => send({ material: v }));
         const themeSel = select(THEME_LABELS, Object.keys(THEME_LABELS), cur.theme, v => send({ theme: v }));
         const color = document.createElement('input');
         color.type = 'color'; color.value = cur.tintColor;
         color.style.cssText = 'width:44px;height:26px;padding:0;border:0.5px solid rgba(255,255,255,0.2);border-radius:6px;background:none;cursor:pointer;';
         color.oninput = () => send({ tintColor: color.value });
+        const blurSl = slider(cur.blurRadius, v => send({ blurRadius: v }), {
+            format: v => `${(30 * Math.pow(v, 1.25)).toFixed(1)} px`,
+        });
+        const saturationSl = slider(cur.saturation, v => send({ saturation: v }), { max: 2, step: 0.05, format: v => `${v.toFixed(2)}×` });
+        const noiseSl = slider(cur.noise, v => send({ noise: v }), { max: 0.1, step: 0.002, format: v => `${(v * 100).toFixed(1)}%` });
         const tintSl = slider(cur.tintOpacity, v => send({ tintOpacity: v }));
         const lumSl = slider(cur.lumOpacity, v => send({ lumOpacity: v }));
-        container.appendChild(makeRow('Material', materialSel, 'The window background Windows draws behind the app', false));
-        container.appendChild(makeRow('Theme', themeSel, 'Light or dark look of the material (Adam is designed for Dark); System follows Windows', false));
+        container.appendChild(makeRow('Blur radius', blurSl, 'Gaussian radius follows a gentle curve; zero leaves the backdrop clear', false));
+        container.appendChild(makeRow('Saturation', saturationSl, 'Color intensity of the blurred host backdrop', false));
+        container.appendChild(makeRow('Noise', noiseSl, 'Fine grain on the glass; fades with the blur', false));
+        container.appendChild(makeRow('Theme', themeSel, 'Light or dark luminosity tint; System follows Windows', false));
         container.appendChild(makeRow('Tint color', color, null, false));
         container.appendChild(makeRow('Tint opacity', tintSl, 'Colour laid over the material', false));
         container.appendChild(makeRow('Luminosity opacity', lumSl, 'Theme-coloured layer under the tint; 1 hides the material', false));
@@ -9211,7 +9215,8 @@ window.adamGetQueueInfo = function () {
             const d = await window.adamBridge.setAcrylic({ ...info.defaults });
             if (!d) return;
             Object.assign(cur, d);
-            materialSel.value = d.material; themeSel.value = d.theme; color.value = d.tintColor;
+            themeSel.value = d.theme; color.value = d.tintColor;
+            blurSl.set(d.blurRadius); saturationSl.set(d.saturation); noiseSl.set(d.noise);
             tintSl.set(d.tintOpacity); lumSl.set(d.lumOpacity);
         };
         container.appendChild(reset);

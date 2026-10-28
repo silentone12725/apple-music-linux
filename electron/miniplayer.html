@@ -37,12 +37,11 @@
     opacity:var(--tint-opacity, 0); transition:opacity 0.6s ease, background 0.6s ease; }
   /* Fine grain noise — breaks up flat glass (variable via --noise). */
   #wrap::after { content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
-    opacity:var(--noise, 0.05); mix-blend-mode:soft-light;
+    opacity:var(--adam-acrylic-noise, var(--noise, 0.025)); mix-blend-mode:soft-light;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
   /* Windows acrylic (main.mjs sets data-adam-acrylic-material): the window itself is the material, so the glass
      fill, blur, shadow and rounded frame are dropped; the tint and luminosity layers it injects sit behind. */
-  html[data-adam-acrylic-material] #wrap { background:transparent; backdrop-filter:none; -webkit-backdrop-filter:none;
-    box-shadow:none; border:none; border-radius:0; }
+  html[data-adam-acrylic-material] #wrap { background:transparent; backdrop-filter:none; -webkit-backdrop-filter:none; }
   #wrap > * { position:relative; z-index:1; }
   #top { display:flex; align-items:center; gap:12px; min-height:56px; }
   #artbox { position:relative; width:56px; height:56px; flex-shrink:0; }
