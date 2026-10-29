@@ -176,18 +176,19 @@ Result (harness: hybris_backend_init + hybris_fairplay_init, throwaway base dir,
 Not tested: real account login, 2FA, key/lease fetch, ALAC decrypt/playback, Play Integrity on a real account,
 Windows build of the hybris_stubs/main.c changes, and moving drm/native hooks for the ARM-free engine build.
 
-== Recipe: replacing scripts/fetch-fairplay-libs.sh with an APK download (what was done by hand) ==
-Candidates (x86_64 libs inside the APK):
-  - 4.9.7.2 (build 1472): universal APK, nodpi, 137.74 MB / 144434636 bytes; libs under lib/x86_64/.
-  - 5.2.1 (build 1545): APKMirror bundle (.apkm, 150429532 bytes); libs are in split_config.x86_64.apk (lib/x86_64/).
-  - 6.5.x is a different design (AMSKit) and does NOT work with the wrapper.
-Steps:
-  1. Download the APK/bundle (APKMirror blocks scripted access; Uptodown or a manual download may be needed), verify the size/hash.
-  2. Extract only lib/x86_64/*.so (for a bundle, from split_config.x86_64.apk) into a NEW empty directory.
-  3. Copy the 17 app libs into rootfs/system/lib64: libandroidappmusic, libBlocksRuntime, libCoreADI, libCoreFoundation, libCoreFP,
-     libCoreLSKD, libc++_shared, libcurl, libdaapkit, libdispatch, libicudata_sv_apple, libicui18n_sv_apple, libicuuc_sv_apple,
-     libmedialibrarycore, libmediaplatform, libstoreservicescore, libxml2.
-  4. The APK has no bionic system libs: keep libc, libm, liblog, libstdc++, libz, libdl, libandroid, libOpenSLES from the current rootfs.
-  5. Delete the extracted directory and the downloaded APK/bundle.
-Before switching the default: make sure the Android ID never starts with '0' (engine/core/drm/deviceid.go), re-check the SHA-256
-lock (drm/fairplay-libs.lock) for the new files, and test a real login, key fetch and ALAC playback.
+== (disabled for now) APK-based lib fetch, to replace scripts/fetch-fairplay-libs.sh ==
+# Kept as notes only; commented out until we decide to switch. Nothing in the repo uses it.
+# Candidates (x86_64 libs inside the APK):
+#   - 4.9.7.2 (build 1472): universal APK, nodpi, 137.74 MB / 144434636 bytes; libs under lib/x86_64/.
+#   - 5.2.1 (build 1545): APKMirror bundle (.apkm, 150429532 bytes); libs are in split_config.x86_64.apk (lib/x86_64/).
+#   - 6.5.x is a different design (AMSKit) and does NOT work with the wrapper.
+# Steps:
+#   1. Download the APK/bundle (APKMirror blocks scripted access; Uptodown or a manual download may be needed), verify the size/hash.
+#   2. Extract only lib/x86_64/*.so (for a bundle, from split_config.x86_64.apk) into a NEW empty directory.
+#   3. Copy the 17 app libs into rootfs/system/lib64: libandroidappmusic, libBlocksRuntime, libCoreADI, libCoreFoundation, libCoreFP,
+#      libCoreLSKD, libc++_shared, libcurl, libdaapkit, libdispatch, libicudata_sv_apple, libicui18n_sv_apple, libicuuc_sv_apple,
+#      libmedialibrarycore, libmediaplatform, libstoreservicescore, libxml2.
+#   4. The APK has no bionic system libs: keep libc, libm, liblog, libstdc++, libz, libdl, libandroid, libOpenSLES from the current rootfs.
+#   5. Delete the extracted directory and the downloaded APK/bundle.
+# Before switching the default: make sure the Android ID never starts with '0' (engine/core/drm/deviceid.go), re-check the SHA-256
+# lock (drm/fairplay-libs.lock) for the new files, and test a real login, key fetch and ALAC playback.
