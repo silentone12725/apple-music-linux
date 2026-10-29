@@ -273,8 +273,9 @@ static void __attribute__((sysv_abi)) dialogHandler(int64_t j, struct shared_ptr
             std_string_data(_ZNK17storeservicescore14ProtocolDialog7messageEv(
                 protoDialogPtr->obj)));
 
-    unsigned char ptr[72];
-    memset(ptr + 8, 0, 16);
+    /* The library keeps this response (and its control block) after the handler returns and processes it on another
+     * thread, so it must not live on this stack frame. Never freed: the library holds shared references. */
+    unsigned char *const ptr = calloc(1, 72);
     *(void **)(ptr) =
         &_ZTVNSt6__ndk120__shared_ptr_emplaceIN17storeservicescore22ProtocolDialogResponseENS_9allocatorIS2_EEEE +
         2;
@@ -434,6 +435,8 @@ void drm_init_internal(void) {
     DRM_DEBUG("[trace] after DeviceGUID::configure\n");
 }
 
+void install_request_context_callbacks(void *cfg);
+
 struct shared_ptr drm_init_ctx(void) {
     DRM_DEBUG("[+] initializing ctx...\n");
     union std_string strBuf =
@@ -491,6 +494,9 @@ struct shared_ptr drm_init_ctx(void) {
     strBuf = new_std_string(device_infos[7]);
     _ZN17storeservicescore20RequestContextConfig21setLanguageIdentifierERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
         reqCtxCfg.obj, &strBuf);
+
+    /* Builds that expect host callbacks (4.9.x/5.x) get them here; a no-op when the libs export no such setters. */
+    install_request_context_callbacks(reqCtxCfg.obj);
 
     DRM_DEBUG("[cp14] RequestContextManager::configure\n");
     _ZN21RequestContextManager9configureERKNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEEE(

@@ -135,6 +135,34 @@ static struct {
 
 /* ── Init ────────────────────────────────────────────────────────────────────*/
 
+#ifndef _WIN32
+/* __register_atfork: the guest's fork handlers never run here (no fork), so registering them is a no-op.
+ * __memchr_chk: memchr with a destination-size check; the check is dropped. */
+static int hybris_shim_register_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void), void *dso)
+{
+    (void)prepare;
+    (void)parent;
+    (void)child;
+    (void)dso;
+    return 0;
+}
+
+static void *hybris_shim_memchr_chk(const void *s, int c, size_t n, size_t buf_size)
+{
+    (void)buf_size;
+    return memchr(s, c, n);
+}
+
+static void *hybris_libc_shim_hook(const char *symbol, const char *requester)
+{
+    (void)requester;
+    if (!symbol) return NULL;
+    if (strcmp(symbol, "__register_atfork") == 0) return (void *)hybris_shim_register_atfork;
+    if (strcmp(symbol, "__memchr_chk") == 0) return (void *)hybris_shim_memchr_chk;
+    return NULL;
+}
+#endif
+
 int hybris_backend_init(
     const char *hybris_linker_dir,
     const char *lib64_dir,
@@ -203,6 +231,11 @@ int hybris_backend_init(
         pthread_mutex_unlock(&g_hybris.lock);
         return -1;
     }
+
+#ifndef _WIN32
+    /* Newer Apple Music builds (4.9.x/5.x) import two libc symbols that bionic's libc.so here does not define. */
+    embedded_set_hook_callback(hybris_libc_shim_hook);
+#endif
 
     /*
      * Wire android_dlopen/dlsym to the embedded loader wrappers.

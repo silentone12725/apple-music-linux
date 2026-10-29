@@ -1,3 +1,4 @@
+#include <pthread.h>
 /*
  * hybris_stubs.c — provides all symbols declared in import.h via android_dlsym.
  *
@@ -62,6 +63,168 @@ static void *sym(const char *name) {
     if (dbg) fprintf(stderr, "[trace] resolve %s -> %p\n", name, p);
     if (!p) { fprintf(stderr, "[hybris] FATAL: %s\n", name); abort(); }
     return p;
+}
+
+
+/* ── hand-built make_shared (newer Apple Music builds inline these instead of exporting them) ──────────────────────
+ * libc++ make_shared lays out [control block: vptr, shared_owners, weak_owners, pad][object at +0x20]. The sizes and
+ * the enable_shared_from_this offset are taken from the 5.2.1 libs' own inlined copies. */
+static int have_export(const char *name) {
+    return android_dlsym(h_ssc, name) || android_dlsym(h_apm, name) || (h_core && android_dlsym(h_core, name));
+}
+
+static void *emplace_vtable(const char *vtable_name) {
+    void *v = sym(vtable_name);
+    return (char *)v + 0x10;
+}
+
+/* Allocates the control block and object, runs `construct(obj)`, and wires up the shared_ptr and the object's
+ * weak_this (esft_off is its byte offset in the object, or -1 when the class has none). */
+static void make_shared_manual(struct shared_ptr *out, const char *vtable_name, size_t total_size, long esft_off,
+                               void (*construct)(void *obj, void *arg), void *arg) {
+    void **cb = calloc(1, total_size);
+    cb[0] = emplace_vtable(vtable_name);
+    char *obj = (char *)cb + 0x20;
+    construct(obj, arg);
+    out->obj = obj;
+    out->ctrl_blk = cb;
+    if (esft_off >= 0) {
+        void **weak_this = (void **)(obj + esft_off);
+        weak_this[0] = obj;
+        weak_this[1] = cb;
+        cb[2] = (void *)((uintptr_t)cb[2] + 1);   /* the weak reference held by weak_this */
+    }
+}
+
+static void construct_request_context(void *obj, void *arg) {
+    static void (__attribute__((sysv_abi)) *fn)(void *, union std_string *) = NULL;
+    if (!fn) fn = sym("_ZN17storeservicescore14RequestContextC1ERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
+    fn(obj, arg);
+}
+
+static void construct_auth_flow(void *obj, void *arg) {
+    static void (__attribute__((sysv_abi)) *fn)(void *, void *) = NULL;
+    if (!fn) fn = sym("_ZN17storeservicescore16AuthenticateFlowC1ERKNSt6__ndk110shared_ptrINS_14RequestContextEEE");
+    fn(obj, arg);
+}
+
+static void construct_presentation(void *obj, void *arg) {
+    static void (__attribute__((sysv_abi)) *fn)(void *) = NULL;
+    (void)arg;
+    if (!fn) fn = sym("_ZN20androidstoreservices28AndroidPresentationInterfaceC1Ev");
+    fn(obj);
+}
+
+
+/* ── RequestContextConfig callbacks (4.9.x / 5.x) ───────────────────────────────────────────────────────────────────
+ * Newer Apple Music builds expect the host app to supply a set of std::function callbacks (cookies, a key/value store,
+ * account updates). They are libc++ std::function objects: 32 bytes of inline storage plus a pointer to a callable
+ * whose vtable is {~D1, ~D0, clone(), clone(dest), destroy, destroy_deallocate, operator(), target, target_type}.
+ * Arguments reach operator() by reference (libc++ forwards _ArgTypes&&), and a non-trivial return value comes back
+ * through a hidden pointer in rdi, with `this` in rsi. All state is in memory. */
+#define SYSV __attribute__((sysv_abi))
+struct rcc_callable { void **vptr; const char *name; };
+struct rcc_function { char buf[32]; void *f; };   /* NDK libc++: inline buffer of 4 pointers, callable pointer at +0x20 */
+
+static const char *rcc_str(const void *s, size_t *len) {
+    const unsigned char *b = s;
+    if (b[0] & 1) { const size_t *w = s; *len = w[1]; return (const char *)w[2]; }
+    *len = b[0] >> 1;
+    return (const char *)b + 1;
+}
+
+static void rcc_ret_string(void *sret, const char *s, size_t n) {
+    unsigned char *b = sret;
+    memset(sret, 0, 24);
+    if (n <= 22) { b[0] = (unsigned char)(n << 1); if (n) memcpy(b + 1, s, n); return; }
+    size_t cap = ((n + 1) | 1) + 16;
+    char *d = malloc(cap);
+    memcpy(d, s, n); d[n] = 0;
+    size_t *w = sret; w[0] = cap | 1; w[1] = n; w[2] = (size_t)d;
+}
+
+#define RCC_KV_MAX 128
+static struct { char *k, *v; } rcc_kv[RCC_KV_MAX];
+static pthread_mutex_t rcc_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static char *rcc_dup(const void *s) { size_t n; const char *p = rcc_str(s, &n); char *d = malloc(n + 1); memcpy(d, p, n); d[n] = 0; return d; }
+
+static void rcc_log(const char *name, const char *extra) {
+    if (drm_lib_debug_enabled()) fprintf(stderr, "[rcc] %s %s\n", name, extra ? extra : "");
+}
+
+static void rcc_kv_get(void *sret, const void *key, const char *name) {
+    char *k = rcc_dup(key); const char *val = "";
+    pthread_mutex_lock(&rcc_mu);
+    for (int i = 0; i < RCC_KV_MAX; i++) if (rcc_kv[i].k && !strcmp(rcc_kv[i].k, k)) { val = rcc_kv[i].v; break; }
+    rcc_ret_string(sret, val, strlen(val));
+    pthread_mutex_unlock(&rcc_mu);
+    rcc_log(name, k); free(k);
+}
+static void rcc_kv_set(const void *key, const void *val, const char *name) {
+    char *k = rcc_dup(key), *v = rcc_dup(val); int slot = -1;
+    pthread_mutex_lock(&rcc_mu);
+    for (int i = 0; i < RCC_KV_MAX; i++) { if (rcc_kv[i].k && !strcmp(rcc_kv[i].k, k)) { slot = i; break; } if (slot < 0 && !rcc_kv[i].k) slot = i; }
+    if (slot >= 0) { free(rcc_kv[slot].k); free(rcc_kv[slot].v); rcc_kv[slot].k = k; rcc_kv[slot].v = v; k = v = NULL; }
+    pthread_mutex_unlock(&rcc_mu);
+    rcc_log(name, k ? k : "(stored)"); free(k); free(v);
+}
+
+/* one operator() per signature */
+static void *SYSV rcc_op_get_cookie(void *sret, void *self, void *url, long *dsid) { (void)url; (void)dsid; rcc_ret_string(sret, "", 0); rcc_log(((struct rcc_callable *)self)->name, NULL); return sret; }
+static void SYSV rcc_op_void_str_long(void *self, void *s, long *l) { (void)s; (void)l; rcc_log(((struct rcc_callable *)self)->name, NULL); }
+static void SYSV rcc_op_void_str(void *self, void *s) { (void)s; rcc_log(((struct rcc_callable *)self)->name, NULL); }
+static void SYSV rcc_op_void(void *self) { rcc_log(((struct rcc_callable *)self)->name, NULL); }
+static void SYSV rcc_op_cookie_list(void *self, void *s, long *l, void *vec) { (void)s; (void)l; (void)vec; rcc_log(((struct rcc_callable *)self)->name, NULL); }
+static void *SYSV rcc_op_get_value(void *sret, void *self, void *key) { rcc_kv_get(sret, key, ((struct rcc_callable *)self)->name); return sret; }
+static void SYSV rcc_op_set_value(void *self, void *key, void *val) { rcc_kv_set(key, val, ((struct rcc_callable *)self)->name); }
+static int SYSV rcc_op_bool(void *self) { rcc_log(((struct rcc_callable *)self)->name, NULL); return 0; }
+static void *SYSV rcc_op_account_value(void *sret, void *self, long *dsid, void *key) { (void)dsid; (void)key; rcc_ret_string(sret, "", 0); rcc_log(((struct rcc_callable *)self)->name, NULL); return sret; }
+static void *SYSV rcc_op_all_cookies(void *sret, void *self, unsigned long *dsid) { (void)dsid; memset(sret, 0, 24); rcc_log(((struct rcc_callable *)self)->name, NULL); return sret; }
+static void SYSV rcc_op_status(void *self, long *a, int *b, int *c, int *d) { (void)a; (void)b; (void)c; (void)d; rcc_log(((struct rcc_callable *)self)->name, NULL); }
+static void SYSV rcc_op_xtoken(void *self, long *dsid, void *tok) { (void)dsid; (void)tok; rcc_log(((struct rcc_callable *)self)->name, "(token received)"); }
+static long SYSV rcc_op_dsid(void *self) { rcc_log(((struct rcc_callable *)self)->name, NULL); return 0; }
+static void *SYSV rcc_op_play_integrity(void *sret, void *self, void *s) { (void)s; rcc_ret_string(sret, "", 0); rcc_log(((struct rcc_callable *)self)->name, "(empty token)"); return sret; }
+static void SYSV rcc_op_proto_action(void *self, void *s, int *b) { (void)s; (void)b; rcc_log(((struct rcc_callable *)self)->name, NULL); }
+
+static void SYSV rcc_dtor_noop(void *self) { (void)self; }
+static void SYSV rcc_dtor_free(void *self) { free(self); }
+static void *SYSV rcc_clone(void *self) { struct rcc_callable *c = malloc(sizeof *c); *c = *(struct rcc_callable *)self; return c; }
+static void SYSV rcc_clone_into(void *self, void *dest) { *(struct rcc_callable *)dest = *(struct rcc_callable *)self; }
+static void *SYSV rcc_target(void *self, void *ti) { (void)self; (void)ti; return NULL; }
+
+static void rcc_install(void *cfg, const char *setter, const char *name, void *op) {
+    if (!have_export(setter)) return;
+    void **vt = malloc(9 * sizeof(void *));
+    vt[0] = (void *)rcc_dtor_noop; vt[1] = (void *)rcc_dtor_free; vt[2] = (void *)rcc_clone; vt[3] = (void *)rcc_clone_into;
+    vt[4] = (void *)rcc_dtor_noop; vt[5] = (void *)rcc_dtor_free; vt[6] = op; vt[7] = (void *)rcc_target; vt[8] = (void *)rcc_target;
+    struct rcc_callable *c = malloc(sizeof *c); c->vptr = vt; c->name = name;
+    struct rcc_function fn; memset(&fn, 0, sizeof fn); fn.f = c;
+    void (SYSV *set)(void *, struct rcc_function *) = sym(setter);
+    set(cfg, &fn);   /* the setter copies via clone(); the temporary is ours to release */
+    ((void (SYSV *)(void *))vt[5])(c);   /* vt stays allocated: the setter's copies of the callable still point at it */
+}
+
+void install_request_context_callbacks(void *cfg) {
+    /* The old libs export only setBagInvalidateCallback and work without any; install nothing there. */
+    if (!have_export("_ZN17storeservicescore20RequestContextConfig20setGetCookieCallbackENSt6__ndk18functionIFNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEERS8_lEEE")) return;
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig20setGetCookieCallbackENSt6__ndk18functionIFNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEERS8_lEEE", "GetCookieCallback", (void *)rcc_op_get_cookie);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig20setSetCookieCallbackENSt6__ndk18functionIFvRNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEElEEE", "SetCookieCallback", (void *)rcc_op_void_str_long);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig21setAddProfileCallbackENSt6__ndk18functionIFvRNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEEEEE", "AddProfileCallback", (void *)rcc_op_void_str);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig24setBagInvalidateCallbackENSt6__ndk18functionIFvvEEE", "BagInvalidateCallback", (void *)rcc_op_void);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig24setGetCookieListCallbackENSt6__ndk18functionIFvRNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEElRNS1_6vectorIS8_NS6_IS8_EEEEEEE", "GetCookieListCallback", (void *)rcc_op_cookie_list);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig25setGetValueForKeyCallbackENSt6__ndk18functionIFNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEERS8_EEE", "GetValueForKeyCallback", (void *)rcc_op_get_value);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig25setSetValueForKeyCallbackENSt6__ndk18functionIFvRNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_EEE", "SetValueForKeyCallback", (void *)rcc_op_set_value);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig25setUseLegacyStoreCallbackENSt6__ndk18functionIFbvEEE", "UseLegacyStoreCallback", (void *)rcc_op_bool);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig26setGetAccountValueCallbackENSt6__ndk18functionIFNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEElRKS8_EEE", "GetAccountValueCallback", (void *)rcc_op_account_value);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig28setAllCookiesForUserCallbackENSt6__ndk18functionIFNS1_6vectorINS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEENS7_IS9_EEEEmEEE", "AllCookiesForUserCallback", (void *)rcc_op_all_cookies);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig29setUpdateAccountFlagsCallbackENSt6__ndk18functionIFvRNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEEEEE", "UpdateAccountFlagsCallback", (void *)rcc_op_void_str);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig30setUpdateAccountStatusCallbackENSt6__ndk18functionIFvlbbbEEE", "UpdateAccountStatusCallback", (void *)rcc_op_status);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig30setUpdateAccountXTokenCallbackENSt6__ndk18functionIFvlRNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEEEEE", "UpdateAccountXTokenCallback", (void *)rcc_op_xtoken);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig31setGetActiveAccountDSIDCallbackENSt6__ndk18functionIFlvEEE", "GetActiveAccountDSIDCallback", (void *)rcc_op_dsid);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig31setGetPlayIntegrityHashCallbackENSt6__ndk18functionIFNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEERS8_EEE", "GetPlayIntegrityHashCallback", (void *)rcc_op_play_integrity);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig34setUpdateAccountStoreFrontCallbackENSt6__ndk18functionIFvRNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEEEEE", "UpdateAccountStoreFrontCallback", (void *)rcc_op_void_str);
+    rcc_install(cfg, "_ZN17storeservicescore20RequestContextConfig35setCreateAccountProtoActionCallbackENSt6__ndk18functionIFvRNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEEbEEE", "CreateAccountProtoActionCallback", (void *)rcc_op_proto_action);
 }
 
 /* ── Windows: dummy bionic TLS so DT_INIT_ARRAY constructors don't fault ─── */
@@ -341,23 +504,50 @@ void _ZN17storeservicescore14RequestContext24setFairPlayDirectoryPathERKNSt6__nd
 
 void _ZN14FootHillConfig6configERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE(union std_string *cfg) {
     static void (__attribute__((sysv_abi)) *fn)(union std_string*) = NULL;
-    if (!fn) fn = sym("_ZN14FootHillConfig6configERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE");
+    static int by_value = 0;
+    if (!fn) {
+        /* Newer Apple Music builds (4.9.x/5.x) take the string by value instead of by const&. A non-trivial by-value
+         * parameter is still passed as a pointer to the caller's object, so the call itself is the same. */
+        const char *old_name = "_ZN14FootHillConfig6configERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE";
+        const char *new_name = "_ZN14FootHillConfig6configENSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE";
+        void *p = android_dlsym(h_apm, old_name);
+        if (!p) { p = android_dlsym(h_apm, new_name); by_value = p != NULL; }
+        fn = p ? (void (__attribute__((sysv_abi)) *)(union std_string*))p : sym(old_name);
+    }
     if (drm_lib_debug_enabled())
-        fprintf(stderr, "[trace] FootHill fn=%p cfg=%p cap=%zx size=%zx data=%p\n",
-                (void *)fn, (void *)cfg, cfg->cap, cfg->size, (void *)cfg->data);
-    fn(cfg);
+        fprintf(stderr, "[trace] FootHill fn=%p by_value=%d cfg=%p cap=%zx size=%zx data=%p\n",
+                (void *)fn, by_value, (void *)cfg, cfg->cap, cfg->size, (void *)cfg->data);
+    if (by_value && cfg->size <= 22) {
+        /* The newer code reads a properly formed libc++ string (the wrapper's cap=1 long form is not valid there):
+         * use the short form, size in the first byte and the characters inline. */
+        union std_string own;
+        memset(&own, 0, sizeof own);
+        own.mark = (uint8_t)(cfg->size << 1);
+        memcpy(own.str, (const void *)cfg->data, cfg->size);
+        fn(&own);
+    } else fn(cfg);
 }
 
 void _ZNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEE11make_sharedIJRNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEEEEES3_DpOT_(
     struct shared_ptr *out, union std_string *str) {
     static void (__attribute__((sysv_abi)) *fn)(struct shared_ptr*,union std_string*) = NULL;
-    if (!fn) fn = sym("_ZNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEE11make_sharedIJRNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEEEEES3_DpOT_");
+    if (!fn && have_export("_ZNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEE11make_sharedIJRNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEEEEES3_DpOT_")) fn = sym("_ZNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEE11make_sharedIJRNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEEEEES3_DpOT_");
+    if (!fn && !have_export("_ZNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEE11make_sharedIJRNS_12basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEEEEES3_DpOT_")) {
+        make_shared_manual(out, "_ZTVNSt6__ndk120__shared_ptr_emplaceIN17storeservicescore14RequestContextENS_9allocatorIS2_EEEE",
+                           0x5e0, 0, construct_request_context, str);
+        return;
+    }
     fn(out,str);
 }
 
 void _ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentationInterfaceEE11make_sharedIJEEES3_DpOT_(struct shared_ptr *out) {
     static void (__attribute__((sysv_abi)) *fn)(struct shared_ptr*) = NULL;
-    if (!fn) fn = sym("_ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentationInterfaceEE11make_sharedIJEEES3_DpOT_");
+    if (!fn && have_export("_ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentationInterfaceEE11make_sharedIJEEES3_DpOT_")) fn = sym("_ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentationInterfaceEE11make_sharedIJEEES3_DpOT_");
+    if (!fn && !have_export("_ZNSt6__ndk110shared_ptrIN20androidstoreservices28AndroidPresentationInterfaceEE11make_sharedIJEEES3_DpOT_")) {
+        make_shared_manual(out, "_ZTVNSt6__ndk120__shared_ptr_emplaceIN20androidstoreservices28AndroidPresentationInterfaceENS_9allocatorIS2_EEEE",
+                           0x120, 0x18, construct_presentation, NULL);
+        return;
+    }
     fn(out);
 }
 
@@ -385,7 +575,12 @@ void _ZN17storeservicescore14RequestContext24setPresentationInterfaceERKNSt6__nd
 void _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_(
     struct shared_ptr *out, struct shared_ptr *ctx) {
     static void (__attribute__((sysv_abi)) *fn)(struct shared_ptr*,struct shared_ptr*) = NULL;
-    if (!fn) fn = sym("_ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_");
+    if (!fn && have_export("_ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_")) fn = sym("_ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_");
+    if (!fn) {
+        make_shared_manual(out, "_ZTVNSt6__ndk120__shared_ptr_emplaceIN17storeservicescore16AuthenticateFlowENS_9allocatorIS2_EEEE",
+                           0x100, 8, construct_auth_flow, ctx);
+        return;
+    }
     fn(out,ctx);
 }
 
@@ -465,7 +660,20 @@ void _ZN21SVFootHillSessionCtrl14decryptContextERKNSt6__ndk112basic_stringIcNS0_
 
 void _ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev(struct shared_ptr *sp) {
     static void (__attribute__((sysv_abi)) *fn)(struct shared_ptr*) = NULL;
-    if (!fn) fn = sym("_ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev");
+    if (!fn && have_export("_ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev"))
+        fn = sym("_ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev");
+    if (!fn) {
+        /* Not exported by newer builds: release the strong reference the way libc++'s shared_ptr destructor does. */
+        void **cb = sp->ctrl_blk;
+        if (!cb) return;
+        if (__atomic_fetch_add((long *)&cb[1], -1, __ATOMIC_ACQ_REL) == 0) {
+            ((void (__attribute__((sysv_abi)) *)(void *))((void **)cb[0])[2])(cb);   /* __on_zero_shared */
+            static void (__attribute__((sysv_abi)) *release_weak)(void *) = NULL;
+            if (!release_weak) release_weak = sym("_ZNSt6__ndk119__shared_weak_count14__release_weakEv");
+            release_weak(cb);
+        }
+        return;
+    }
     fn(sp);
 }
 

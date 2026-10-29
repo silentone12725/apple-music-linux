@@ -41,6 +41,7 @@
 
 typedef void *(*android_dlopen_fn)(const char *filename, int flags);
 typedef void *(*android_dlsym_fn)(void *handle, const char *symbol);
+typedef void (*set_hook_callback_fn)(void *(*cb)(const char *symbol, const char *requester));
 typedef int (*android_dlclose_fn)(void *handle);
 typedef void (*android_update_ld_fn)(const char *path);
 typedef int (*android_init_ns_fn)(const char *shared_libs, const char *lib_dir);
@@ -61,6 +62,7 @@ static struct {
 
     android_dlopen_fn android_dlopen;
     android_dlsym_fn android_dlsym;
+    set_hook_callback_fn set_hook_callback;
     android_dlclose_fn android_dlclose;
     android_update_ld_fn android_update_ld;
     android_init_ns_fn android_init_ns;
@@ -207,6 +209,7 @@ int embedded_loader_init_path(const char *core_path)
     g_el.android_dlopen = (android_dlopen_fn)dlsym(g_el.hybris_handle, "android_dlopen");
     g_el.android_dlsym = (android_dlsym_fn)dlsym(g_el.hybris_handle, "android_dlsym");
     g_el.android_dlclose = (android_dlclose_fn)dlsym(g_el.hybris_handle, "android_dlclose");
+    g_el.set_hook_callback = (set_hook_callback_fn)dlsym(g_el.hybris_handle, "hybris_set_hook_callback");
     g_el.android_update_ld = (android_update_ld_fn)dlsym(g_el.hybris_handle, "android_update_LD_LIBRARY_PATH");
     g_el.android_init_ns = (android_init_ns_fn)dlsym(g_el.hybris_handle, "android_init_anonymous_namespace");
 #endif
@@ -250,6 +253,13 @@ void *embedded_dlopen(const char *name, int flags)
         return NULL;
     }
     return g_el.android_dlopen(name, flags);
+}
+
+int embedded_set_hook_callback(void *(*cb)(const char *symbol, const char *requester))
+{
+    if (!g_el.initialized || !g_el.set_hook_callback) return -1;
+    g_el.set_hook_callback(cb);
+    return 0;
 }
 
 void *embedded_dlsym(const char *symbol)

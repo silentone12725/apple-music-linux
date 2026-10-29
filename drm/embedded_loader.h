@@ -46,6 +46,13 @@ int embedded_loader_init_path(const char *core_path);
 void *embedded_dlopen(const char *name, int flags);
 
 /*
+ * embedded_set_hook_callback() — register a callback consulted first for every symbol a loaded Android library
+ * imports; it returns the host function to bind, or NULL to fall through. Returns 0, or -1 when the loaded
+ * libhybris-core.so has no such export (Windows binds its hooks internally).
+ */
+int embedded_set_hook_callback(void *(*cb)(const char *symbol, const char *requester));
+
+/*
  * embedded_dlsym() — look up a symbol across all loaded Android libraries.
  * Equivalent to android_dlsym(NULL, symbol) — searches all loaded libs.
  */
