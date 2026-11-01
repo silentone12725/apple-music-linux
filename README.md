@@ -289,12 +289,37 @@ scripts/build-flatpak.sh                # Flatpak bundle → dist/adam.flatpak (
 
 ### Windows
 
-Needs [MSYS2](https://www.msys2.org) UCRT64 (`pacman -S mingw-w64-ucrt-x86_64-{gcc,make,openssl}`) on `PATH`, Go, Node, git and a 64-bit VLC 3.x install:
+**Prerequisites** (all on `PATH` unless noted):
+
+- [MSYS2](https://www.msys2.org) UCRT64 with `pacman -S mingw-w64-ucrt-x86_64-{gcc,make,openssl}`, and `C:\msys64\ucrt64\bin` on `PATH`
+- Go, Node.js (with npm) and git; run `git lfs pull` once so `third_party/ffmpeg-win` is present
+- A 64-bit VLC 3.x install (default `C:\Program Files\VideoLAN\VLC`); the script fetches the libvlc headers itself
+- Visual Studio 2022 Build Tools with the Windows 10/11 SDK, for the window-blur DLL (`electron\native\composition-backdrop.dll`, built automatically if missing)
+
+**Build the installer** from a PowerShell prompt in the repo root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1      # installer in electron\dist
-powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -SkipInstaller
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 ```
+
+The script builds `libdrm_client.dll` and `engine.exe` (CGO + the `adamplay_backend` tag), copies the MSYS2 runtime DLLs and an audio-only VLC subset, then runs electron-builder. The installer lands at `electron\dist\adam-setup-<version>.exe`.
+
+| Option | Effect |
+|---|---|
+| `-SkipInstaller` | Stop after staging everything in `electron\dist\resources-win` |
+| `-VlcDir D:\vlc` | Use a VLC install in another location |
+| `-VlcInclude <dir>` | Use an existing directory containing `vlc\vlc.h` instead of fetching one |
+| `-Msys <dir>` | MSYS2 UCRT64 `bin` directory if not `C:\msys64\ucrt64\bin` |
+
+The renderer bundles (`engine-bundle.js` etc.) are committed; they are rebuilt on Linux with `scripts/build-renderer.sh`.
+
+**Windows engine without ALAC/DRM (AAC + music videos only).** With cgo off the engine needs no C toolchain and no libvlc, and it cross-compiles from Linux:
+
+```bash
+cd engine && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags '-w -s' -trimpath -o ../electron/dist/resources/engine.exe ./cmd
+```
+
+For development on Windows, run `npm install` then `npx electron .` in `electron\`; it uses `electron\dist\resources\engine.exe`. Lossless playback returns with the full cgo build above.
 
 ### Cleaning
 

@@ -7,6 +7,12 @@ the project's Releases page.
 
 ## Unreleased
 
+**Highlights**
+- A track ends where its audio ends: no replayed endings, no pause after shorter audio, nothing cut off
+- Tracks paused for a long time resume at their saved position
+- Music-video crackle is gone, and a refused 4K licence falls back to a lower tier
+- DRM fixes for long tokens and a hanging init; CI skips unfinished work
+
 ### Playback
 - **Track durations match the real stream.** When a stream's own playlist length differs from the catalog length by more than a second, the engine reports the stream's, so progress, fades and gapless timing line up. Lossless files carry the same length.
 - **No more replayed track endings.** The engine tells VLC reaching the real end of a file from a failed read (`eof` on `/vlc/time`); a clean short end advances instead of reloading and replaying the last seconds.
@@ -23,40 +29,54 @@ the project's Releases page.
 ### DRM
 - The music token request is built with cJSON, so long tokens are no longer truncated at 512 bytes; the subscription status read is bounds-checked; a failed FairPlay init releases its lock instead of hanging. Adapted from silentone12725/apple-music-linux#1.
 
+### Build and CI
+- **CI skips unfinished work.** Draft pull requests, titles marked `[WIP]` or `WIP:` and pushes marked `[wip]` are not checked; the Windows build runs only on request until the Windows DRM runtime is released.
+- **CI failures fixed:** `scripts/build-windows.ps1` builds the DRM DLL with the current `windows-build` make target, `scripts/ffmpeg-config.sh` carries its bash shebang so the shell-syntax check passes, and a library test no longer races its own background save.
+
 ## 1.5.0 - 2026-10-13
 
+**Highlights**
+- Renamed to Adam; existing data is migrated
+- An Apple-style sign-in sheet for lossless, with FairPlay keys following the upstream downloader
+- A Windows 10/11 installer (AAC and music videos)
+- Dependable engine startup and quit, and a volume that respects the desktop mixer
+- Every Apple Music link opens in the app; themes are no longer derived from an accent colour
+
 ### Lossless (ALAC)
-- **Lossless playback works again, decrypted the way the upstream downloader does.** Every FairPlay key, including the shared prefetch key that encrypts each track's first segment, now goes through Apple's own key exchange (`getKdContext`) and sample decryptor. Previously the first segment was passed through or decrypted with an all-zero key, and the track key was requested from Widevine under an all-zero key ID, which garbled the audio. Only the key tags on segments 0 and 1 are used, as upstream does. Streaming to the disk cache and VLC is unchanged, so playback still starts before the download finishes.
-- **Apple's FairPlay libraries are downloaded, not shipped.** The `.run` installer fetches them (`--no-lossless` skips it); the AppImage, system-wide installs and the Flatpak fetch them on first launch and switch lossless on once they arrive. Sources are pinned to fixed commits and every file is checked against `drm/fairplay-libs.lock`. Windows stays AAC-only for now.
-- **Concurrent FairPlay calls are serialised.** Key opens, sample decrypts and the lease-recovery reset now share one lock, and a key context freed by a lease refresh is detected and reopened instead of being used after free.
+- **FairPlay keys follow the upstream downloader.** Every key, including the shared prefetch key that encrypts each track's first segment, goes through Apple's own key exchange (`getKdContext`) and sample decryptor. Streaming to the disk cache and VLC is unchanged, so playback still starts before the download finishes.
+- **Apple's FairPlay libraries are downloaded, not shipped.** The `.run` installer fetches them (`--no-lossless` skips it); the AppImage, system-wide installs and the Flatpak fetch them on first launch and switch lossless on once they arrive. Sources are pinned to fixed commits and every file is checked against `drm/fairplay-libs.lock`.
+- **Concurrent FairPlay calls are serialised.** Key opens, sample decrypts and the lease-recovery reset share one lock, and a key context freed by a lease refresh is detected and reopened.
 - **VLC opens every track unmuted at your last volume**, remembered across restarts.
-- **Each install now has its own device identity.** Every install used to present the same hard-coded Android ID to Apple. A new install generates a random one (stored in `drm/files/device-id`); an install that is already signed in keeps the old one until its next sign-out, so the upgrade does not log anyone out.
-- **Fixed:** decode times were patched before decrypting, which shifted every sample by 4 bytes when a fragment carried a 32-bit `tfdt`; a parser panic on a malformed fragment could crash the whole engine (now it fails that stream only); a stale "Kernel restriction detected" dialog could pop up on unrelated engine output; the Cavern reader trusted chunk sizes from its socket.
+- **Each install has its own device identity.** A new install generates a random Android ID (stored in `drm/files/device-id`) instead of sharing one with every other install; an install that is already signed in keeps its identity until its next sign-out, so the upgrade does not log anyone out.
 - **Removed** the unused CoreFP/Wine route, the old native FairPlay licence exchange and about 18,000 lines of other unreachable code.
 
 ### Sign-in for lossless
-- **An Apple-style sign-in sheet.** Settings → Account → Sign In… opens a sheet over Settings in the style of macOS's Apple Account sheets: email and password (with a button that shows the password for a few seconds), then a six-digit verification-code screen that accepts typing, pasting and autofill. The code goes straight to Apple's FairPlay login; a wrong code clears the fields and asks again, and the sheet closes by itself once lossless is ready.
-- **Sign-in no longer hangs after the verification code.** The engine waited on a lock it already held once Apple accepted the code, so FairPlay never reported ready and the sheet stayed open.
-- **Every sign-in asks for the verification code.** Signing out now also forgets Apple's trust in this computer (`adi.pb` and FairPlay's device files) and restarts the engine, which dropped that trust from memory; before, Apple sometimes skipped the code after a sign-out.
-- **Challenges are numbered**, so a wrong code is told apart from the same request arriving again, and an answered challenge is withdrawn at once, so reloading the page during sign-in does not ask for the same code twice.
+- **An Apple-style sign-in sheet.** Settings → Account → Sign In… opens a sheet over Settings in the style of macOS's Apple Account sheets: email and password (with a button that shows the password for a few seconds), then a six-digit verification-code screen that accepts typing, pasting and autofill. The code goes straight to Apple's FairPlay login; a wrong code clears the fields and asks again, and the sheet closes by itself once lossless is ready. Enter moves from email to password and submits.
+- **Lossless has its own sign-in.** FairPlay keeps a session separate from the web player's, so the web sign-in covers AAC, the catalog and the library, and lossless uses the sign-in under Settings → Account. The account state is read fresh each time Settings opens.
+- **Every sign-in asks for the verification code.** Signing out forgets Apple's trust in this computer (`adi.pb` and FairPlay's device files) and restarts the engine.
 
-### Reliability and sign-in
+### Reliability
 Ported from the pull request by Flavio Giacchetti ([silentone12725/apple-music-linux#1](https://github.com/silentone12725/apple-music-linux/pull/1)), adapted to Adam (Windows included, `adam` names).
-- **Engine startup no longer kills whatever owns the engine port.** It recovers only an orphan of this exact engine (same binary, data directory and port; `/proc` on Linux, the image path and command line on Windows), never deletes the session lock file (a replacement inode let two engines own the session at once), waits for the port, and reports a clear error when something else is using it. Starts, crash restarts and quitting are owned by one lifecycle module, so a quit during startup cannot spawn an engine.
-- **Quitting is reliable.** Storage and cookies are flushed (with a bounded wait), the engine is stopped with a bounded wait, and then the app exits, so the web player's unload handlers can no longer veto the quit and leave a window open with no engine. The tray *Exit* and *Restart* items go through the same path.
-- **Closing the terminal no longer crashes the app** (`EIO` is ignored like `EPIPE`), and the engine's event streams end when it shuts down.
+- **Engine startup only takes over an orphan of this exact engine** (same binary, data directory and port; `/proc` on Linux, the image path and command line on Windows). It never deletes the session lock file, waits for the port, and reports a clear error when something else is using it. Starts, crash restarts and quitting are owned by one lifecycle module, so a quit during startup cannot spawn an engine.
+- **Quitting flushes storage and cookies and stops the engine, each with a bounded wait, and then exits**, so the web player's unload handlers cannot veto the quit. The tray *Exit* and *Restart* items use the same path.
+- **Closing the terminal does not crash the app** (`EIO` is ignored like `EPIPE`), and the engine's event streams end when it shuts down.
 - **Sign-in popups keep their opener.** Apple's sign-in and authorize pages open as popups that keep `window.opener` and the session (MusicKit reports completion through it), with no `adamBridge` and every later navigation checked; the Last.fm window is managed the same way. Storage access is granted to Apple pages only.
-- **Settings sign-in fixes.** The verification code was posted to a malformed URL (`…:20025api/v1/drm/challenge`); it now goes to the right endpoint, must be six digits, and a challenge accepts exactly one reply. Enter moves from email to password and submits, the account state is read fresh each time Settings opens (a pre-warmed snapshot could predate a login), and polling can be cancelled. A failed FairPlay session no longer keeps advertising playback capabilities, a pending challenge is no longer erased by unrelated updates, and failed restores and restarts are reported as failed.
-- **Settings → Display → Reduce animations** (off by default) makes the web player use still artwork. Idle startup now pre-warms three tracks instead of ten, and none when something is already playing.
-- **Installer** ships fresh renderer bundles next to the app, so an upgrade over an existing install cannot be overridden by stale copies.
+- **Settings → Display → Reduce animations** (off by default) makes the web player use still artwork. Idle startup pre-warms three tracks instead of ten, and none when something is already playing.
+- **The installer ships fresh renderer bundles** next to the app, so an upgrade over an existing install is not overridden by stale copies.
+
+### Playback
+Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone12725/apple-music-linux/pull/1), adapted to Adam.
+- **The desktop mixer is respected.** libvlc gets a stable app identity and its volume is not re-applied (or `pactl` run) on every track; the page follows mixer changes through `volume`/`muted` on `/vlc/time`.
+- **Native transport commands are serialised.** Pause, resume and skip commands are dropped when the track has changed, status replies that arrive after a stop or skip are discarded, and a seek response for a skipped track cannot unfreeze the next one.
+- **The natural end of a track advances** instead of replaying the last fragment (the allowed gap is capped at 10% of the track).
+- **ALAC download and precache contexts end on shutdown**, the transport buttons follow the native session, and a poll error does not stop status updates.
 
 ### Themes
-- **Accent-generated themes are gone.** The theme is never derived from an accent colour any more, neither the system's nor a picked one, and the all-pink look that appeared on first run and after the sign-in is removed. The default is the `Apple Music` preset (black, grey sidebar, red only for accents), and Reset returns to it. Palettes saved by older versions are reset once (your own saved presets and chosen mode are kept).
-- **Blur works on every desktop.** The wallpaper layer behind the interface never actually received its image (the page script referenced a variable that only existed in the main process), so blur showed nothing on any desktop. It is fixed and available on Windows (wallpaper from the registry) and GNOME as well as Hyprland and KDE. The wallpaper is blurred once in the app instead of by a full-window CSS filter, which kept machines without a GPU from rendering the page.
-- **Signed-out pages use the blur theme** and the chosen theme applies after sign-in.
+- **The theme is no longer derived from an accent colour**, neither the system's nor a picked one. The default is the `Apple Music` preset (black, grey sidebar, red only for accents), and Reset returns to it. Palettes saved by older versions are reset once (your own saved presets and chosen mode are kept).
+- **Blur is available on every desktop:** Windows (wallpaper from the registry), GNOME, Hyprland and KDE. The wallpaper is blurred once in the app instead of by a full-window CSS filter, so machines without a GPU still render the page. Signed-out pages use the blur theme, and the chosen theme applies after sign-in.
 
 ### Links
-- **Every Apple Music URL form opens in Adam.** `adam://` gained `play`/`open` forms, any `music.apple.com` path (browse, radio, search, curators, library, stations) is opened in the app, `?i=` song links, legacy `itunes.apple.com` links and all Apple Music hosts work, and `music.apple.com` MPRIS `OpenUri` requests now actually open (they were sent in a shape the page ignored).
+- **Every Apple Music URL form opens in Adam.** `adam://` has `play`/`open` forms, any `music.apple.com` path (browse, radio, search, curators, library, stations) opens in the app, and so do `?i=` song links, legacy `itunes.apple.com` links and all Apple Music hosts. `music.apple.com` MPRIS `OpenUri` requests open as well.
 - **Settings → Links lets you choose which of Apple Music's 24 URL schemes Adam claims** (`music://`, `musics://`, `itms://`, `itmss://`, `itunes://`, `itals://`, `italss://`, `itvls://`, `itvlss://`, `itsradio://`, `itunesradio://`, `daap://`, `itpc://` and the Windows `itunes.assocprotocol.*` aliases). None is claimed by default, only Adam's own registrations are ever removed, and `daap://` and `itpc://` show a notice because a web client cannot act on them. On Linux the choice is written to `mimeapps.list`.
 
 ### Renamed to Adam
@@ -65,31 +85,29 @@ Ported from the pull request by Flavio Giacchetti ([silentone12725/apple-music-l
 - **Breaking:** custom CSS written against `.aml-*` classes or `--aml-*` variables must be updated to `adam-` (see `adam-custom.example.css`); old `aml://` links no longer open the app; scripts that set `AML_*` variables need `ADAM_*`. The old install location (`~/.local/share/apple-music-linux`) is not removed by the new installer.
 
 ### Windows
-- **Windows 10/11 x64 support.** NSIS installer built by `scripts/build-windows.ps1`; the DRM library is a MinGW DLL (`drm_linux.c` + libcrypto) and the engine builds with cgo and libvlc.
-- **System integration.** SMTC media controls (overlay, lock screen, hardware media keys, seek), taskbar thumbnail buttons and progress, jump-list tasks, launch at login (starts in the tray), `adam://` links, Discord Rich Presence over the named pipe, Mica backdrop and a Windows-native config location.
-- **DRM backend renamed `adamplay`** (`AdamplayBackend`, build tag `adamplay_backend`, was `native_backend`). Windows has no Android runtime, so it stays AAC-only.
+- **A Windows 10/11 x64 installer** (NSIS, built by `scripts/build-windows.ps1`). The release installer is AAC and music videos only: its engine is built without cgo, so lossless is not available on Windows yet.
+- **System integration:** SMTC media controls (overlay, lock screen, hardware media keys, seek), taskbar thumbnail buttons and progress, jump-list tasks, launch at login (starts in the tray), `adam://` links, Discord Rich Presence over the named pipe, and a system backdrop for the window.
+- **The DRM backend is renamed `adamplay`** (`AdamplayBackend`, build tag `adamplay_backend`, was `native_backend`).
 
-### Playback lifecycle and mixer
-Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone12725/apple-music-linux/pull/1), adapted to Adam.
-- **The desktop mixer is respected.** libvlc gets a stable app identity and its volume is no longer re-applied (or `pactl` run) on every track; the page follows mixer changes through `volume`/`muted` on `/vlc/time`.
-- **Pause, resume and skip no longer race.** Native transport commands are serialised and dropped when the track changed; status replies that arrive after a stop or skip are discarded; a seek response for a skipped track can no longer unfreeze the next one.
-- **Natural end of track advances** instead of replaying the last fragment (the allowed gap is capped at 10% of the track), and recovery reloads the cached source.
-- **Downloads stop with the engine.** ALAC download and precache contexts end on shutdown.
-- **Transport buttons follow the native session** and a poll error no longer stops status updates for good.
-
-### Offline, packaging and cleanup
+### Offline, packaging and housekeeping
 - **An offline page** replaces the blank window when Apple Music cannot be reached, and reconnects by itself.
-- **AppImage:** versioned name (`Adam-<version>-x86_64.AppImage`), glibc baseline check (`scripts/check-glibc.sh`) and a static-runtime repack (`scripts/repack-appimage.sh`) in the release workflow.
-- **Config directory housekeeping:** obsolete wrapper-era folders, stale profile data, interrupted-write temp files and over-budget caches are removed at startup (at most daily, rule-based, live data protected). The 256 MB HTTP cache cap now takes effect (it was set too late), and prefs and the credential store are written atomically.
+- **AppImage:** a versioned name (`Adam-<version>-x86_64.AppImage`), a glibc baseline check (`scripts/check-glibc.sh`) and a static-runtime repack (`scripts/repack-appimage.sh`) in the release workflow.
+- **Config directory housekeeping:** obsolete wrapper-era folders, stale profile data, interrupted-write temp files and over-budget caches are removed at startup (at most daily, rule-based, live data protected). The 256 MB HTTP cache cap takes effect, and prefs and the credential store are written atomically.
 - **Device identity:** an existing or earlier identity is used before anything else; generating one is opt-in (`ADAM_GENERATE_IDENTITY=1`) because the license server rejects self-made ones. Key contexts are wiped and freed.
 
-### Fixes
-- **Lossless needs its own Apple Account sign-in.** FairPlay keeps a session separate from the web player's, so the web sign-in covers AAC, the catalog and the library, and lossless needs the sign-in under Settings → Account. Status is reported honestly: `process: stopped` while idle, and session/auth are no longer claimed by the backend itself.
-- Export: titles containing a dot no longer lose the file extension; the final move never overwrites a file the policy protects; job phases only move forward and finished jobs stay finished; relative output folders are made absolute.
-- Seek requests from a skipped track are refused (409); `NaN`/`Inf` seek times, negative cache sizes and oversized samples or SOFA headers are rejected; the engine accepts only its own loopback origin (`ADAM_ALLOW_LOCAL_ORIGINS=1` allows others).
-- Library: query failures are logged, playlist paging cannot loop forever. Prefetch: closed-queue pushes are handed back; stale context jobs are cancelled. Opening an asset can no longer wedge after a provider panic. SSE: `waitFor` no longer leaks listeners and reconnects back off after short-lived connections. Imported theme presets are validated.
+### Hardening
+- **Exports** keep the file extension of titles containing a dot, never overwrite a file the policy protects, move job phases only forward, and make relative output folders absolute.
+- **The engine validates its inputs:** seek requests from a skipped track are refused (409), non-finite seek times, negative cache sizes and oversized samples or SOFA headers are rejected, and only the engine's own loopback origin is accepted (`ADAM_ALLOW_LOCAL_ORIGINS=1` allows others).
+- **Library and prefetch:** query failures are logged and playlist paging is bounded; the prefetch queue hands back pushes to a closed queue and cancels stale jobs; opening an asset cannot wedge after a provider panic; SSE `waitFor` does not leak listeners and reconnects back off after short-lived connections; imported theme presets are validated.
 
 ## 1.4.0 - 2026-10-06
+
+**Highlights**
+- DRM runs inside the engine: no wrapper process or sockets, smaller and verified packages
+- ALAC plays in-process through libvlc and starts while it downloads
+- A rebuilt music-video pipeline with fragment-level seeking
+- Exports that yield to playback; Discord, Last.fm and ListenBrainz; a mini player
+- Album-art theming and two security audits
 
 A major release: 304 commits across 689 files since 1.3.0. Grouped by area because of its
 size; the same list is in releases/v1.4.0.md.
@@ -160,6 +178,12 @@ size; the same list is in releases/v1.4.0.md.
 
 ## 1.3.0 - 2026-08-11
 
+**Highlights**
+- Music videos with a quality menu (480p to 2160p), subtitles, fullscreen and download
+- Playlist and album downloads, FLAC conversion and filename templates
+- A theme engine with blur, accent and custom CSS modes
+- AAC streams straight into the browser instead of through libvlc
+
 Music videos, downloads, the theme engine and the AAC streaming path.
 
 ### Added
@@ -220,6 +244,11 @@ Music videos, downloads, the theme engine and the AAC streaming path.
 
 ## 1.2.0-pre - 2026-07-23
 
+**Highlights**
+- A dedicated AAC playback path (ALAC and Atmos stay on VLC)
+- Theme and accent colours with saved presets, and custom CSS
+- Back and Forward buttons, and cache management buttons
+
 ### Added
 - A dedicated MSE playback path for AAC (ALAC and Atmos stay on VLC), with a faster stream start
   through the engine's HLS fetcher.
@@ -245,6 +274,10 @@ Music videos, downloads, the theme engine and the AAC streaming path.
 
 ## 1.1.0-pre - 2026-07-21
 
+**Highlights**
+- A per-track decrypted audio disk cache, and VLC bundled with the app
+- DRM first-launch fixes: no more double sign-in
+
 ### Added
 - A per-track decrypted audio disk cache (later plays need no re-decryption or re-fetch), with
   GET /api/v1/cache/stats, DELETE /api/v1/cache/playback and PUT /api/v1/cache/config.
@@ -266,6 +299,10 @@ Music videos, downloads, the theme engine and the AAC streaming path.
   status shows spinners and turns green automatically.
 
 ## 1.0.0-pre - 2026-07-19
+
+**Highlights**
+- The first pre-release: a standalone AppImage
+- VLC playback (lossless and hi-res), MPRIS2 and a frosted-glass UI
 
 First pre-release: a standalone x86-64 AppImage.
 
