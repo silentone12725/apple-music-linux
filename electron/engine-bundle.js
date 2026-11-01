@@ -9729,7 +9729,8 @@
             `;
         document.head.appendChild(ds);
       }
-      const losslessOn = prefs["lossless-enabled"] !== false && drmAvailable;
+      const losslessUsable = drmAvailable && drmSignedIn;
+      const losslessOn = prefs["lossless-enabled"] !== false && losslessUsable;
       const qualityOpts = [
         { value: "high-quality", label: "High Quality (AAC 256 kbps)" },
         { value: "lossless", label: "Lossless (ALAC up to 24-bit / 48 kHz)" },
@@ -9743,7 +9744,7 @@
         window.adamBridge?.setTweak("streaming-quality", "lossless");
         _streamingQuality = "lossless";
       });
-      if (!drmAvailable) {
+      if (!losslessUsable) {
         sqResetBtn.style.opacity = "0.38";
         sqResetBtn.style.pointerEvents = "none";
       }
@@ -9761,7 +9762,7 @@
       const sqRow = makeRow(
         "Streaming",
         sqInner,
-        !drmAvailable ? "AAC only: this build has no DRM layer" : drmSignedIn ? null : "Lossless qualities play once the DRM layer is ready; AAC plays until then",
+        !drmAvailable ? "AAC only: this build has no DRM layer" : drmSignedIn ? null : "Sign in to Apple Music to stream lossless; AAC plays until then",
         true
       );
       let _onLosslessChange = null;
@@ -9778,15 +9779,15 @@
         }
         _onLosslessChange?.(v);
       });
-      if (!drmAvailable) {
+      if (!losslessUsable) {
         losslessToggle.style.opacity = "0.4";
         losslessToggle.style.pointerEvents = "none";
-        losslessToggle.title = "Lossless needs the DRM layer, which this build does not include";
+        losslessToggle.title = drmAvailable ? "Sign in to Apple Music to use lossless" : "Lossless needs the DRM layer, which this build does not include";
       }
       aqBody.appendChild(makeRow(
         "Lossless Audio",
         losslessToggle,
-        !drmAvailable ? "Not available: this build has no DRM layer, so AAC plays" : drmSignedIn ? "Stream lossless audio (ALAC) when available" : "Starts as soon as the DRM layer is ready; AAC plays until then",
+        !drmAvailable ? "Not available: this build has no DRM layer, so AAC plays" : drmSignedIn ? "Stream lossless audio (ALAC) when available" : "Sign in to Apple Music to enable; AAC plays until then",
         false
       ));
       aqBody.appendChild(sqRow);
@@ -10086,11 +10087,11 @@
       dlBody.appendChild(previewWrap);
       updatePreview();
       dlBody.appendChild(_dlSubhead("Format"));
-      const fullQualityOpts = drmSignedIn ? [
+      const fullQualityOpts = [
         { value: "high-quality", label: "High Quality (AAC 256 kbps)" },
         { value: "lossless", label: "Lossless (ALAC up to 24-bit / 48 kHz)" },
         { value: "hi-res-lossless", label: "Hi-Res Lossless (ALAC up to 24-bit / 192 kHz)" }
-      ] : [{ value: "high-quality", label: "High Quality (AAC 256 kbps)" }];
+      ];
       const { wrap: dlQWrap, setValue: setDlQ } = _adamMakeQualityDropdown("dl-quality", prefs, fullQualityOpts);
       if (!losslessAllowed) setDlQ("high-quality");
       const dlQReset = makeMiniBtn("", () => {
@@ -10120,7 +10121,7 @@
       dlBody.appendChild(makeRow(
         "Quality",
         dlQInner,
-        !drmSignedIn ? drmAvailable ? "Lossless downloads are available once the DRM session is ready" : "Lossless downloads need the DRM layer, which this build does not include" : null,
+        !drmSignedIn ? drmAvailable ? "Sign in to Apple Music to download lossless" : "Lossless downloads need the DRM layer, which this build does not include" : null,
         true
       ));
       const ffmpegIndCtrl = document.createElement("div");
@@ -10731,6 +10732,7 @@
     }
     const COG_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:17%"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.05-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.04.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.03-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>`;
     const DOWNLOAD_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%" style="display:block;padding:19%"><path d="M11.9952,21.1159C12.3277,21.1159 12.6697,20.9829 12.8977,20.7359L19.12,14.5136C19.3765,14.2571 19.5,13.9531 19.5,13.6396C19.5,12.9462 19.006,12.4522 18.341,12.4522C17.9801,12.4522 17.6856,12.6042 17.4671,12.8322L15.3011,14.9791L13.1352,17.4395L13.2112,15.3781L13.2112,4.254C13.2112,3.5035 12.7172,3 11.9952,3C11.2733,3 10.7793,3.5035 10.7793,4.254L10.7793,15.3781L10.8648,17.4395L8.6894,14.9791L6.5329,12.8322C6.3049,12.6042 6.0199,12.4522 5.659,12.4522C4.994,12.4522 4.5,12.9462 4.5,13.6396C4.5,13.9531 4.6235,14.2571 4.88,14.5136L11.0928,20.7359C11.3303,20.9829 11.6628,21.1159 11.9952,21.1159Z"/></svg>`;
+    const MINI_SVG = `<svg viewBox="0 0 14 11" fill="none" stroke="currentColor" width="100%" height="100%" style="display:block;padding:25% 22%;box-sizing:border-box"><rect x="0.75" y="0.75" width="12.5" height="9.5" rx="1.75" style="stroke-width:1;fill:none"/><rect x="7" y="5.5" width="6" height="4" rx="1" style="fill:currentColor;stroke:none"/></svg>`;
     function findAccountRow() {
       const nav = document.querySelector("nav.navigation") || document.querySelector("nav");
       if (!nav) return null;
@@ -10745,6 +10747,7 @@
       if (!accountRow || !nav) return;
       let cog = document.getElementById("adam-settings-cog");
       let dlBtn = document.getElementById("adam-downloads-btn");
+      let miniBtn = document.getElementById("adam-miniplayer-btn");
       if (!cog) {
         cog = document.createElement("button");
         cog.id = "adam-settings-cog";
@@ -10769,14 +10772,28 @@
         };
         nav.appendChild(dlBtn);
       }
-      _positionCogButtons(nav, accountRow, cog, dlBtn);
+      if (!miniBtn) {
+        miniBtn = document.createElement("button");
+        miniBtn.id = "adam-miniplayer-btn";
+        miniBtn.title = "Mini Player";
+        miniBtn.setAttribute("aria-label", "Mini Player");
+        miniBtn.innerHTML = MINI_SVG;
+        _styleNavBtn(miniBtn);
+        miniBtn.onclick = (e) => {
+          e.stopPropagation();
+          window.adamBridge?.toggleMiniPlayer?.();
+        };
+        nav.appendChild(miniBtn);
+      }
+      _positionCogButtons(nav, accountRow, cog, dlBtn, miniBtn);
       if (!_cogResizeObs) {
         _cogResizeObs = new ResizeObserver(() => {
           const row = findAccountRow();
           const n = document.querySelector("nav.navigation") || document.querySelector("nav");
           const c = document.getElementById("adam-settings-cog");
           const d = document.getElementById("adam-downloads-btn");
-          if (row && n && c && d) _positionCogButtons(n, row, c, d);
+          const m = document.getElementById("adam-miniplayer-btn");
+          if (row && n && c && d && m) _positionCogButtons(n, row, c, d, m);
         });
         _cogResizeObs.observe(nav);
       }
@@ -10810,7 +10827,7 @@
         btn.style.color = "rgba(255,255,255,0.55)";
       };
     }
-    function _positionCogButtons(nav, accountRow, cog, dlBtn) {
+    function _positionCogButtons(nav, accountRow, cog, dlBtn, miniBtn) {
       const navRect = nav.getBoundingClientRect();
       const rowRect = accountRow.getBoundingClientRect();
       if (!navRect.height || !rowRect.height) return;
@@ -10820,6 +10837,8 @@
       cog.style.right = "10px";
       dlBtn.style.top = `${top}px`;
       dlBtn.style.right = `${10 + _szN + gap}px`;
+      miniBtn.style.top = `${top}px`;
+      miniBtn.style.right = `${10 + 2 * (_szN + gap)}px`;
     }
     watchDomSettled(() => {
       if (findAccountRow()) mountSettingsCog();
