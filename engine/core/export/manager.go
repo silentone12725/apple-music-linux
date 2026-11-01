@@ -1142,6 +1142,11 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 		if cerr := f.Close(); copyErr == nil {
 			copyErr = cerr
 		}
+		// Windows cannot delete a file that is still open, so a cancelled or failed copy removes
+		// the temp file here, after the close, as well as in the caller.
+		if copyErr != nil || ctx.Err() != nil {
+			os.Remove(tmpPath)
+		}
 		done <- copyErr
 	}()
 	select {
@@ -1154,6 +1159,10 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 		// next write and self-exit.
 		r.Close()
 		err = ctx.Err()
+		select { // give the goroutine a moment to close f, so the file can be removed on Windows
+		case <-done:
+		case <-time.After(time.Second):
+		}
 	}
 	if err != nil {
 		os.Remove(tmpPath)
