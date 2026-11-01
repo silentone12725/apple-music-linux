@@ -17,6 +17,7 @@ the project's Releases page.
 ### Music videos
 - **A refused video licence falls back to the next lower tier** (H.264 preferred) instead of failing the video. Apple refuses the 4K keys to this client; the refusal is remembered per video for an hour.
 - **Quality is logged clearly**: `[mv-quality]` lines show what was requested, what each tier allows (HDCP-LEVEL, ALLOWED-CPC key systems) and what plays.
+- **An opt-in live check for 4K music videos** (`engine/core/e2e/mv_4k_integration_test.go`, skipped without `AM_TEST_TOKEN` and `AM_TEST_MUT`) opens videos whose master playlists offer 4K-class heights with a 2160 ceiling, logs the heights offered and the chosen variant's codec, streams the first 6 MB and checks that it decrypts to real fMP4 video. It reports whether the key request is accepted, and writes the results to `verification/mv-4k/`.
 
 ### DRM
 - The music token request is built with cJSON, so long tokens are no longer truncated at 512 bytes; the subscription status read is bounds-checked; a failed FairPlay init releases its lock instead of hanging. Adapted from silentone12725/apple-music-linux#1.
