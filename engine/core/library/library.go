@@ -78,7 +78,8 @@ type PlaylistTrack struct {
 // Store is the library cache backed by in-memory SQLite with encrypted persistence.
 type Store struct {
 	db      *sql.DB
-	saveMu  sync.Mutex // serialises save()
+	saveMu  sync.Mutex     // serialises save()
+	bg      sync.WaitGroup // background saves in flight, so a test can wait for them before removing its directory
 	keyPath string
 	encPath string
 	key     []byte // cached encryption key; loaded once in encKey()
@@ -328,6 +329,15 @@ func loadTx(tx *sql.Tx, dc *diskCache) error {
 		}
 	}
 	return nil
+}
+
+// saveAsync persists the cache in the background.
+func (s *Store) saveAsync() {
+	s.bg.Add(1)
+	go func() {
+		defer s.bg.Done()
+		s.save()
+	}()
 }
 
 func (s *Store) save() {
@@ -631,7 +641,7 @@ func (s *Store) SetPlaylistTracks(playlistID string, tracks []PlaylistTrack) {
 		log.Printf("[library] set playlist tracks commit: %v", err)
 		return
 	}
-	go s.save()
+	s.saveAsync()
 }
 
 // IngestPayload is sent by the JS library sync function.
@@ -697,7 +707,7 @@ func (s *Store) Ingest(p IngestPayload) {
 	}
 
 	log.Printf("[library] ingested: %d songs, %d albums, %d playlists", len(p.Songs), len(p.Albums), len(p.Playlists))
-	go s.save()
+	s.saveAsync()
 }
 
 func ingestSongs(tx *sql.Tx, songs []amItem) error {

@@ -30,6 +30,7 @@ func song(id, cid, album string, disc, track int) amItem {
 func TestPersistenceRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	s := New(dir)
+	t.Cleanup(s.bg.Wait) // Ingest saves in the background; it must finish before the temp dir is removed
 	var album amItem
 	album.ID = "l.album1"
 	album.Attributes.Name = "Album"
