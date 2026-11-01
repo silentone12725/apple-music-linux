@@ -55,6 +55,9 @@ typedef struct {
  * Must be called exactly once before any other drm_lib_* function. */
 int drm_lib_init(const drm_lib_config_t *cfg);
 
+/* drm_lib_abort_init — release the init lock after drm_lib_init did not return (exception barrier only). */
+void drm_lib_abort_init(void);
+
 /* drm_lib_shutdown — stop background threads and free global state.
  * After this returns, no further calls to drm_lib_* are valid. */
 void drm_lib_shutdown(void);

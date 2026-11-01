@@ -130,6 +130,7 @@ extern "C" int aml_lib_init_guarded(const drm_lib_config_t *cfg)
         g_recovery_valid = false;
         fprintf(stderr, "[guard] drm_lib_init: SVError escaped\n");
         fflush(stderr);
+        drm_lib_abort_init();
         return -1;
     }
 
@@ -138,9 +139,11 @@ extern "C" int aml_lib_init_guarded(const drm_lib_config_t *cfg)
     } catch (const std::exception &e) {
         fprintf(stderr, "[guard] drm_lib_init exception: %s\n", e.what());
         fflush(stderr);
+        drm_lib_abort_init();
     } catch (...) {
         fprintf(stderr, "[guard] drm_lib_init: unknown C++ exception\n");
         fflush(stderr);
+        drm_lib_abort_init();
     }
 
     g_recovery_valid = false;
@@ -182,8 +185,10 @@ extern "C" int aml_lib_init_guarded(const drm_lib_config_t *cfg)
         return drm_lib_init(cfg);
     } catch (const std::exception &e) {
         fprintf(stderr, "[guard] drm_lib_init exception: %s\n", e.what());
+        drm_lib_abort_init();
     } catch (...) {
         fprintf(stderr, "[guard] drm_lib_init: unknown C++ exception\n");
+        drm_lib_abort_init();
     }
     return -1;
 }

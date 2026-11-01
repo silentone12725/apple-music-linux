@@ -344,6 +344,17 @@ int drm_lib_login(const char *username, const char *password)
     return 0;
 }
 
+/* A C++ exception unwinding out of drm_lib_init (or a SVError recovered by longjmp) skips the unlock calls, which would
+ * hang the next init and drm_lib_shutdown on g_init_mutex. The exception barrier calls this when init did not return
+ * normally, on the thread that ran it; the trylock keeps it a no-op if the mutex is somehow free. Adapted from PR #1. */
+void drm_lib_abort_init(void)
+{
+    g_init_result = -1;
+    pthread_mutex_trylock(&g_init_mutex); /* held by the aborted init, or free: either way it ends unlocked */
+    pthread_mutex_unlock(&g_init_mutex);
+    if (g_drm_state_cb) g_drm_state_cb("FAILED", g_drm_state_ud);
+}
+
 /* ── drm_lib_shutdown ───────────────────────────────────────────────────────*/
 
 void drm_lib_shutdown(void)

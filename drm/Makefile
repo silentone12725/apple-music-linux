@@ -226,8 +226,18 @@ uninstall:
 	rm -f $(DESTDIR)/usr/lib/$(TARGET)
 	rm -f $(addprefix $(DESTDIR)/usr/include/,$(HEADERS))
 
-test: $(TEST_TARGET)
+# Unit tests for header-only wrapper helpers (adapted from PR #1).
+NATIVE_C_TESTS = tests/music_token_request_test tests/subscription_status_test
+
+tests/music_token_request_test: tests/music_token_request_test.c native/music_token_request.h native/cJSON.c
+	$(CC) -std=gnu11 -g -Inative -o $@ tests/music_token_request_test.c native/cJSON.c -lm
+
+tests/subscription_status_test: tests/subscription_status_test.c native/subscription_status.h
+	$(CC) -std=gnu11 -g -Inative -o $@ tests/subscription_status_test.c
+
+test: $(TEST_TARGET) $(NATIVE_C_TESTS)
 	@$(TEST_TARGET)
+	@for t in $(NATIVE_C_TESTS); do ./$$t || exit 1; done
 
 # Compile the Windows loader branch without requiring credentials or Android
 # libraries. Run this in an MSYS2 MinGW shell, or override MINGW_CC in CI.

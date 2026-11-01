@@ -80,6 +80,8 @@ static inline int hybris_windows_setenv(const char *name, const char *value,
 #include "import.h"
 #include "cmdline.h"
 #include "cJSON.h"
+#include "music_token_request.h"
+#include "subscription_status.h"
 #include "dobby.h"
 
 struct shared_ptr apInf;
@@ -1942,13 +1944,12 @@ char *get_music_user_token(char *guid, char *authToken, struct shared_ptr reqCtx
     union std_string bundleVersionHeader = new_std_string("X-Apple-Requesting-Bundle-Version");
     union std_string bundleVersionValue = new_std_string("Music/4.9 Android/10 model/Samsung S9 build/7663313 (dt:66)");
     _ZN13mediaplatform11HTTPMessage9setHeaderERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_(httpMessage.obj, &bundleVersionHeader, &bundleVersionValue);
-    size_t body_size = 512;
-    char *body = (char *)malloc(body_size);
+    /* The assertion is a JWT that can exceed any fixed buffer; serialise it with cJSON (PR #1). */
+    char *body = drm_music_token_request(guid, authToken, getCurrentTimeMillis());
     if (body == NULL) {
-        return "";
+        return NULL;
     }
 
-    snprintf(body, body_size, "{\"guid\":\"%s\",\"assertion\":\"%s\",\"tcc-acceptance-date\":\"%lld\"}", guid, authToken, getCurrentTimeMillis());
     _ZN13mediaplatform11HTTPMessage11setBodyDataEPcm(httpMessage.obj, body, strlen(body));
     /* NOTE: do NOT free body before run() — new hybris stores pointer, not copy */
     uint8_t *urlRequest = (uint8_t *)calloc(1, 2048);
@@ -2048,16 +2049,10 @@ int offline_available() {
         return 0;
     }
     struct std_vector fairplay_status = _ZN17storeservicescore8FairPlay21getSubscriptionStatusEv(fairplay->obj);
-    char *begin_ptr = (char*)fairplay_status.begin;
-    if (!begin_ptr) {
-        fprintf(stderr, "[drm] offline_available: subscription status vector is empty\n"); fflush(stderr);
-        free(fairplay);
-        return 0;
-    }
-    char *second_item_ptr = begin_ptr + 16;
-    int state = *(int*)((char*)second_item_ptr + 8);
+    /* Empty or partial status is common before sign-in; never read past the vector (PR #1). */
+    const int available = drm_subscription_offline_available(fairplay_status.begin, fairplay_status.end);
     free(fairplay);
-    if (state == 2 || state == 3) { // kFPSubscriptionCanPlayContent, kFPSubscriptionCanStreamAndPlayContent
+    if (available) { // kFPSubscriptionCanPlayContent, kFPSubscriptionCanStreamAndPlayContent
         return 1;
     }
     return 0;
