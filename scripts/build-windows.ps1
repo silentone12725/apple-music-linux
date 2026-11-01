@@ -112,6 +112,14 @@ $ff = Join-Path $Repo 'third_party\ffmpeg-win'
 if (-not (Test-Path "$ff\bin\ffmpeg.exe")) { throw "third_party\ffmpeg-win\bin\ffmpeg.exe is missing (git lfs pull, or run scripts/build-ffmpeg-windows.sh from an MSYS2 UCRT64 shell)" }
 Copy-Item $ff (Join-Path $Out 'ffmpeg') -Recurse
 
+# Apple's Android FairPlay libraries cannot ship with Adam: the app downloads them on first launch from the sources
+# pinned in fairplay-libs.lock (electron\fairplay-fetch.mjs). Only our own empty stubs (libandroid, libOpenSLES, libdl)
+# are packed, built on Linux with `make -C drm android-stubs` (they are ELF files).
+Copy-Item (Join-Path $Repo 'drm\fairplay-libs.lock') $Out
+$stubs = Join-Path $Repo 'drm\stubs\out'
+if (Test-Path "$stubs\libdl.so") { Copy-Item $stubs (Join-Path $Out 'android-stubs') -Recurse }
+else { Write-Warning 'drm\stubs\out is missing: run `make -C drm android-stubs` on Linux and copy it over, or lossless will not start on Windows' }
+
 # The window blur: a native Windows Composition backdrop (electron\native). It is a build output, not committed;
 # electron-builder packs it as resources\composition-backdrop.dll. Needs Visual Studio 2022 Build Tools and the
 # Windows 10/11 SDK (the C++/WinRT headers), see native\build-composition-backdrop.cmd.

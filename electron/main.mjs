@@ -31,6 +31,7 @@ import { shouldShowOffline, offlineHash } from './load-failure.mjs';
 import { runCleanupThrottled, cleanupCache } from './config-cleanup.mjs';
 import { gnomeWallpaperPath } from './wallpaper.mjs';
 import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS } from './acrylic.mjs';
+import { fetchFairPlayLibs } from './fairplay-fetch.mjs';
 import { setCompositionBackdrop, setNativeCaptionDrag, removeCompositionBackdrop } from './composition-backdrop.mjs';
 import { cleanBlur, cleanGlassOpacity, sidebarOpacityControl, artNavAlpha } from './src/engine/sidebar-glass.js';
 
@@ -418,7 +419,9 @@ function stopEngine() { return engineLifecycle.stop(); }
 const FAIRPLAY_LIB64 = path.join(CONFIG_DIR, 'drm', 'rootfs', 'system', 'lib64');
 let _reloadEngineOnPause = false;
 function ensureFairPlayLibs() {
-    if (!IS_LINUX || !app.isPackaged) return;
+    if (!app.isPackaged) return;
+    if (IS_WIN) return ensureFairPlayLibsWindows();
+    if (!IS_LINUX) return;
     if (existsSync(path.join(FAIRPLAY_LIB64, 'libandroidappmusic.so'))) return;
     const script = path.join(process.resourcesPath, 'fetch-fairplay-libs.sh');
     if (!existsSync(script)) return;
@@ -432,6 +435,24 @@ function ensureFairPlayLibs() {
         if (_lastMprisStatus === 'Playing') _reloadEngineOnPause = true;
         else engineLifecycle.reload();
     });
+}
+
+// Windows: the same download, done in-process (no shell). Only builds that ship the DRM runtime
+// (libdrm_client.dll) fetch anything; the AAC-only build has no use for the libraries.
+function ensureFairPlayLibsWindows() {
+    const res = process.resourcesPath;
+    if (!existsSync(path.join(res, 'libdrm_client.dll'))) return;
+    if (['libandroidappmusic.so', 'libdl.so'].every(n => existsSync(path.join(FAIRPLAY_LIB64, n)))) return;
+    console.log('[Adam] Downloading the FairPlay libraries for lossless playback...');
+    fetchFairPlayLibs({
+        lockPath: path.join(res, 'fairplay-libs.lock'), stubsDir: path.join(res, 'android-stubs'),
+        dest: FAIRPLAY_LIB64, log: m => console.error('[Adam] fairplay:', m),
+    }).then(r => {
+        if (!r.ok) return console.error('[Adam] FairPlay libraries unavailable; lossless stays off:', r.failed.join(', '));
+        console.log('[Adam] FairPlay libraries ready; enabling lossless');
+        if (_lastMprisStatus === 'Playing') _reloadEngineOnPause = true;
+        else engineLifecycle.reload();
+    }).catch(e => console.error('[Adam] FairPlay download failed:', e.message));
 }
 
 // ── Compositor / blur detection ───────────────────────────────────────────────
