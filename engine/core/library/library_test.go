@@ -51,7 +51,8 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		PlaylistTracks: map[string][]amItem{"p.1": {song("i.2", "102", "", 0, 0)}},
 		Revision:       "rev-42",
 	})
-	s.save() // Ingest saves asynchronously; save synchronously for the test
+	s.save()    // Ingest saves asynchronously; save synchronously for the test
+	s.bg.Wait() // the background save from Ingest must finish too, or it may still hold the temp file below
 
 	r := New(dir)
 	got := r.SongsByAlbum("l.album1")
