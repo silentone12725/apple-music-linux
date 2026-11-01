@@ -10,6 +10,7 @@ the project's Releases page.
 ### Playback
 - **Track durations match the real stream.** When a stream's own playlist length differs from the catalog length by more than a second, the engine reports the stream's, so progress, fades and gapless timing line up. Lossless files carry the same length.
 - **No more replayed track endings.** The engine tells VLC reaching the real end of a file from a failed read (`eof` on `/vlc/time`); a clean short end advances instead of reloading and replaying the last seconds.
+- **The audio's real end decides when a track ends.** Once the stream's end is known, the fade-out, the next-track prefetch and MusicKit's length follow it. Audio longer than the reported length is not cut or faded out early (the length grows as it plays), and audio shorter than reported is not followed by a pause.
 - **Long pauses resume.** Open sessions are kept alive (`POST /api/v1/playback/{id}/touch`), and a session the engine no longer knows is reopened at the saved position on Play.
 - **Missing track-change events are recovered**: a track MusicKit leaves loading without announcing now starts after 300 ms.
 - **Music-video crackle fixed.** Audio/video drift is closed by running the video 4-6% faster or slower instead of seeking the audio about twice a second.
