@@ -2,12 +2,12 @@
 
 # Adam
 
-[![GitHub release](https://img.shields.io/github/v/release/silentone12725/adam?include_prereleases&style=for-the-badge)](https://github.com/silentone12725/adam/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/silentone12725/apple-music-linux?include_prereleases&style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-blue?style=for-the-badge)](https://github.com/silentone12725/adam/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/tY4v52KpVV)
 
-An Apple Music desktop client for Linux and Windows — lossless audio, music videos, downloads, and a native-feeling UI.
+An Apple Music desktop client for Linux and Windows — lossless audio on Linux, music videos, downloads, and a native-feeling UI.
 
 <div align="center">
   <img src="assets/screenshots/Blur-preview.png" alt="Blur theme" width="49%"/>
@@ -33,18 +33,7 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
 
 ## Contents
 
-- [Features](#features)
-- [Roadmap](#roadmap)
-- [Requirements](#requirements)
-- [Download & Install](#download--install)
-- [Opening links](#opening-links-in-adam)
-- [Login](#login)
-- [Dev](#dev)
-- [Build](#build)
-- [Project structure](#project-structure)
-- [Changelog](#changelog)
-- [Community](#community)
-- [References](#references)
+[Features](#features) · [Roadmap](#roadmap) · [Requirements](#requirements) · [Download & Install](#download--install) · [Opening links](#opening-links-in-adam) · [Login](#login) · [Dev](#dev) · [Build](#build) · [Project structure](#project-structure) · [Changelog](#changelog) · [Community](#community) · [References](#references)
 
 ## Features
 
@@ -53,7 +42,7 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
 - **AAC streaming** — dedicated MSE pipeline for AAC with accurate seek
 - **In-process DRM** — FairPlay runs inside the engine, with no helper process or local sockets
 - **Clean mode switching** — moving between lossless, AAC and music video stops the previous player first, so tracks never overlap
-- **Music Videos** — full MV playback with resolution selector (480p → 4K), subtitles, fullscreen, and fast fragment-level seeking; H.264-preferred to avoid HEVC decode issues on Linux
+- **Music Videos** — full MV playback with resolution selector (480p → 1080p), subtitles, fullscreen, and fast fragment-level seeking; H.264-preferred to avoid HEVC decode issues on Linux
 - **Audio quality badge** — shows codec, bit depth, and sample rate right in the player bar; click for full details
 
 ### Downloads
@@ -75,12 +64,16 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
   <img src="assets/screenshots/Features.png" alt="Features" width="49%"/>
 </div>
 
-### Compositor & Blur
+<details>
+<summary><b>Compositor &amp; blur</b></summary>
+
 - Native `blur-behind` on KDE X11 (KWin) and KDE Wayland — no screen-share dialog
 - Hyprland wallpaper blur via `hyprpaper` / `swww`
-- Wallpaper blur on Windows and GNOME (read from the desktop settings), so Blur works on every desktop
+- Native window blur on Windows 10/11 (the Windows Composition backdrop), and wallpaper blur on GNOME (read from the desktop settings), so Blur works on every desktop
 - Software blur fallback on X11 and Sway
 - Automatically switches to software blur if the GPU crashes
+
+</details>
 
 ### System Integration
 - **MPRIS2** — play/pause, next/prev, seek, and shuffle via D-Bus (works with KDE, GNOME shell, Waybar, etc.)
@@ -94,8 +87,11 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
 - **Mini player** — a small always-on-top now-playing window
 - **Discord Rich Presence**, **Last.fm** and **ListenBrainz** scrobbling
 - **Wayland + X11** — tested on Hyprland, KDE Plasma, GNOME, and Sway
+- **Windows** — media overlay, lock screen and hardware media keys (SMTC), taskbar buttons and jump list, launch at login, and Discord Rich Presence; see [Option D](#option-d--windows-installer-experimental)
 
-### Other
+<details>
+<summary><b>Other</b></summary>
+
 - **Play History** — last 30 songs shown in the native Up Next panel; click any to replay; persists across restarts
 - Back / Forward navigation buttons in the sidebar header
 - Smart segment cache — tracks pre-warmed before you press play
@@ -103,28 +99,36 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
 - Encrypted local library cache that persists across restarts
 - Settings auto-save with visual confirmation
 
+</details>
+
 ## Roadmap
 
+- **Windows lossless** — available in the nightly builds (Discord server, nightly channel); not yet in a release
 - **arm64 support** — packaging and wrapper binary for Apple Silicon / Raspberry Pi
 - **AutoEQ** — per-headphone parametric EQ from autoeq.app, with an EQ Studio panel in Settings (engine package ready; not yet wired into playback or the UI)
 - **Cavern** — lossless Dolby Atmos binaural rendering through CavernPipeServer, opt-in via `scripts/install-cavern.sh` (engine package ready; not yet wired into playback)
 
 ## Requirements
 
-- Linux x86_64
-- glibc ≥ 2.28 (Ubuntu 20.04+, Fedora 34+, Debian 11+)
-- PulseAudio or PipeWire
+- Linux x86_64 with glibc ≥ 2.35 (Ubuntu 22.04+, Fedora 36+, Debian 12+), PulseAudio or PipeWire — or Windows 10/11 x64
 - Apple Music subscription
 
-VLC and a minimal FFmpeg are bundled in every package — no system VLC or FFmpeg needed.
+VLC and a minimal FFmpeg are bundled in every Linux package — no system VLC or FFmpeg needed.
 
 A Wayland compositor with blur support (Hyprland, KWin) gives the best glass UI. X11, GNOME, and Sway use a software blur fallback.
 
 ## Download & Install
 
-Three formats are available. They contain the same build.
+Four formats are available. The three Linux ones (A–C) contain the same build.
 
-### Option A — `.run` installer (113 MB, recommended)
+| | Format | Size | Best for |
+|:-:|---|--:|---|
+| **A** | [`.run` installer](#option-a--run-installer-96-mb-recommended) | 96 MB | Most Linux users — no root needed (**recommended**) |
+| **B** | [AppImage](#option-b--appimage-140-mb-portable) | 140 MB | Portable, nothing installed |
+| **C** | [Flatpak](#option-c--flatpak-118-mb-experimental) | 118 MB | Sandboxed (experimental) |
+| **D** | [Windows installer](#option-d--windows-installer-experimental) | 108 MB | Windows 10/11 x64 — AAC and music videos (experimental) |
+
+### Option A — `.run` installer (96 MB, recommended)
 
 No dependencies, no root required for a user install.
 
@@ -150,8 +154,14 @@ After install, launch from your app menu or run `adam` in a terminal.
 ### Lossless (ALAC) and the FairPlay libraries
 
 Lossless and hi-res playback decrypt through Apple's own Android FairPlay libraries, which Adam
-is not allowed to redistribute. They are downloaded on your machine instead, so Adam itself stays
-open source:
+is not allowed to redistribute. They are downloaded on your machine instead (about 65 MB, pinned and checksum-verified), so Adam itself stays
+open source. The `.run` installer fetches them at the end of the install; the other formats fetch them on first launch.
+
+> [!NOTE]
+> Without them everything else works and playback uses AAC 256 kbps.
+
+<details>
+<summary>Where they come from and how to repair them</summary>
 
 - The `.run` installer downloads them at the end of a user install (~65 MB).
 - The AppImage, a `--system` install and the Flatpak download them in the background on first launch;
@@ -163,9 +173,9 @@ open source:
   script: `sh ~/.local/lib/adam/resources/fetch-fairplay-libs.sh` (adjust the path for `--system`
   installs or an extracted AppImage).
 
-Without them everything else works and playback uses AAC 256 kbps.
+</details>
 
-### Option B — AppImage (162 MB, portable)
+### Option B — AppImage (140 MB, portable)
 
 No install needed — just run it directly.
 
@@ -188,17 +198,21 @@ flatpak install --user adam.flatpak
 flatpak run io.github.silentone12725.Adam
 ```
 
-It also appears in your app menu as **Apple Music**. To remove it: `flatpak uninstall --user io.github.silentone12725.Adam`.
+It also appears in your app menu as **Adam**. To remove it: `flatpak uninstall --user io.github.silentone12725.Adam`.
 
-Things to know:
+<details>
+<summary>Things to know</summary>
+
 - It keeps its own settings and web session under `~/.var/app/io.github.silentone12725.Adam/`, separate from the other formats, so you sign in again.
 - Only one copy of the app can run at a time (the engine uses port 20025), so close the other formats first.
 - Wallpaper detection for the blur theme is limited by the sandbox; the software blur is used instead.
 - This is a self-hosted bundle, not a Flathub listing.
 
+</details>
+
 ### Option D — Windows installer (experimental)
 
-`adam-setup-<version>.exe` is an NSIS installer for Windows 10/11 x64. It bundles the engine, the DRM library and an audio-only VLC. The app follows Windows conventions: settings in `%APPDATA%\adam`, Mica window backdrop on Windows 11, and the same Apple Music pink default theme.
+`adam-setup-<version>.exe` is an NSIS installer for Windows 10/11 x64. It bundles the engine and a minimal FFmpeg, and plays AAC and music videos. The app follows Windows conventions: settings in `%APPDATA%\adam`, a native blur-behind window backdrop, and the same Apple Music pink default theme.
 
 Windows integration:
 
@@ -207,7 +221,8 @@ Windows integration:
 - **Startup** — optional *Launch at login* in the tray menu (starts hidden in the tray) and the `adam://` link handler.
 - **Discord Rich Presence** over the Windows named pipe.
 
-Not available on Windows yet: lossless/ALAC (Apple's FairPlay libraries only run on Linux, so Windows plays AAC 256 kbps), Cavern (Atmos JOC) rendering and the bundled FFmpeg (music-video remux and export use an `ffmpeg.exe` on `PATH` if present).
+> [!NOTE]
+> Not in the release yet: lossless/ALAC on Windows (it is in the nightly builds, announced in the Discord server's nightly channel; the [`nightly`](https://github.com/silentone12725/apple-music-linux/tree/nightly) branch builds it) and Cavern (Atmos JOC) rendering.
 
 ### GNOME
 
@@ -219,19 +234,42 @@ Adam opens Apple Music links from other apps and from the command line (`adam <l
 
 - **`adam://`** links always work: `adam://song/<id>`, `adam://album/<id>`, `adam://playlist/<id>`, `adam://play/<s|a|p|r>/<id>`, `adam://open/<s|a|p|r>/<id>` (add `?sf=us` for a storefront), or `adam://music.apple.com/...` with any Apple Music path.
 - **Apple Music URLs** (`https://music.apple.com/...` on any Apple Music host, including legacy `itunes.apple.com` links and `?i=` song links) play when they point at a song, album, playlist, artist or music video, and open in the app for any other page (browse, radio, search, curators, library, stations).
-- **Apple's own schemes** (`music://`, `musics://`, `itms://`, `itmss://`, `itunes://`, `itals://`, `italss://`, `itvls://`, `itvlss://`, `itsradio://`, `itunesradio://`, plus `daap://` and `itpc://`, and the Windows `itunes.assocprotocol.*` aliases) are the ones the Apple Music app registers. **Adam claims none of them until you turn them on in Settings → Links**, one by one, because claiming a scheme takes it away from whatever handles it now. `daap://` (shared iTunes libraries) and `itpc://` (podcast subscriptions) cannot be played in a web client, so Adam shows a notice for them.
+- **Apple's own schemes** are the ones the Apple Music app registers (full list below). **Adam claims none of them until you turn them on in Settings → Links**, one by one, because claiming a scheme takes it away from whatever handles it now. `daap://` (shared iTunes libraries) and `itpc://` (podcast subscriptions) cannot be played in a web client, so Adam shows a notice for them.
+
+<details>
+<summary>The 24 schemes Settings → Links can claim</summary>
+
+`music://` `musics://` `itms://` `itmss://` `itunes://` `itals://` `italss://` `itvls://` `itvlss://` `itsradio://` `itunesradio://` `daap://` `itpc://` and the Windows `itunes.assocprotocol.*` aliases.
+
+</details>
 
 A plain `https://music.apple.com` link clicked in another app opens in your browser: operating systems do not let an app claim links for another company's website. To get from the browser into Adam, turn on `music://` and click **Open in Music** on the website, or use a URL-redirect browser extension that rewrites `music.apple.com` to `adam://music.apple.com`. On Windows you may also have to confirm the choice under Settings → Apps → Default apps.
 
 ## Login
 
-Sign in on first launch the same way you would at music.apple.com. That is the only sign-in: Adam uses the web session for the DRM layer too, so lossless, hi-res and music videos work once you are signed in, and there is no separate account step in Settings.
+Two sign-ins are needed on Linux.
+
+### 1. Apple Music web session
+
+Sign in on first launch the same way you would at music.apple.com. This covers AAC playback, the catalog and your library.
 
 <div align="center">
   <img src="assets/screenshots/electron_login.png" alt="Apple Music web login" width="600"/>
 </div>
 
-The **Engine Status** section in Settings shows whether the DRM layer is ready (DRM process, FairPlay, session, backend). If it is not, playback falls back to AAC 256 kbps and music videos are unavailable.
+### 2. Lossless account (lossless, hi-res)
+
+This authenticates the FairPlay layer. Without it, playback falls back to AAC 256 kbps.
+
+1. Click the **Settings** cog wheel next to your account button
+2. Open **Account → Sign In…**, enter your Apple Account email and password, then the six-digit verification code Apple sends you
+
+<div align="center">
+  <img src="assets/screenshots/engine_login.png" alt="Adam Settings — lossless account sign-in" width="49%"/>
+  <img src="assets/screenshots/Account_logged_in.png" alt="Account signed in" width="49%"/>
+</div>
+
+The **Engine Status** section in Settings shows whether the DRM layer is ready (DRM process, FairPlay, session, backend). On Linux, if it is not, playback falls back to AAC 256 kbps and music videos are unavailable.
 
 ## Dev
 
@@ -239,8 +277,8 @@ The bundled FFmpeg (`third_party/ffmpeg`) is stored with [Git LFS](https://git-l
 
 ```bash
 git lfs install
-git clone https://github.com/silentone12725/adam
-cd adam/electron
+git clone https://github.com/silentone12725/apple-music-linux
+cd apple-music-linux/electron
 bash build.sh
 ```
 
@@ -317,8 +355,7 @@ Install with `%APPDATA%\adam\drm\rootfs\system\lib64` missing, start Adam, and a
 ```bash
 make -C drm                    # DRM library + Android stub libraries
 cd electron
-bash build.sh                         # bundle the audio-only VLC subset → dist/resources/vlc
-NODE_ENV=production npm run dist      # engine + AppImage → electron/dist/*.AppImage
+NODE_ENV=production npm run dist      # engine, VLC subset + AppImage → electron/dist/*.AppImage
 cd .. && scripts/build-installer.sh   # .run installer → dist/adam.run
 scripts/build-flatpak.sh                # Flatpak bundle → dist/adam.flatpak (after one of the above)
 ```
@@ -338,7 +375,7 @@ scripts/build-flatpak.sh                # Flatpak bundle → dist/adam.flatpak (
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 ```
 
-The script builds `libdrm_client.dll` and `engine.exe` (CGO + the `adamplay_backend` tag), copies the MSYS2 runtime DLLs and an audio-only VLC subset, then runs electron-builder. The installer lands at `electron\dist\adam-setup-<version>.exe`.
+The script builds `libdrm_client.dll` and `engine.exe` (CGO + the `adamplay_backend` tag), copies the MSYS2 runtime DLLs and an audio-only VLC subset, then runs electron-builder. This is the stable line: it does not ship the Android runtime that Windows lossless needs, which lives on the [`nightly`](https://github.com/silentone12725/apple-music-linux/tree/nightly) branch. The installer lands at `electron\dist\adam-setup-<version>.exe`.
 
 | Option | Effect |
 |---|---|
@@ -355,7 +392,7 @@ The renderer bundles (`engine-bundle.js` etc.) are committed; they are rebuilt o
 cd engine && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags '-w -s' -trimpath -o ../electron/dist/resources/engine.exe ./cmd
 ```
 
-For development on Windows, run `npm install` then `npx electron .` in `electron\`; it uses `electron\dist\resources\engine.exe`. Lossless playback returns with the full cgo build above.
+For development on Windows, run `npm install` then `npx electron .` in `electron\`; it uses `electron\dist\resources\engine.exe`. Windows lossless is built from the `nightly` branch.
 
 ### Cleaning
 
@@ -375,8 +412,11 @@ scripts/build-installer.sh --clean # build the installer, then drop electron/dis
 
 ## Project structure
 
+<details>
+<summary>Directory tree</summary>
+
 ```
-adam/
+apple-music-linux/
 ├── electron/                  Desktop shell
 │   ├── main.mjs               Main process: window, IPC, MPRIS2, tray, themes, prefs,
 │   │                          Discord / Last.fm / ListenBrainz, engine lifecycle
@@ -389,6 +429,7 @@ adam/
 │   │   ├── engine-sse.js        Server-sent-events client for engine state
 │   │   ├── smart-cache.js       Reports what you are looking at so the engine can pre-warm it
 │   │   └── vision-glass.js      Glass UI and CSS overrides
+│   ├── native/                Windows window-blur DLL source (Composition backdrop, built on Windows)
 │   ├── *-bundle.js            Generated by scripts/build-renderer.sh (do not edit)
 │   └── test/                  node --test suites for the renderer and main process
 ├── engine/                    Go HTTP engine (127.0.0.1:20025, TLS)
@@ -407,7 +448,7 @@ adam/
 │   │   ├── library/           Encrypted local library cache
 │   │   ├── autoeq/ ffmpeg/ cavern/   Headphone EQ and binaural (Atmos) rendering
 │   │   └── archtest/          Import-boundary tests
-│   └── utils/                 aacstream, alacstream, ampapi, lyrics, manifest, config
+│   └── utils/                 aacstream, alacstream, ampapi, lyrics, mvlabel, config
 ├── drm/                       DRM library (libdrm_client.so)
 │   ├── drm_linux.c            Session lifecycle and account files
 │   ├── drm_hybris.c           Loads Apple's Android FairPlay libraries through libhybris
@@ -416,10 +457,11 @@ adam/
 │   ├── fairplay-libs.lock     Pinned sources + SHA-256 of Apple's libraries (fetched, never shipped)
 │   └── files/                 Your Apple session (never packaged or committed)
 ├── flatpak/                   Flatpak manifest, desktop entry, metainfo and icon
-├── third_party/ffmpeg/        Prebuilt minimal FFmpeg (LGPL, Git LFS) bundled into every package
+├── third_party/               Prebuilt minimal FFmpeg (LGPL, Git LFS): ffmpeg/ for Linux, ffmpeg-win/ for Windows
 ├── scripts/                   build-installer.sh, build-flatpak.sh, build-engine.sh,
 │                              build-renderer.sh, bundle-vlc.sh, build-ffmpeg.sh, clean.sh,
-│                              install-cavern.sh, fetch-fairplay-libs.sh
+│                              build-windows.ps1, build-ffmpeg-windows.sh, check-glibc.sh,
+│                              repack-appimage.sh, install-cavern.sh, fetch-fairplay-libs.sh
 ├── verification/              API schema, QA console, benchmark and test harnesses
 ├── releases/                  Release notes (one file per version)
 ├── assets/                    Screenshots and tray icon
@@ -427,6 +469,8 @@ adam/
 ├── CHANGELOG.md
 └── go.work                    Go workspace (engine module)
 ```
+
+</details>
 
 How the pieces fit: the Electron app loads music.apple.com and injects the renderer bundles. The renderer asks the engine for a session per track. The engine fetches the stream and either serves AAC to a MediaSource in the page, or decrypts the lossless stream fragment by fragment through Apple's FairPlay code (loaded by the DRM library) and plays it through libvlc inside the engine.
 
@@ -439,6 +483,9 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 Questions, bug reports, feature requests and polls live on the [Adam Discord server](https://discord.gg/tY4v52KpVV).
 
 ## References
+
+<details>
+<summary>Libraries and projects Adam builds on</summary>
 
 **Runtime**
 - [Electron](https://electronjs.org) — desktop shell
@@ -460,3 +507,5 @@ Questions, bug reports, feature requests and polls live on the [Adam Discord ser
 - [esbuild](https://esbuild.github.io) — renderer bundles
 - [electron-builder](https://www.electron.build) — AppImage and package layout
 - [Last.fm](https://www.last.fm/api) and [ListenBrainz](https://listenbrainz.readthedocs.io) — scrobbling APIs
+
+</details>

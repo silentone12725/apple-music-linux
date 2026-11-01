@@ -62,7 +62,7 @@ Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone127
 
 ### Themes
 - **The theme is no longer derived from an accent colour**, neither the system's nor a picked one. The default is the `Apple Music` preset (black, grey sidebar, red only for accents), and Reset returns to it. Palettes saved by older versions are reset once (your own saved presets and chosen mode are kept).
-- **Blur is available on every desktop:** Windows (wallpaper from the registry), GNOME, Hyprland and KDE. The wallpaper is blurred once in the app instead of by a full-window CSS filter, so machines without a GPU still render the page. Signed-out pages use the blur theme, and the chosen theme applies after sign-in.
+- **Blur is available on every desktop:** Windows 10/11 use a native window blur (the Windows Composition backdrop), and GNOME, Hyprland and KDE blur the wallpaper. The wallpaper is blurred once in the app instead of by a full-window CSS filter, so machines without a GPU still render the page. Signed-out pages use the blur theme, and the chosen theme applies after sign-in.
 
 ### Interface
 - **Lossless options are honest when signed out.** Without a sign-in (or in a build with no DRM layer) the Lossless toggle is shown off and locked, and the Streaming and Downloads quality dropdowns show High Quality (AAC 256 kbps), greyed out and with the same options. Your saved choice returns after signing in.
@@ -78,7 +78,7 @@ Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone127
 - **Breaking:** custom CSS written against `.aml-*` classes or `--aml-*` variables must be updated to `adam-` (see `adam-custom.example.css`); old `aml://` links no longer open the app; scripts that set `AML_*` variables need `ADAM_*`. The old install location (`~/.local/share/apple-music-linux`) is not removed by the new installer.
 
 ### Windows
-- **A Windows 10/11 x64 installer** (NSIS, built by `scripts/build-windows.ps1`). The release installer is AAC and music videos only: its engine is built without cgo, so lossless is not available on Windows yet.
+- **A Windows 10/11 x64 installer** (NSIS, built by `scripts/build-windows.ps1`). The release installer is AAC and music videos only. Lossless (the DRM layer) was left out of this release for a stable experience, and the engine is built without cgo; Windows lossless is in the nightly builds (the [`nightly`](https://github.com/silentone12725/apple-music-linux/tree/nightly) branch, announced in the [Discord server](https://discord.gg/tY4v52KpVV)'s nightly channel).
 - **System integration:** SMTC media controls (overlay, lock screen, hardware media keys, seek), taskbar thumbnail buttons and progress, jump-list tasks, launch at login (starts in the tray), `adam://` links, Discord Rich Presence over the named pipe, and a system backdrop for the window.
 - **The DRM backend is renamed `adamplay`** (`AdamplayBackend`, build tag `adamplay_backend`, was `native_backend`).
 
