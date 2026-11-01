@@ -716,6 +716,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("GET /api/v1/playback/{id}/vseg/seek", cors(s.handlePlaybackVsegSeek))
 	mux.HandleFunc("DELETE /api/v1/playback/{id}/vseg", cors(s.handlePlaybackVsegStop))
 	mux.HandleFunc("POST /api/v1/playback/{id}/precache", cors(s.handlePlaybackPrecache))
+	mux.HandleFunc("POST /api/v1/playback/{id}/touch", cors(s.handlePlaybackTouch))
 	mux.HandleFunc("DELETE /api/v1/playback/{id}", cors(s.handleDeletePlayback))
 
 	// Playback context — renderer signals user intent; scheduler decides what to warm.

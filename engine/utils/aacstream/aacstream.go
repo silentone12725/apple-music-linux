@@ -136,6 +136,10 @@ func BeforeRequest(cl *resty.Client, ctx context.Context, url string, body []byt
 	return resp, err
 }
 
+// ErrLicenceRefused is returned when Apple's licence server answered with an error: it refused to grant the key (for
+// example a quality tier this client may not play), as opposed to a request that failed in transit.
+var ErrLicenceRefused = errors.New("error in license response")
+
 func AfterRequest(response *resty.Response) ([]byte, []byte, error) {
 	var responseData PlaybackLicense
 
@@ -145,7 +149,13 @@ func AfterRequest(response *resty.Response) ([]byte, []byte, error) {
 	}
 
 	if responseData.ErrorCode != 0 || responseData.Status != 0 {
-		return nil, nil, fmt.Errorf("error in license response, code: %d, status: %d", responseData.ErrorCode, responseData.Status)
+		// An error response carries no licence, so its body is safe to show and often says why it was refused.
+		body := string(response.Body())
+		if len(body) > 400 {
+			body = body[:400] + "…"
+		}
+		log.Printf("[aacstream] licence refused (HTTP %d): %s", response.StatusCode(), body)
+		return nil, nil, fmt.Errorf("%w, code: %d, status: %d", ErrLicenceRefused, responseData.ErrorCode, responseData.Status)
 	}
 
 	license, err := base64.StdEncoding.DecodeString(responseData.License)

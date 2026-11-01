@@ -52,6 +52,10 @@ type LicenseProvider interface {
 	Open(ctx context.Context, req LicenseRequest) (pipeline.Decryptor, error)
 }
 
+// ErrLicenceRefused is reported (wrapped) when the licence server refuses a key. Callers outside this package may not
+// import utils/aacstream, so it is re-exported here.
+var ErrLicenceRefused = aacstream.ErrLicenceRefused
+
 // New returns the default LicenseProvider backed by utils/aacstream.
 func New() LicenseProvider { return &fpLicenseProvider{} }
 

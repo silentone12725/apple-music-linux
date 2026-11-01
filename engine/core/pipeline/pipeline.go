@@ -161,6 +161,12 @@ type Stream struct {
 	Stages []Stage
 	Kind   StreamKind
 	Codec  Codec
+	// DurationMs is the length the stream's own playlist declares (the sum of its segment durations), or 0 when
+	// unknown. It can differ from the catalog length, and it is what the player will actually reach the end of.
+	DurationMs int
+	// CodecString is the MSE codec string of the variant actually opened, when it can differ from the one the track was
+	// advertised with (a video that fell back to a lower variant). Empty means the track's own string applies.
+	CodecString string
 }
 
 // ── Seek context ─────────────────────────────────────────────────────────────

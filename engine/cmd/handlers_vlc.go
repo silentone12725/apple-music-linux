@@ -141,6 +141,8 @@ func (s *APIServer) handleVLCTime(w http.ResponseWriter, r *http.Request) {
 		"state":    state,
 		"volume":   volume, // live mixer state, from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1)
 		"muted":    muted,
+		// eof: the source ended cleanly, so an "ended" state is the real end of the data, not a failed read.
+		"eof": s.vlcPlayer.SourceEnded(),
 	})
 }
 

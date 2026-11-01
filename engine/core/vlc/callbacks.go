@@ -17,6 +17,7 @@ import (
 	"errors"
 	"io"
 	"runtime/cgo"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -36,6 +37,9 @@ type callbackMedia struct {
 	src    Source
 	handle cgo.Handle
 	opaque unsafe.Pointer
+	// eof is set when the source reported a clean end of data (all bytes delivered, no error) and cleared when libvlc
+	// seeks. A read that failed or was aborted never sets it, so it tells the real end of the data from a failure.
+	eof atomic.Bool
 }
 
 func newCallbackMedia(src Source) *callbackMedia {
@@ -70,7 +74,7 @@ func mediaFromOpaque(opaque unsafe.Pointer) *callbackMedia {
 func adamVlcOpen(opaque unsafe.Pointer, datap *unsafe.Pointer, sizep *C.uint64_t) C.int {
 	cm := mediaFromOpaque(opaque)
 	*datap = opaque
-	if _, err := cm.src.Seek(0, io.SeekStart); err != nil {
+	if cm.seekTo(0) != 0 {
 		return -1
 	}
 	if n := cm.src.Size(); n >= 0 {
@@ -86,14 +90,19 @@ func adamVlcRead(opaque unsafe.Pointer, buf *C.uchar, n C.size_t) C.ssize_t {
 	if n == 0 {
 		return 0
 	}
-	cm := mediaFromOpaque(opaque)
 	p := unsafe.Slice((*byte)(unsafe.Pointer(buf)), int(n))
+	return C.ssize_t(mediaFromOpaque(opaque).read(p))
+}
+
+// read fills p for libvlc: the byte count, 0 at the end of the data, -1 on a read error.
+func (cm *callbackMedia) read(p []byte) int {
 	for {
 		got, err := cm.src.Read(p)
 		if got > 0 {
-			return C.ssize_t(got)
+			return got
 		}
 		if errors.Is(err, io.EOF) {
+			cm.eof.Store(true)
 			return 0
 		}
 		if err != nil {
@@ -104,7 +113,13 @@ func adamVlcRead(opaque unsafe.Pointer, buf *C.uchar, n C.size_t) C.ssize_t {
 
 //export adamVlcSeek
 func adamVlcSeek(opaque unsafe.Pointer, offset C.uint64_t) C.int {
-	if _, err := mediaFromOpaque(opaque).src.Seek(int64(offset), io.SeekStart); err != nil {
+	return C.int(mediaFromOpaque(opaque).seekTo(int64(offset)))
+}
+
+// seekTo repositions the source; 0 on success, -1 on failure. Any seek means libvlc is not at the end any more.
+func (cm *callbackMedia) seekTo(offset int64) int {
+	cm.eof.Store(false)
+	if _, err := cm.src.Seek(offset, io.SeekStart); err != nil {
 		return -1
 	}
 	return 0

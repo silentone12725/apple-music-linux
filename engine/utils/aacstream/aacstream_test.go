@@ -2,10 +2,14 @@ package aacstream
 
 import (
 	"encoding/base64"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	cdm "engine/utils/aacstream/cdm"
 
+	"github.com/go-resty/resty/v2"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -49,5 +53,25 @@ func TestGetPSSHRejectsInvalidKIDLength(t *testing.T) {
 	short := base64.StdEncoding.EncodeToString([]byte("short"))
 	if _, err := getPSSH("", short); err == nil {
 		t.Fatal("getPSSH accepted a KID that is not 16 bytes")
+	}
+}
+
+// A refused licence is reported with a sentinel so callers can tell a refusal from a request that failed in transit,
+// and the message keeps its familiar form.
+func TestAfterRequestMarksARefusedLicence(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"errorCode":-42604,"status":-1021}`))
+	}))
+	defer ts.Close()
+	resp, err := resty.New().R().Get(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = AfterRequest(resp)
+	if !errors.Is(err, ErrLicenceRefused) {
+		t.Fatalf("err = %v, want ErrLicenceRefused", err)
+	}
+	if want := "error in license response, code: -42604, status: -1021"; err.Error() != want {
+		t.Errorf("message = %q, want %q", err.Error(), want)
 	}
 }

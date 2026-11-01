@@ -223,3 +223,28 @@ func TestCountingWriterCountsBytesActuallyWritten(t *testing.T) {
 type shortWriter struct{}
 
 func (*shortWriter) Write([]byte) (int, error) { return 2, nil }
+
+func TestPlaybackTouchKeepsSessionAlive(t *testing.T) {
+	s := &APIServer{pm: playback.NewWithProvider(mvAudioTestProvider{stream: func(io.Writer) error { return nil }})}
+	sess, err := s.pm.Open(context.Background(), playback.OpenRequest{AssetID: "touch-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	touch := func(id string) int {
+		r := httptest.NewRequest(http.MethodPost, "/touch", nil)
+		r.SetPathValue("id", id)
+		w := httptest.NewRecorder()
+		s.handlePlaybackTouch(w, r)
+		return w.Code
+	}
+	if got := touch(sess.ID); got != http.StatusNoContent {
+		t.Fatalf("touch of a live session = %d, want 204", got)
+	}
+	s.pm.Release(sess.ID)
+	if got := touch(sess.ID); got != http.StatusNotFound {
+		t.Fatalf("touch of a released session = %d, want 404 so the renderer reopens the track", got)
+	}
+	if got := touch("no-such-session"); got != http.StatusNotFound {
+		t.Fatalf("touch of an unknown session = %d, want 404", got)
+	}
+}

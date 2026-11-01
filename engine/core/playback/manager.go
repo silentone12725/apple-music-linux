@@ -335,6 +335,18 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 	if err != nil {
 		return nil, err
 	}
+	// Report the length the streams really have when it differs from the catalog's, so the player's progress,
+	// fades and end-of-track handling match where the audio ends.
+	declared := 0
+	for _, st := range streams {
+		if st != nil && st.DurationMs > declared {
+			declared = st.DurationMs
+		}
+	}
+	if d := media.ReconcileDurationMs(sess.DurationMs, declared); d != sess.DurationMs {
+		log.Printf("[playback] %s: stream is %dms, catalog says %dms: reporting the stream's", req.AssetID, d, sess.DurationMs)
+		sess.DurationMs = d
+	}
 	for i, track := range ms.Tracks {
 		stream := streams[i]
 		pctx.streams[track.Kind] = stream
@@ -355,6 +367,9 @@ func (m *Manager) openDirect(ctx context.Context, req OpenRequest, assetKey stri
 		case pipeline.KindVideo:
 			sess.Capabilities.Video = true
 			sess.Capabilities.VideoCodec = track.CodecString
+			if stream.CodecString != "" {
+				sess.Capabilities.VideoCodec = stream.CodecString
+			}
 			sess.Streams.Video = "/api/v1/playback/" + sess.ID + "/video"
 		}
 	}

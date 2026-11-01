@@ -212,6 +212,15 @@ func (p *Player) Time() (posMs, lengthMs int64, state string) {
 	return
 }
 
+// SourceEnded reports whether the attached source delivered all of its data and ended cleanly, as opposed to failing or
+// being aborted. libvlc reaching its end while this is false means the read failed, not that the track ended.
+func (p *Player) SourceEnded() bool {
+	p.mu.Lock()
+	cm := p.cur
+	p.mu.Unlock()
+	return cm != nil && cm.eof.Load()
+}
+
 // Pause pauses playback.
 func (p *Player) Pause() {
 	p.mu.Lock()

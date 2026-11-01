@@ -28,6 +28,26 @@ type Metadata struct {
 	HasLyrics  bool
 }
 
+// DurationToleranceMs is how far a stream's declared length may differ from the catalog length before the stream's
+// length is reported instead. Smaller gaps are rounding and padding, not a real mismatch.
+const DurationToleranceMs = 1000
+
+// ReconcileDurationMs picks the duration to report for an item: the catalog length, unless the opened stream declares
+// a length that differs by more than DurationToleranceMs, in which case the stream's length is the one the player
+// will actually reach the end of. A stream length of 0 means unknown and leaves the catalog length alone.
+func ReconcileDurationMs(catalogMs, streamMs int) int {
+	if streamMs <= 0 {
+		return catalogMs
+	}
+	if catalogMs <= 0 {
+		return streamMs
+	}
+	if d := streamMs - catalogMs; d > DurationToleranceMs || d < -DurationToleranceMs {
+		return streamMs
+	}
+	return catalogMs
+}
+
 // Track is a single decodable media track within a Session.
 // The Open func lazily acquires any necessary resources (connections, licences)
 // and returns a pipeline.Stream ready to pipe to any io.Writer.

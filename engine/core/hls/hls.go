@@ -41,6 +41,13 @@ type Variant struct {
 	Codecs           string
 	Resolution       string
 	VideoRange       string
+	// HDCPLevel is the HDCP-LEVEL attribute ("TYPE-0", "TYPE-1", "NONE"): the output protection the variant
+	// requires before it may be played. Empty when the playlist does not say.
+	HDCPLevel string
+	// AllowedCPC is the ALLOWED-CPC attribute: the key systems, and the security level of each, that may be used to
+	// play this variant (for example FairPlay, PlayReady SL3000, Widevine hardware). Empty when the playlist does not
+	// say. A key system missing from it is one the server will not grant this variant's key to.
+	AllowedCPC string
 }
 
 // Alternative is one audio/subtitle rendition in an HLS master playlist.
@@ -121,7 +128,6 @@ func (m *Master) SelectAudioVariant(priorities []string) (string, error) {
 // SelectVideoVariantWithCodec is like SelectVideoVariant but also returns the
 // CODECS= attribute string from the chosen variant.
 func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs, resolution string, err error) {
-	re := dimRe
 	sorted := make([]Variant, len(m.Variants))
 	copy(sorted, m.Variants)
 	// AVERAGE-BANDWIDTH is optional; without it every variant would tie at 0 and
@@ -133,25 +139,7 @@ func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs,
 		return v.Bandwidth
 	}
 	sort.SliceStable(sorted, func(i, j int) bool { return rate(sorted[i]) > rate(sorted[j]) })
-	heightOf := func(v Variant) int {
-		if v.Resolution != "" {
-			var w, h int
-			if n, _ := fmt.Sscanf(v.Resolution, "%dx%d", &w, &h); n == 2 && h > 0 {
-				return h
-			}
-		}
-		u, err := url.Parse(v.URL)
-		if err != nil {
-			return 0
-		}
-		matches := re.FindStringSubmatch(u.Path)
-		if len(matches) != 3 {
-			return 0
-		}
-		var h int
-		fmt.Sscanf(matches[2], "%d", &h)
-		return h
-	}
+	heightOf := func(v Variant) int { return v.Height() }
 	isH264 := func(v Variant) bool {
 		return strings.Contains(strings.ToLower(v.Codecs), "avc1")
 	}
@@ -223,6 +211,108 @@ func (m *Master) SelectByCodec(codec string) string {
 		return best.URL
 	}
 	return fallback.URL
+}
+
+// Height is the variant's pixel height from RESOLUTION, or from the dimensions in its URL; 0 when neither says.
+func (v Variant) Height() int {
+	if v.Resolution != "" {
+		var w, h int
+		if n, _ := fmt.Sscanf(v.Resolution, "%dx%d", &w, &h); n == 2 && h > 0 {
+			return h
+		}
+	}
+	u, err := url.Parse(v.URL)
+	if err != nil {
+		return 0
+	}
+	matches := dimRe.FindStringSubmatch(u.Path)
+	if len(matches) != 3 {
+		return 0
+	}
+	var h int
+	fmt.Sscanf(matches[2], "%d", &h)
+	return h
+}
+
+func (v Variant) isH264() bool { return strings.Contains(strings.ToLower(v.Codecs), "avc1") }
+
+// VideoFallback returns the variant to try after the licence for failed was refused: the tallest variant below it,
+// H.264 preferred because every Linux and Windows build can decode it. ok is false when nothing lower exists.
+func (m *Master) VideoFallback(failed Variant) (Variant, bool) {
+	limit := failed.Height()
+	if limit <= 0 {
+		return Variant{}, false
+	}
+	var best Variant
+	found := false
+	better := func(c, b Variant) bool {
+		if c.isH264() != b.isH264() {
+			return c.isH264()
+		}
+		if c.Height() != b.Height() {
+			return c.Height() > b.Height()
+		}
+		return c.Bandwidth > b.Bandwidth
+	}
+	for _, v := range m.Variants {
+		if h := v.Height(); h <= 0 || h >= limit {
+			continue
+		}
+		if !found || better(v, best) {
+			best, found = v, true
+		}
+	}
+	return best, found
+}
+
+var allowedCPCRe = regexp.MustCompile(`ALLOWED-CPC="([^"]*)"`)
+
+// allowedCPCByURI maps each variant URI in a master playlist to its ALLOWED-CPC attribute. The m3u8 library does not
+// expose that attribute, so the EXT-X-STREAM-INF lines are read directly.
+func allowedCPCByURI(master string) map[string]string {
+	out := map[string]string{}
+	pending := ""
+	for _, raw := range strings.Split(master, "\n") {
+		line := strings.TrimSpace(raw)
+		switch {
+		case strings.HasPrefix(line, "#EXT-X-STREAM-INF:"):
+			pending = ""
+			if m := allowedCPCRe.FindStringSubmatch(line); m != nil {
+				pending = m[1]
+			}
+		case line == "" || strings.HasPrefix(line, "#"):
+		default:
+			if pending != "" {
+				out[line] = pending
+			}
+			pending = ""
+		}
+	}
+	return out
+}
+
+// CPCSummary shortens an ALLOWED-CPC value for a log line: the key systems by name with their levels, for example
+// "fairplay:Main/AppleMain playready:SL3000".
+func CPCSummary(cpc string) string {
+	if cpc == "" {
+		return "unspecified"
+	}
+	names := strings.NewReplacer(
+		"com.apple.streamingkeydelivery", "fairplay",
+		"com.microsoft.playready", "playready",
+		"urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed", "widevine",
+	)
+	return strings.ReplaceAll(names.Replace(cpc), ",", " ")
+}
+
+// VariantFor returns the variant with the given URL (as returned by SelectVideoVariantWithCodec).
+func (m *Master) VariantFor(variantURL string) (Variant, bool) {
+	for _, v := range m.Variants {
+		if v.URL == variantURL {
+			return v, true
+		}
+	}
+	return Variant{}, false
 }
 
 // VideoHeights returns the unique, sorted set of video heights the quality menu
@@ -304,6 +394,13 @@ type EncryptionInfo struct {
 
 	// KIDBase64 is the base64-encoded key ID (after the comma).
 	KIDBase64 string
+
+	// Method and KeyFormat are the EXT-X-KEY attributes, kept for diagnostics: they show which key system the
+	// playlist declares. KeyCount is the number of distinct key URIs the playlist uses (more than one means the key
+	// changes between segments, which a single licence request does not cover).
+	Method    string
+	KeyFormat string
+	KeyCount  int
 }
 
 // Media is a parsed HLS media playlist.
@@ -504,6 +601,9 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 			med.Encryption = &EncryptionInfo{
 				URIPrefix: parts[0],
 				KIDBase64: parts[1],
+				Method:    pl.Key.Method,
+				KeyFormat: pl.Key.Keyformat,
+				KeyCount:  distinctKeyURIs(pl),
 			}
 		}
 	}
@@ -539,6 +639,20 @@ func parseMedia(rawURL string, body []byte) (*Media, error) {
 
 	logMediaParsed(rawURL, med, pl)
 	return med, nil
+}
+
+// distinctKeyURIs counts the different EXT-X-KEY URIs a media playlist uses, at playlist level and on its segments.
+func distinctKeyURIs(pl *m3u8.MediaPlaylist) int {
+	seen := map[string]struct{}{}
+	if pl.Key != nil && pl.Key.URI != "" {
+		seen[pl.Key.URI] = struct{}{}
+	}
+	for _, seg := range pl.Segments {
+		if seg != nil && seg.Key != nil && seg.Key.URI != "" {
+			seen[seg.Key.URI] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 func logMediaParsed(rawURL string, med *Media, pl *m3u8.MediaPlaylist) {
@@ -767,6 +881,7 @@ func parseMaster(base *url.URL, rawURL string, body []byte) (*Master, error) {
 
 	pl := from.(*m3u8.MasterPlaylist)
 	m := &Master{baseURL: base}
+	cpc := allowedCPCByURI(string(body))
 
 	for _, v := range pl.Variants {
 		if v == nil {
@@ -783,6 +898,8 @@ func parseMaster(base *url.URL, rawURL string, body []byte) (*Master, error) {
 			Codecs:           v.Codecs,
 			Resolution:       v.Resolution,
 			VideoRange:       v.VideoRange,
+			HDCPLevel:        v.HDCPLevel,
+			AllowedCPC:       cpc[v.URI],
 		})
 		for _, alt := range v.Alternatives {
 			if alt == nil || alt.URI == "" {

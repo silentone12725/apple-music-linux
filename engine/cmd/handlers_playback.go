@@ -463,6 +463,17 @@ func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handlePlaybackTouch keeps a session alive while the renderer still has it open. A session's expiry only slides
+// when something looks it up, so a track paused for hours would otherwise be swept and could not be resumed. A 404
+// tells the renderer the session is gone and the track must be reopened at its saved position.
+func (s *APIServer) handlePlaybackTouch(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.pm.GetSession(r.PathValue("id")); !ok {
+		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handlePlaybackContext accepts a PUT /api/v1/playback/context payload and
 // submits a cache-warming job to the prefetch scheduler.
 // The renderer is telling the engine "the user is looking at this content."
