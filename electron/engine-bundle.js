@@ -375,6 +375,35 @@
     return PLAY_TRANSITIONS[prev]?.includes(next) ?? false;
   }
 
+  // src/engine/vlc-end.js
+  var VLC_MAX_RETRIES = 2;
+  function classifyVlcEnd({ posMs, trackEndMs, reason, retryCount, sourceEof }) {
+    if (posMs < 2e3 && trackEndMs > 5e3 && retryCount < VLC_MAX_RETRIES) {
+      return { action: "retry", fromMs: 0, delayMs: 1500 };
+    }
+    const endWindowMs = reason === "error" ? 3e3 : Math.min(1e4, trackEndMs * 0.1);
+    const shortOfEnd = posMs > 2e3 && trackEndMs > 5e3 && posMs < trackEndMs - endWindowMs;
+    const dataEnded = sourceEof === true && reason !== "error";
+    if (shortOfEnd && !dataEnded && retryCount < VLC_MAX_RETRIES) {
+      return { action: "retry", fromMs: posMs, delayMs: 500 };
+    }
+    return { action: "advance", shortOfReported: shortOfEnd && dataEnded };
+  }
+
+  // src/engine/av-sync.js
+  var AV_DEADBAND_S = 0.04;
+  var AV_MAX_RATE_DELTA = 0.06;
+  var AV_RATE_GAIN = 0.25;
+  var AV_SNAP_DRIFT_S = 1.5;
+  var AV_SNAP_COOLDOWN_MS = 3e3;
+  function avSyncAction({ driftSec, sinceSnapMs }) {
+    const d = Math.abs(driftSec);
+    if (!Number.isFinite(driftSec) || d < AV_DEADBAND_S) return { action: "none", rate: 1 };
+    if (d > AV_SNAP_DRIFT_S && sinceSnapMs > AV_SNAP_COOLDOWN_MS) return { action: "snap", rate: 1 };
+    const delta = Math.max(-AV_MAX_RATE_DELTA, Math.min(AV_MAX_RATE_DELTA, driftSec * AV_RATE_GAIN));
+    return { action: "rate", rate: 1 + delta };
+  }
+
   // src/engine/verification-code.js
   var CODE_LENGTH = 6;
   function normalizeCode(text) {
@@ -1300,6 +1329,7 @@
   var _vlcSeekTimer = null;
   var _vlcSeekFrozen = false;
   var _vlcSeekOffsetMs = 0;
+  var _vlcSourceEof = false;
   var _vlcRetryCount = 0;
   var _vlcPrevState = null;
   var _vlcLoading = false;
@@ -2730,6 +2760,7 @@
         e.stopPropagation();
         _mvMaxHeight = height;
         localStorage.setItem("adam-mv-quality", String(height));
+        console.log(`[Adam MV quality] set to ${_qualityLabel()} (${height}p)`);
         _qualitySpanEl.textContent = _qualityLabel();
         _qualityMenu.querySelectorAll("button").forEach((b, i) => {
           b.querySelector("span").innerHTML = _qualityOptions[i].height === _mvMaxHeight ? _checkSVG : "";
@@ -3807,16 +3838,25 @@
           }
         }
       });
-      let _vsegLastNudge = 0;
+      let _vsegLastNudge = -Infinity;
+      let _vsegRateActive = false;
       myVid.addEventListener("timeupdate", () => {
         if (!_avStarted || _seekHandlerActive || _vsegStalled) return;
         const drift = mkAudio.currentTime - myVid.currentTime;
         const now = performance.now();
-        if (Math.abs(drift) > 0.35 && now - _vsegLastNudge > 500) {
+        const fix = avSyncAction({ driftSec: drift, sinceSnapMs: now - _vsegLastNudge });
+        if (fix.action === "snap") {
           _vsegLastNudge = now;
-          console.log(`[Adam vseg] timeupdate drift=${drift.toFixed(3)}s \u2192 snap`);
+          console.log(`[Adam vseg] A/V drift ${drift.toFixed(3)}s is too large to correct by rate: snapping the audio`);
           mkAudio.currentTime = myVid.currentTime;
         }
+        if (fix.action === "rate" && !_vsegRateActive) {
+          console.log(`[Adam vseg] A/V drift ${drift.toFixed(3)}s: running the video at ${fix.rate.toFixed(2)}x until they match`);
+        } else if (fix.action === "none" && _vsegRateActive) {
+          console.log("[Adam vseg] A/V back in sync");
+        }
+        _vsegRateActive = fix.action === "rate";
+        if (myVid.playbackRate !== fix.rate) myVid.playbackRate = fix.rate;
       });
       myVid.addEventListener("canplay", () => {
         _bufSpinner.style.display = "none";
@@ -4157,6 +4197,39 @@
       console.log(`[Adam VLC] pos=${posMs}ms state=${state}`);
     }
   }
+  var _SESSION_KEEPALIVE_MS = 10 * 60 * 1e3;
+  var _LONG_PAUSE_MS = 5 * 60 * 1e3;
+  var _sessionLost = null;
+  var _lastPauseAt = 0;
+  async function _touchSession() {
+    const sessionId = _sessionId;
+    if (!sessionId) return;
+    try {
+      const r = await fetch(
+        `${ENGINE}/api/v1/playback/${encodeURIComponent(sessionId)}/touch`,
+        { method: "POST", signal: AbortSignal.timeout(5e3) }
+      );
+      if (r.status === 404 && _sessionId === sessionId && !_sessionLost) {
+        _sessionLost = { sessionId, adamId: _currentAssetId, positionSec: _resumeCurrentPositionSec() };
+        console.warn(`[Adam Engine] session ${sessionId} expired at ${_sessionLost.positionSec.toFixed(1)}s \u2014 will reopen on play`);
+      }
+    } catch (_) {
+    }
+  }
+  async function _reopenCurrentTrack(positionSec) {
+    const mk = _mkInstance;
+    const adamId = _currentAssetId;
+    _sessionLost = null;
+    if (!mk?.nowPlayingItem || !adamId) return false;
+    _resumeSeekWhenReady(mk, { adamId, positionSec });
+    try {
+      await handleTrackChange(mk);
+      return true;
+    } catch (e) {
+      console.warn("[Adam Engine] reopen after expired session failed:", e?.message || e);
+      return false;
+    }
+  }
   function _vlcRetryFrom(posMs, mkAudio, delay) {
     const sessionId = _sessionId;
     const assetId = _currentAssetId;
@@ -4169,6 +4242,10 @@
           body: JSON.stringify({ sessionId, assetId, startMs: posMs }),
           signal: AbortSignal.timeout(15e3)
         });
+        if (response.status === 404) {
+          _reopenCurrentTrack(posMs / 1e3);
+          return;
+        }
         if (!response.ok) throw new Error(`VLC reload: HTTP ${response.status}`);
         if (_sessionId !== sessionId) return;
         _vlcPosMs = posMs;
@@ -4182,21 +4259,17 @@
   }
   function _vlcHandleEnded(posMs, mkAudio, reason = "ended") {
     stopVLCPoll();
-    if (posMs < 2e3 && _durationSec > 5 && _vlcRetryCount < 2) {
+    const trackEndMs = Math.round(_durationSec * 1e3);
+    const end = classifyVlcEnd({ posMs, trackEndMs, reason, retryCount: _vlcRetryCount, sourceEof: _vlcSourceEof });
+    if (end.action === "retry") {
       _vlcRetryCount++;
-      _vlcSeekOffsetMs = 0;
-      console.log(`[Adam VLC] premature end at posMs=${posMs} \u2014 reload attempt ${_vlcRetryCount}`);
-      _vlcRetryFrom(0, mkAudio, 1500);
+      if (end.fromMs === 0) _vlcSeekOffsetMs = 0;
+      console.warn(`[Adam VLC] ${end.fromMs === 0 ? "premature end" : "false end"} at ${posMs}ms (track=${trackEndMs}ms) \u2014 reloading to resume at ${end.fromMs}ms attempt ${_vlcRetryCount}`);
+      _vlcRetryFrom(end.fromMs, mkAudio, end.delayMs);
       return;
     }
-    const trackEndMs = Math.round(_durationSec * 1e3);
-    const endWindowMs = reason === "error" ? 3e3 : Math.min(1e4, trackEndMs * 0.1);
-    if (posMs > 2e3 && trackEndMs > 5e3 && posMs < trackEndMs - endWindowMs && _vlcRetryCount < 2) {
-      _vlcRetryCount++;
-      const resumeMs = posMs;
-      console.warn(`[Adam VLC] false end at ${posMs}ms (track=${trackEndMs}ms) \u2014 reloading to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
-      _vlcRetryFrom(resumeMs, mkAudio, 500);
-      return;
+    if (end.shortOfReported) {
+      console.log(`[Adam VLC] the track's data ends at ${posMs}ms, short of the reported ${trackEndMs}ms \u2014 advancing`);
     }
     if (_allowCDNTransition) {
       console.log("[Adam VLC] ended \u2014 _adamNext suppressed (CDN gate open)");
@@ -4236,9 +4309,10 @@
       if (!r.ok) throw new Error(`VLC status: HTTP ${r.status}`);
       if (_sessionId !== mySession || generation !== _vlcPollGeneration) return;
       _vlcErrCount = 0;
-      const { posMs, lengthMs, state, volume, muted } = await r.json();
+      const { posMs, lengthMs, state, volume, muted, eof } = await r.json();
       if (_sessionId !== mySession || generation !== _vlcPollGeneration || transportRevision !== _vlcTransport.revision || _vlcTransport.pending) return;
       _vlcSyncVolume?.(volume, muted);
+      _vlcSourceEof = eof === true;
       _vlcHandleLength(lengthMs);
       _vlcUpdatePosition(posMs, state, mkAudio);
       if (state === _vlcPrevState) return;
@@ -4260,6 +4334,7 @@
     _vlcErrCount = 0;
     _vlcTickCount = 0;
     _vlcLengthSet = false;
+    _vlcSourceEof = false;
     _vlcFetching = false;
     const mySession = _sessionId;
     const generation = _vlcPollGeneration;
@@ -4679,6 +4754,7 @@
         return entry.sess;
       }
     }
+    if (isVideo) console.log(`[Adam MV quality] opening ${adamId} with a ${_mvMaxHeight >= 2160 ? "4K (2160p)" : _mvMaxHeight + "p"} limit`);
     const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5499,6 +5575,7 @@
     } catch (_) {
     }
     if (!_resumeFlushTimer) _resumeFlushTimer = setInterval(_resumeFlush, 15e3);
+    if (!window._adamSessionKeepalive) window._adamSessionKeepalive = setInterval(_touchSession, _SESSION_KEEPALIVE_MS);
     window.addEventListener("pagehide", _resumeFlush);
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) _resumeFlush();
@@ -7888,9 +7965,31 @@
         sendMprisStatus("Stopped");
       }
     });
+    let trackFallbackTimer;
     mk.addEventListener("playbackStateDidChange", () => {
       const PS = window.MusicKit?.PlaybackStates;
       console.log(`[Adam Engine] state=${mk.playbackState} (playing=${PS?.playing})`);
+      clearTimeout(trackFallbackTimer);
+      if (mk.playbackState === PS?.loading || mk.playbackState === PS?.playing) {
+        trackFallbackTimer = setTimeout(() => {
+          const item = mk.nowPlayingItem;
+          const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id;
+          if (!id || String(id) === String(_currentAssetId) || String(id) === String(_directPlayAdamId)) return;
+          if (item === _htcSkippedItem) return;
+          if (mk.playbackState !== PS?.loading && mk.playbackState !== PS?.playing) return;
+          console.warn("[Adam Engine] recovering missing track-change event");
+          handleTrackChange(mk).catch((e) => console.warn("[Adam Engine] track recovery:", e.message));
+        }, 300);
+      }
+      if (mk.playbackState === PS?.paused) _lastPauseAt = Date.now();
+      if (mk.playbackState === PS?.playing) {
+        const pausedFor = _lastPauseAt ? Date.now() - _lastPauseAt : 0;
+        _lastPauseAt = 0;
+        const check = pausedFor > _LONG_PAUSE_MS ? _touchSession() : Promise.resolve();
+        check.then(() => {
+          if (_sessionLost && _sessionLost.sessionId === _sessionId) _reopenCurrentTrack(_sessionLost.positionSec);
+        });
+      }
       const s = mk.playbackState;
       if (s === PS?.playing) {
         if (!_vlcMode || _vlcPosMs > 0) sendMprisStatus("Playing", { isResume: _vlcPaused });

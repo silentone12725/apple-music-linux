@@ -26,6 +26,8 @@ import { createTransportController } from './engine/transport.js';
 import { installTransportControls } from './engine/transport-controls.js';
 import { playbackMode, leaveLossless } from './engine/handoff.js';
 import { PLAY_STATE, isLegalPlayTransition } from './engine/playstate.js';
+import { classifyVlcEnd } from './engine/vlc-end.js';
+import { avSyncAction } from './engine/av-sync.js';
 import { createAccountSheet } from './engine/account-sheet.js';
 import { signOutFlow } from './engine/sign-out.js';
 
@@ -667,6 +669,7 @@ let _vlcPollTimer  = null;  // setInterval handle
 let _vlcSeekTimer  = null;  // debounce: actual VLC seek fires after scrubbing stops
 let _vlcSeekFrozen    = false; // true during scrub → poll won't overwrite _vlcPosMs
 let _vlcSeekOffsetMs  = 0;    // song-position base of current VLC HTTP stream (ms)
+let _vlcSourceEof     = false; // engine: the source ended cleanly, so an 'ended' state is the real end of the data
 let _vlcRetryCount    = 0;    // premature-end retries for current track (reset on track change)
 let _vlcPrevState     = null; // last VLC state seen by the poll (null forces re-emit after seek)
 let _vlcLoading       = false; // true from VLC.Load until VLC first enters 'playing' state
@@ -2413,6 +2416,7 @@ async function startMVPipeline() {
             e.stopPropagation();
             _mvMaxHeight = height;
             localStorage.setItem('adam-mv-quality', String(height));
+            console.log(`[Adam MV quality] set to ${_qualityLabel()} (${height}p)`);
             _qualitySpanEl.textContent = _qualityLabel();
             _qualityMenu.querySelectorAll('button').forEach((b, i) => {
                 b.querySelector('span').innerHTML = _qualityOptions[i].height === _mvMaxHeight ? _checkSVG : '';
@@ -3522,20 +3526,31 @@ async function startMVPipeline() {
             }
         });
 
-        // Continuous A/V drift correction: nudge mkAudio back to myVid when they
-        // diverge by more than 350 ms (same threshold as the native-video path).
-        let _vsegLastNudge = 0;
+        // Continuous A/V drift correction. Audio is the master clock, so the picture is brought to it: a small drift is
+        // closed by running the video a few percent slower or faster, and only a large one seeks the audio, rarely.
+        // Seeking the audio for every 350 ms of drift fed itself (the seek stalls the audio, the picture moves on, the
+        // drift returns) and was heard as crackle; see engine/av-sync.js.
+        let _vsegLastNudge = -Infinity;
+        let _vsegRateActive = false;
         myVid.addEventListener('timeupdate', () => {
             // Also skip during a stall: mkAudio is muted and the 'playing' handler
             // will snap precisely on recovery; nudging here would fight that snap.
             if (!_avStarted || _seekHandlerActive || _vsegStalled) return;
             const drift = mkAudio.currentTime - myVid.currentTime;
             const now = performance.now();
-            if (Math.abs(drift) > 0.35 && now - _vsegLastNudge > 500) {
+            const fix = avSyncAction({ driftSec: drift, sinceSnapMs: now - _vsegLastNudge });
+            if (fix.action === 'snap') {
                 _vsegLastNudge = now;
-                console.log(`[Adam vseg] timeupdate drift=${drift.toFixed(3)}s → snap`);
+                console.log(`[Adam vseg] A/V drift ${drift.toFixed(3)}s is too large to correct by rate: snapping the audio`);
                 mkAudio.currentTime = myVid.currentTime;
             }
+            if (fix.action === 'rate' && !_vsegRateActive) {
+                console.log(`[Adam vseg] A/V drift ${drift.toFixed(3)}s: running the video at ${fix.rate.toFixed(2)}x until they match`);
+            } else if (fix.action === 'none' && _vsegRateActive) {
+                console.log('[Adam vseg] A/V back in sync');
+            }
+            _vsegRateActive = fix.action === 'rate';
+            if (myVid.playbackRate !== fix.rate) myVid.playbackRate = fix.rate;
         });
 
         myVid.addEventListener('canplay', () => {
@@ -3864,6 +3879,37 @@ function _vlcUpdatePosition(posMs, state, mkAudio) {
     }
 }
 
+// The engine drops a session nothing has used for hours, and also when it restarts. Pausing a track for a long time
+// would then leave Play with nothing to resume. While a track is open the session is touched periodically; if the engine
+// reports it gone (404), the track is reopened at the saved position the next time the user presses Play.
+const _SESSION_KEEPALIVE_MS = 10 * 60 * 1000;
+const _LONG_PAUSE_MS        = 5 * 60 * 1000;
+let _sessionLost  = null; // { sessionId, adamId, positionSec } once the engine no longer knows the open session
+let _lastPauseAt  = 0;
+
+async function _touchSession() {
+    const sessionId = _sessionId;
+    if (!sessionId) return;
+    try {
+        const r = await fetch(`${ENGINE}/api/v1/playback/${encodeURIComponent(sessionId)}/touch`,
+            { method: 'POST', signal: AbortSignal.timeout(5000) });
+        if (r.status === 404 && _sessionId === sessionId && !_sessionLost) {
+            _sessionLost = { sessionId, adamId: _currentAssetId, positionSec: _resumeCurrentPositionSec() };
+            console.warn(`[Adam Engine] session ${sessionId} expired at ${_sessionLost.positionSec.toFixed(1)}s — will reopen on play`);
+        }
+    } catch (_) { /* engine unreachable: nothing to learn, the next tick retries */ }
+}
+
+async function _reopenCurrentTrack(positionSec) {
+    const mk = _mkInstance;
+    const adamId = _currentAssetId;
+    _sessionLost = null;
+    if (!mk?.nowPlayingItem || !adamId) return false;
+    _resumeSeekWhenReady(mk, { adamId, positionSec });
+    try { await handleTrackChange(mk); return true; }
+    catch (e) { console.warn('[Adam Engine] reopen after expired session failed:', e?.message || e); return false; }
+}
+
 // Bounded reload-from-position recovery (PR #1).
 function _vlcRetryFrom(posMs, mkAudio, delay) {
     const sessionId = _sessionId;
@@ -3876,6 +3922,7 @@ function _vlcRetryFrom(posMs, mkAudio, delay) {
                 body: JSON.stringify({ sessionId, assetId, startMs: posMs }),
                 signal: AbortSignal.timeout(15000),
             });
+            if (response.status === 404) { _reopenCurrentTrack(posMs / 1000); return; } // session expired: open a new one
             if (!response.ok) throw new Error(`VLC reload: HTTP ${response.status}`);
             if (_sessionId !== sessionId) return;
             _vlcPosMs = posMs;
@@ -3890,29 +3937,20 @@ function _vlcRetryFrom(posMs, mkAudio, delay) {
 
 function _vlcHandleEnded(posMs, mkAudio, reason = 'ended') {
     stopVLCPoll();
-    // Premature end at posMs≈0: cbcs stream failed before delivering data.
-    if (posMs < 2000 && _durationSec > 5 && _vlcRetryCount < 2) {
+    // Reload the cached source and apply startMs after playback opens: SetTime alone cannot restart a player that has
+    // reached EOF. A failed read is retried a bounded number of times; the real end of the data is not (see vlc-end.js),
+    // which is what made a track whose length MusicKit overstated replay its last seconds 2-3 times.
+    const trackEndMs = Math.round(_durationSec * 1000);
+    const end = classifyVlcEnd({ posMs, trackEndMs, reason, retryCount: _vlcRetryCount, sourceEof: _vlcSourceEof });
+    if (end.action === 'retry') {
         _vlcRetryCount++;
-        _vlcSeekOffsetMs = 0;
-        console.log(`[Adam VLC] premature end at posMs=${posMs} — reload attempt ${_vlcRetryCount}`);
-        _vlcRetryFrom(0, mkAudio, 1500);
+        if (end.fromMs === 0) _vlcSeekOffsetMs = 0;
+        console.warn(`[Adam VLC] ${end.fromMs === 0 ? 'premature end' : 'false end'} at ${posMs}ms (track=${trackEndMs}ms) — reloading to resume at ${end.fromMs}ms attempt ${_vlcRetryCount}`);
+        _vlcRetryFrom(end.fromMs, mkAudio, end.delayMs);
         return;
     }
-    // A decoded natural EOF can precede the reported duration by one final
-    // fragment/padding plus the last poll interval. It must advance, not replay
-    // that fragment twice. Keep error recovery stricter, and cap the natural
-    // window to 10% so short tracks do not lose a large portion on an early EOF.
-    // Reload the cached source and apply startMs after playback opens.
-    // SetTime alone cannot restart a player that has reached EOF.
-    const trackEndMs = Math.round(_durationSec * 1000);
-    // Natural-EOF tolerance (PR #1): a decoded end shortly before the reported duration must advance, not replay.
-    const endWindowMs = reason === 'error' ? 3000 : Math.min(10000, trackEndMs * 0.1);
-    if (posMs > 2000 && trackEndMs > 5000 && posMs < trackEndMs - endWindowMs && _vlcRetryCount < 2) {
-        _vlcRetryCount++;
-        const resumeMs = posMs;
-        console.warn(`[Adam VLC] false end at ${posMs}ms (track=${trackEndMs}ms) — reloading to resume at ${resumeMs}ms attempt ${_vlcRetryCount}`);
-        _vlcRetryFrom(resumeMs, mkAudio, 500);
-        return;
+    if (end.shortOfReported) {
+        console.log(`[Adam VLC] the track's data ends at ${posMs}ms, short of the reported ${trackEndMs}ms — advancing`);
     }
     if (_allowCDNTransition) {
         // CDN gate is open: user already clicked an external play button.
@@ -3970,9 +4008,10 @@ async function _vlcPollTick(mkAudio, mySession, generation = _vlcPollGeneration)
         if (!r.ok) throw new Error(`VLC status: HTTP ${r.status}`);
         if (_sessionId !== mySession || generation !== _vlcPollGeneration) return;
         _vlcErrCount = 0;
-        const { posMs, lengthMs, state, volume, muted } = await r.json();
+        const { posMs, lengthMs, state, volume, muted, eof } = await r.json();
         if (_sessionId !== mySession || generation !== _vlcPollGeneration || transportRevision !== _vlcTransport.revision || _vlcTransport.pending) return; // stale after command/skip
         _vlcSyncVolume?.(volume, muted);
+        _vlcSourceEof = eof === true;
         _vlcHandleLength(lengthMs);
         _vlcUpdatePosition(posMs, state, mkAudio);
         if (state === _vlcPrevState) return;
@@ -4000,6 +4039,7 @@ function startVLCPoll(mkAudio) {
     _vlcErrCount  = 0;
     _vlcTickCount = 0;
     _vlcLengthSet = false;
+    _vlcSourceEof = false;
     _vlcFetching  = false;
     const mySession = _sessionId; // capture — discard responses that arrive after a track skip
     const generation = _vlcPollGeneration;
@@ -4435,6 +4475,7 @@ async function _resolveSession(item, adamId, sf, mk) {
             return entry.sess;
         }
     }
+    if (isVideo) console.log(`[Adam MV quality] opening ${adamId} with a ${_mvMaxHeight >= 2160 ? '4K (2160p)' : _mvMaxHeight + 'p'} limit`);
     const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5362,6 +5403,7 @@ async function _resumeSetup(mk) {
     } catch (_) {}
     // Save hooks are always installed; _resumeMark no-ops when disabled.
     if (!_resumeFlushTimer) _resumeFlushTimer = setInterval(_resumeFlush, 15000);
+    if (!window._adamSessionKeepalive) window._adamSessionKeepalive = setInterval(_touchSession, _SESSION_KEEPALIVE_MS);
     window.addEventListener('pagehide', _resumeFlush);
     document.addEventListener('visibilitychange', () => { if (document.hidden) _resumeFlush(); });
     // Main process sends this just before quitting — flush immediately so the
@@ -8169,9 +8211,37 @@ async function setup() {
         }
     });
 
+    let trackFallbackTimer;
     mk.addEventListener('playbackStateDidChange', () => {
         const PS = window.MusicKit?.PlaybackStates;
         console.log(`[Adam Engine] state=${mk.playbackState} (playing=${PS?.playing})`);
+
+        // MusicKit can enter loading/playing without emitting nowPlayingItemDidChange (a programmatic queue change
+        // while CDN playback is gated). Wait for the ordinary event first, then start only a still-unhandled item
+        // (from PR #1).
+        clearTimeout(trackFallbackTimer);
+        if (mk.playbackState === PS?.loading || mk.playbackState === PS?.playing) {
+            trackFallbackTimer = setTimeout(() => {
+                const item = mk.nowPlayingItem;
+                const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id;
+                if (!id || String(id) === String(_currentAssetId) || String(id) === String(_directPlayAdamId)) return;
+                if (item === _htcSkippedItem) return; // handleTrackChange already declined it
+                if (mk.playbackState !== PS?.loading && mk.playbackState !== PS?.playing) return;
+                console.warn('[Adam Engine] recovering missing track-change event');
+                handleTrackChange(mk).catch(e => console.warn('[Adam Engine] track recovery:', e.message));
+            }, 300);
+        }
+
+        // Long pause: make sure the open session survived, and reopen the track at its position if it did not.
+        if (mk.playbackState === PS?.paused) _lastPauseAt = Date.now();
+        if (mk.playbackState === PS?.playing) {
+            const pausedFor = _lastPauseAt ? Date.now() - _lastPauseAt : 0;
+            _lastPauseAt = 0;
+            const check = pausedFor > _LONG_PAUSE_MS ? _touchSession() : Promise.resolve();
+            check.then(() => {
+                if (_sessionLost && _sessionLost.sessionId === _sessionId) _reopenCurrentTrack(_sessionLost.positionSec);
+            });
+        }
 
         // Sync MPRIS status.
         const s = mk.playbackState;
