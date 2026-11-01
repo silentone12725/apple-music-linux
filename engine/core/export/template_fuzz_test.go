@@ -3,6 +3,7 @@ package export
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -15,14 +16,34 @@ func FuzzRenderTemplateContainment(f *testing.F) {
 	f.Add("a/../../b", "x", "y", 0)
 	f.Fuzz(func(t *testing.T, title, artist, album string, track int) {
 		rel := renderTemplate("", templateVar{Title: title, Artist: artist, Album: album, TrackNumber: track, Ext: "m4a"})
-		out := filepath.Join("/export", rel)
-		if out != "/export" && !strings.HasPrefix(out, "/export/") {
+		root := filepath.Join(os.TempDir(), "export")
+		out := filepath.Join(root, rel)
+		if out != root && !strings.HasPrefix(out, root+string(filepath.Separator)) {
 			t.Fatalf("escaped export dir: rel=%q out=%q", rel, out)
 		}
 	})
 }
 
+// On Windows a path with '/' is as much a path as one with '\\', and a drive letter makes it absolute.
+func TestValidToolPathWindowsForms(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows path forms")
+	}
+	for p, want := range map[string]bool{
+		`C:\ffmpeg\bin\ffmpeg.exe`: true, `C:/ffmpeg/bin/ffmpeg.exe`: true, `ffmpeg.exe`: true, "ffmpeg": true,
+		"../ffmpeg": false, "bin/ffmpeg": false, `bin\ffmpeg`: false, `..\ffmpeg.exe`: false,
+		`C:\Windows\System32\cmd.exe`: false, `C:\ffmpeg\..\cmd.exe`: false,
+	} {
+		if got := validToolPath(p, "ffmpeg"); got != want {
+			t.Errorf("validToolPath(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
 func TestValidToolPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix absolute paths; see TestValidToolPathWindowsForms")
+	}
 	for p, want := range map[string]bool{
 		"": true, "ffmpeg": true, "/usr/bin/ffmpeg": true, "/opt/ffmpeg-7/bin/ffmpeg": true,
 		"/usr/local/bin/ffmpeg-7.1": true, "/bin/sh": false, "/usr/bin/python3": false,
@@ -39,6 +60,9 @@ func TestValidToolPath(t *testing.T) {
 }
 
 func TestCheckToolExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes and the shebang stand-in are Unix-only; Windows needs .exe files")
+	}
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)

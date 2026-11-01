@@ -90,6 +90,9 @@ func TestProbeFFmpegReportsABrokenBinary(t *testing.T) {
 }
 
 func TestProbeFFmpegRefusesWhatExportsRefuse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix absolute paths")
+	}
 	if info := ProbeFFmpeg(context.Background(), "/nonexistent/dir/ffmpeg"); info.Error != "not found" {
 		t.Errorf("a missing custom path should read as plain 'not found', got %q", info.Error)
 	}

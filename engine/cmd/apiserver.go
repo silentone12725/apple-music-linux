@@ -691,7 +691,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	s.em = export.NewManager(s.pm, func(ev export.ExportEvent) {
 		s.events.emit("export", ev)
-	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10, OutputRoots: exportRoots()})
+	}, export.Options{Cache: exportCache, FloorBps: int64(cfg.ExportFloorKbps) << 10, OutputRoots: exportRoots(), MoreRoots: pickedExportRoots})
 
 	mux := http.NewServeMux()
 
@@ -1142,6 +1142,27 @@ func exportRoots() []string {
 		return []string{home}
 	}
 	return []string{"/nonexistent"} // no home to anchor to: refuse rather than allow everything
+}
+
+// pickedExportRoots returns the folders the user chose in the app's native folder dialog.
+// The Electron main process writes them, one per line, to the file named by
+// ADAM_EXPORT_PICKED; the page cannot write it, so it cannot widen the roots itself.
+func pickedExportRoots() []string {
+	f := os.Getenv("ADAM_EXPORT_PICKED")
+	if f == "" {
+		return nil
+	}
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if l = strings.TrimSpace(l); l != "" && filepath.IsAbs(l) {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // installReleaseHook frees a session's server-side resources however the session ends.

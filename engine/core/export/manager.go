@@ -57,6 +57,10 @@ type Options struct {
 	// means unrestricted, which is only appropriate when every caller is trusted —
 	// the HTTP server sets it, because request bodies come from a web page.
 	OutputRoots []string
+	// MoreRoots, when non-nil, is consulted on every check for roots added after
+	// start-up (the folder the user picked in a native dialog). It must read from a
+	// source the web page cannot write.
+	MoreRoots func() []string
 }
 
 // Manager enqueues and executes export jobs one at a time: highest priority
@@ -77,6 +81,7 @@ type Manager struct {
 	run      func(*workItem) // test seam; nil means m.execute
 	seq      atomic.Int64    // monotonically increasing enqueue counter
 	roots    []string        // resolved OutputRoots
+	more     func() []string // Options.MoreRoots
 	confined bool            // OutputRoots was set (even if nothing resolved: then nothing is allowed)
 	active   sync.WaitGroup  // the worker and every post-process goroutine, joined by Stop
 }
@@ -102,6 +107,7 @@ func NewManager(pm *playback.Manager, ev EventSink, opts Options) *Manager {
 	}
 	m := &Manager{
 		roots:    roots,
+		more:     opts.MoreRoots,
 		confined: len(opts.OutputRoots) > 0,
 		jobs:     make(map[string]*ExportJob),
 		requests: make(map[string]ExportRequest),
@@ -1142,6 +1148,11 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 		if cerr := f.Close(); copyErr == nil {
 			copyErr = cerr
 		}
+		// Windows cannot delete a file that is still open, so a cancelled or failed copy removes
+		// the temp file here, after the close, as well as in the caller.
+		if copyErr != nil || ctx.Err() != nil {
+			os.Remove(tmpPath)
+		}
 		done <- copyErr
 	}()
 	select {
@@ -1154,6 +1165,10 @@ func (m *Manager) copyToTemp(ctx context.Context, job *ExportJob, tmpPath string
 		// next write and self-exit.
 		r.Close()
 		err = ctx.Err()
+		select { // give the goroutine a moment to close f, so the file can be removed on Windows
+		case <-done:
+		case <-time.After(time.Second):
+		}
 	}
 	if err != nil {
 		os.Remove(tmpPath)

@@ -315,10 +315,11 @@ func validToolPath(p string, names ...string) bool {
 	if p == "" {
 		return true
 	}
-	if strings.ContainsRune(p, 0) || (filepath.IsAbs(p) && filepath.Clean(p) != p) {
+	if strings.ContainsRune(p, 0) || (filepath.IsAbs(p) && filepath.Clean(p) != filepath.FromSlash(p)) {
 		return false
 	}
-	if !filepath.IsAbs(p) && strings.ContainsRune(p, filepath.Separator) {
+	// '/' separates path elements on every platform (Windows takes it as well as '\\').
+	if !filepath.IsAbs(p) && (strings.ContainsRune(p, filepath.Separator) || strings.ContainsRune(p, '/')) {
 		return false // "bin/ffmpeg": neither a bare name nor absolute
 	}
 	return toolNameOK(filepath.Base(p), names)

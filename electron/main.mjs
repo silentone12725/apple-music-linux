@@ -269,6 +269,7 @@ const _ffDir = app.isPackaged ? path.join(process.resourcesPath, 'ffmpeg')
                               : path.join(__dirname, '..', 'third_party', IS_WIN ? 'ffmpeg-win' : 'ffmpeg');
 
 const ENGINE_DATA_DIR = path.join(CONFIG_DIR, 'engine-data');
+const EXPORT_PICKED_FILE = path.join(CONFIG_DIR, 'export-folders.txt');
 const ENGINE_PORT = 20025;
 
 // Debug output (verbose renderer logging and a log file) is on whenever the app was started
@@ -396,7 +397,7 @@ const engineLifecycle = createEngineLifecycle({
             windowsHide: true,
             // Force Go's pure-Go DNS resolver to avoid CGO getaddrinfo SIGSEGV
             // when the engine makes HTTP requests to Apple's API servers.
-            env: { ...baseEnv, GODEBUG: 'netdns=go', ...libEnv },
+            env: { ...baseEnv, GODEBUG: 'netdns=go', ADAM_EXPORT_PICKED: EXPORT_PICKED_FILE, ...libEnv },
         });
     },
     killDelay: 3000, // allow normal VLC teardown before forced termination
@@ -1708,6 +1709,14 @@ ipcMain.handle('dialog:choose-download-dir', async () => {
         title: 'Choose Download Folder',
         properties: ['openDirectory', 'createDirectory'],
     });
+    if (!canceled && filePaths[0]) {
+        // The engine confines exports to the home folder; a folder picked here is the
+        // user's own choice, so record it where only this process can write.
+        try {
+            const cur = existsSync(EXPORT_PICKED_FILE) ? readFileSync(EXPORT_PICKED_FILE, 'utf8').split('\n').filter(Boolean) : [];
+            if (!cur.includes(filePaths[0])) writeFileSync(EXPORT_PICKED_FILE, [...cur, filePaths[0]].slice(-8).join('\n') + '\n');
+        } catch (e) { console.warn('[Adam] could not record download folder:', e.message); }
+    }
     return { canceled, filePaths };
 });
 const _VALID_PREF_KEYS = new Set(['persistLimitMB', 'persistTTLDays', 'prewarmLimitMB']);

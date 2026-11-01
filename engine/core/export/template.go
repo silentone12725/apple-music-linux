@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
@@ -182,6 +183,34 @@ func sanitizePathComponent(s string) string {
 	// filepath.Clean it would walk out of the export directory.
 	if s != "" && strings.Trim(s, ".") == "" {
 		s = strings.ReplaceAll(s, ".", "．")
+	}
+	if runtime.GOOS == "windows" {
+		s = windowsSafeName(s)
+	}
+	return s
+}
+
+// windowsReserved are device names Windows refuses as file names, with or without an extension.
+var windowsReserved = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NUL": true}
+
+// windowsSafeName makes one path component valid on Windows: no trailing dots or spaces (Windows
+// strips them, so the file would not land under the name the template made) and no reserved device
+// names (CON, NUL, COM1, LPT1, ...). It only changes names that would otherwise fail or move.
+func windowsSafeName(s string) string {
+	if t := strings.TrimRight(s, ". "); t != s && t != "" {
+		s = t
+	}
+	base := s
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	up := strings.ToUpper(strings.TrimRight(base, " "))
+	reserved := windowsReserved[up]
+	if len(up) == 4 && (strings.HasPrefix(up, "COM") || strings.HasPrefix(up, "LPT")) && up[3] >= '1' && up[3] <= '9' {
+		reserved = true
+	}
+	if reserved {
+		s = "_" + s
 	}
 	return s
 }

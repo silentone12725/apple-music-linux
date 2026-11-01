@@ -97,10 +97,18 @@ func (f *failingTail) Read(p []byte) (int, error) {
 func (f *failingTail) Close() error { return nil }
 
 // blockingTail never delivers, like a producer that stalls.
-type blockingTail struct{ closed chan struct{} }
+// blockingTail blocks Read until Close, like the real playback tail reader: a cancelled copy relies on that,
+// because Windows cannot delete the temp file while a blocked Read still holds it open.
+type blockingTail struct {
+	closed chan struct{}
+	once   sync.Once
+}
 
 func (b *blockingTail) Read([]byte) (int, error) { <-b.closed; return 0, io.ErrClosedPipe }
-func (b *blockingTail) Close() error             { return nil }
+func (b *blockingTail) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
 
 func newReuseManager(t *testing.T, p *countingProvider, c AudioCache) *Manager {
 	t.Helper()
@@ -266,7 +274,7 @@ func TestReuse_VideoNeverConsultsAudioCache(t *testing.T) {
 func TestReuse_CancelWhileTailBlocked(t *testing.T) {
 	t.Parallel()
 	bt := &blockingTail{closed: make(chan struct{})}
-	defer close(bt.closed)
+	defer bt.Close()
 	p := &countingProvider{}
 	m := newReuseManager(t, p, &fakeCache{tail: func() io.ReadCloser { return bt }})
 
