@@ -313,6 +313,8 @@ The script builds `libdrm_client.dll` and `engine.exe` (CGO + the `adamplay_back
 
 The renderer bundles (`engine-bundle.js` etc.) are committed; they are rebuilt on Linux with `scripts/build-renderer.sh`.
 
+**Nightly (lossless on Windows).** This branch is the nightly line: pass `-HybrisDir <libhybris-win build dir>` (holding `libhybris-core.dll` and `hybris-linker\q.so`) to `build-windows.ps1` and the installer carries the Windows DRM runtime. The app downloads Apple's FairPlay libraries on first launch (pinned and checksummed). `main` stays the stable line: its Windows release installer is AAC and music videos only. Nightly builds are announced in the Discord server's nightly channel.
+
 **Windows engine without ALAC/DRM (AAC + music videos only).** With cgo off the engine needs no C toolchain and no libvlc, and it cross-compiles from Linux:
 
 ```bash

@@ -10,6 +10,11 @@
   5. renderer bundles       verified present (committed; Linux CI checks they are fresh)
   6. NSIS installer         electron-builder --win
 
+  Nightly (lossless on Windows): pass -HybrisDir, a libhybris-win build directory holding libhybris-core.dll and
+  hybris-linker\q.so. They are packed next to libdrm_client.dll (q.so replaces drm\hybris-linker\q.so for the
+  build and is restored afterwards). Apple's FairPlay libraries are downloaded by the app on first launch.
+  Without -HybrisDir the installer is the release one: the DRM DLL is built but the Android runtime is not shipped.
+
   Prerequisites: MSYS2 UCRT64 (gcc, make, openssl) on PATH, Go, Node, a 64-bit VLC 3.x install,
   and git (to fetch the libvlc headers, which the VLC installer does not ship).
 
@@ -21,12 +26,17 @@ param(
     [string]$VlcDir = 'C:\Program Files\VideoLAN\VLC',
     [string]$VlcInclude = '',      # a directory containing vlc\vlc.h; fetched from VideoLAN's git when empty
     [string]$Msys = 'C:\msys64\ucrt64\bin',
+    [string]$HybrisDir = '',       # nightly: a libhybris-win build directory (libhybris-core.dll, hybris-linker\q.so)
     [switch]$SkipInstaller
 )
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path "$PSScriptRoot\..").Path
 $Electron = Join-Path $Repo 'electron'
 $Out = Join-Path $Electron 'dist\resources-win'
+$QSo = Join-Path $Repo 'drm\hybris-linker\q.so'
+$QBackup = ''
+function Restore-QSo { if ($QBackup -and (Test-Path $QBackup)) { Copy-Item $QBackup $QSo -Force; Remove-Item $QBackup -Force; $script:QBackup = '' } }
+trap { Restore-QSo; break }
 
 function Need($cmd) { if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { throw "'$cmd' is required but not on PATH" } }
 foreach ($t in 'go', 'node', 'npm', 'gcc', 'mingw32-make') { Need $t }
@@ -79,11 +89,20 @@ Push-Location "$Repo\engine"
 try {
     go build -tags adamplay_backend -ldflags '-w -s' -trimpath -o "$Out\engine.exe" .\cmd
     if ($LASTEXITCODE -ne 0) { throw 'engine build failed' }
-} finally { Pop-Location }
+} finally { Pop-Location; Restore-QSo }
 
 # ── 3. Runtime DLLs ──────────────────────────────────────────────────────────
 Write-Host '[3/6] runtime DLLs'
 Copy-Item "$Repo\drm\libdrm_client.dll" $Out
+if ($HybrisDir) {
+    foreach ($f in 'libhybris-core.dll', 'hybris-linker\q.so') {
+        if (-not (Test-Path "$HybrisDir\$f")) { throw "-HybrisDir: $f not found in $HybrisDir" }
+    }
+    Copy-Item "$HybrisDir\libhybris-core.dll" $Out
+    $QBackup = Join-Path $env:TEMP 'adam-q.so.orig'
+    Copy-Item $QSo $QBackup -Force
+    Copy-Item "$HybrisDir\hybris-linker\q.so" $QSo -Force
+}
 # libcrypto plus whatever MSYS2 DLLs it (transitively) imports; system DLLs are skipped.
 $queue = [System.Collections.Queue]::new(); $queue.Enqueue('libcrypto-3-x64.dll'); $seen = @{}
 while ($queue.Count) {
@@ -150,5 +169,5 @@ try {
     Write-Host '[6/6] electron-builder --win'
     npx electron-builder --win nsis
     if ($LASTEXITCODE -ne 0) { throw 'electron-builder failed' }
-} finally { Pop-Location }
+} finally { Pop-Location; Restore-QSo }
 Write-Host "Done: $Electron\dist\adam-setup-$Version.exe"
