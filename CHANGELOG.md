@@ -62,7 +62,7 @@ Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone127
 
 ### Themes
 - **The theme is no longer derived from an accent colour**, neither the system's nor a picked one. The default is the `Apple Music` preset (black, grey sidebar, red only for accents), and Reset returns to it. Palettes saved by older versions are reset once (your own saved presets and chosen mode are kept).
-- **Blur is available on every desktop:** Windows (wallpaper from the registry), GNOME, Hyprland and KDE. The wallpaper is blurred once in the app instead of by a full-window CSS filter, so machines without a GPU still render the page. Signed-out pages use the blur theme, and the chosen theme applies after sign-in.
+- **Blur is available on every desktop:** Windows 10/11 use a native window blur (the Windows Composition backdrop), and GNOME, Hyprland and KDE blur the wallpaper. The wallpaper is blurred once in the app instead of by a full-window CSS filter, so machines without a GPU still render the page. Signed-out pages use the blur theme, and the chosen theme applies after sign-in.
 
 ### Interface
 - **Lossless options are honest when signed out.** Without a sign-in (or in a build with no DRM layer) the Lossless toggle is shown off and locked, and the Streaming and Downloads quality dropdowns show High Quality (AAC 256 kbps), greyed out and with the same options. Your saved choice returns after signing in.
