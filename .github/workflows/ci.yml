@@ -1,9 +1,14 @@
 name: CI
 
+# Unfinished work is skipped: draft pull requests, pull requests titled "[WIP] ..." or "WIP: ...", and pushes whose
+# message contains "[wip]". Mark the draft ready for review (or drop the WIP from the title) and CI runs. A commit
+# message containing "[skip ci]" is skipped by GitHub itself. The Windows build is manual (see the windows job).
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +20,9 @@ concurrency:
 jobs:
   engine:
     name: Go engine
+    if: >-
+      ${{ !(github.event_name == 'pull_request' && (github.event.pull_request.draft || contains(github.event.pull_request.title, '[WIP]') || startsWith(github.event.pull_request.title, 'WIP:')))
+      && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[wip]')) }}
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -39,6 +47,9 @@ jobs:
 
   electron:
     name: Electron app
+    if: >-
+      ${{ !(github.event_name == 'pull_request' && (github.event.pull_request.draft || contains(github.event.pull_request.title, '[WIP]') || startsWith(github.event.pull_request.title, 'WIP:')))
+      && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[wip]')) }}
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -62,6 +73,9 @@ jobs:
 
   style:
     name: C format and shell syntax
+    if: >-
+      ${{ !(github.event_name == 'pull_request' && (github.event.pull_request.draft || contains(github.event.pull_request.title, '[WIP]') || startsWith(github.event.pull_request.title, 'WIP:')))
+      && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[wip]')) }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -81,6 +95,8 @@ jobs:
 
   windows:
     name: Windows build
+    # Manual only (Actions tab > CI > Run workflow): the Windows DRM runtime is not released yet.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
