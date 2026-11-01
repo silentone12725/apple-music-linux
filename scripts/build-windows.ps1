@@ -89,7 +89,7 @@ Push-Location "$Repo\engine"
 try {
     go build -tags adamplay_backend -ldflags '-w -s' -trimpath -o "$Out\engine.exe" .\cmd
     if ($LASTEXITCODE -ne 0) { throw 'engine build failed' }
-} finally { Pop-Location; Restore-QSo }
+} finally { Pop-Location }
 
 # ── 3. Runtime DLLs ──────────────────────────────────────────────────────────
 Write-Host '[3/6] runtime DLLs'
