@@ -404,6 +404,20 @@
     return { action: "rate", rate: 1 + delta };
   }
 
+  // src/engine/track-end.js
+  var LENGTH_TOLERANCE_S = 1;
+  function actualDurationSec({ elementDurationSec, streamComplete, reportedSec }) {
+    if (streamComplete && Number.isFinite(elementDurationSec) && elementDurationSec > 0) return elementDurationSec;
+    return reportedSec;
+  }
+  function lengthDiffers(measuredSec, currentSec) {
+    return Number.isFinite(measuredSec) && measuredSec > 0 && Math.abs(measuredSec - currentSec) > LENGTH_TOLERANCE_S;
+  }
+  function lengthAfterOverrun(positionSec, currentSec) {
+    if (!(currentSec > 0)) return currentSec;
+    return positionSec > currentSec + LENGTH_TOLERANCE_S ? positionSec : currentSec;
+  }
+
   // src/engine/verification-code.js
   var CODE_LENGTH = 6;
   function normalizeCode(text) {
@@ -1329,6 +1343,7 @@
   var _vlcSeekTimer = null;
   var _vlcSeekFrozen = false;
   var _vlcSeekOffsetMs = 0;
+  var _vlcOverrunLogged = false;
   var _vlcSourceEof = false;
   var _vlcRetryCount = 0;
   var _vlcPrevState = null;
@@ -2062,6 +2077,11 @@
         ms.endOfStream();
         _streamComplete = true;
         console.log(`[Adam Engine] Stream complete +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
+        if (lengthDiffers(audio.duration, _durationSec)) {
+          console.log(`[Adam Engine] the audio is ${audio.duration.toFixed(1)}s, not the reported ${_durationSec.toFixed(1)}s: using the audio's length`);
+          _durationSec = audio.duration;
+          if (_mkInstance) bridgeDuration(_mkInstance, _durationSec);
+        }
         try {
           delete audio.load;
         } catch (_) {
@@ -4164,6 +4184,15 @@
   function _vlcUpdatePosition(posMs, state, mkAudio) {
     const prevPos = _vlcPosMs;
     if (!_vlcSeekFrozen && posMs > 0) _vlcPosMs = posMs;
+    const grown = lengthAfterOverrun(_vlcPosMs / 1e3, _durationSec);
+    if (grown !== _durationSec) {
+      if (!_vlcOverrunLogged) {
+        _vlcOverrunLogged = true;
+        console.log(`[Adam VLC] playing past the reported ${_durationSec.toFixed(1)}s: the audio is longer, extending the length with it`);
+      }
+      _durationSec = grown;
+      if (_mkInstance) bridgeDuration(_mkInstance, _durationSec);
+    }
     if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event("timeupdate"));
     if (++_vlcTickCount % 4 === 0) {
       window.adamBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3 });
@@ -4335,6 +4364,7 @@
     _vlcTickCount = 0;
     _vlcLengthSet = false;
     _vlcSourceEof = false;
+    _vlcOverrunLogged = false;
     _vlcFetching = false;
     const mySession = _sessionId;
     const generation = _vlcPollGeneration;
@@ -4881,9 +4911,10 @@
     _xfFadeIn(mkAudio);
     let _gaplessArmed = false, _xfFadedOut = false;
     const onGaplessTick = () => {
-      if (ctrl.signal.aborted || _durationSec <= 0) return;
-      const remaining = _durationSec - mkAudio.currentTime;
-      const analysisLeadSec = _audioAnalysis?.fadeOut ? Math.max(GAPLESS_STREAM_LEAD, (_durationSec * 1e3 - _audioAnalysis.fadeOut.startMs) / 1e3) : GAPLESS_STREAM_LEAD;
+      const trackSec = actualDurationSec({ elementDurationSec: mkAudio.duration, streamComplete: _streamComplete, reportedSec: _durationSec });
+      if (ctrl.signal.aborted || trackSec <= 0) return;
+      const remaining = trackSec - mkAudio.currentTime;
+      const analysisLeadSec = _audioAnalysis?.fadeOut ? Math.max(GAPLESS_STREAM_LEAD, (trackSec * 1e3 - _audioAnalysis.fadeOut.startMs) / 1e3) : GAPLESS_STREAM_LEAD;
       if (!_gaplessArmed && remaining <= analysisLeadSec) {
         _gaplessArmed = true;
         _prefetchNextAacStream();

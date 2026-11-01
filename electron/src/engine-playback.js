@@ -28,6 +28,7 @@ import { playbackMode, leaveLossless } from './engine/handoff.js';
 import { PLAY_STATE, isLegalPlayTransition } from './engine/playstate.js';
 import { classifyVlcEnd } from './engine/vlc-end.js';
 import { avSyncAction } from './engine/av-sync.js';
+import { actualDurationSec, lengthDiffers, lengthAfterOverrun } from './engine/track-end.js';
 import { createAccountSheet } from './engine/account-sheet.js';
 import { signOutFlow } from './engine/sign-out.js';
 
@@ -669,6 +670,7 @@ let _vlcPollTimer  = null;  // setInterval handle
 let _vlcSeekTimer  = null;  // debounce: actual VLC seek fires after scrubbing stops
 let _vlcSeekFrozen    = false; // true during scrub → poll won't overwrite _vlcPosMs
 let _vlcSeekOffsetMs  = 0;    // song-position base of current VLC HTTP stream (ms)
+let _vlcOverrunLogged = false; // the 'audio is longer than reported' line is logged once per track
 let _vlcSourceEof     = false; // engine: the source ended cleanly, so an 'ended' state is the real end of the data
 let _vlcRetryCount    = 0;    // premature-end retries for current track (reset on track change)
 let _vlcPrevState     = null; // last VLC state seen by the poll (null forces re-emit after seek)
@@ -1617,6 +1619,13 @@ async function pipeToSourceBuffer(sb, audio, streamUrlOrResp, signal, ms, durati
         ms.endOfStream();
         _streamComplete = true;
         console.log(`[Adam Engine] Stream complete +${((performance.now()-t0)/1000).toFixed(2)}s`);
+        // endOfStream() snaps the element's duration to where the audio really ends. That, not the reported length,
+        // is the track's length: shorter audio must not wait for the missing seconds, longer audio must not be cut.
+        if (lengthDiffers(audio.duration, _durationSec)) {
+            console.log(`[Adam Engine] the audio is ${audio.duration.toFixed(1)}s, not the reported ${_durationSec.toFixed(1)}s: using the audio's length`);
+            _durationSec = audio.duration;
+            if (_mkInstance) bridgeDuration(_mkInstance, _durationSec);
+        }
         // Restore native audio.load() so MK can advance the queue when the
         // audio element fires 'ended'. Without this, MK's queue-advance call
         // to audio.load() hits our no-op shadow and hangs indefinitely —
@@ -3840,6 +3849,13 @@ function _vlcUpdatePosition(posMs, state, mkAudio) {
     // correct song-timeline position. Guard posMs > 0: VLC returns -1/0
     // briefly before first decode; keep the snapped seek position during that window.
     if (!_vlcSeekFrozen && posMs > 0) _vlcPosMs = posMs;
+    // Playing past the reported length means the audio is longer than reported: grow the length, never cut at it.
+    const grown = lengthAfterOverrun(_vlcPosMs / 1000, _durationSec);
+    if (grown !== _durationSec) {
+        if (!_vlcOverrunLogged) { _vlcOverrunLogged = true; console.log(`[Adam VLC] playing past the reported ${_durationSec.toFixed(1)}s: the audio is longer, extending the length with it`); }
+        _durationSec = grown;
+        if (_mkInstance) bridgeDuration(_mkInstance, _durationSec);
+    }
     if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event('timeupdate'));
     // Update MPRIS position every ~1s (every 4 ticks × 250ms).
     if (++_vlcTickCount % 4 === 0) {
@@ -4040,6 +4056,7 @@ function startVLCPoll(mkAudio) {
     _vlcTickCount = 0;
     _vlcLengthSet = false;
     _vlcSourceEof = false;
+    _vlcOverrunLogged = false;
     _vlcFetching  = false;
     const mySession = _sessionId; // capture — discard responses that arrive after a track skip
     const generation = _vlcPollGeneration;
@@ -4603,15 +4620,17 @@ async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
     // also fade the outgoing track's tail out when crossfade is enabled.
     let _gaplessArmed = false, _xfFadedOut = false;
     const onGaplessTick = () => {
-        if (ctrl.signal.aborted || _durationSec <= 0) return;
-        const remaining = _durationSec - mkAudio.currentTime;
+        // The audio that will actually play decides where this track ends (see engine/track-end.js).
+        const trackSec = actualDurationSec({ elementDurationSec: mkAudio.duration, streamComplete: _streamComplete, reportedSec: _durationSec });
+        if (ctrl.signal.aborted || trackSec <= 0) return;
+        const remaining = trackSec - mkAudio.currentTime;
 
         // When audio analysis is available, use fadeOut.startMs as the actual
         // gapless-arm point — this is where the track naturally starts decaying,
         // matching Android's PlayerAudioFadeControl which arms at fadeOut.startInMilliseconds.
         // Fall back to the fixed GAPLESS_STREAM_LEAD constant when analysis is absent.
         const analysisLeadSec = _audioAnalysis?.fadeOut
-            ? Math.max(GAPLESS_STREAM_LEAD, (_durationSec * 1000 - _audioAnalysis.fadeOut.startMs) / 1000)
+            ? Math.max(GAPLESS_STREAM_LEAD, (trackSec * 1000 - _audioAnalysis.fadeOut.startMs) / 1000)
             : GAPLESS_STREAM_LEAD;
 
         if (!_gaplessArmed && remaining <= analysisLeadSec) {
