@@ -225,10 +225,26 @@ A plain `https://music.apple.com` link clicked in another app opens in your brow
 
 ## Login
 
-Sign in on first launch the same way you would at music.apple.com. That web sign-in covers AAC, the catalog and the library. Lossless has its own Apple Account sign-in: open **Settings → Account → Sign In…** once (email, password and a verification code), and lossless and hi-res switch on.
+Two sign-ins are needed on Linux.
+
+### 1. Apple Music web session
+
+Sign in on first launch the same way you would at music.apple.com. This covers AAC playback, the catalog and your library.
 
 <div align="center">
   <img src="assets/screenshots/electron_login.png" alt="Apple Music web login" width="600"/>
+</div>
+
+### 2. Lossless account (lossless, hi-res)
+
+This authenticates the FairPlay layer. Without it, playback falls back to AAC 256 kbps.
+
+1. Click the **Settings** cog wheel next to your account button
+2. Open **Account → Sign In…**, enter your Apple Account email and password, then the six-digit verification code Apple sends you
+
+<div align="center">
+  <img src="assets/screenshots/engine_login.png" alt="Adam Settings — lossless account sign-in" width="49%"/>
+  <img src="assets/screenshots/Account_logged_in.png" alt="Account signed in" width="49%"/>
 </div>
 
 The **Engine Status** section in Settings shows whether the DRM layer is ready (DRM process, FairPlay, session, backend). On Linux, if it is not, playback falls back to AAC 256 kbps and music videos are unavailable.
