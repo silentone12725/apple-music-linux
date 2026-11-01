@@ -70,7 +70,15 @@ func (m *Manager) checkOutputDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("outputDir: %w", err)
 	}
-	for _, root := range m.roots {
+	roots := m.roots
+	if m.more != nil {
+		for _, r := range m.more() {
+			if rr, err := resolveExisting(r); err == nil {
+				roots = append(roots[:len(roots):len(roots)], rr)
+			}
+		}
+	}
+	for _, root := range roots {
 		if pathWithin(real, root) {
 			return nil
 		}

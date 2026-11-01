@@ -110,3 +110,19 @@ func TestNormalizeOutputDirIsAlwaysAbsolute(t *testing.T) {
 		t.Error("a path containing a NUL byte must be refused")
 	}
 }
+
+func TestMoreRootsExtendConfinement(t *testing.T) {
+	root, extra, other := t.TempDir(), t.TempDir(), t.TempDir()
+	var picked []string
+	m := NewManager(nil, nil, Options{OutputRoots: []string{root}, MoreRoots: func() []string { return picked }})
+	if err := m.checkOutputDir(extra); err == nil {
+		t.Fatal("folder outside the roots accepted before it was picked")
+	}
+	picked = []string{extra}
+	if err := m.checkOutputDir(extra); err != nil {
+		t.Fatalf("picked folder rejected: %v", err)
+	}
+	if err := m.checkOutputDir(other); err == nil {
+		t.Fatal("unrelated folder accepted")
+	}
+}
