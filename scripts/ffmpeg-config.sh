@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Sourced by build-ffmpeg.sh (Linux) and build-ffmpeg-windows.sh: the pinned FFmpeg source and the
 # component list, so both platforms ship the same minimal build.
 

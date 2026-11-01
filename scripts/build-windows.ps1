@@ -3,7 +3,7 @@
   Builds the Windows installer: dist\adam-setup-<version>.exe
 
 .DESCRIPTION
-  1. libdrm_client.dll      mingw32-make -C drm            (drm_linux.c + libcrypto)
+  1. libdrm_client.dll      mingw32-make -C drm windows-build  (the hybris wrapper + libcrypto)
   2. engine.exe             go build (CGO, adamplay_backend tag, libvlc)
   3. runtime DLLs           libcrypto and its MSYS2 UCRT64 dependencies
   4. VLC runtime subset     libvlc.dll, libvlccore.dll and the audio-side plugins
@@ -47,8 +47,9 @@ cmd /c mklink /J "$Link\drm" "$Repo\drm" | Out-Null
 
 # ── 1. DRM client DLL ────────────────────────────────────────────────────────
 Write-Host '[1/6] libdrm_client.dll'
-mingw32-make -C "$Repo\drm" libdrm_client.dll | Out-Null
+mingw32-make -C "$Repo\drm" MINGW_CC=gcc MINGW_CXX=g++ windows-build | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'DRM client build failed' }
+Copy-Item "$Repo\drm\build-windows\libdrm_client.dll" "$Repo\drm\libdrm_client.dll" -Force
 
 # ── 2. Engine ────────────────────────────────────────────────────────────────
 Write-Host '[2/6] engine.exe'
