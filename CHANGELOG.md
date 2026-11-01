@@ -5,35 +5,7 @@ Changelog, and releases are numbered MAJOR.MINOR.PATCH (the early ones were publ
 pre-releases). Narrative release notes for 1.4.0 and 1.5.0 are in releases/; earlier ones are on
 the project's Releases page.
 
-## Unreleased
-
-**Highlights**
-- A track ends where its audio ends: no replayed endings, no pause after shorter audio, nothing cut off
-- Tracks paused for a long time resume at their saved position
-- Music-video crackle is gone, and a refused 4K licence falls back to a lower tier
-- DRM fixes for long tokens and a hanging init; CI skips unfinished work
-
-### Playback
-- **Track durations match the real stream.** When a stream's own playlist length differs from the catalog length by more than a second, the engine reports the stream's, so progress, fades and gapless timing line up. Lossless files carry the same length.
-- **No more replayed track endings.** The engine tells VLC reaching the real end of a file from a failed read (`eof` on `/vlc/time`); a clean short end advances instead of reloading and replaying the last seconds.
-- **The audio's real end decides when a track ends.** Once the stream's end is known, the fade-out, the next-track prefetch and MusicKit's length follow it. Audio longer than the reported length is not cut or faded out early (the length grows as it plays), and audio shorter than reported is not followed by a pause.
-- **Long pauses resume.** Open sessions are kept alive (`POST /api/v1/playback/{id}/touch`), and a session the engine no longer knows is reopened at the saved position on Play.
-- **Missing track-change events are recovered**: a track MusicKit leaves loading without announcing now starts after 300 ms.
-- **Music-video crackle fixed.** Audio/video drift is closed by running the video 4-6% faster or slower instead of seeking the audio about twice a second.
-
-### Music videos
-- **A refused video licence falls back to the next lower tier** (H.264 preferred) instead of failing the video. Apple refuses the 4K keys to this client; the refusal is remembered per video for an hour.
-- **Quality is logged clearly**: `[mv-quality]` lines show what was requested, what each tier allows (HDCP-LEVEL, ALLOWED-CPC key systems) and what plays.
-- **An opt-in live check for 4K music videos** (`engine/core/e2e/mv_4k_integration_test.go`, skipped without `AM_TEST_TOKEN` and `AM_TEST_MUT`) opens videos whose master playlists offer 4K-class heights with a 2160 ceiling, logs the heights offered and the chosen variant's codec, streams the first 6 MB and checks that it decrypts to real fMP4 video. It reports whether the key request is accepted, and writes the results to `verification/mv-4k/`.
-
-### DRM
-- The music token request is built with cJSON, so long tokens are no longer truncated at 512 bytes; the subscription status read is bounds-checked; a failed FairPlay init releases its lock instead of hanging. Adapted from silentone12725/apple-music-linux#1.
-
-### Build and CI
-- **CI skips unfinished work.** Draft pull requests, titles marked `[WIP]` or `WIP:` and pushes marked `[wip]` are not checked; the Windows build runs only on request until the Windows DRM runtime is released.
-- **CI failures fixed:** `scripts/build-windows.ps1` builds the DRM DLL with the current `windows-build` make target, `scripts/ffmpeg-config.sh` carries its bash shebang so the shell-syntax check passes, and a library test no longer races its own background save.
-
-## 1.5.0 - 2026-10-13
+## 1.5.0 - 2026-11-01
 
 **Highlights**
 - Renamed to Adam; existing data is migrated
@@ -41,6 +13,9 @@ the project's Releases page.
 - A Windows 10/11 installer (AAC and music videos)
 - Dependable engine startup and quit, and a volume that respects the desktop mixer
 - Every Apple Music link opens in the app; themes are no longer derived from an accent colour
+- A track ends where its audio ends: no replayed endings, no pause after shorter audio, nothing cut off; long pauses resume
+- Music-video crackle is gone, and a refused 4K licence falls back to a lower tier
+- Lossless options show AAC, greyed out, until you sign in; the mini player button moves next to Downloads
 
 ### Lossless (ALAC)
 - **FairPlay keys follow the upstream downloader.** Every key, including the shared prefetch key that encrypts each track's first segment, goes through Apple's own key exchange (`getKdContext`) and sample decryptor. Streaming to the disk cache and VLC is unchanged, so playback still starts before the download finishes.
@@ -70,10 +45,28 @@ Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone127
 - **Native transport commands are serialised.** Pause, resume and skip commands are dropped when the track has changed, status replies that arrive after a stop or skip are discarded, and a seek response for a skipped track cannot unfreeze the next one.
 - **The natural end of a track advances** instead of replaying the last fragment (the allowed gap is capped at 10% of the track).
 - **ALAC download and precache contexts end on shutdown**, the transport buttons follow the native session, and a poll error does not stop status updates.
+- **Track durations match the real stream.** When a stream's own playlist length differs from the catalog length by more than a second, the engine reports the stream's, so progress, fades and gapless timing line up. Lossless files carry the same length.
+- **No more replayed track endings.** The engine tells VLC reaching the real end of a file from a failed read (`eof` on `/vlc/time`); a clean short end advances instead of reloading and replaying the last seconds.
+- **The audio's real end decides when a track ends.** Once the stream's end is known, the fade-out, the next-track prefetch and MusicKit's length follow it. Audio longer than the reported length is not cut or faded out early (the length grows as it plays), and audio shorter than reported is not followed by a pause.
+- **Long pauses resume.** Open sessions are kept alive (`POST /api/v1/playback/{id}/touch`), and a session the engine no longer knows is reopened at the saved position on Play.
+- **Missing track-change events are recovered**: a track MusicKit leaves loading without announcing now starts after 300 ms.
+- **Music-video crackle fixed.** Audio/video drift is closed by running the video 4-6% faster or slower instead of seeking the audio about twice a second.
+
+### Music videos
+- **A refused video licence falls back to the next lower tier** (H.264 preferred) instead of failing the video. Apple refuses the 4K keys to this client; the refusal is remembered per video for an hour.
+- **Quality is logged clearly**: `[mv-quality]` lines show what was requested, what each tier allows (HDCP-LEVEL, ALLOWED-CPC key systems) and what plays.
+- **An opt-in live check for 4K music videos** (`engine/core/e2e/mv_4k_integration_test.go`, skipped without `AM_TEST_TOKEN` and `AM_TEST_MUT`) opens videos whose master playlists offer 4K-class heights with a 2160 ceiling, logs the heights offered and the chosen variant's codec, streams the first 6 MB and checks that it decrypts to real fMP4 video. It reports whether the key request is accepted, and writes the results to `verification/mv-4k/`.
+
+### DRM
+- The music token request is built with cJSON, so long tokens are no longer truncated at 512 bytes; the subscription status read is bounds-checked; a failed FairPlay init releases its lock instead of hanging. Adapted from silentone12725/apple-music-linux#1.
 
 ### Themes
 - **The theme is no longer derived from an accent colour**, neither the system's nor a picked one. The default is the `Apple Music` preset (black, grey sidebar, red only for accents), and Reset returns to it. Palettes saved by older versions are reset once (your own saved presets and chosen mode are kept).
 - **Blur is available on every desktop:** Windows (wallpaper from the registry), GNOME, Hyprland and KDE. The wallpaper is blurred once in the app instead of by a full-window CSS filter, so machines without a GPU still render the page. Signed-out pages use the blur theme, and the chosen theme applies after sign-in.
+
+### Interface
+- **Lossless options are honest when signed out.** Without a sign-in (or in a build with no DRM layer) the Lossless toggle is shown off and locked, and the Streaming and Downloads quality dropdowns show High Quality (AAC 256 kbps), greyed out and with the same options. Your saved choice returns after signing in.
+- **The mini player button sits next to Downloads and Settings** at the bottom of the sidebar, spaced like them, so Windows and Linux look the same.
 
 ### Links
 - **Every Apple Music URL form opens in Adam.** `adam://` has `play`/`open` forms, any `music.apple.com` path (browse, radio, search, curators, library, stations) opens in the app, and so do `?i=` song links, legacy `itunes.apple.com` links and all Apple Music hosts. `music.apple.com` MPRIS `OpenUri` requests open as well.
@@ -94,6 +87,10 @@ Ported from [silentone12725/apple-music-linux#1](https://github.com/silentone127
 - **AppImage:** a versioned name (`Adam-<version>-x86_64.AppImage`), a glibc baseline check (`scripts/check-glibc.sh`) and a static-runtime repack (`scripts/repack-appimage.sh`) in the release workflow.
 - **Config directory housekeeping:** obsolete wrapper-era folders, stale profile data, interrupted-write temp files and over-budget caches are removed at startup (at most daily, rule-based, live data protected). The 256 MB HTTP cache cap takes effect, and prefs and the credential store are written atomically.
 - **Device identity:** an existing or earlier identity is used before anything else; generating one is opt-in (`ADAM_GENERATE_IDENTITY=1`) because the license server rejects self-made ones. Key contexts are wiped and freed.
+
+### Build and CI
+- **CI skips unfinished work.** Draft pull requests, titles marked `[WIP]` or `WIP:` and pushes marked `[wip]` are not checked; the Windows build runs only on request until the Windows DRM runtime is released.
+- **CI failures fixed:** `scripts/build-windows.ps1` builds the DRM DLL with the current `windows-build` make target, `scripts/ffmpeg-config.sh` carries its bash shebang so the shell-syntax check passes, and a library test no longer races its own background save.
 
 ### Hardening
 - **Exports** keep the file extension of titles containing a dot, never overwrite a file the policy protects, move job phases only forward, and make relative output folders absolute.
