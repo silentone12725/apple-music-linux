@@ -231,7 +231,7 @@ Sign in on first launch the same way you would at music.apple.com. That web sign
   <img src="assets/screenshots/electron_login.png" alt="Apple Music web login" width="600"/>
 </div>
 
-The **Engine Status** section in Settings shows whether the DRM layer is ready (DRM process, FairPlay, session, backend). If it is not, playback falls back to AAC 256 kbps.
+The **Engine Status** section in Settings shows whether the DRM layer is ready (DRM process, FairPlay, session, backend). On Linux, if it is not, playback falls back to AAC 256 kbps and music videos are unavailable.
 
 ## Dev
 
