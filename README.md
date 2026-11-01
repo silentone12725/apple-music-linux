@@ -5,6 +5,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/silentone12725/adam?include_prereleases&style=for-the-badge)](https://github.com/silentone12725/adam/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-blue?style=for-the-badge)](https://github.com/silentone12725/adam/releases/latest)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/tY4v52KpVV)
 
 An Apple Music desktop client for Linux and Windows — lossless audio, music videos, downloads, and a native-feeling UI.
 
@@ -42,6 +43,7 @@ An Apple Music desktop client for Linux and Windows — lossless audio, music vi
 - [Build](#build)
 - [Project structure](#project-structure)
 - [Changelog](#changelog)
+- [Community](#community)
 - [References](#references)
 
 ## Features
@@ -370,6 +372,10 @@ How the pieces fit: the Electron app loads music.apple.com and injects the rende
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+
+## Community
+
+Questions, bug reports, feature requests and polls live on the [Adam Discord server](https://discord.gg/tY4v52KpVV).
 
 ## References
 
