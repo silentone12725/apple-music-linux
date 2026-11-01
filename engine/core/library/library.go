@@ -173,24 +173,26 @@ func (s *Store) encKey() ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
-	// O_EXCL: if another process created the key since our read, use theirs.
-	f, err := os.OpenFile(s.keyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Write the key to a temp file and hard-link it into place: the link fails if another
+	// process created the key first (then use theirs), and a reader never sees a
+	// half-written key file.
+	tmp, err := os.CreateTemp(filepath.Dir(s.keyPath), ".library.key.*")
 	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			if data, rerr := read(); rerr == nil {
-				s.key = data
-				return s.key, nil
-			}
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	defer os.Remove(tmp.Name()) //nolint:errcheck
+	if _, err := tmp.Write(key); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := os.Link(tmp.Name(), s.keyPath); err != nil {
+		if data, rerr := read(); rerr == nil {
+			s.key = data
+			return s.key, nil
 		}
-		return nil, fmt.Errorf("write key: %w", err)
-	}
-	if _, err := f.Write(key); err != nil {
-		f.Close()
-		os.Remove(s.keyPath) //nolint:errcheck
-		return nil, fmt.Errorf("write key: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(s.keyPath) //nolint:errcheck
 		return nil, fmt.Errorf("write key: %w", err)
 	}
 	s.key = key

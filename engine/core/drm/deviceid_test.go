@@ -3,6 +3,7 @@ package drm
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -31,7 +32,7 @@ func TestNewInstallGetsItsOwnStableDeviceID(t *testing.T) {
 	if again := androidIDOf(t, a); again != idA {
 		t.Fatalf("device ID changed between starts: %q then %q", idA, again)
 	}
-	if fi, err := os.Stat(filepath.Join(a, deviceIDFile)); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(filepath.Join(a, deviceIDFile)); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("device-id must be stored with mode 0600: %v %v", fi, err)
 	}
 }

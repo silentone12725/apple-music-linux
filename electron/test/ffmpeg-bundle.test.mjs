@@ -18,7 +18,7 @@ const MAIN = readFileSync(path.join(ELECTRON, 'main.mjs'), 'utf8');
 // CI checks out without Git LFS, so the binaries are ~130-byte pointer files there; the tests that
 // run or inspect them only make sense on a real checkout.
 const isReal = (f) => existsSync(f) && !readFileSync(f, { encoding: 'latin1', flag: 'r' }).slice(0, 40).startsWith('version https://git-lfs');
-const REAL = isReal(path.join(FF, 'bin', 'ffmpeg'));
+const REAL = process.platform === 'linux' && isReal(path.join(FF, 'bin', 'ffmpeg')); // the prebuilt binaries are Linux ELF
 const PKG = JSON.parse(readFileSync(path.join(ELECTRON, 'package.json'), 'utf8'));
 
 test('the engine is started with the bundled ffmpeg first on PATH and its libraries visible to VLC', () => {
@@ -34,13 +34,13 @@ test('electron-builder ships third_party/ffmpeg as resources/ffmpeg', () => {
     assert.equal(r.to, 'ffmpeg');
 });
 
-test('the prebuilt binary and the sonames the VLC plugins link are present', { skip: !REAL && 'Git LFS binaries not checked out' }, () => {
+test('the prebuilt binary and the sonames the VLC plugins link are present', { skip: !REAL && 'Linux-only prebuilt binaries (or Git LFS not checked out)' }, () => {
     for (const f of ['bin/ffmpeg', 'lib/libavcodec.so.63', 'lib/libavformat.so.63', 'lib/libavutil.so.61']) {
         assert.ok(existsSync(path.join(FF, f)), `${f} missing (git lfs pull?)`);
     }
 });
 
-test('the bundled ffmpeg runs from its own libraries with an empty environment', { skip: !REAL && 'Git LFS binaries not checked out' }, () => {
+test('the bundled ffmpeg runs from its own libraries with an empty environment', { skip: !REAL && 'Linux-only prebuilt binaries (or Git LFS not checked out)' }, () => {
     const out = execFileSync(path.join(FF, 'bin', 'ffmpeg'), ['-hide_banner', '-version'], { env: {}, encoding: 'utf8' });
     assert.match(out, /^ffmpeg version 9\.0\.2/);
     const ldd = execFileSync('ldd', [path.join(FF, 'bin', 'ffmpeg')], { env: {}, encoding: 'utf8' });
@@ -50,7 +50,7 @@ test('the bundled ffmpeg runs from its own libraries with an empty environment',
     }
 });
 
-test('no bundled FFmpeg file needs a newer glibc than the other packaged binaries (2.38)', { skip: !REAL && 'Git LFS binaries not checked out' }, () => {
+test('no bundled FFmpeg file needs a newer glibc than the other packaged binaries (2.38)', { skip: !REAL && 'Linux-only prebuilt binaries (or Git LFS not checked out)' }, () => {
     const files = ['bin/ffmpeg', ...readdirSync(path.join(FF, 'lib')).filter((f) => /\.so\.\d+\.\d+\.\d+$/.test(f)).map((f) => 'lib/' + f)];
     const ver = (v) => v.split('.').map(Number);
     const newer = (a, b) => { for (let i = 0; i < 3; i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); } return false; };

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -214,6 +215,11 @@ func TestClearSessionKeepsDeviceIdentity(t *testing.T) {
 	dir := t.TempDir()
 	account := []string{"33F633BF6AC7D676168B84C3594A7941AF2BEC09", "2fa.txt", "session-ready", "MUSIC_TOKEN"}
 	keep := []string{"adi.pb", "IC-Info.sids", "fsi.pdat", "device-id", "engine-session.lock", "33f633bf6ac7d676168b84c3594a7941af2bec09", "notes.txt"}
+	if runtime.GOOS == "windows" {
+		// Case-insensitive file names: the upper- and lower-case hash are one file there.
+		keep = []string{"adi.pb", "IC-Info.sids", "fsi.pdat", "device-id", "engine-session.lock", "notes.txt"}
+		account = account[1:]
+	}
 	for _, n := range append(append([]string{}, account...), keep...) {
 		os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600)
 	}

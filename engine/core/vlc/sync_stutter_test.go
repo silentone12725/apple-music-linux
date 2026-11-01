@@ -39,6 +39,7 @@ func testVLCFile(t *testing.T) string {
 // TestVLCSyncStutter simulates the continuous 100ms SetTime drift-correction
 // loop and measures call latency + position accuracy.
 func TestVLCSyncStutter(t *testing.T) {
+	file := testVLCFile(t)
 	p, err := New()
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -47,7 +48,7 @@ func TestVLCSyncStutter(t *testing.T) {
 
 	p.SetVolume(0) // mute: isolate video pipeline, no audio clock interference
 
-	url := "file://" + testVLCFile(t)
+	url := "file://" + file
 	if err := p.Load(url); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

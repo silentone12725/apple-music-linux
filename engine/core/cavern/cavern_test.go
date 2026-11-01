@@ -134,6 +134,7 @@ func TestFeedSocketReportsSourceError(t *testing.T) {
 func TestEnsureHRTFEnablesHeadphoneVirtualizer(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	path := filepath.Join(home, saveDatDir, saveDatFile)
 
 	if err := EnsureHRTF(); err != nil {
