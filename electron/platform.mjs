@@ -1,6 +1,7 @@
 // Cross-platform helpers for main.mjs. Everything platform-dependent that can be a pure
 // function takes `plat` explicitly so it is unit-testable from any OS.
 import path from 'path';
+const nodePath = path;
 import os from 'os';
 import net from 'net';
 import { execFile } from 'child_process';
@@ -12,8 +13,8 @@ export const IS_LINUX = process.platform === 'linux';
 // Directory that holds the `adam` config folder. Windows: %APPDATA%. Inside a
 // Flatpak the real ~/.config is invisible and XDG_CONFIG_HOME is the app's own directory.
 export function configRoot(plat = process.platform, env = process.env, home = os.homedir()) {
-    if (plat === 'win32') return env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    return env.FLATPAK_ID && env.XDG_CONFIG_HOME ? env.XDG_CONFIG_HOME : path.join(home, '.config');
+    if (plat === 'win32') return env.APPDATA || path.win32.join(home, 'AppData', 'Roaming');
+    return env.FLATPAK_ID && env.XDG_CONFIG_HOME ? env.XDG_CONFIG_HOME : path.posix.join(home, '.config');
 }
 
 export const engineFileName = (plat = process.platform) => (plat === 'win32' ? 'engine.exe' : 'engine');
@@ -22,6 +23,7 @@ export const engineFileName = (plat = process.platform) => (plat === 'win32' ? '
 // Linux uses LD_LIBRARY_PATH; Windows resolves DLLs through PATH (and the exe's own folder).
 export function engineLibEnv({ plat = process.platform, env = process.env, vlcDir, ffDir, resDir, hasVlc, hasFfmpeg }) {
     const sep = plat === 'win32' ? ';' : ':';
+    const path = plat === 'win32' ? nodePath.win32 : nodePath.posix; // the target's separators, not the host's
     const out = {};
     if (plat === 'win32') {
         const dirs = [];
@@ -51,7 +53,7 @@ export function discordIpcPaths(plat = process.platform, env = process.env) {
     const subdirs = ['', 'snap.discord/', 'app/com.discordapp.Discord/', 'app/com.discordapp.DiscordCanary/'];
     for (const base of bases)
         for (const sub of subdirs)
-            for (let i = 0; i < 10; i++) paths.push(path.join(base, sub + `discord-ipc-${i}`));
+            for (let i = 0; i < 10; i++) paths.push(path.posix.join(base, sub + `discord-ipc-${i}`));
     return paths;
 }
 
@@ -167,7 +169,7 @@ export function hasSessionBus(env = process.env, exists = existsSync) {
         }
         return false;
     }
-    return !!env.XDG_RUNTIME_DIR && exists(path.join(env.XDG_RUNTIME_DIR, 'bus'));
+    return !!env.XDG_RUNTIME_DIR && exists(path.posix.join(env.XDG_RUNTIME_DIR, 'bus'));
 }
 
 // Delay before the next MPRIS reconnect: 2 s, doubling to a 60 s ceiling.

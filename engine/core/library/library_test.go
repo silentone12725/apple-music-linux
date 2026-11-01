@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/go-resty/resty/v2"
@@ -102,8 +103,8 @@ func TestLoadRejectsTamperedCache(t *testing.T) {
 // A key file that is unreadable for any reason other than "absent" must not be replaced:
 // minting a new key would overwrite the real one and orphan the encrypted cache.
 func TestKeyIsNotRegeneratedOnReadFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores file permissions")
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("file permissions are not enforced here (root, or Windows)")
 	}
 	dir := t.TempDir()
 	s := New(dir)
@@ -112,7 +113,7 @@ func TestKeyIsNotRegeneratedOnReadFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	keyPath := filepath.Join(dir, "library.key")
-	if fi, err := os.Stat(keyPath); err != nil || fi.Mode().Perm() != 0o600 {
+	if fi, err := os.Stat(keyPath); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("key file: %v, mode %v", err, fi.Mode().Perm())
 	}
 

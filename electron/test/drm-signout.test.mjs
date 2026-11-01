@@ -16,11 +16,21 @@ test('validBackstop accepts only the two scopes', () => {
 
 test('writeBackstop commits a uniquely named request durably', () => {
     const dir = tmpDir();
-    const r = writeBackstop(dir, 'device');
+    // Directory handles cannot be fsynced on Windows, so stand one in for the directory fd.
+    const DIR_FD = -7;
+    const fakeFs = { ...fs,
+        openSync(p, flags, mode) { return p === dir ? DIR_FD : fs.openSync(p, flags, mode); },
+        fsyncSync(fd) { if (fd !== DIR_FD) fs.fsyncSync(fd); },
+        closeSync(fd) { if (fd !== DIR_FD) fs.closeSync(fd); } };
+    const r = writeBackstop(dir, 'device', { fs: fakeFs, platform: 'linux' });
     assert.deepEqual(r, { committed: true, durable: true });
     const [name] = backstops(dir);
     assert.match(name, /^logout-pending\.backstop-[0-9a-f]{32}$/);
     assert.equal(fs.readFileSync(path.join(dir, name), 'utf8'), 'device');
+});
+
+test('Windows cannot fsync a directory: committed but not durable', () => {
+    assert.deepEqual(writeBackstop(tmpDir(), 'account', { platform: 'win32' }), { committed: true, durable: false });
 });
 
 test('concurrent backstops never share a temp file', async () => {
@@ -46,7 +56,7 @@ test('a directory fsync failure after the rename is committed but not durable', 
     const dir = tmpDir();
     let dirOpened = false;
     const fakeFs = { ...fs, openSync(p, flags, mode) { if (p === dir) { dirOpened = true; throw new Error('EIO'); } return fs.openSync(p, flags, mode); } };
-    const r = writeBackstop(dir, 'account', { fs: fakeFs });
+    const r = writeBackstop(dir, 'account', { fs: fakeFs, platform: 'linux' });
     assert.ok(dirOpened);
     assert.equal(r.committed, true);
     assert.equal(r.durable, false);
