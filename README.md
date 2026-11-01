@@ -321,6 +321,7 @@ This is the `nightly` branch: the next release's code plus the Windows DRM runti
 ### What a nightly has that the release does not
 
 - The Windows DRM runtime (`libdrm_client.dll`, `libhybris-core.dll` and the Windows `hybris-linker\q.so`), so ALAC plays on Windows after the Apple Account sign-in (Settings → Account → Sign In…).
+- Windows link types: the installer lists Adam under Settings → Apps → Default apps → *Choose defaults by link type* for `adam://` and the Apple Music schemes (`music://`, `musics://`, `itms://`, `itmss://`, `itunes://`, `itals://`, `italss://`, `itvls://`, `itvlss://`, `itsradio://`, `itunesradio://`, `daap://`, `itpc://` and the `itunes.assocprotocol.*` aliases). Windows does not let an app take a link type silently, so pick Adam there; Settings → Links in the app also registers the ones you turn on.
 - Apple's Android FairPlay libraries are downloaded by the app on its first launch (pinned and SHA-256 checked, see `drm/fairplay-libs.lock`); nothing to install by hand. The Linux `.run` and AppImage already do the same.
 
 ### Linux
