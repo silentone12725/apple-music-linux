@@ -276,6 +276,42 @@ CGO_ENABLED=1 CGO_LDFLAGS='-L/tmp/adam-drm -Wl,-rpath,$ORIGIN' \
 cp ../drm/libdrm_client.so ../electron/dist/resources/
 ```
 
+## Nightly builds
+
+This is the `nightly` branch: the next release's code plus the Windows DRM runtime, so **lossless works on Windows here**. `main` is the stable line; its Windows release installer is AAC and music videos only, to keep it dependable. Expect rough edges in a nightly. Builds are announced in the nightly channel of the [Discord server](https://discord.gg/tY4v52KpVV).
+
+### What a nightly has that the release does not
+
+- The Windows DRM runtime (`libdrm_client.dll`, `libhybris-core.dll` and the Windows `hybris-linker\q.so`), so ALAC plays on Windows after the Apple Account sign-in (Settings → Account → Sign In…).
+- Apple's Android FairPlay libraries are downloaded by the app on its first launch (pinned and SHA-256 checked, see `drm/fairplay-libs.lock`); nothing to install by hand. The Linux `.run` and AppImage already do the same.
+
+### Linux
+
+Same build as the release, from this branch:
+
+```bash
+./scripts/build-installer.sh            # dist/adam.run
+cd electron && npm run dist             # electron/dist/Adam-<version>-x86_64.AppImage
+```
+
+### Windows
+
+Needs the [Windows prerequisites](#windows) below, plus a `libhybris-win` build directory that holds `libhybris-core.dll` and `hybris-linker\q.so` (from the `libhybris-win` project). Linux must have built the Android stubs once (`make -C drm android-stubs`) and `drm\stubs\out` copied over, because the stubs are ELF files:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -HybrisDir D:\libhybris-win\build
+```
+
+The script builds the DRM DLL and the CGO engine, packs the hybris runtime next to them (`q.so` replaces `drm\hybris-linker\q.so` for the build and is restored afterwards), and writes `electron\dist\adam-setup-<version>.exe`. Without `-HybrisDir` it builds the release installer (no Android runtime).
+
+### Publishing a nightly
+
+Name the files `adam-nightly-<date>-linux.run` and `adam-setup-nightly-<date>-windows-drm.exe`, put them in a shared folder with a `SHA256SUMS`, and post the link in the nightly channel with a short list of what changed. Never commit `drm/files` (a personal Apple session) or Apple's FairPlay libraries.
+
+### Testing the first-launch download
+
+Install with `%APPDATA%\adam\drm\rootfs\system\lib64` missing, start Adam, and about a minute later 25 files should be there and the engine should have restarted by itself. Lossless turns on after the sign-in.
+
 ## Build
 
 ```bash
@@ -312,8 +348,6 @@ The script builds `libdrm_client.dll` and `engine.exe` (CGO + the `adamplay_back
 | `-Msys <dir>` | MSYS2 UCRT64 `bin` directory if not `C:\msys64\ucrt64\bin` |
 
 The renderer bundles (`engine-bundle.js` etc.) are committed; they are rebuilt on Linux with `scripts/build-renderer.sh`.
-
-**Nightly (lossless on Windows).** This branch is the nightly line: pass `-HybrisDir <libhybris-win build dir>` (holding `libhybris-core.dll` and `hybris-linker\q.so`) to `build-windows.ps1` and the installer carries the Windows DRM runtime. The app downloads Apple's FairPlay libraries on first launch (pinned and checksummed). `main` stays the stable line: its Windows release installer is AAC and music videos only. Nightly builds are announced in the Discord server's nightly channel.
 
 **Windows engine without ALAC/DRM (AAC + music videos only).** With cgo off the engine needs no C toolchain and no libvlc, and it cross-compiles from Linux:
 
