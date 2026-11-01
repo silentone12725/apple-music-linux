@@ -5,6 +5,22 @@ Changelog, and releases are numbered MAJOR.MINOR.PATCH (the early ones were publ
 pre-releases). Narrative release notes for 1.4.0 and 1.5.0 are in releases/; earlier ones are on
 the project's Releases page.
 
+## Unreleased
+
+### Playback
+- **Track durations match the real stream.** When a stream's own playlist length differs from the catalog length by more than a second, the engine reports the stream's, so progress, fades and gapless timing line up. Lossless files carry the same length.
+- **No more replayed track endings.** The engine tells VLC reaching the real end of a file from a failed read (`eof` on `/vlc/time`); a clean short end advances instead of reloading and replaying the last seconds.
+- **Long pauses resume.** Open sessions are kept alive (`POST /api/v1/playback/{id}/touch`), and a session the engine no longer knows is reopened at the saved position on Play.
+- **Missing track-change events are recovered**: a track MusicKit leaves loading without announcing now starts after 300 ms.
+- **Music-video crackle fixed.** Audio/video drift is closed by running the video 4-6% faster or slower instead of seeking the audio about twice a second.
+
+### Music videos
+- **A refused video licence falls back to the next lower tier** (H.264 preferred) instead of failing the video. Apple refuses the 4K keys to this client; the refusal is remembered per video for an hour.
+- **Quality is logged clearly**: `[mv-quality]` lines show what was requested, what each tier allows (HDCP-LEVEL, ALLOWED-CPC key systems) and what plays.
+
+### DRM
+- The music token request is built with cJSON, so long tokens are no longer truncated at 512 bytes; the subscription status read is bounds-checked; a failed FairPlay init releases its lock instead of hanging. Adapted from silentone12725/apple-music-linux#1.
+
 ## 1.5.0 - 2026-10-13
 
 ### Lossless (ALAC)
