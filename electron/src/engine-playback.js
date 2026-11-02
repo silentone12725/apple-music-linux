@@ -27,6 +27,7 @@ import { installTransportControls } from './engine/transport-controls.js';
 import { playbackMode, leaveLossless } from './engine/handoff.js';
 import { PLAY_STATE, isLegalPlayTransition } from './engine/playstate.js';
 import { classifyVlcEnd } from './engine/vlc-end.js';
+import { wantsAtmos } from './engine/spatial.js';
 import { avSyncAction } from './engine/av-sync.js';
 import { actualDurationSec, lengthDiffers, lengthAfterOverrun } from './engine/track-end.js';
 import { createAccountSheet } from './engine/account-sheet.js';
@@ -95,15 +96,6 @@ const ENGINE = window._adamEngineURL || 'https://127.0.0.1:20025';
 // A real HTTPS origin avoids the mixed-content block AND the custom-protocol seek bug
 // (electron#38749) → Chrome's native byte-range seeking works.
 const _ADAM_DEBUG = !!(window.adamBridge?.isDev || window.adamBridge?.debug) || localStorage.getItem('_ADAM_DEBUG') === '1';
-
-// ── Last.fm API credentials ────────────────────────────────────────────────────
-// Last.fm's API guidelines for native desktop applications require the key and
-// shared secret to be embedded in the binary. The secret signs API method calls
-// (HMAC-MD5) and does not grant access to any user account — each user
-// authenticates separately via OAuth and their session key is stored locally.
-// See: https://www.last.fm/api/authentication (desktop auth flow)
-const LASTFM_API_KEY    = 'de5f164dcf024dc00e0aab05ba464d17';
-const LASTFM_API_SECRET = 'c03db782a5d29db42da06edcbf76d89a';
 
 // ── Power Budget ───────────────────────────────────────────────────────────────
 // Classifies runtime into full / reduced / minimal based on battery state and
@@ -738,6 +730,7 @@ let _prevSb           = null;
 // ── Engine capability snapshot (from SSE) ─────────────────────────────────────
 
 let _engineCaps       = { lossless: false, atmos: false };
+let _spatialAudio = 'off'; // independent preference, applied on restart
 let _streamingQuality  = 'lossless'; // 'high-quality' | 'lossless' | 'hi-res-lossless'
 let _downloadsQuality  = 'lossless'; // same options, applied to export requests
 let _losslessWaitDone = false;  // true after waitForLossless has timed out once — skip future waits
@@ -1260,6 +1253,9 @@ function _showQualityPopup(anchorEl) {
     } else if (spatialAudio === 'binaural') {
         title  = 'Spatial Audio';
         detail = 'Dolby Atmos · Binaural';
+    } else if (codec === 'atmos') {
+        title = 'EC-3 stream';
+        detail = 'HDMI Atmos output not verified';
     } else if (codec === 'alac') {
         const hiRes = sampleRate > 48000 || bitDepth > 16;
         const khz   = sampleRate ? `${(sampleRate / 1000).toFixed(sampleRate % 1000 ? 1 : 0)} kHz` : '';
@@ -1285,21 +1281,7 @@ function _showQualityPopup(anchorEl) {
 }
 
 function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
-    // When codec=null (session teardown / track change), schedule an optimistic
-    // lossless badge to appear 80 ms after DOM refresh settles. Firing synchronously
-    // here is too early — Apple Music's marquee DOM rebuild detaches any badge we
-    // insert during the transition animation. The timeout gives the slot time to
-    // re-attach before we insert. If a real session confirms the codec first, the
-    // timeout is a no-op.
-    if (codec === null && _engineCaps.lossless && _streamingQuality !== 'high-quality') {
-        const optSR = _qualityBadgeInfo.sampleRate ?? 44100;
-        const optBD = _qualityBadgeInfo.bitDepth   ?? 16;
-        setTimeout(() => {
-            if (_qualityBadgeInfo.codec === null) {
-                showQualityBadge('alac', optSR, optBD, null);
-            }
-        }, 80);
-    }
+    // Only show quality confirmed by the selected session.
     _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
     let badge = document.getElementById('adam-quality-badge');
 
@@ -1307,6 +1289,10 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
     if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural') {
         color    = '#bf5af2';
         label    = 'SPATIAL AUDIO';
+        isSpatial = true;
+    } else if (codec === 'atmos') {
+        color = '#bf5af2';
+        label = 'EC-3';
         isSpatial = true;
     } else if (codec === 'alac') {
         isHiRes  = sampleRate > 48000 || bitDepth > 16;
@@ -1394,6 +1380,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
         const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
         if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural')
             return { show: true, label: 'Spatial Audio', icon: false };
+        if (codec === 'atmos') return { show: true, label: 'EC-3', icon: false };
         if (codec === 'alac') {
             const hi = sampleRate > 48000 || bitDepth > 16;
             return { show: true, label: hi ? 'Hi-Res Lossless' : 'Lossless', icon: true };
@@ -4130,7 +4117,7 @@ async function _hoverPrewarmById(adamId, isVideo = false) {
             body: JSON.stringify({
                 assetId:    adamId,
                 storefront: sf,
-                capabilities: { lossless, hiRes: lossless && _streamingQuality === 'hi-res-lossless', atmos: false, video: isVideo },
+                capabilities: { lossless, hiRes: lossless && _streamingQuality === 'hi-res-lossless', atmos: wantsAtmos(_spatialAudio, lossless, isVideo), video: isVideo },
                 ...(isVideo ? { mvMaxHeight: _mvMaxHeight } : {}),
                 token:          mk.developerToken ?? '',
                 mediaUserToken: getMUT(),
@@ -4225,7 +4212,7 @@ async function _prewarmNextAlac() {
             body: JSON.stringify({
                 assetId:    nextAdamId,
                 storefront: sf,
-                capabilities: { lossless: true, hiRes: _streamingQuality === 'hi-res-lossless', atmos: false, video: false },
+                capabilities: { lossless: true, hiRes: _streamingQuality === 'hi-res-lossless', atmos: wantsAtmos(_spatialAudio, true), video: false },
                 token:          mk.developerToken ?? '',
                 mediaUserToken: getMUT(),
             }),
@@ -4241,8 +4228,8 @@ async function _prewarmNextAlac() {
         }
         const sess = await sessResp.json();
         const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-        if (sess.codec !== 'alac') {
-            console.log(`[Adam Gapless] skipped — engine returned ${sess.codec} (not lossless) in ${elapsed}s — will not retry`);
+        if (sess.codec !== 'alac' && sess.codec !== 'atmos') {
+            console.log(`[Adam Gapless] skipped — engine returned ${sess.codec} (not native audio) in ${elapsed}s — will not retry`);
             deleteSession(sess.sessionId);
             return;
         }
@@ -4502,7 +4489,7 @@ async function _resolveSession(item, adamId, sf, mk) {
             capabilities: {
                 lossless: losslessWanted,
                 hiRes:    losslessWanted && _streamingQuality === 'hi-res-lossless',
-                atmos:    false,
+                atmos:    wantsAtmos(_spatialAudio, losslessWanted, isVideo),
                 video:    isVideo,
             },
             mvMaxHeight:    _mvMaxHeight,
@@ -4927,7 +4914,7 @@ async function _triggerDirectPlay(adamId, mk) {
             body: JSON.stringify({
                 assetId:    adamId,
                 storefront: sf,
-                capabilities: { lossless: losslessWanted, hiRes: losslessWanted && _streamingQuality === 'hi-res-lossless', atmos: false, video: false },
+                capabilities: { lossless: losslessWanted, hiRes: losslessWanted && _streamingQuality === 'hi-res-lossless', atmos: wantsAtmos(_spatialAudio, losslessWanted), video: false },
                 mvMaxHeight: _mvMaxHeight,
                 token:          mk.developerToken ?? '',
                 mediaUserToken: getMUT(),
@@ -6406,9 +6393,12 @@ async function setup() {
         console.warn('[Adam Engine] Engine snapshot timeout:', e.message, '— continuing');
     }
 
+    // Load saved preferences before installing playback/prewarm handlers. Otherwise
+    // the first session can use defaults while the preferences IPC is pending.
     // Push saved cache config to engine now that it's up; also load quality pref.
-    window.adamBridge?.getPrefs().then(p => {
+    await window.adamBridge?.getPrefs().then(p => {
         if (p['streaming-quality']) _streamingQuality = p['streaming-quality'];
+        _spatialAudio = p['spatial-audio'] === 'atmos' ? 'atmos' : 'off';
         // lossless-enabled=false overrides streaming-quality → force AAC regardless.
         if (p['lossless-enabled'] === false) _streamingQuality = 'high-quality';
         if (p['downloads-quality']) _downloadsQuality  = p['downloads-quality'];
@@ -8849,7 +8839,7 @@ window.adamStartSession = async function (adamId, sf) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             assetId: adamId, storefront,
-            capabilities: { lossless: losslessWanted, atmos: false, video: false },
+            capabilities: { lossless: losslessWanted, atmos: wantsAtmos(_spatialAudio, losslessWanted), video: false },
             token: mk.developerToken ?? '',
             mediaUserToken: getMUT(),
         }),
@@ -10001,6 +9991,13 @@ window.adamGetQueueInfo = function () {
                               : 'Sign in to Apple Music to enable; AAC plays until then',
             false));
         aqBody.appendChild(sqRow);
+        const { wrap: spatialWrap } = _adamMakeQualityDropdown('spatial-audio',
+            { ...prefs, 'spatial-audio': prefs['spatial-audio'] === 'atmos' ? 'atmos' : 'off' }, [
+                { value: 'off', label: 'Off' },
+                { value: 'atmos', label: 'Prefer Atmos stream (experimental)' },
+            ]);
+        aqBody.appendChild(makeRow('Spatial audio', spatialWrap,
+            'Requires Lossless Audio enabled. Restart to apply. Falls back to ALAC when available; HDMI Atmos output is not verified.', true));
 
         return { wrap, onLosslessChange: fn => { _onLosslessChange = fn; } };
     }
@@ -10606,12 +10603,6 @@ window.adamGetQueueInfo = function () {
         body.appendChild(_scrobbleSubhead('Last.fm'));
         const lf = await window.adamBridge?.lastfmStatus().catch(() => null) ?? {};
 
-        // Auto-seed hardcoded credentials if not yet stored.
-        if (LASTFM_API_KEY && (!lf.apiKey || !lf.secretSet)) {
-            await window.adamBridge?.lastfmSetCredentials({ apiKey: LASTFM_API_KEY, secret: LASTFM_API_SECRET }).catch(() => {});
-            Object.assign(lf, { apiKey: LASTFM_API_KEY, secretSet: true, configured: true });
-        }
-
         const lfVal = document.createElement('div');
         lfVal.style.cssText = 'display:flex;align-items:center;gap:8px;';
         const lfConnected = () => {
@@ -10636,8 +10627,11 @@ window.adamGetQueueInfo = function () {
             };
             lfVal.appendChild(connect);
         };
-        (lf.connected ? lfConnected : lfDisconnected)();
-        body.appendChild(makeRow('Account', lfVal, 'Log in and authorize Adam in the in-app Last.fm window', false));
+        if (!lf.configured) lfVal.appendChild(statusVal('Not configured', false));
+        else (lf.connected ? lfConnected : lfDisconnected)();
+        body.appendChild(makeRow('Account', lfVal, lf.configured
+            ? 'Log in and authorize Adam in the in-app Last.fm window'
+            : 'Optional integration: configure your own Last.fm API key and shared secret before connecting.', false));
 
         // ── ListenBrainz ─────────────────────────────────────────────────────
         body.appendChild(_scrobbleSubhead('ListenBrainz'));

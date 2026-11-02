@@ -192,25 +192,33 @@ func (m *Master) SelectVideoVariantWithCodec(maxHeight int) (variantURL, codecs,
 	return "", "", "", fmt.Errorf("no video variant at or below %dp", maxHeight)
 }
 
-// SelectByCodec returns the URL of the highest-bandwidth variant whose Codecs
-// field contains the given string.  Falls back to highest bandwidth on no match.
-func (m *Master) SelectByCodec(codec string) string {
-	codec = strings.ToLower(codec)
-	var best, fallback Variant
+// SelectVariantByCodec returns the highest-bandwidth variant with an exact
+// CODECS token. Missing codecs never select an unrelated format. Returning the
+// variant lets callers report its metadata and choose their own explicit fallback.
+func (m *Master) SelectVariantByCodec(codec string) (Variant, bool) {
+	codec = strings.TrimSpace(codec)
+	if codec == "" {
+		return Variant{}, false
+	}
+	var best Variant
+	found := false
 	for _, v := range m.Variants {
-		if v.Bandwidth > fallback.Bandwidth {
-			fallback = v
+		if v.URL == "" {
+			continue
 		}
-		if codec != "" && strings.Contains(strings.ToLower(v.Codecs), codec) {
-			if v.Bandwidth > best.Bandwidth {
-				best = v
+		for _, token := range strings.Split(v.Codecs, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), codec) && (!found || v.Bandwidth > best.Bandwidth) {
+				best, found = v, true
 			}
 		}
 	}
-	if best.URL != "" {
-		return best.URL
-	}
-	return fallback.URL
+	return best, found
+}
+
+// SelectByCodec returns an empty URL when the requested codec is absent.
+func (m *Master) SelectByCodec(codec string) string {
+	v, _ := m.SelectVariantByCodec(codec)
+	return v.URL
 }
 
 // Height is the variant's pixel height from RESOLUTION, or from the dimensions in its URL; 0 when neither says.

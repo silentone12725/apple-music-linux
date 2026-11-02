@@ -134,17 +134,15 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 	traits := traitSet(a.AudioTraits)
 	var codec pipeline.Codec
 	var hlsFilter string
-	var sr, bd int
+	var selected hls.Variant
 
 	switch {
 	case req.Atmos && traits["atmos"]:
 		codec, hlsFilter = pipeline.CodecAtmos, "ec-3"
 	case req.Lossless && req.HiRes && traits["hi-res-lossless"]:
 		codec, hlsFilter = pipeline.CodecALAC, "alac"
-		sr, bd = extractALACQuality(a.AudioTraits)
 	case req.Lossless && traits["lossless"]:
 		codec, hlsFilter = pipeline.CodecALAC, "alac"
-		sr, bd = 44100, 16
 	default:
 		codec, hlsFilter = pipeline.CodecAAC, "mp4a.40.2"
 	}
@@ -166,10 +164,11 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 		if err != nil {
 			return nil, fmt.Errorf("open master playlist: %w", err)
 		}
-		playlistURL = master.SelectByCodec(hlsFilter)
-		if playlistURL == "" {
-			return nil, fmt.Errorf("no HLS variant matching codec %q", hlsFilter)
+		selected, codec, err = selectSongVariant(master, hlsFilter, req.Lossless)
+		if err != nil {
+			return nil, err
 		}
+		playlistURL = selected.URL
 	}
 
 	lp := p.lp
@@ -188,7 +187,12 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 		trackOpen = p.makeCBCSTrackOpener(assetID, playlistURL, pipeline.KindAudio, codec, a.DurationInMillis)
 	}
 
-	br, ch, mimeType := audioFormatFields(codec, sr)
+	br, ch, mimeType := audioFormatFields(codec)
+	// HLS bandwidth is an estimate, not decoded audio quality. Do not invent
+	// sample rate, bit depth, channel count or JOC support from catalog traits.
+	if codec != pipeline.CodecAAC {
+		br = int(selected.AverageBandwidth)
+	}
 	return &media.Session{
 		Kind: "song",
 		Metadata: media.Metadata{
@@ -202,8 +206,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 		Tracks: []media.Track{{
 			Kind:          pipeline.KindAudio,
 			Codec:         codec,
-			SampleRate:    sr,
-			BitDepth:      bd,
+			CodecString:   selected.Codecs,
 			BitRate:       br,
 			ChannelCount:  ch,
 			CodecMIMEType: mimeType,
@@ -212,19 +215,18 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 	}, nil
 }
 
-// audioFormatFields returns (bitRate bps, channelCount, codecMIMEType) for the
-// given codec.  Values are Apple Music defaults; they are informational only and
-// never used in the decryption path.
-func audioFormatFields(codec pipeline.Codec, sampleRate int) (bitRate, channelCount int, mimeType string) {
+// audioFormatFields reports the known AAC asset format. Native formats leave
+// unmeasured fields unknown (zero); EC-3 alone does not establish Atmos JOC.
+func audioFormatFields(codec pipeline.Codec) (bitRate, channelCount int, mimeType string) {
 	switch codec {
 	case pipeline.CodecAAC:
 		return 256_000, 2, `audio/mp4; codecs="mp4a.40.2"`
 	case pipeline.CodecALAC:
 		// Lossless bitrate is track-dependent; report 0 (unknown).
-		return 0, 2, `audio/mp4; codecs="alac"`
+		return 0, 0, `audio/mp4; codecs="alac"`
 	case pipeline.CodecAtmos:
-		// Dolby Atmos EC-3 7.1+objects; base bed is 7.1 (8 channels).
-		return 768_000, 8, `audio/mp4; codecs="ec-3"`
+		// CodecAtmos is the legacy session label for selected EC-3, not proof of JOC.
+		return 0, 0, `audio/mp4; codecs="ec-3"`
 	default:
 		return 0, 0, ""
 	}

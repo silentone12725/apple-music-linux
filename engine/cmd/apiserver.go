@@ -781,7 +781,11 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 
 	// VLC player — libvlc-backed playback for ALAC/Atmos that the browser cannot decode.
 	// Routes are no-ops when libvlc is not installed; frontend falls back to MSE.
-	s.vlcPlayer, _ = vlc.New() // nil if libvlc unavailable
+	var vlcErr error
+	s.vlcPlayer, vlcErr = vlc.New() // nil if libvlc unavailable or settings invalid
+	if vlcErr != nil {
+		slog.Warn("native audio unavailable", "error", vlcErr)
+	}
 	mux.HandleFunc("POST /api/v1/vlc/load", cors(s.handleVLCLoad))
 	mux.HandleFunc("POST /api/v1/vlc/pause", cors(s.handleVLCPause))
 	mux.HandleFunc("POST /api/v1/vlc/resume", cors(s.handleVLCResume))

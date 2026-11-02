@@ -199,6 +199,9 @@
     if (qb.spatialAudio === 'binaural-lossless' || qb.spatialAudio === 'binaural') {
       el.style.display = ''; el.className = 'spatial';
       el.innerHTML = 'SPATIAL AUDIO';
+    } else if (qb.codec === 'atmos') {
+      el.style.display = ''; el.className = 'spatial';
+      el.textContent = 'EC-3';
     } else if (qb.codec === 'alac') {
       const hi = qb.sampleRate > 48000 || qb.bitDepth > 16;
       el.style.display = ''; el.className = 'lossless';

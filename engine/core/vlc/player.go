@@ -8,6 +8,7 @@ package vlc
 import "C"
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 	"unsafe"
@@ -32,7 +33,28 @@ func New() (*Player, error) {
 }
 
 func newPlayer(applicationName, applicationID string) (*Player, error) {
-	inst := C.libvlc_new(0, nil)
+	options, err := OutputOptionsFromEnv(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	args, err := options.Args()
+	if err != nil {
+		return nil, err
+	}
+	var argv []*C.char
+	for _, arg := range args {
+		argv = append(argv, C.CString(arg))
+	}
+	defer func() {
+		for _, arg := range argv {
+			C.free(unsafe.Pointer(arg))
+		}
+	}()
+	var ptr **C.char
+	if len(argv) > 0 {
+		ptr = &argv[0]
+	}
+	inst := C.libvlc_new(C.int(len(argv)), ptr)
 	if inst == nil {
 		return nil, fmt.Errorf("vlc: libvlc_new failed — is libvlc.so.5 in LD_LIBRARY_PATH?")
 	}

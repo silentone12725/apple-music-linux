@@ -2,6 +2,7 @@ import * as electronMain from 'electron/main';
 const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, net: electronNet } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
 import { createEngineLifecycle, recoverOrphanEngine, isPortFree } from './engine-lifecycle.mjs';
+import { lastfmConfiguration } from './lastfm-config.mjs';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
 // A terminal that goes away (closed window, SSH drop) surfaces as EPIPE or EIO.
@@ -2365,15 +2366,13 @@ ipcMain.on('discord:disable', () => {
 });
 
 // ── Last.fm scrobbling ────────────────────────────────────────────────────────
-// The API key + shared secret are configured from Adam Settings (create an API
-// account at https://www.last.fm/api/account/create). Both, and the user's
-// session key, live ONLY in the main process (encrypted store) — the secret is
-// never returned to the renderer.
+// Optional credentials are supplied explicitly through the existing configuration
+// hook; no defaults are shipped. The shared secret remains in the main process.
 const LASTFM_ROOT = 'https://ws.audioscrobbler.com/2.0/';
 
 async function _lastfmCreds() {
     const store = await _storeLoad();
-    return { key: store.lastfm_api_key || '', secret: store.lastfm_secret || '' };
+    return lastfmConfiguration(store);
 }
 
 function _lastfmSign(params, secret) {
@@ -2386,7 +2385,8 @@ function _lastfmSign(params, secret) {
 }
 
 async function _lastfmCall(params, httpMethod = 'GET') {
-    const { key, secret } = await _lastfmCreds();
+    const { key, secret, configured } = await _lastfmCreds();
+    if (!configured) return { error: 'not-configured' };
     const full = { ...params, api_key: key };
     full.api_sig = _lastfmSign(full, secret);
     full.format  = 'json';
@@ -2450,10 +2450,10 @@ ipcMain.handle('drm:clear-credentials', async (_, opts) => {
 
 ipcMain.handle('lastfm:status', async () => {
     const store = await _storeLoad();
-    const configured = !!(store.lastfm_api_key && store.lastfm_secret);
+    const { key, secret, configured } = lastfmConfiguration(store);
     // apiKey is public → returned for prefill; the secret is never returned.
-    return { configured, apiKey: store.lastfm_api_key || '', secretSet: !!store.lastfm_secret,
-             connected: !!store.lastfm_sk, username: store.lastfm_user || null };
+    return { configured, apiKey: key, secretSet: !!secret,
+             connected: configured && !!store.lastfm_sk, username: store.lastfm_user || null };
 });
 
 // Open Last.fm's authorize page IN-APP so we control the theme and avoid the
@@ -2493,8 +2493,8 @@ function openLastfmAuthWindow(url) {
 }
 
 ipcMain.handle('lastfm:auth', async () => {
-    const { key, secret } = await _lastfmCreds();
-    if (!key || !secret) return { error: 'not-configured' };
+    const { key, configured } = await _lastfmCreds();
+    if (!configured) return { error: 'not-configured' };
     try {
         const r = await _lastfmCall({ method: 'auth.getToken' });
         if (!r.token) return { error: r.message || 'token request failed' };
@@ -2505,8 +2505,8 @@ ipcMain.handle('lastfm:auth', async () => {
 });
 
 ipcMain.handle('lastfm:session', async (_, token) => {
-    const { key, secret } = await _lastfmCreds();
-    if (!key || !secret) return { error: 'not-configured' };
+    const { configured } = await _lastfmCreds();
+    if (!configured) return { error: 'not-configured' };
     const t = token || _lastfmPendingToken;
     if (!t) return { error: 'no-token' };
     try {
@@ -2531,7 +2531,7 @@ ipcMain.handle('lastfm:disconnect', async () => {
 ipcMain.on('lastfm:nowplaying', async (_, t) => {
     if (!t?.artist || !t?.track) return;
     const store = await _storeLoad();
-    if (!store.lastfm_sk || !store.lastfm_api_key) return;
+    if (!store.lastfm_sk || !lastfmConfiguration(store).configured) return;
     const p = { method: 'track.updateNowPlaying', artist: t.artist, track: t.track, sk: store.lastfm_sk };
     if (t.album)       p.album       = t.album;
     if (t.albumArtist) p.albumArtist = t.albumArtist;
@@ -2542,7 +2542,7 @@ ipcMain.on('lastfm:nowplaying', async (_, t) => {
 ipcMain.on('lastfm:scrobble', async (_, t) => {
     if (!t?.artist || !t?.track || !t?.timestamp) return;
     const store = await _storeLoad();
-    if (!store.lastfm_sk || !store.lastfm_api_key) return;
+    if (!store.lastfm_sk || !lastfmConfiguration(store).configured) return;
     const p = { method: 'track.scrobble', artist: t.artist, track: t.track, timestamp: String(t.timestamp), sk: store.lastfm_sk };
     if (t.album)       p.album       = t.album;
     if (t.albumArtist) p.albumArtist = t.albumArtist;

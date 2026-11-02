@@ -1,5 +1,5 @@
 (() => {
-  // src/engine/mp4parse.js
+  // electron/src/engine/mp4parse.js
   function extractMetaFields(type, boxData, box) {
     if (type === "ftyp" && boxData.length >= 12)
       box.majorBrand = String.fromCharCode(boxData[8], boxData[9], boxData[10], boxData[11]);
@@ -73,7 +73,7 @@
     return result;
   }
 
-  // src/engine/mp4base.js
+  // electron/src/engine/mp4base.js
   var u32 = (b, o) => (b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]) >>> 0;
   function boxes(b, start, end) {
     const out = [];
@@ -99,7 +99,7 @@
     return timescale > 0 ? decodeTime / timescale : null;
   }
 
-  // src/engine/sidebar-glass.js
+  // electron/src/engine/sidebar-glass.js
   var GLASS = Object.freeze({
     blur: Object.freeze({ def: 20, min: 0, max: 80 }),
     glassOpacity: Object.freeze({ def: 0.07, min: 0, max: 0.5 }),
@@ -123,12 +123,12 @@
     return m ? `${m[1]}(${m[2]}, var(--adam-nav-alpha, ${m[3]}))` : color;
   }
 
-  // src/engine/catalog.js
+  // electron/src/engine/catalog.js
   var extractItemId = (item) => item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
   var isVideoType = (t) => t === "music-videos" || t === "musicVideo" || t === "library-music-videos";
   var extractItemType = (item) => item?.type ?? item?.attributes?.playParams?.kind ?? item?.playParams?.kind ?? null;
 
-  // src/engine/artpalette.js
+  // electron/src/engine/artpalette.js
   function rgbToHsl(r, g, b) {
     r /= 255;
     g /= 255;
@@ -216,14 +216,14 @@
     };
   }
 
-  // src/engine/auth.js
+  // electron/src/engine/auth.js
   function accountSignedIn(status) {
     const state = status?.state ?? {};
     if (state.authentication === "failed" || state.session === "expired") return false;
     return status?.capabilities?.cbcs === true || state.fairplay === "ready" || state.authentication === "logged_in" || state.session === "valid";
   }
 
-  // src/engine/transport.js
+  // electron/src/engine/transport.js
   function createTransportController({ scope, send }) {
     let tail = Promise.resolve(), desired = null, revision = 0, pending = 0, epoch = 0;
     return {
@@ -260,7 +260,7 @@
     };
   }
 
-  // src/engine/transport-controls.js
+  // electron/src/engine/transport-controls.js
   function installTransportControls({ root = document, state, command }) {
     const original = /* @__PURE__ */ new Map();
     const playIcon = '<svg viewBox="0 0 32 28" width="24" height="24" aria-hidden="true"><path fill="currentColor" d="M10 4v20l16-10z"/></svg>';
@@ -325,7 +325,7 @@
     } };
   }
 
-  // src/engine/handoff.js
+  // electron/src/engine/handoff.js
   function playbackMode(sess) {
     if (sess?.capabilities?.video) return "mv";
     return sess?.codec === "aac" ? "aac" : "alac";
@@ -349,7 +349,7 @@
     }
   }
 
-  // src/engine/playstate.js
+  // electron/src/engine/playstate.js
   var PLAY_STATE = Object.freeze({
     IDLE: "idle",
     // no active attempt
@@ -375,7 +375,7 @@
     return PLAY_TRANSITIONS[prev]?.includes(next) ?? false;
   }
 
-  // src/engine/vlc-end.js
+  // electron/src/engine/vlc-end.js
   var VLC_MAX_RETRIES = 2;
   function classifyVlcEnd({ posMs, trackEndMs, reason, retryCount, sourceEof }) {
     if (posMs < 2e3 && trackEndMs > 5e3 && retryCount < VLC_MAX_RETRIES) {
@@ -390,7 +390,12 @@
     return { action: "advance", shortOfReported: shortOfEnd && dataEnded };
   }
 
-  // src/engine/av-sync.js
+  // electron/src/engine/spatial.js
+  function wantsAtmos(preference, losslessRoute, isVideo = false) {
+    return preference === "atmos" && losslessRoute === true && !isVideo;
+  }
+
+  // electron/src/engine/av-sync.js
   var AV_DEADBAND_S = 0.04;
   var AV_MAX_RATE_DELTA = 0.06;
   var AV_RATE_GAIN = 0.25;
@@ -404,7 +409,7 @@
     return { action: "rate", rate: 1 + delta };
   }
 
-  // src/engine/track-end.js
+  // electron/src/engine/track-end.js
   var LENGTH_TOLERANCE_S = 1;
   function actualDurationSec({ elementDurationSec, streamComplete, reportedSec }) {
     if (streamComplete && Number.isFinite(elementDurationSec) && elementDurationSec > 0) return elementDurationSec;
@@ -418,7 +423,7 @@
     return positionSec > currentSec + LENGTH_TOLERANCE_S ? positionSec : currentSec;
   }
 
-  // src/engine/verification-code.js
+  // electron/src/engine/verification-code.js
   var CODE_LENGTH = 6;
   function normalizeCode(text) {
     return String(text ?? "").replace(/\D/g, "").slice(0, CODE_LENGTH);
@@ -446,7 +451,7 @@
     return "none";
   }
 
-  // src/engine/account-sheet.js
+  // electron/src/engine/account-sheet.js
   var ACCENT = "#fc3c44";
   var STYLE = `
 #adam-account{width:380px;max-width:calc(100vw - 32px);box-sizing:border-box;padding:0;border:0;border-radius:12px;
@@ -761,7 +766,7 @@
     return { openSignIn: () => showSignIn(), onSnapshot, close, isOpen: () => view !== null };
   }
 
-  // src/engine/sign-out.js
+  // electron/src/engine/sign-out.js
   var SIGN_OUT_TEXT = {
     marker: "Couldn't sign out: the engine isn't responding and the sign-out couldn't be recorded. Try again.",
     credentials: "Signed out of the engine, but the saved sign-in couldn't be removed. Try again.",
@@ -781,7 +786,7 @@
     return { ok: true, note: res.warning === "durability" ? SIGN_OUT_TEXT.durability : "" };
   }
 
-  // src/engine-playback.js
+  // electron/src/engine-playback.js
   var _accountSheetInstance = null;
   var _onAccountSignedIn = null;
   var _accountNote = null;
@@ -835,8 +840,6 @@
   window.__adamEngineInjected = true;
   var ENGINE = window._adamEngineURL || "https://127.0.0.1:20025";
   var _ADAM_DEBUG = !!(window.adamBridge?.isDev || window.adamBridge?.debug) || localStorage.getItem("_ADAM_DEBUG") === "1";
-  var LASTFM_API_KEY = "de5f164dcf024dc00e0aab05ba464d17";
-  var LASTFM_API_SECRET = "c03db782a5d29db42da06edcbf76d89a";
   var _TIMINGS = {
     full: { poll: 250, debounce: 150, losslessWait: 1500, sseWait: 4e3, qualityRace: 200, mkCheck: 50 },
     reduced: { poll: 250, debounce: 150, losslessWait: 2e3, sseWait: 5e3, qualityRace: 250, mkCheck: 50 },
@@ -1384,6 +1387,7 @@
   var _prevMs = null;
   var _prevSb = null;
   var _engineCaps = { lossless: false, atmos: false };
+  var _spatialAudio = "off";
   var _streamingQuality = "lossless";
   var _downloadsQuality = "lossless";
   var _losslessWaitDone = false;
@@ -1774,6 +1778,9 @@
     } else if (spatialAudio === "binaural") {
       title = "Spatial Audio";
       detail = "Dolby Atmos \xB7 Binaural";
+    } else if (codec === "atmos") {
+      title = "EC-3 stream";
+      detail = "HDMI Atmos output not verified";
     } else if (codec === "alac") {
       const hiRes = sampleRate > 48e3 || bitDepth > 16;
       const khz = sampleRate ? `${(sampleRate / 1e3).toFixed(sampleRate % 1e3 ? 1 : 0)} kHz` : "";
@@ -1793,21 +1800,16 @@
     pop.style.top = top + "px";
   }
   function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
-    if (codec === null && _engineCaps.lossless && _streamingQuality !== "high-quality") {
-      const optSR = _qualityBadgeInfo.sampleRate ?? 44100;
-      const optBD = _qualityBadgeInfo.bitDepth ?? 16;
-      setTimeout(() => {
-        if (_qualityBadgeInfo.codec === null) {
-          showQualityBadge("alac", optSR, optBD, null);
-        }
-      }, 80);
-    }
     _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
     let badge = document.getElementById("adam-quality-badge");
     let color, isHiRes = false, isSpatial = false, label = "";
     if (spatialAudio === "binaural-lossless" || spatialAudio === "binaural") {
       color = "#bf5af2";
       label = "SPATIAL AUDIO";
+      isSpatial = true;
+    } else if (codec === "atmos") {
+      color = "#bf5af2";
+      label = "EC-3";
       isSpatial = true;
     } else if (codec === "alac") {
       isHiRes = sampleRate > 48e3 || bitDepth > 16;
@@ -1872,6 +1874,7 @@
       const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
       if (spatialAudio === "binaural-lossless" || spatialAudio === "binaural")
         return { show: true, label: "Spatial Audio", icon: false };
+      if (codec === "atmos") return { show: true, label: "EC-3", icon: false };
       if (codec === "alac") {
         const hi = sampleRate > 48e3 || bitDepth > 16;
         return { show: true, label: hi ? "Hi-Res Lossless" : "Lossless", icon: true };
@@ -4417,7 +4420,7 @@
         body: JSON.stringify({
           assetId: adamId,
           storefront: sf,
-          capabilities: { lossless, hiRes: lossless && _streamingQuality === "hi-res-lossless", atmos: false, video: isVideo },
+          capabilities: { lossless, hiRes: lossless && _streamingQuality === "hi-res-lossless", atmos: wantsAtmos(_spatialAudio, lossless, isVideo), video: isVideo },
           ...isVideo ? { mvMaxHeight: _mvMaxHeight } : {},
           token: mk.developerToken ?? "",
           mediaUserToken: getMUT()
@@ -4499,7 +4502,7 @@
         body: JSON.stringify({
           assetId: nextAdamId,
           storefront: sf,
-          capabilities: { lossless: true, hiRes: _streamingQuality === "hi-res-lossless", atmos: false, video: false },
+          capabilities: { lossless: true, hiRes: _streamingQuality === "hi-res-lossless", atmos: wantsAtmos(_spatialAudio, true), video: false },
           token: mk.developerToken ?? "",
           mediaUserToken: getMUT()
         })
@@ -4515,8 +4518,8 @@
       }
       const sess = await sessResp.json();
       const elapsed = ((performance.now() - t0) / 1e3).toFixed(2);
-      if (sess.codec !== "alac") {
-        console.log(`[Adam Gapless] skipped \u2014 engine returned ${sess.codec} (not lossless) in ${elapsed}s \u2014 will not retry`);
+      if (sess.codec !== "alac" && sess.codec !== "atmos") {
+        console.log(`[Adam Gapless] skipped \u2014 engine returned ${sess.codec} (not native audio) in ${elapsed}s \u2014 will not retry`);
         deleteSession(sess.sessionId);
         return;
       }
@@ -4794,7 +4797,7 @@
         capabilities: {
           lossless: losslessWanted,
           hiRes: losslessWanted && _streamingQuality === "hi-res-lossless",
-          atmos: false,
+          atmos: wantsAtmos(_spatialAudio, losslessWanted, isVideo),
           video: isVideo
         },
         mvMaxHeight: _mvMaxHeight,
@@ -5160,7 +5163,7 @@
         body: JSON.stringify({
           assetId: adamId,
           storefront: sf,
-          capabilities: { lossless: losslessWanted, hiRes: losslessWanted && _streamingQuality === "hi-res-lossless", atmos: false, video: false },
+          capabilities: { lossless: losslessWanted, hiRes: losslessWanted && _streamingQuality === "hi-res-lossless", atmos: wantsAtmos(_spatialAudio, losslessWanted), video: false },
           mvMaxHeight: _mvMaxHeight,
           token: mk.developerToken ?? "",
           mediaUserToken: getMUT()
@@ -6546,8 +6549,9 @@
     } catch (e) {
       console.warn("[Adam Engine] Engine snapshot timeout:", e.message, "\u2014 continuing");
     }
-    window.adamBridge?.getPrefs().then((p) => {
+    await window.adamBridge?.getPrefs().then((p) => {
       if (p["streaming-quality"]) _streamingQuality = p["streaming-quality"];
+      _spatialAudio = p["spatial-audio"] === "atmos" ? "atmos" : "off";
       if (p["lossless-enabled"] === false) _streamingQuality = "high-quality";
       if (p["downloads-quality"]) _downloadsQuality = p["downloads-quality"];
       window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
@@ -8544,7 +8548,7 @@
       body: JSON.stringify({
         assetId: adamId,
         storefront,
-        capabilities: { lossless: losslessWanted, atmos: false, video: false },
+        capabilities: { lossless: losslessWanted, atmos: wantsAtmos(_spatialAudio, losslessWanted), video: false },
         token: mk.developerToken ?? "",
         mediaUserToken: getMUT()
       })
@@ -9791,6 +9795,20 @@
         false
       ));
       aqBody.appendChild(sqRow);
+      const { wrap: spatialWrap } = _adamMakeQualityDropdown(
+        "spatial-audio",
+        { ...prefs, "spatial-audio": prefs["spatial-audio"] === "atmos" ? "atmos" : "off" },
+        [
+          { value: "off", label: "Off" },
+          { value: "atmos", label: "Prefer Atmos stream (experimental)" }
+        ]
+      );
+      aqBody.appendChild(makeRow(
+        "Spatial audio",
+        spatialWrap,
+        "Requires Lossless Audio enabled. Restart to apply. Falls back to ALAC when available; HDMI Atmos output is not verified.",
+        true
+      ));
       return { wrap, onLosslessChange: (fn) => {
         _onLosslessChange = fn;
       } };
@@ -10450,11 +10468,6 @@
       const { wrap, body } = makeSection("Scrobbling");
       body.appendChild(_scrobbleSubhead("Last.fm"));
       const lf = await window.adamBridge?.lastfmStatus().catch(() => null) ?? {};
-      if (LASTFM_API_KEY && (!lf.apiKey || !lf.secretSet)) {
-        await window.adamBridge?.lastfmSetCredentials({ apiKey: LASTFM_API_KEY, secret: LASTFM_API_SECRET }).catch(() => {
-        });
-        Object.assign(lf, { apiKey: LASTFM_API_KEY, secretSet: true, configured: true });
-      }
       const lfVal = document.createElement("div");
       lfVal.style.cssText = "display:flex;align-items:center;gap:8px;";
       const lfConnected = () => {
@@ -10491,8 +10504,9 @@
         };
         lfVal.appendChild(connect);
       };
-      (lf.connected ? lfConnected : lfDisconnected)();
-      body.appendChild(makeRow("Account", lfVal, "Log in and authorize Adam in the in-app Last.fm window", false));
+      if (!lf.configured) lfVal.appendChild(statusVal("Not configured", false));
+      else (lf.connected ? lfConnected : lfDisconnected)();
+      body.appendChild(makeRow("Account", lfVal, lf.configured ? "Log in and authorize Adam in the in-app Last.fm window" : "Optional integration: configure your own Last.fm API key and shared secret before connecting.", false));
       body.appendChild(_scrobbleSubhead("ListenBrainz"));
       const lb = await window.adamBridge?.lbStatus().catch(() => null) ?? {};
       const lbCard = document.createElement("div");

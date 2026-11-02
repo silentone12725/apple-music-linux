@@ -185,9 +185,9 @@ func TestSelectByCodec_NoMatch(t *testing.T) {
 		{URL: "a", Bandwidth: 256000, Codecs: "mp4a.40.2"},
 		{URL: "b", Bandwidth: 320000, Codecs: "mp4a.40.2"},
 	}}
-	// No ec-3 variant → falls back to highest bandwidth overall.
-	if got := m.SelectByCodec("ec-3"); got != "b" {
-		t.Errorf("fallback = %q want b (highest bw)", got)
+	// No EC-3 variant must not silently select AAC.
+	if got := m.SelectByCodec("ec-3"); got != "" {
+		t.Errorf("missing EC-3 = %q want empty", got)
 	}
 }
 
