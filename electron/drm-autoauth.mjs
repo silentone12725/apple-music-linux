@@ -40,7 +40,12 @@ export async function autoAuthenticate({ request, creds, forget, sleep = (ms) =>
         if (Number.isFinite(at) && at < sentAt - 1000) continue;
         const auth = snap.state?.authentication;
         if (auth === 'logged_in' || snap.state?.fairplay === 'ready') return 'signed-in';
-        if (auth === 'challenging') return 'needs-code'; // the sign-in sheet takes it from here
+        if (auth === 'challenging') {
+            // These details no longer sign in silently (Apple wants a code): drop them so the next
+            // launch does not start another unattended sign-in. The sheet takes this attempt from here.
+            await forget();
+            return 'needs-code';
+        }
         if (auth === 'failed') {
             if (String(snap.message ?? '').includes(SETUP_PREFIX)) return 'kept';
             await forget();

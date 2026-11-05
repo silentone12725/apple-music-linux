@@ -1563,7 +1563,16 @@ function applyThemeMode() {
 ipcMain.once('app:ui-ready', async () => {
     try {
         const store = await _storeLoad();
-        if (!store.drm_email || !store.drm_password) return;
+        if (!store.drm_email && !store.drm_password) return;
+        // Details are kept only from a sign-in Apple accepted (drm:save-credentials marks them).
+        // Anything else is an incomplete or abandoned attempt: left alone it would start a sign-in
+        // on every launch and raise Apple's verification-code prompt unasked.
+        if (!store.drm_verified || !store.drm_email || !store.drm_password) {
+            delete store.drm_email; delete store.drm_password; delete store.drm_verified;
+            _storeDirty = true; _storeFlush();
+            console.log('[Adam] Removed saved sign-in details that never completed a sign-in');
+            return;
+        }
         // Give the engine a moment to load hybris and emit its initial DRM state.
         await new Promise(r => setTimeout(r, 3500));
         const outcome = await autoAuthenticate({
@@ -1571,7 +1580,7 @@ ipcMain.once('app:ui-ready', async () => {
             creds: { email: store.drm_email, password: store.drm_password },
             forget: async () => {
                 const s = await _storeLoad();
-                delete s.drm_email; delete s.drm_password;
+                delete s.drm_email; delete s.drm_password; delete s.drm_verified;
                 _storeDirty = true; _storeFlush();
             },
             log: m => console.log('[Adam]', m),
@@ -2430,6 +2439,7 @@ ipcMain.handle('drm:save-credentials', async (_, c) => {
     const store = await _storeLoad();
     store.drm_email    = c.email.trim();
     store.drm_password = c.password;
+    store.drm_verified = true; // only called once Apple has accepted the sign-in
     _storeDirty = true; _storeFlush();
     return { ok: true };
 });
@@ -2452,6 +2462,7 @@ ipcMain.handle('drm:clear-credentials', async (_, opts) => {
             const store = await _storeLoad();
             delete store.drm_email;
             delete store.drm_password;
+            delete store.drm_verified;
             _storeDirty = true;
             return _storeFlushNow();
         },

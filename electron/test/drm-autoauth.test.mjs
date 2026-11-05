@@ -68,9 +68,9 @@ test('a failure reported before this attempt began is ignored', async () => {
     assert.deepEqual(await run(e), { outcome: 'signed-in', forgotten: 0 });
 });
 
-test('a verification-code challenge is left to the sign-in sheet', async () => {
+test('a verification-code challenge drops the details and leaves this attempt to the sign-in sheet', async () => {
     const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'challenging' } }] });
-    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 0 });
+    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 1 });
 });
 
 test('a rejected request body clears the credentials; an engine without DRM does not', async () => {
