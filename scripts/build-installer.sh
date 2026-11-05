@@ -55,7 +55,7 @@ echo "Building Adam $VERSION ($COMMIT) installer..."
 
 # ── 0. pre-flight ─────────────────────────────────────────────────────────────
 echo "[0/7] Checking prerequisites..."
-for tool in node npx go gcc make zstd tar; do
+for tool in node npx go gcc make zstd tar python3 readelf ldd; do
     command -v "$tool" >/dev/null 2>&1 || die "'$tool' is required but not installed"
 done
 [ -x "$ELECTRON/node_modules/.bin/electron-builder" ] || die "electron/node_modules missing — run 'npm install' in electron/"
@@ -119,7 +119,7 @@ RES="$UNPACKED/resources"
 # ── 6. Verify the package against the fresh build ────────────────────────────
 echo "[6/7] Verifying package contents..."
 for f in engine libdrm_client.so \
-         vlc/libvlc.so.5 vlc/libvlccore.so.9 vlc/plugins vlc/libvlc_pulse.so.0 \
+         vlc/libvlc.so.5 vlc/libvlccore.so.9 vlc/plugins \
          ffmpeg/bin/ffmpeg ffmpeg/lib/libavcodec.so.63 ffmpeg/lib/libavutil.so.61 ffmpeg/lib/libavformat.so.63 \
          tray-icon.png icon.png app.asar \
          fetch-fairplay-libs.sh fairplay-libs.lock \
@@ -130,6 +130,10 @@ done
 [ ! -e "$RES/libdrm-native.so" ] || die "stale resources/libdrm-native.so is packaged (old wrapper library)"
 [ ! -e "$RES/libhybris-core.so" ] || die "stale resources/libhybris-core.so is packaged (it is embedded in libdrm_client.so)"
 [ ! -e "$RES/rootfs" ] || die "resources/rootfs is packaged: Apple's libraries must not ship, they are downloaded at install time"
+
+# Audit the exact staged payload, with its own VLC/FFmpeg search paths. Never
+# collect here: a missing dependency must be fixed before electron-builder.
+python3 "$REPO/scripts/vlc-runtime.py" "$RES/vlc" "$RES/ffmpeg/lib"
 
 same() { cmp -s "$1" "$2" || die "$3 in the package differs from the fresh build — stale copy"; }
 same "$RES_SRC/engine"           "$RES/engine"             "resources/engine"

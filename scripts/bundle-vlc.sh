@@ -13,10 +13,15 @@ DEST="$REPO/electron/dist/resources/vlc"
 LIBDIR="${ADAM_VLC_LIBDIR:-/usr/lib}"
 SRC="${ADAM_VLC_PLUGINS:-$LIBDIR/vlc/plugins}"
 
+validate_runtime() {
+    python3 "$REPO/scripts/vlc-runtime.py" --collect --source-dir "$LIBDIR" --source-dir "$LIBDIR/vlc" "$DEST" "$REPO/third_party/ffmpeg/lib"
+}
+
 if [ "${1:-}" = "--force" ]; then
     rm -rf "$DEST"
 fi
 if [ -f "$DEST/libvlc.so.5" ] && [ -d "$DEST/plugins" ]; then
+    validate_runtime
     echo "VLC already bundled: $(du -sh "$DEST" | cut -f1)"
     exit 0
 fi
@@ -75,7 +80,7 @@ done
 cp_plugins control libdummy_plugin.so
 
 # Core plugins the engine cannot do without: fail the build rather than ship a silent player.
-for need in access/libimem_plugin.so demux/libmp4_plugin.so audio_output/libpulse_plugin.so; do
+for need in access/libimem_plugin.so demux/libmp4_plugin.so codec/libavcodec_plugin.so audio_output/libpulse_plugin.so; do
     if [ ! -f "$P/$need" ] && [ ! -f "$P/${need/libpulse/libalsa}" ]; then
         echo "error: required VLC plugin $need was not found under $SRC" >&2
         exit 1
@@ -88,51 +93,10 @@ if [ -n "${ADAM_VLC_FFMPEG_LIBDIR:-}" ]; then
     cp -a "$ADAM_VLC_FFMPEG_LIBDIR"/lib*.so.* "$DEST/"
 fi
 
-# Libraries the plugins link that other distros (and the Flatpak runtime) do not provide. The
-# FFmpeg libraries are not among them: they ship in third_party/ffmpeg (a minimal build whose
-# sonames match these plugins) and reach VLC through LD_LIBRARY_PATH.
-for lib in libvlc_pulse.so.0 libsoxr.so.0 libdvbpsi.so.10 libaribb24.so.0 liba52.so.0; do
-    real=""
-    for d in "$LIBDIR" "$LIBDIR/vlc"; do   # libvlc_pulse lives in the vlc subdirectory
-        [ -e "$d/$lib" ] && { real="$(readlink -f "$d/$lib")"; break; }
-    done
-    if [ -n "$real" ] && [ -f "$real" ]; then
-        cp "$real" "$DEST/$lib"
-    else
-        echo "warning: $lib not found under $LIBDIR; the plugin that needs it will not load" >&2
-    fi
-done
-
-# Every library a bundled plugin links must resolve inside the bundle or be a library every
-# system has. FFmpeg and the support libraries above resolving from /usr/lib would work here and
-# fail on the next machine, so insist they come from the bundle.
-FFLIB="$REPO/third_party/ffmpeg/lib"
-[ -d "$FFLIB" ] || { echo "error: $FFLIB is missing (git lfs pull?)" >&2; exit 1; }
-bad=0
-for plug in "$P/codec/libavcodec_plugin.so" "$P/demux/libavformat_plugin.so" "$P/audio_output/libpulse_plugin.so"; do
-    [ -f "$plug" ] || continue
-    out="$(LD_LIBRARY_PATH="$DEST:$FFLIB" ldd "$plug" 2>/dev/null)"
-    for dep in libavcodec libavformat libavutil libvlc_pulse; do
-        line="$(grep "^[[:space:]]*$dep\." <<<"$out" || true)"
-        [ -z "$line" ] && continue
-        case "$line" in *"$DEST"/*|*"$FFLIB"/*) ;; *) echo "error: $(basename "$plug") resolves $dep outside the bundle: $line" >&2; bad=1 ;; esac
-    done
-done
-[ "$bad" = 0 ] || exit 1
-
-# Nothing bundled may need a newer glibc than the other packaged binaries (2.38 by default; release builds
-# on Ubuntu 22.04 set ADAM_MAX_GLIBC=2.35): a library copied from a rolling distro can require symbols that
-# older systems and the Flatpak runtime lack.
-MAX_GLIBC="${ADAM_MAX_GLIBC:-2.38}"
-over=0
-while IFS= read -r f; do
-    v="$(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
-    [ -z "$v" ] && continue
-    if [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$v" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
-        echo "error: ${f#$DEST/} needs GLIBC_$v (limit $MAX_GLIBC): do not bundle it" >&2; over=1
-    fi
-done < <(find "$DEST" -type f \( -name '*.so' -o -name '*.so.*' \))
-[ "$over" = 0 ] || exit 1
+# Resolve only reviewed redistributable dependencies actually needed by the
+# selected plugins. Unknown dependencies fail closed; system ABI contracts stay
+# on the target host. The audit also checks every copied library's GLIBC ceiling.
+validate_runtime
 
 # Regenerate the plugin cache so VLC does not scan on every start.
 vlc-cache-gen "$P" 2>/dev/null || true
