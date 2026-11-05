@@ -51,6 +51,14 @@ func (a *AuthCoordinator) SetCredentials(creds Credentials) {
 	a.mu.Unlock()
 }
 
+// ClearCredentials forgets the stored credentials once a sign-in attempt is over, so a
+// later request for credentials cannot silently resubmit an old password.
+func (a *AuthCoordinator) ClearCredentials() {
+	a.mu.Lock()
+	a.stored = Credentials{}
+	a.mu.Unlock()
+}
+
 // Abort ends a sign-in in progress: it forgets the stored credentials, ends a
 // pending verification-code challenge (the backend gets no code and that sign-in
 // attempt fails) and refuses further code challenges until SetCredentials is

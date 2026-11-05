@@ -89,10 +89,12 @@ function el(doc, tag, props = {}, ...children) {
  * `submitCode(code)` resolves to true when the engine accepted the code;
  * `onDone()` runs after sign-in finishes; `onCancel()` runs when the user cancels a
  * sign-in the engine is already running (waiting for Apple or for the code), so it can
- * be stopped. Feed DRM snapshots to `onSnapshot`.
+ * be stopped. Feed DRM snapshots to `onSnapshot`. `fetchSnapshot()` (optional) reads the current
+ * snapshot; while the sheet is open it is polled, so an outcome whose event was missed (a dropped
+ * event stream) still ends the "Signing In…" wait.
  */
-export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCancel = () => {}, doc = globalThis.document }) {
-    let dlg = null, view = null, busy = false;
+export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCancel = () => {}, fetchSnapshot = null, pollMs = 4000, doc = globalThis.document }) {
+    let dlg = null, view = null, busy = false, poll = null;
     let challengeId = null, submittedId = null, dismissedId = null;
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {};
@@ -193,6 +195,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         if (view !== 'signin') return; // moved on to the code meanwhile
         if (!res?.ok) { setBusy(false); setMessage(res?.error || 'Could not sign in. Try again.', true); }
         // ok: stay busy until the engine asks for the code or reports FairPlay ready
+        else startPoll();
     }
 
     function showCode() {
@@ -262,7 +265,17 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         dlg.classList.remove('shake'); void dlg.offsetWidth; dlg.classList.add('shake');
     }
 
+    function stopPoll() { clearInterval(poll); poll = null; }
+    function startPoll() {
+        if (!fetchSnapshot || poll) return;
+        poll = setInterval(async () => {
+            if (view === null) return stopPoll();
+            try { const s = await fetchSnapshot(); if (s && view !== null) onSnapshot(s); } catch { /* engine unreachable: keep waiting */ }
+        }, pollMs);
+    }
+
     function close() {
+        stopPoll();
         hidePassword();
         if (dlg?.open) dlg.close();
         view = null; busy = false; submittedId = null; inputs = []; msg = null; primary = null;
@@ -282,6 +295,9 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
             case 'code': showCode(); break;
             case 'retry': wrongCode(); break;
             case 'close': close(); onDone(); break;
+            case 'expired':
+                showSignIn(snap?.message || 'The sign-in ended before the code was accepted. Sign in again.');
+                break;
             case 'failed':
                 if (!busy) break; // a stale failure from an earlier attempt, nothing submitted now
                 if (view === 'signin') { setBusy(false); setMessage(snap?.message || 'Could not sign in. Check your Apple Account and password.', true); }

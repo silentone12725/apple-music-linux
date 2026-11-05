@@ -93,6 +93,8 @@ char *amUsername, *amPassword;
  * per attempt and the code is appended to the password, so it is cut back to
  * this length first; otherwise a second prompt sends password+code1+code2. */
 size_t amPasswordLen;
+/* The reason the last sign-in failed (Apple's own wording when it gave one), for the host to show. */
+char g_last_auth_error[256];
 struct shared_ptr g_GUID;
 int decryptCount = 1000;
 int offlineFlag;
@@ -542,28 +544,27 @@ extern int   get_recovery_state(void);
 
 uint8_t login(struct shared_ptr reqCtx) {
     DRM_DEBUG("[+] logging in...\n");
-    if (file_exists(strcat_b(args_info.base_dir_arg, "/STOREFRONT_ID"))) {
-        remove(strcat_b(args_info.base_dir_arg, "/STOREFRONT_ID"));
-    }
-    if (file_exists(strcat_b(args_info.base_dir_arg, "/MUSIC_TOKEN"))) {
-        remove(strcat_b(args_info.base_dir_arg, "/MUSIC_TOKEN"));
-    }
+    g_last_auth_error[0] = '\0';
     struct shared_ptr flow;
     _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_(
         &flow, &reqCtx);
     _ZN17storeservicescore16AuthenticateFlow3runEv(flow.obj);
     struct shared_ptr *resp =
         _ZNK17storeservicescore16AuthenticateFlow8responseEv(flow.obj);
-    if (resp == NULL || resp->obj == NULL)
+    if (resp == NULL || resp->obj == NULL) {
+        snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Apple did not answer the sign-in request");
         return 0;
+    }
     const int respType =
         _ZNK17storeservicescore20AuthenticateResponse12responseTypeEv(
             resp->obj);
     if (respType != 6) {
         const char *customer_msg = std_string_data(
             _ZNK17storeservicescore20AuthenticateResponse15customerMessageEv(resp->obj));
-        if (customer_msg && *customer_msg)
+        if (customer_msg && *customer_msg) {
             fprintf(stderr, "[!] server message: %s\n", customer_msg);
+            snprintf(g_last_auth_error, sizeof(g_last_auth_error), "%s", customer_msg);
+        }
 
         struct shared_ptr *err = _ZNK17storeservicescore20AuthenticateResponse5errorEv(resp->obj);
         if (err != NULL && err->obj != NULL) {
@@ -576,10 +577,20 @@ uint8_t login(struct shared_ptr reqCtx) {
 #else
             fprintf(stderr, "[!] auth error: code=%d, message=%s\n", code, what ? what : "none");
 #endif
+            if (!g_last_auth_error[0])
+                snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Apple rejected the sign-in (error %d)", code);
         } else {
 
             fprintf(stderr, "[!] auth failed: response type %d\n", respType);
+            if (!g_last_auth_error[0])
+                snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Apple rejected the sign-in (response %d)", respType);
         }
+    }
+    if (respType == 6) {
+        /* Only a successful sign-in replaces the old tokens: a wrong password must not sign the
+         * existing session out. */
+        remove(strcat_b(args_info.base_dir_arg, "/STOREFRONT_ID"));
+        remove(strcat_b(args_info.base_dir_arg, "/MUSIC_TOKEN"));
     }
     return respType == 6;
     // struct shared_ptr subStatMgr;

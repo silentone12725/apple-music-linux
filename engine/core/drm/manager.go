@@ -21,7 +21,7 @@ var DefaultRestartPolicy = RestartPolicy{
 	MaxCrashRestarts: 5,
 	RestartBackoff:   []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second},
 	StartupTimeout:   60 * time.Second,
-	AuthTimeout:      120 * time.Second,
+	AuthTimeout:      7 * time.Minute, // covers the 5-minute wait for a verification code
 }
 
 // RestartPolicy controls how DRMManager responds to backend crashes.
@@ -370,7 +370,11 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 
 func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error {
 	m.auth.SetCredentials(creds) // stored in AuthCoordinator; used if challenged
+	defer m.auth.ClearCredentials()
 	m.setManagerState(ManagerInitializing)
+	// Replace the previous attempt's outcome right away: a client that polls (or reconnects)
+	// must not read an earlier failure as this attempt's result.
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggingIn}, Message: "signing in"})
 
 	loginCtx, cancel := context.WithTimeout(ctx, m.policy.AuthTimeout)
 	defer cancel()

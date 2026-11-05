@@ -42,6 +42,7 @@ int  hybris_backend_init(const char *linker_dir, const char *lib64_dir, const ch
 int  hybris_fairplay_init(const char *base_dir, const char *device_info, const char *lib64_dir, const char *username, const char *password, drm_auth_callback_t auth_cb, void *auth_ud);
 // keep in sync with drm/drm_hybris.h
 #define HYBRIS_ERR_STALE_CONTEXT (-2)
+const char *hybris_last_error(void);
 void *hybris_open_kd_ctx_from_uri(const char *adam, const char *uri, unsigned *epoch);
 int  hybris_backend_decrypt(void *ctx, unsigned epoch, uint8_t *data, uint32_t len);
 
@@ -97,6 +98,8 @@ type adamplayBackend struct {
 	// (success or failure). nil means hybris was initialised synchronously (login
 	// path) or has not started yet.
 	hybrisInitDone chan struct{}
+
+	loops sync.Once // starts stateLoop once for the life of the process
 }
 
 var errBackendStopped = errors.New("DRM backend is not running")
@@ -151,14 +154,29 @@ func AdamplayBackend(drmDir string) DRMBackend {
 
 // Start launches the native DRM backend
 func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
+	if cfg.Credentials.Email != "" {
+		// A session-reuse start may still be loading FairPlay in the background; a sign-in
+		// must not drive the same libraries at the same time.
+		b.mu.Lock()
+		done := b.hybrisInitDone
+		b.mu.Unlock()
+		if done != nil {
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.config = cfg
 
-	// Start callback goroutines
-	go b.authLoop()
-	go b.stateLoop()
+	// One state loop for the process: stateCh outlives every Start, and several loops would
+	// leak and could deliver state changes out of order.
+	b.loops.Do(func() { go b.stateLoop() })
 
 	// Determine paths:
 	// - base_directory: the files/ folder where credentials are stored
@@ -261,15 +279,18 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 
 	if cfg.Credentials.Email != "" {
 		// Login flow: run hybris synchronously so the caller can verify the
-		// session-ready marker before returning "login succeeded".
+		// session-ready marker before returning "login succeeded". It runs even when FairPlay is
+		// already up (a session that expired, or another account): hybris_fairplay_init then signs
+		// in with the new credentials instead of initialising again.
 		// b.mu is held for all of Start, so set hybrisReady here rather than in
 		// runHybrisInit (sync.Mutex is not re-entrant).
-		if !b.hybrisReady && b.runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir, cfg) {
-			b.hybrisReady = true
+		if err := b.signIn(ctx, baseDir, lib64Dir, hybrisLinkerDir, cfg); err != nil {
+			// A sign-in that did not complete leaves no half-started backend behind.
+			b.running = false
+			C.drm_shutdown()
+			return err
 		}
-		if !b.hybrisReady {
-			return fmt.Errorf("native login completed but session-ready marker missing — hybris_fairplay_init may have failed silently")
-		}
+		b.hybrisReady = true
 		b.emitFairPlayReady()
 	} else if !b.hybrisReady {
 		// Session-reuse path: spin hybris init in the background so Start()
@@ -279,7 +300,9 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		b.hybrisInitDone = done
 		go func() {
 			defer close(done)
-			if b.runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir, cfg) {
+			if err := b.runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir, cfg); err != nil {
+				log.Printf("[drm] FairPlay not ready, ALAC disabled: %v", err)
+			} else {
 				b.mu.Lock()
 				b.hybrisReady = true
 				b.mu.Unlock()
@@ -291,20 +314,18 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 	return nil
 }
 
-// runHybrisInit initialises the hybris+Android FairPlay path and reports whether
-// FairPlay is ready. It is called either from Start (login flow, b.mu held) or
+// runHybrisInit initialises the hybris+Android FairPlay path and returns why it is not
+// ready (nil when it is). Errors about this installation start with SetupErrorPrefix. It is called either from Start (login flow, b.mu held) or
 // from a background goroutine (session reuse, b.mu not held), so it must not
 // touch b.mu or b.hybrisReady; the caller records the result.
-func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir string, cfg BackendConfig) bool {
+func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir string, cfg BackendConfig) error {
 	// Guard: libhybris-core.so calls exit(1) if q.so is missing.
 	qso := filepath.Join(hybrisLinkerDir, "q.so")
 	if _, err := os.Stat(qso); err != nil {
-		log.Printf("[drm] hybris linker not found at %s — ALAC hybris path disabled", qso)
-		return false
+		return setupError("the Android linker shim is missing (%s); reinstall Adam", qso)
 	}
 	if _, err := os.Stat(lib64Dir); err != nil {
-		log.Printf("[drm] lib64 dir not found at %s — ALAC hybris path disabled", lib64Dir)
-		return false
+		return setupError("the FairPlay libraries are not installed (looked in %s); restart Adam to download them, or run scripts/fetch-fairplay-libs.sh", lib64Dir)
 	}
 
 	cLinker := C.CString(hybrisLinkerDir)
@@ -313,8 +334,7 @@ func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir strin
 	C.free(unsafe.Pointer(cLinker))
 	C.free(unsafe.Pointer(cLib64))
 	if hiRet != 0 {
-		log.Printf("[drm] hybris_backend_init failed: ret=%d (ALAC will not work)", hiRet)
-		return false
+		return setupError("the Android runtime could not start (code %d)", int(hiRet))
 	}
 
 	// For session-reuse (no credentials): gate hybris_fairplay_init on the
@@ -323,9 +343,8 @@ func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir strin
 	if cfg.Credentials.Email == "" {
 		markerPath := filepath.Join(baseDir, "session-ready")
 		if _, err := os.Stat(markerPath); err != nil {
-			log.Printf("[drm] hybris: session-ready marker absent — ALAC disabled (login required)")
 			_ = os.Remove(filepath.Join(baseDir, "MUSIC_TOKEN"))
-			return false
+			return errors.New("not signed in: no session-ready marker, sign in to enable lossless")
 		}
 	}
 
@@ -346,14 +365,37 @@ func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir strin
 		C.free(unsafe.Pointer(cFPPass))
 	}
 	if fpRet != 0 {
-		log.Printf("[drm] hybris_fairplay_init failed: ret=%d (ALAC will not work)", fpRet)
-		return false
+		// Apple's own wording when it gave a reason (wrong password, account locked, ...).
+		if why := C.GoString(C.hybris_last_error()); why != "" {
+			return errors.New(why)
+		}
+		return fmt.Errorf("Apple's sign-in did not complete (code %d)", int(fpRet))
 	}
 	_ = os.WriteFile(filepath.Join(baseDir, "session-ready"), []byte("1"), 0o600)
 	log.Printf("[drm] hybris: FairPlay ready via Android libraries (%s)", lib64Dir)
 	// enter() takes b.mu, so this waits until Start has returned.
 	go b.warmDefaultKeyContext()
-	return true
+	return nil
+}
+
+// signIn runs the FairPlay sign-in and gives up when ctx ends. The native call cannot be
+// interrupted: after a timeout it finishes in the background and its outcome is only logged.
+func (b *adamplayBackend) signIn(ctx context.Context, baseDir, lib64Dir, linkerDir string, cfg BackendConfig) error {
+	res := make(chan error, 1)
+	go func() { res <- b.runHybrisInit(baseDir, lib64Dir, linkerDir, cfg) }()
+	select {
+	case err := <-res:
+		return err
+	case <-ctx.Done():
+		go func() {
+			if err := <-res; err != nil {
+				log.Printf("[drm] sign-in finished after the timeout: %v", err)
+			} else {
+				log.Printf("[drm] sign-in finished after the timeout; restart Adam to use it")
+			}
+		}()
+		return fmt.Errorf("sign-in timed out: %w", ctx.Err())
+	}
 }
 
 // emitState sends a DRMEvent snapshot onto the event channel (non-blocking).
@@ -750,11 +792,6 @@ func (b *adamplayBackend) Events() <-chan DRMEvent {
 	return b.eventCh
 }
 
-// authLoop processes authentication requests
-func (b *adamplayBackend) authLoop() {
-	// Auth is handled via callbacks
-}
-
 // stateLoop processes state changes from C callbacks
 func (b *adamplayBackend) stateLoop() {
 	for state := range b.stateCh {
@@ -833,5 +870,5 @@ func (b *adamplayBackend) answerChallenge(kind string) string {
 		log.Printf("[drm] verification code not entered: %v", err)
 		return ""
 	}
-	return strings.TrimSpace(code)
+	return verificationDigits(code)
 }

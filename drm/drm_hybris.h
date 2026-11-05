@@ -43,6 +43,9 @@ int hybris_fairplay_init(const char *base_dir, const char *device_info,
                          void (*auth_cb)(const char *type, char *out_buf, int out_size, void *ud),
                          void *auth_ud);
 
+/* Why the last sign-in failed, in words fit for the sign-in form ("" when unknown). Valid until the next sign-in. */
+const char *hybris_last_error(void);
+
 /* Returned by hybris_backend_decrypt when a lease refresh freed the context. */
 #define HYBRIS_ERR_STALE_CONTEXT (-2)
 

@@ -25,6 +25,8 @@ export function spreadDigits(current, index, text) {
  *   'retry'  Apple asked again after a submit: the code was wrong
  *   'close'  FairPlay is ready, sign-in finished
  *   'failed' sign-in failed
+ *   'expired' sign-in failed while the code was still being asked for (Apple or the
+ *            engine gave up waiting): back to the sign-in form, the code can no longer be sent
  * Snapshots keep a pending challenge until sign-in moves on, so challenges are
  * told apart by ID, and a challenge the user cancelled is not reopened.
  */
@@ -40,6 +42,6 @@ export function promptAction(snap, { open, view = null, submittedId = null, dism
         if (submittedId != null && ch.id !== submittedId) return 'retry';
         return 'none';
     }
-    if (st.authentication === 'failed' && open) return 'failed';
+    if (st.authentication === 'failed' && open) return view === 'code' ? 'expired' : 'failed';
     return 'none';
 }

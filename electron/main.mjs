@@ -31,6 +31,8 @@ import { shouldShowOffline, offlineHash } from './load-failure.mjs';
 import { runCleanupThrottled, cleanupCache } from './config-cleanup.mjs';
 import { gnomeWallpaperPath } from './wallpaper.mjs';
 import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS } from './acrylic.mjs';
+import https from 'https';
+import { autoAuthenticate } from './drm-autoauth.mjs';
 import { fetchFairPlayLibs } from './fairplay-fetch.mjs';
 import { setCompositionBackdrop, setNativeCaptionDrag, removeCompositionBackdrop } from './composition-backdrop.mjs';
 import { cleanBlur, cleanGlassOpacity, sidebarOpacityControl, artNavAlpha } from './src/engine/sidebar-glass.js';
@@ -1564,30 +1566,43 @@ ipcMain.once('app:ui-ready', async () => {
         if (!store.drm_email || !store.drm_password) return;
         // Give the engine a moment to load hybris and emit its initial DRM state.
         await new Promise(r => setTimeout(r, 3500));
-        const https = await import('https');
-        const agent = new https.Agent({ rejectUnauthorized: false });
-        const statusRes = await fetch(`https://127.0.0.1:${ENGINE_PORT}/api/v1/drm/status`, { agent }).catch(() => null);
-        if (!statusRes?.ok) return;
-        const status = await statusRes.json().catch(() => null);
-        // Only when the engine has no Apple session. A session it is still loading must not
-        // be replaced by a fresh sign-in, which would ask Apple for another verification code.
-        if (status?.state?.fairplay === 'ready' || status?.state?.session === 'valid') return;
-        console.log('[Adam] Auto-authenticating with saved DRM credentials');
-        const authRes = await fetch(`https://127.0.0.1:${ENGINE_PORT}/api/v1/drm/authenticate`, {
-            method: 'POST', agent,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: store.drm_email, password: store.drm_password }),
-        }).catch(() => null);
-        if (!authRes?.ok) {
-            console.warn('[Adam] Saved DRM credentials rejected — clearing');
-            const s = await _storeLoad();
-            delete s.drm_email; delete s.drm_password;
-            _storeDirty = true; _storeFlush();
-        }
+        const outcome = await autoAuthenticate({
+            request: engineRequest,
+            creds: { email: store.drm_email, password: store.drm_password },
+            forget: async () => {
+                const s = await _storeLoad();
+                delete s.drm_email; delete s.drm_password;
+                _storeDirty = true; _storeFlush();
+            },
+            log: m => console.log('[Adam]', m),
+        });
+        if (outcome === 'rejected') console.warn('[Adam] Saved DRM credentials rejected — cleared');
+        else if (outcome !== 'no-engine' && outcome !== 'has-session') console.log('[Adam] DRM auto sign-in:', outcome);
     } catch (e) {
         console.warn('[Adam] DRM auto-auth error:', e.message);
     }
 });
+
+// JSON request to the local engine (loopback TLS with its own self-signed certificate). Node's
+// fetch cannot skip certificate checks, so this uses https directly. null: engine unreachable.
+function engineRequest(method, urlPath, body) {
+    return new Promise(resolve => {
+        const payload = body === undefined ? null : JSON.stringify(body);
+        const req = https.request({
+            host: '127.0.0.1', port: ENGINE_PORT, path: urlPath, method, rejectUnauthorized: false, timeout: 15000,
+            headers: payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {},
+        }, res => {
+            let data = '';
+            res.setEncoding('utf8');
+            res.on('data', c => { data += c; });
+            res.on('end', () => { let json = null; try { json = JSON.parse(data); } catch {} resolve({ status: res.statusCode, json }); });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        if (payload) req.write(payload);
+        req.end();
+    });
+}
 
 ipcMain.on('app:auth-state', (_e, signedIn) => {
     const on = signedIn === true;

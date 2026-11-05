@@ -442,7 +442,7 @@
       if (submittedId != null && ch.id !== submittedId) return "retry";
       return "none";
     }
-    if (st.authentication === "failed" && open) return "failed";
+    if (st.authentication === "failed" && open) return view === "code" ? "expired" : "failed";
     return "none";
   }
 
@@ -522,8 +522,8 @@
   }
   function createAccountSheet({ signIn, submitCode, onDone = () => {
   }, onCancel = () => {
-  }, doc = globalThis.document }) {
-    let dlg = null, view = null, busy = false;
+  }, fetchSnapshot = null, pollMs = 4e3, doc = globalThis.document }) {
+    let dlg = null, view = null, busy = false, poll = null;
     let challengeId = null, submittedId = null, dismissedId = null;
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {
@@ -633,7 +633,7 @@
       if (!res?.ok) {
         setBusy(false);
         setMessage(res?.error || "Could not sign in. Try again.", true);
-      }
+      } else startPoll();
     }
     function showCode() {
       view = "code";
@@ -719,7 +719,23 @@
       void dlg.offsetWidth;
       dlg.classList.add("shake");
     }
+    function stopPoll() {
+      clearInterval(poll);
+      poll = null;
+    }
+    function startPoll() {
+      if (!fetchSnapshot || poll) return;
+      poll = setInterval(async () => {
+        if (view === null) return stopPoll();
+        try {
+          const s = await fetchSnapshot();
+          if (s && view !== null) onSnapshot(s);
+        } catch {
+        }
+      }, pollMs);
+    }
     function close() {
+      stopPoll();
       hidePassword();
       if (dlg?.open) dlg.close();
       view = null;
@@ -748,6 +764,9 @@
         case "close":
           close();
           onDone();
+          break;
+        case "expired":
+          showSignIn(snap?.message || "The sign-in ended before the code was accepted. Sign in again.");
           break;
         case "failed":
           if (!busy) break;
@@ -797,6 +816,10 @@
         if (!r.ok) return { ok: false, error: (await r.text().catch(() => "")).trim() || `HTTP ${r.status}` };
         _pendingCredentials = { email, password };
         return { ok: true };
+      },
+      fetchSnapshot: async () => {
+        const r = await fetch(`${ENGINE}/api/v1/drm/status`);
+        return r.ok ? r.json() : null;
       },
       submitCode: async (code) => {
         const r = await fetch(`${ENGINE}/api/v1/drm/challenge`, {

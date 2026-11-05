@@ -356,6 +356,12 @@ int hybris_fairplay_init(const char *base_dir, const char *device_info,
     return rc;
 }
 
+extern const char *drm_lib_last_error(void);
+const char *hybris_last_error(void)
+{
+    return drm_lib_last_error();
+}
+
 /* ── URI-based context ───────────────────────────────────────────────────────*/
 
 extern pthread_mutex_t g_fp_call_mutex;

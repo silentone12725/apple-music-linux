@@ -51,6 +51,10 @@ function _accountSheet() {
             _pendingCredentials = { email, password };
             return { ok: true };
         },
+        fetchSnapshot: async () => {
+            const r = await fetch(`${ENGINE}/api/v1/drm/status`);
+            return r.ok ? r.json() : null;
+        },
         submitCode: async (code) => {
             const r = await fetch(`${ENGINE}/api/v1/drm/challenge`, {
                 method: 'POST',
