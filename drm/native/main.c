@@ -413,7 +413,9 @@ static void __attribute__((sysv_abi)) credentialHandler(struct shared_ptr *credR
         credResp.obj, &password);
 
     _ZN17storeservicescore19CredentialsResponse15setResponseTypeENS0_12ResponseTypeE(
-        credResp.obj, cancelled ? 1 : 2); /* 2 = submit; 1 = cancel */
+        credResp.obj, cancelled ? 0 : 2);
+    /* 2 = the second (OK) button, 0 = the first (Cancel) button: AuthenticateFlow::_buttonActionForResponseType
+     * maps them to the dialog's buttons, and 0 ends the flow as cancelled. 1 would read as "no answer". */
 
     _ZN20androidstoreservices28AndroidPresentationInterface25handleCredentialsResponseERKNSt6__ndk110shared_ptrIN17storeservicescore19CredentialsResponseEEE(
         apInf.obj, &credResp);
