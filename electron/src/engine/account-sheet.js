@@ -34,6 +34,9 @@ const STYLE = `
 #adam-account .note{align-self:stretch;margin:8px 2px 0;font-size:11px;color:rgba(235,235,245,.38);text-align:left}
 #adam-account .msg{align-self:stretch;min-height:16px;margin:8px 0 0;font-size:12px;color:rgba(235,235,245,.6)}
 #adam-account .msg.err{color:#ff6961}
+#adam-account .msg button.link{min-width:0;height:auto;padding:0;background:none;box-shadow:none;color:#ff9a94;text-decoration:underline;cursor:pointer;font:inherit}
+#adam-account .remember{display:flex;align-items:center;gap:6px;align-self:flex-start;margin:10px 2px 0;font-size:12px;color:rgba(235,235,245,.6)}
+#adam-account .remember input{accent-color:#fc3c44;margin:0}
 #adam-account .digits{display:flex;gap:7px;align-items:center;justify-content:center;margin:2px 0 0}
 #adam-account .digits .sep{width:8px;height:1px;background:rgba(255,255,255,.25);margin:0 2px}
 #adam-account .digits input{width:38px;height:46px;box-sizing:border-box;padding:0;border:0;border-radius:7px;text-align:center;
@@ -85,16 +88,17 @@ function el(doc, tag, props = {}, ...children) {
 }
 
 /**
- * Create the sheet. `signIn(email, password)` resolves to { ok, error };
+ * Create the sheet. `signIn(email, password, remember)` resolves to { ok, error };
  * `submitCode(code)` resolves to true when the engine accepted the code;
  * `onDone()` runs after sign-in finishes; `onCancel()` runs when the user cancels a
  * sign-in the engine is already running (waiting for Apple or for the code), so it can
- * be stopped. Feed DRM snapshots to `onSnapshot`. `fetchSnapshot()` (optional) reads the current
+ * be stopped. `savedEmail()` gives the account signed in before (pre-fills the form); `openUrl(url)`
+ * opens a help link. Feed DRM snapshots to `onSnapshot`. `fetchSnapshot()` (optional) reads the current
  * snapshot; while the sheet is open it is polled, so an outcome whose event was missed (a dropped
  * event stream) still ends the "Signing In…" wait.
  */
-export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCancel = () => {}, fetchSnapshot = null, pollMs = 4000, doc = globalThis.document }) {
-    let dlg = null, view = null, busy = false, poll = null;
+export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCancel = () => {}, fetchSnapshot = null, pollMs = 4000, savedEmail = async () => '', openUrl = () => {}, doc = globalThis.document }) {
+    let dlg = null, view = null, busy = false, poll = null, remember = null;
     let challengeId = null, submittedId = null, dismissedId = null;
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {};
@@ -110,10 +114,17 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         return dlg;
     }
 
-    function setMessage(text, isError = false) {
+    function setMessage(text, isError = false, failure = null) {
         if (!msg) return;
         msg.textContent = text;
         msg.className = isError ? 'msg err' : 'msg';
+        if (failure?.url) {
+            // Where the problem is fixed (reset a password, accept terms): one click away.
+            const host = new URL(failure.url).host;
+            const link = el(doc, 'button', { type: 'button', class: 'link' }, `Open ${host}`);
+            link.addEventListener('click', () => openUrl(failure.url));
+            msg.append(' ', link);
+        }
     }
 
     function setBusy(on, label) {
@@ -145,10 +156,10 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         return b;
     }
 
-    function showSignIn(error = '') {
+    function showSignIn(error = '', { email: knownEmail = '', failure = null } = {}) {
         view = 'signin';
         busy = false;
-        const email = el(doc, 'input', { type: 'email', placeholder: 'Email or Phone Number', autocomplete: 'username', spellcheck: false });
+        const email = el(doc, 'input', { type: 'email', placeholder: 'Email or Phone Number', autocomplete: 'username', spellcheck: false, value: knownEmail });
         const pass = el(doc, 'input', { type: 'password', placeholder: 'Password', autocomplete: 'current-password' });
         inputs = [email, pass];
         const eye = el(doc, 'button', { type: 'button', class: 'eye', 'aria-label': 'Show password', 'aria-pressed': 'false' });
@@ -166,12 +177,17 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         eye.addEventListener('click', () => reveal(pass.type === 'password'));
         hidePassword = () => reveal(false);
         msg = el(doc, 'div', { class: 'msg', 'aria-live': 'polite' });
+        remember = el(doc, 'input', { type: 'checkbox', id: 'adam-account-remember' });
+        const rememberRow = el(doc, 'label', { class: 'remember', htmlFor: 'adam-account-remember' }, remember, ' Remember password on this computer');
         primary = button('Sign In', { isPrimary: true, onClick: submitSignIn });
         render(
-            [el(doc, 'h1', { id: 'adam-account-title' }, 'Sign in with your Apple Account'),
-             el(doc, 'div', { class: 'sub' }, 'Lossless and Hi-Res Lossless use Apple’s FairPlay, which needs its own sign-in.')],
+            [el(doc, 'h1', { id: 'adam-account-title' }, knownEmail ? 'Sign-In Required' : 'Sign in with your Apple Account'),
+             el(doc, 'div', { class: 'sub' }, knownEmail
+                 ? `Enter the password for your Apple Account ${knownEmail}.`
+                 : 'Lossless and Hi-Res Lossless use Apple’s FairPlay, which needs its own sign-in.')],
             [el(doc, 'div', { class: 'group' }, email, el(doc, 'div', { class: 'pw' }, pass, eye)),
-             el(doc, 'div', { class: 'note' }, 'Your password is sent only to Apple and kept encrypted on this computer.'),
+             rememberRow,
+             el(doc, 'div', { class: 'note' }, 'Your password is sent only to Apple. Unless you tick the box, it is not kept on this computer.'),
              msg],
             [button('Cancel', { onClick: cancel }), primary],
         );
@@ -179,9 +195,9 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
             i.addEventListener('input', () => { primary.disabled = busy || !ready(); setMessage(''); });
             i.addEventListener('keydown', (e) => { if (e.key === 'Enter' && ready()) submitSignIn(); });
         }
-        primary.disabled = true;
-        if (error) setMessage(error, true);
-        email.focus();
+        primary.disabled = !ready();
+        if (error) setMessage(error, true, failure);
+        (knownEmail ? pass : email).focus();
     }
 
     async function submitSignIn() {
@@ -190,7 +206,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         setMessage('');
         setBusy(true, 'Signing In…');
         let res;
-        try { res = await signIn(inputs[0].value.trim(), inputs[1].value); }
+        try { res = await signIn(inputs[0].value.trim(), inputs[1].value, !!remember?.checked); }
         catch (e) { res = { ok: false, error: e?.message }; }
         if (view !== 'signin') return; // moved on to the code meanwhile
         if (!res?.ok) { setBusy(false); setMessage(res?.error || 'Could not sign in. Try again.', true); }
@@ -225,7 +241,8 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         render(
             [el(doc, 'h1', { id: 'adam-account-title' }, 'Enter Verification Code'),
              el(doc, 'div', { class: 'sub' }, 'A verification code was sent to your other devices. Enter it to continue.')],
-            [fields, msg],
+            [fields, msg,
+             el(doc, 'div', { class: 'note' }, 'No code? Apple shows it on your other devices signed in to this Apple Account, and a code can also be read in Settings > your name > Sign-In & Security on an iPhone or iPad. Apple only sends a new code after a new sign-in.')],
             [button('Cancel', { onClick: cancel }), primary],
         );
         primary.disabled = true;
@@ -296,15 +313,21 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
             case 'retry': wrongCode(); break;
             case 'close': close(); onDone(); break;
             case 'expired':
-                showSignIn(snap?.message || 'The sign-in ended before the code was accepted. Sign in again.');
+                showSignIn(snap?.failure?.message || snap?.message || 'The sign-in ended before the code was accepted. Sign in again.', { failure: snap?.failure });
                 break;
             case 'failed':
                 if (!busy) break; // a stale failure from an earlier attempt, nothing submitted now
-                if (view === 'signin') { setBusy(false); setMessage(snap?.message || 'Could not sign in. Check your Apple Account and password.', true); }
-                else showSignIn(snap?.message || 'Sign-in failed. Try again.');
+                if (view === 'signin') { setBusy(false); setMessage(snap?.failure?.message || snap?.message || 'Could not sign in. Check your Apple Account and password.', true, snap?.failure); }
+                else showSignIn(snap?.failure?.message || snap?.message || 'Sign-in failed. Try again.', { failure: snap?.failure });
                 break;
         }
     }
 
-    return { openSignIn: () => showSignIn(), onSnapshot, close, isOpen: () => view !== null };
+    async function openSignIn() {
+        let email = '';
+        try { email = (await savedEmail()) || ''; } catch { /* no saved account: plain form */ }
+        showSignIn('', { email });
+    }
+
+    return { openSignIn, onSnapshot, close, isOpen: () => view !== null };
 }

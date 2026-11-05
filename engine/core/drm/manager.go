@@ -367,6 +367,9 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 		return ErrSignInRunning
 	}
 	defer m.signingIn.Store(false)
+	if until := m.session.SignInPausedUntil(); !until.IsZero() {
+		return &SignInPausedError{Until: until}
+	}
 	err := m.startGuarded(ctx, true, func(ctx context.Context) error { return m.authenticate(ctx, creds) })
 	if errors.Is(err, ErrLogoutPending) {
 		m.mergeAndEmit(DRMSnapshot{
@@ -400,16 +403,28 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 	loginCfg.Credentials = creds
 	authErr := m.backend.Start(loginCtx, loginCfg)
 	if authErr != nil {
+		if errors.Is(authErr, ErrSignInCancelled) {
+			// Nobody failed: the code was not given. Back to "signed out", without a failure.
+			m.setManagerState(ManagerReady)
+			m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggedOut}, Message: "sign-in cancelled"})
+			return fmt.Errorf("authenticate: %w", authErr)
+		}
 		m.setManagerState(ManagerFailed)
 		if creds.Email != "" {
+			f := ClassifySignInError(authErr)
+			m.session.NoteSignInOutcome(false, f)
 			// Fresh login failed — emit AuthFailed so the UI shows the error
 			// immediately instead of timing out after the poll interval expires.
 			m.mergeAndEmit(DRMSnapshot{
 				State:   DRMState{Authentication: AuthFailed},
-				Message: authErr.Error(),
+				Failure: &f,
+				Message: f.Message,
 			})
 		}
 		return fmt.Errorf("authenticate: %w", authErr)
+	}
+	if creds.Email != "" {
+		m.session.NoteSignInOutcome(true, SignInFailure{})
 	}
 	m.lastStart.Store(time.Now().UnixNano())
 	if creds.Email != "" {
@@ -429,6 +444,14 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 	}
 	m.setManagerState(ManagerReady)
 	return nil
+}
+
+// SignInPausedFor returns how long sign-ins stay paused after repeated rejections (0: not paused).
+func (m *DRMManager) SignInPausedFor() time.Duration {
+	if until := m.session.SignInPausedUntil(); !until.IsZero() {
+		return time.Until(until)
+	}
+	return 0
 }
 
 // SignInRunning reports whether a sign-in is in progress.
@@ -611,6 +634,12 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 		// Judge by the merged state: an unrelated update (Authentication unset) must not
 		// erase a challenge that is still waiting for the user.
 		m.snapshot.Challenge = nil
+	}
+
+	if snap.Failure != nil {
+		m.snapshot.Failure = snap.Failure
+	} else if snap.State.Authentication != 0 && snap.State.Authentication != AuthFailed {
+		m.snapshot.Failure = nil
 	}
 
 	// RecoveryUnknown (0) means the update carries no recovery state.

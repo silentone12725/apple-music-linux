@@ -184,6 +184,7 @@ type DRMSnapshot struct {
 	State        DRMState        `json:"state"`
 	Capabilities CapabilityState `json:"capabilities"`        // derived; at snapshot level, not state
 	Challenge    *AuthChallenge  `json:"challenge,omitempty"` // non-nil only when Auth == AuthChallenging
+	Failure      *SignInFailure  `json:"failure,omitempty"`   // why the last sign-in failed; set while Auth == AuthFailed
 	Timestamp    time.Time       `json:"timestamp"`
 	Message      string          `json:"message,omitempty"` // log text; never parsed for state
 }

@@ -93,25 +93,6 @@ func (a *AuthCoordinator) SubmitReply(reply string) error {
 	}
 }
 
-// Resend answers the pending verification-code challenge with no code, so Apple
-// rejects that attempt and (if it behaves as for a wrong code) asks again and sends
-// a new code. Unlike Abort it keeps the credentials and the next challenge works.
-func (a *AuthCoordinator) Resend() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.pending == nil {
-		return fmt.Errorf("no authentication challenge pending")
-	}
-	select {
-	case a.pending <- "":
-		a.pending = nil
-		a.cancelPending = nil
-		return nil
-	default:
-		return fmt.Errorf("authentication challenge already answered")
-	}
-}
-
 // Pending reports whether the backend is waiting for user input.
 func (a *AuthCoordinator) Pending() bool {
 	a.mu.Lock()

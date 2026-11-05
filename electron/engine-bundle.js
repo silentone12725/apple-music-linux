@@ -476,6 +476,9 @@
 #adam-account .note{align-self:stretch;margin:8px 2px 0;font-size:11px;color:rgba(235,235,245,.38);text-align:left}
 #adam-account .msg{align-self:stretch;min-height:16px;margin:8px 0 0;font-size:12px;color:rgba(235,235,245,.6)}
 #adam-account .msg.err{color:#ff6961}
+#adam-account .msg button.link{min-width:0;height:auto;padding:0;background:none;box-shadow:none;color:#ff9a94;text-decoration:underline;cursor:pointer;font:inherit}
+#adam-account .remember{display:flex;align-items:center;gap:6px;align-self:flex-start;margin:10px 2px 0;font-size:12px;color:rgba(235,235,245,.6)}
+#adam-account .remember input{accent-color:#fc3c44;margin:0}
 #adam-account .digits{display:flex;gap:7px;align-items:center;justify-content:center;margin:2px 0 0}
 #adam-account .digits .sep{width:8px;height:1px;background:rgba(255,255,255,.25);margin:0 2px}
 #adam-account .digits input{width:38px;height:46px;box-sizing:border-box;padding:0;border:0;border-radius:7px;text-align:center;
@@ -522,8 +525,9 @@
   }
   function createAccountSheet({ signIn, submitCode, onDone = () => {
   }, onCancel = () => {
-  }, fetchSnapshot = null, pollMs = 4e3, doc = globalThis.document }) {
-    let dlg = null, view = null, busy = false, poll = null;
+  }, fetchSnapshot = null, pollMs = 4e3, savedEmail = async () => "", openUrl = () => {
+  }, doc = globalThis.document }) {
+    let dlg = null, view = null, busy = false, poll = null, remember = null;
     let challengeId = null, submittedId = null, dismissedId = null;
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {
@@ -541,10 +545,16 @@
       doc.body.appendChild(dlg);
       return dlg;
     }
-    function setMessage(text, isError = false) {
+    function setMessage(text, isError = false, failure = null) {
       if (!msg) return;
       msg.textContent = text;
       msg.className = isError ? "msg err" : "msg";
+      if (failure?.url) {
+        const host = new URL(failure.url).host;
+        const link = el(doc, "button", { type: "button", class: "link" }, `Open ${host}`);
+        link.addEventListener("click", () => openUrl(failure.url));
+        msg.append(" ", link);
+      }
     }
     function setBusy(on, label) {
       busy = on;
@@ -571,10 +581,10 @@
       b.addEventListener("click", onClick);
       return b;
     }
-    function showSignIn(error = "") {
+    function showSignIn(error = "", { email: knownEmail = "", failure = null } = {}) {
       view = "signin";
       busy = false;
-      const email = el(doc, "input", { type: "email", placeholder: "Email or Phone Number", autocomplete: "username", spellcheck: false });
+      const email = el(doc, "input", { type: "email", placeholder: "Email or Phone Number", autocomplete: "username", spellcheck: false, value: knownEmail });
       const pass = el(doc, "input", { type: "password", placeholder: "Password", autocomplete: "current-password" });
       inputs = [email, pass];
       const eye = el(doc, "button", { type: "button", class: "eye", "aria-label": "Show password", "aria-pressed": "false" });
@@ -592,15 +602,18 @@
       eye.addEventListener("click", () => reveal(pass.type === "password"));
       hidePassword = () => reveal(false);
       msg = el(doc, "div", { class: "msg", "aria-live": "polite" });
+      remember = el(doc, "input", { type: "checkbox", id: "adam-account-remember" });
+      const rememberRow = el(doc, "label", { class: "remember", htmlFor: "adam-account-remember" }, remember, " Remember password on this computer");
       primary = button("Sign In", { isPrimary: true, onClick: submitSignIn });
       render(
         [
-          el(doc, "h1", { id: "adam-account-title" }, "Sign in with your Apple Account"),
-          el(doc, "div", { class: "sub" }, "Lossless and Hi-Res Lossless use Apple\u2019s FairPlay, which needs its own sign-in.")
+          el(doc, "h1", { id: "adam-account-title" }, knownEmail ? "Sign-In Required" : "Sign in with your Apple Account"),
+          el(doc, "div", { class: "sub" }, knownEmail ? `Enter the password for your Apple Account ${knownEmail}.` : "Lossless and Hi-Res Lossless use Apple\u2019s FairPlay, which needs its own sign-in.")
         ],
         [
           el(doc, "div", { class: "group" }, email, el(doc, "div", { class: "pw" }, pass, eye)),
-          el(doc, "div", { class: "note" }, "Your password is sent only to Apple and kept encrypted on this computer."),
+          rememberRow,
+          el(doc, "div", { class: "note" }, "Your password is sent only to Apple. Unless you tick the box, it is not kept on this computer."),
           msg
         ],
         [button("Cancel", { onClick: cancel }), primary]
@@ -614,9 +627,9 @@
           if (e.key === "Enter" && ready()) submitSignIn();
         });
       }
-      primary.disabled = true;
-      if (error) setMessage(error, true);
-      email.focus();
+      primary.disabled = !ready();
+      if (error) setMessage(error, true, failure);
+      (knownEmail ? pass : email).focus();
     }
     async function submitSignIn() {
       if (busy || !ready()) return;
@@ -625,7 +638,7 @@
       setBusy(true, "Signing In\u2026");
       let res;
       try {
-        res = await signIn(inputs[0].value.trim(), inputs[1].value);
+        res = await signIn(inputs[0].value.trim(), inputs[1].value, !!remember?.checked);
       } catch (e) {
         res = { ok: false, error: e?.message };
       }
@@ -677,7 +690,11 @@
           el(doc, "h1", { id: "adam-account-title" }, "Enter Verification Code"),
           el(doc, "div", { class: "sub" }, "A verification code was sent to your other devices. Enter it to continue.")
         ],
-        [fields, msg],
+        [
+          fields,
+          msg,
+          el(doc, "div", { class: "note" }, "No code? Apple shows it on your other devices signed in to this Apple Account, and a code can also be read in Settings > your name > Sign-In & Security on an iPhone or iPad. Apple only sends a new code after a new sign-in.")
+        ],
         [button("Cancel", { onClick: cancel }), primary]
       );
       primary.disabled = true;
@@ -766,18 +783,26 @@
           onDone();
           break;
         case "expired":
-          showSignIn(snap?.message || "The sign-in ended before the code was accepted. Sign in again.");
+          showSignIn(snap?.failure?.message || snap?.message || "The sign-in ended before the code was accepted. Sign in again.", { failure: snap?.failure });
           break;
         case "failed":
           if (!busy) break;
           if (view === "signin") {
             setBusy(false);
-            setMessage(snap?.message || "Could not sign in. Check your Apple Account and password.", true);
-          } else showSignIn(snap?.message || "Sign-in failed. Try again.");
+            setMessage(snap?.failure?.message || snap?.message || "Could not sign in. Check your Apple Account and password.", true, snap?.failure);
+          } else showSignIn(snap?.failure?.message || snap?.message || "Sign-in failed. Try again.", { failure: snap?.failure });
           break;
       }
     }
-    return { openSignIn: () => showSignIn(), onSnapshot, close, isOpen: () => view !== null };
+    async function openSignIn() {
+      let email = "";
+      try {
+        email = await savedEmail() || "";
+      } catch {
+      }
+      showSignIn("", { email });
+    }
+    return { openSignIn, onSnapshot, close, isOpen: () => view !== null };
   }
 
   // src/engine/sign-out.js
@@ -807,14 +832,16 @@
   var _pendingCredentials = null;
   function _accountSheet() {
     return _accountSheetInstance ??= createAccountSheet({
-      signIn: async (email, password) => {
+      savedEmail: () => window.adamBridge?.drmSavedEmail?.() ?? "",
+      openUrl: (url) => window.adamBridge?.openExternal?.(url),
+      signIn: async (email, password, remember) => {
         const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password })
         });
         if (!r.ok) return { ok: false, error: (await r.text().catch(() => "")).trim() || `HTTP ${r.status}` };
-        _pendingCredentials = { email, password };
+        _pendingCredentials = { email, password, remember: remember === true };
         return { ok: true };
       },
       fetchSnapshot: async () => {
@@ -8680,6 +8707,12 @@
         const main = document.createElement("div");
         main.style.cssText = FF + "font-size:13px;color:rgba(255,255,255,0.85);";
         main.textContent = isSignedIn ? "Signed in" : "Not signed in";
+        if (isSignedIn) {
+          window.adamBridge?.drmSavedEmail?.().then((e) => {
+            if (e) main.textContent = `Signed in as ${e}`;
+          }).catch(() => {
+          });
+        }
         text.appendChild(main);
         if (!isSignedIn) {
           const sub = document.createElement("div");

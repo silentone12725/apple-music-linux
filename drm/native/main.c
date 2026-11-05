@@ -97,6 +97,8 @@ size_t amPasswordLen;
 char g_last_auth_error[256];
 /* Set when the host gave no verification code (the user cancelled or the wait ran out). */
 static int g_auth_cancelled;
+/* Title and text of the last dialog Apple raised during the sign-in ("Forgot Your Password?: ..."). */
+static char g_last_dialog[384];
 struct shared_ptr g_GUID;
 int decryptCount = 1000;
 int offlineFlag;
@@ -275,9 +277,16 @@ static void __attribute__((sysv_abi)) dialogHandler(int64_t j, struct shared_ptr
                           struct shared_ptr *respHandler) {
     const char *const title = std_string_data(
         _ZNK17storeservicescore14ProtocolDialog5titleEv(protoDialogPtr->obj));
-    DRM_DEBUG("[.] dialogHandler: {title: %s, message: %s}\n", title,
-            std_string_data(_ZNK17storeservicescore14ProtocolDialog7messageEv(
-                protoDialogPtr->obj)));
+    const char *const dialog_text = std_string_data(_ZNK17storeservicescore14ProtocolDialog7messageEv(
+        protoDialogPtr->obj));
+    DRM_DEBUG("[.] dialogHandler: {title: %s, message: %s}\n", title, dialog_text);
+    if (title && *title && strcmp(title, "Sign In") != 0) {
+        /* Keep what Apple said: the host shows it, and tells a locked account from a wrong password by it. */
+        if (dialog_text && *dialog_text)
+            snprintf(g_last_dialog, sizeof(g_last_dialog), "%s: %s", title, dialog_text);
+        else
+            snprintf(g_last_dialog, sizeof(g_last_dialog), "%s", title);
+    }
 
     /* The library keeps this response (and its control block) after the handler returns and processes it on another
      * thread, so it must not live on this stack frame. Never freed: the library holds shared references. */
@@ -563,6 +572,7 @@ uint8_t login(struct shared_ptr reqCtx) {
     DRM_DEBUG("[+] logging in...\n");
     g_last_auth_error[0] = '\0';
     g_auth_cancelled = 0;
+    g_last_dialog[0] = '\0';
     struct shared_ptr flow;
     _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_(
         &flow, &reqCtx);
@@ -583,6 +593,8 @@ uint8_t login(struct shared_ptr reqCtx) {
             fprintf(stderr, "[!] server message: %s\n", customer_msg);
             snprintf(g_last_auth_error, sizeof(g_last_auth_error), "%s", customer_msg);
         }
+        if (g_last_dialog[0])
+            snprintf(g_last_auth_error, sizeof(g_last_auth_error), "%s", g_last_dialog);
 
         struct shared_ptr *err = _ZNK17storeservicescore20AuthenticateResponse5errorEv(resp->obj);
         if (err != NULL && err->obj != NULL) {
@@ -596,12 +608,12 @@ uint8_t login(struct shared_ptr reqCtx) {
             fprintf(stderr, "[!] auth error: code=%d, message=%s\n", code, what ? what : "none");
 #endif
             if (!g_last_auth_error[0])
-                snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Apple rejected the sign-in (error %d)", code);
+                snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Apple rejected the sign-in");
         } else {
 
             fprintf(stderr, "[!] auth failed: response type %d\n", respType);
             if (!g_last_auth_error[0])
-                snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Apple rejected the sign-in (response %d)", respType);
+                snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Apple rejected the sign-in");
         }
     }
     if (g_auth_cancelled && respType != 6)

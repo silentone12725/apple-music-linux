@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"engine/core/drm"
@@ -63,6 +64,11 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 	}
 	if !s.drmReady {
 		http.Error(w, "DRM backend not available — drm binary not found at startup", http.StatusServiceUnavailable)
+		return
+	}
+	if d := s.dm.SignInPausedFor(); d > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(d.Seconds())+1))
+		http.Error(w, (&drm.SignInPausedError{Until: time.Now().Add(d)}).Error(), http.StatusTooManyRequests)
 		return
 	}
 	if s.dm.SignInRunning() {
@@ -159,18 +165,4 @@ func (s *APIServer) handleDRMForgetDevice(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.writeSignOut(w, s.dm.ForgetDevice)
-}
-
-// handleDRMResend is the resend-code probe: it answers the pending code challenge
-// with no code. What Apple does next is reported over SSE.
-func (s *APIServer) handleDRMResend(w http.ResponseWriter, r *http.Request) {
-	if s.dm == nil {
-		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
-		return
-	}
-	if err := s.dm.ResendCode(); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.dm.Status())
 }

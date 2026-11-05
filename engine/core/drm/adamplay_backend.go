@@ -368,6 +368,9 @@ func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir strin
 	if fpRet != 0 {
 		// Apple's own wording when it gave a reason (wrong password, account locked, ...).
 		if why := C.GoString(C.hybris_last_error()); why != "" {
+			if why == "Sign-in cancelled" {
+				return ErrSignInCancelled
+			}
 			return errors.New(why)
 		}
 		return fmt.Errorf("Apple's sign-in did not complete (code %d)", int(fpRet))

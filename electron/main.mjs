@@ -1567,12 +1567,15 @@ ipcMain.once('app:ui-ready', async () => {
         // Details are kept only from a sign-in Apple accepted (drm:save-credentials marks them).
         // Anything else is an incomplete or abandoned attempt: left alone it would start a sign-in
         // on every launch and raise Apple's verification-code prompt unasked.
-        if (!store.drm_verified || !store.drm_email || !store.drm_password) {
+        if (!store.drm_verified || !store.drm_email) {
             delete store.drm_email; delete store.drm_password; delete store.drm_verified;
             _storeDirty = true; _storeFlush();
             console.log('[Adam] Removed saved sign-in details that never completed a sign-in');
             return;
         }
+        // Only the email was kept (the password is remembered when the user asks for it): it just
+        // pre-fills the sign-in form, there is nothing to sign in with.
+        if (!store.drm_password) return;
         // Give the engine a moment to load hybris and emit its initial DRM state.
         await new Promise(r => setTimeout(r, 3500));
         const outcome = await autoAuthenticate({
@@ -2433,15 +2436,23 @@ ipcMain.handle('lastfm:set-credentials', async (_, c) => {
     return { ok: true };
 });
 
+// Called once Apple has accepted a sign-in. The email is kept to pre-fill the form and to show
+// which account is signed in; the password only when the user ticked "Remember password".
 ipcMain.handle('drm:save-credentials', async (_, c) => {
-    if (typeof c?.email !== 'string' || typeof c?.password !== 'string') return { ok: false };
-    if (c.email.length > 256 || c.password.length > 256) return { ok: false };
+    if (typeof c?.email !== 'string' || c.email.length > 256) return { ok: false };
+    const remember = c.remember === true && typeof c.password === 'string' && c.password.length > 0 && c.password.length <= 256;
     const store = await _storeLoad();
     store.drm_email    = c.email.trim();
-    store.drm_password = c.password;
     store.drm_verified = true; // only called once Apple has accepted the sign-in
+    if (remember) store.drm_password = c.password; else delete store.drm_password;
     _storeDirty = true; _storeFlush();
     return { ok: true };
+});
+
+// The account signed in on this computer, for the sign-in form and the Settings row ('' if none).
+ipcMain.handle('drm:saved-email', async () => {
+    const store = await _storeLoad();
+    return store.drm_verified && typeof store.drm_email === 'string' ? store.drm_email : '';
 });
 
 // Sign-out ({ reload: true }, the default) or an abandoned sign-in ({ reload: false }).

@@ -41,14 +41,16 @@ let _accountNote = null;       // { text, error } shown once under the account r
 let _pendingCredentials = null; // kept until Apple accepts the sign-in, then saved
 function _accountSheet() {
     return _accountSheetInstance ??= createAccountSheet({
-        signIn: async (email, password) => {
+        savedEmail: () => window.adamBridge?.drmSavedEmail?.() ?? '',
+        openUrl: (url) => window.adamBridge?.openExternal?.(url),
+        signIn: async (email, password, remember) => {
             const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password }),
             });
             if (!r.ok) return { ok: false, error: (await r.text().catch(() => '')).trim() || `HTTP ${r.status}` };
-            _pendingCredentials = { email, password };
+            _pendingCredentials = { email, password, remember: remember === true };
             return { ok: true };
         },
         fetchSnapshot: async () => {
@@ -8990,6 +8992,10 @@ window.adamGetQueueInfo = function () {
             const main = document.createElement('div');
             main.style.cssText = FF + 'font-size:13px;color:rgba(255,255,255,0.85);';
             main.textContent = isSignedIn ? 'Signed in' : 'Not signed in';
+            if (isSignedIn) {
+                // Which account: the email saved when Apple accepted the sign-in.
+                window.adamBridge?.drmSavedEmail?.().then(e => { if (e) main.textContent = `Signed in as ${e}`; }).catch(() => {});
+            }
             text.appendChild(main);
             if (!isSignedIn) {
                 const sub = document.createElement('div');

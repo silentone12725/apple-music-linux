@@ -269,10 +269,3 @@ func (m *DRMManager) restartPath(res SignOutResult, why string) (SignOutResult, 
 
 // RestartPending reports that a sign-out needs the process to restart.
 func (m *DRMManager) RestartPending() bool { return m.restartPending.Load() }
-
-// ResendCode asks Apple for a new verification code by answering the pending code
-// challenge with no code, keeping the credentials so Apple can ask again. Probe:
-// what Apple does next decides the resend design.
-func (m *DRMManager) ResendCode() error {
-	return m.auth.Resend()
-}
