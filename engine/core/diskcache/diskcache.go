@@ -512,6 +512,8 @@ type StreamingReader struct {
 	sw      *StreamingPutWriter
 	pos     int64
 	aborted bool // guarded by sw.mu
+
+	closeOnce sync.Once
 }
 
 func (sr *StreamingReader) Read(p []byte) (int, error) {
@@ -584,9 +586,10 @@ func (sr *StreamingReader) Abort() {
 	sr.sw.cond.Broadcast()
 }
 
-// Close releases the reader's reference to the underlying file.
+// Close releases the reader's reference to the underlying file exactly once.
+// Repeated or concurrent Close calls are safe.
 func (sr *StreamingReader) Close() {
-	sr.sw.decRef()
+	sr.closeOnce.Do(sr.sw.decRef)
 }
 
 // EvictExpired removes all entries older than the configured TTL.
