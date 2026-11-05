@@ -95,6 +95,8 @@ char *amUsername, *amPassword;
 size_t amPasswordLen;
 /* The reason the last sign-in failed (Apple's own wording when it gave one), for the host to show. */
 char g_last_auth_error[256];
+/* Set when the host gave no verification code (the user cancelled or the wait ran out). */
+static int g_auth_cancelled;
 struct shared_ptr g_GUID;
 int decryptCount = 1000;
 int offlineFlag;
@@ -332,6 +334,7 @@ static void __attribute__((sysv_abi)) credentialHandler(struct shared_ptr *credR
     if (amPasswordLen && strlen(amPassword) > amPasswordLen)
         amPassword[amPasswordLen] = '\0';
     int passLen = strlen(amPassword);
+    int cancelled = 0;
 
     if (need2FA) {
         write_drm_state("WAITING_2FA");
@@ -339,7 +342,14 @@ static void __attribute__((sysv_abi)) credentialHandler(struct shared_ptr *credR
             /* library mode: ask the Go engine for the 2FA code */
             char code[16] = {0};
             g_drm_auth_cb("2fa", code, sizeof(code), g_drm_auth_ud);
-            strncat(amPassword, code, 6);
+            if (code[0] == '\0') {
+                /* No code: answering with the bare password would only count as another wrong attempt
+                 * at Apple, and repeated ones lock the account. Cancel instead. */
+                cancelled = 1;
+                g_auth_cancelled = 1;
+            } else {
+                strncat(amPassword, code, 6);
+            }
         } else if (args_info.code_from_file_flag) {
             fprintf(stderr, "[!] Enter your 2FA code into rootfs/%s/2fa.txt\n", args_info.base_dir_arg);
             fprintf(stderr, "[!] Example command: echo -n 123456 > rootfs/%s/2fa.txt\n", args_info.base_dir_arg);
@@ -378,16 +388,16 @@ static void __attribute__((sysv_abi)) credentialHandler(struct shared_ptr *credR
     _ZN17storeservicescore19CredentialsResponseC1Ev(credResp.obj);
 
     DRM_DEBUG("[.] credential payload lengths: username=%zu password=%zu\n", amUsername ? strlen(amUsername) : 0, amPassword ? strlen(amPassword) : 0);
-    union std_string username = new_std_string(amUsername);
+    union std_string username = new_std_string(cancelled ? "" : amUsername);
     _ZN17storeservicescore19CredentialsResponse11setUserNameERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
         credResp.obj, &username);
 
-    union std_string password = new_std_string(amPassword);
+    union std_string password = new_std_string(cancelled ? "" : amPassword);
     _ZN17storeservicescore19CredentialsResponse11setPasswordERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
         credResp.obj, &password);
 
     _ZN17storeservicescore19CredentialsResponse15setResponseTypeENS0_12ResponseTypeE(
-        credResp.obj, 2);
+        credResp.obj, cancelled ? 1 : 2); /* 2 = submit; 1 = cancel */
 
     _ZN20androidstoreservices28AndroidPresentationInterface25handleCredentialsResponseERKNSt6__ndk110shared_ptrIN17storeservicescore19CredentialsResponseEEE(
         apInf.obj, &credResp);
@@ -545,6 +555,7 @@ extern int   get_recovery_state(void);
 uint8_t login(struct shared_ptr reqCtx) {
     DRM_DEBUG("[+] logging in...\n");
     g_last_auth_error[0] = '\0';
+    g_auth_cancelled = 0;
     struct shared_ptr flow;
     _ZNSt6__ndk110shared_ptrIN17storeservicescore16AuthenticateFlowEE11make_sharedIJRNS0_INS1_14RequestContextEEEEEES3_DpOT_(
         &flow, &reqCtx);
@@ -586,6 +597,8 @@ uint8_t login(struct shared_ptr reqCtx) {
                 snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Apple rejected the sign-in (response %d)", respType);
         }
     }
+    if (g_auth_cancelled && respType != 6)
+        snprintf(g_last_auth_error, sizeof(g_last_auth_error), "Sign-in cancelled");
     if (respType == 6) {
         /* Only a successful sign-in replaces the old tokens: a wrong password must not sign the
          * existing session out. */
