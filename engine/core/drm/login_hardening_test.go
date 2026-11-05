@@ -58,3 +58,45 @@ func TestAuthenticateForgetsCredentials(t *testing.T) {
 		})
 	}
 }
+
+// The web player's token must not report "logged in" while a sign-in is running: an older
+// session marker would close the sign-in sheet before Apple has answered.
+func TestWebSessionDoesNotAnswerForARunningSignIn(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "session-ready", "1")
+	b := newFake()
+	m := newTestManager(t, dir, b)
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggingIn}})
+	m.NoteWebSession()
+	if got := m.Status().State.Authentication; got != AuthLoggingIn {
+		t.Fatalf("a web session overwrote the running sign-in: %v", got)
+	}
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthFailed}})
+	m.NoteWebSession()
+	if got := m.Status().State.Authentication; got != AuthLoggedIn {
+		t.Fatalf("with no sign-in running the marker should report logged in, got %v", got)
+	}
+}
+
+func TestOnlyOneSignInAtATime(t *testing.T) {
+	b := newFake()
+	started, release := make(chan struct{}), make(chan struct{})
+	b.startFn = func(context.Context, *fakeBackend) error { close(started); <-release; return nil }
+	m := newTestManager(t, t.TempDir(), b)
+	done := make(chan error, 1)
+	go func() { done <- m.Authenticate(context.Background(), Credentials{Email: "a@b.c", Password: "pw"}) }()
+	<-started
+	if !m.SignInRunning() {
+		t.Fatal("SignInRunning is false while a sign-in is running")
+	}
+	if err := m.Authenticate(context.Background(), Credentials{Email: "a@b.c", Password: "pw"}); !errors.Is(err, ErrSignInRunning) {
+		t.Fatalf("second sign-in got %v, want ErrSignInRunning", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if m.SignInRunning() {
+		t.Fatal("SignInRunning stays true after the sign-in ended")
+	}
+}

@@ -100,6 +100,17 @@ extern char *g_music_token;
 static char            g_base_dir_copy[1024];
 static char            g_device_info_copy[512];
 static char            g_username_copy[320];
+static char            g_pw_buf[256]; /* the password (and the code appended to it) while a sign-in runs */
+
+/* A sign-in is over: forget the account so a later request for credentials cannot resubmit it. */
+static void forget_credentials(void)
+{
+    memset(g_pw_buf, 0, sizeof(g_pw_buf));
+    memset(g_username_copy, 0, sizeof(g_username_copy));
+    amPassword = NULL;
+    amUsername = NULL;
+    amPasswordLen = 0;
+}
 extern char            g_last_auth_error[];
 
 static int             g_init_result = 0;  /* 0 = success, -1 = failed */
@@ -107,7 +118,7 @@ static pthread_mutex_t g_init_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
 /* ── drm_lib_init ───────────────────────────────────────────────────────────*/
 
-int drm_lib_init(const drm_lib_config_t *cfg)
+static int drm_lib_init_impl(const drm_lib_config_t *cfg)
 {
     pthread_mutex_lock(&g_init_mutex);
 
@@ -161,11 +172,10 @@ int drm_lib_init(const drm_lib_config_t *cfg)
         snprintf(g_username_copy, sizeof(g_username_copy), "%s", cfg->username);
         amUsername = g_username_copy;
         /* Allocate a mutable buffer (credentialHandler appends the 2FA code) */
-        static char pw_buf[256];
-        strncpy(pw_buf, cfg->password, sizeof(pw_buf) - 1);
-        pw_buf[sizeof(pw_buf) - 1] = '\0';
-        amPassword = pw_buf;
-        amPasswordLen = strlen(pw_buf);
+        strncpy(g_pw_buf, cfg->password, sizeof(g_pw_buf) - 1);
+        g_pw_buf[sizeof(g_pw_buf) - 1] = '\0';
+        amPassword = g_pw_buf;
+        amPasswordLen = strlen(g_pw_buf);
         args_info.login_arg = NULL; /* not used in library mode */
         args_info.login_given = 0;
     }
@@ -335,20 +345,26 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     return 0;
 }
 
+int drm_lib_init(const drm_lib_config_t *cfg)
+{
+    int rc = drm_lib_init_impl(cfg);
+    forget_credentials();
+    return rc;
+}
+
 /* ── drm_lib_login ──────────────────────────────────────────────────────────*/
 
-int drm_lib_login(const char *username, const char *password)
+static int drm_lib_login_impl(const char *username, const char *password)
 {
     if (!username || !password) return -1;
 
     extern char *amUsername, *amPassword;
     snprintf(g_username_copy, sizeof(g_username_copy), "%s", username);
     amUsername = g_username_copy;
-    static char pw_buf[256];
-    strncpy(pw_buf, password, sizeof(pw_buf) - 1);
-    pw_buf[sizeof(pw_buf) - 1] = '\0';
-    amPassword = pw_buf;
-    amPasswordLen = strlen(pw_buf);
+    strncpy(g_pw_buf, password, sizeof(g_pw_buf) - 1);
+    g_pw_buf[sizeof(g_pw_buf) - 1] = '\0';
+    amPassword = g_pw_buf;
+    amPasswordLen = strlen(g_pw_buf);
 
     extern uint8_t login(struct shared_ptr ctx);
     if (!login(reqCtx)) {
@@ -380,6 +396,13 @@ int drm_lib_login(const char *username, const char *password)
     return 0;
 }
 
+int drm_lib_login(const char *username, const char *password)
+{
+    int rc = drm_lib_login_impl(username, password);
+    forget_credentials();
+    return rc;
+}
+
 /* Why the last sign-in failed, in words fit for the sign-in form ("" when there is nothing to say). */
 const char *drm_lib_last_error(void)
 {
@@ -392,6 +415,7 @@ const char *drm_lib_last_error(void)
 void drm_lib_abort_init(void)
 {
     g_init_result = -1;
+    forget_credentials();
     pthread_mutex_trylock(&g_init_mutex); /* held by the aborted init, or free: either way it ends unlocked */
     pthread_mutex_unlock(&g_init_mutex);
     if (g_drm_state_cb) g_drm_state_cb("FAILED", g_drm_state_ud);

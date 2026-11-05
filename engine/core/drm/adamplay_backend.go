@@ -99,7 +99,8 @@ type adamplayBackend struct {
 	// path) or has not started yet.
 	hybrisInitDone chan struct{}
 
-	loops sync.Once // starts stateLoop once for the life of the process
+	loops    sync.Once   // starts stateLoop once for the life of the process
+	retrying atomic.Bool // a RetryFairPlay is in progress; every web-session note would otherwise start another
 }
 
 var errBackendStopped = errors.New("DRM backend is not running")
@@ -459,6 +460,10 @@ func (b *adamplayBackend) quiesce(timeout time.Duration) bool {
 // and retries hybris_fairplay_init without a full Stop/Start cycle.
 // Implements the optional FairPlayRetrier interface checked by NoteWebSession.
 func (b *adamplayBackend) RetryFairPlay(mut string) {
+	if !b.retrying.CompareAndSwap(false, true) {
+		return
+	}
+	defer b.retrying.Store(false)
 	b.mu.Lock()
 	if b.hybrisReady || !b.running || mut == "" {
 		b.mu.Unlock()

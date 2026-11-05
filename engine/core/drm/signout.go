@@ -12,6 +12,9 @@ import (
 // not be completed yet: no session may be started or reused until it finishes.
 var ErrLogoutPending = errors.New("sign-out in progress or incomplete")
 
+// ErrSignInRunning is returned by Authenticate while another sign-in is still in progress.
+var ErrSignInRunning = errors.New("a sign-in is already running")
+
 // gateState says whether sessions may be started or reused.
 type gateState int
 

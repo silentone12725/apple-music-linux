@@ -78,7 +78,8 @@ type DRMManager struct {
 	closed atomic.Bool
 
 	// warming ensures one background backend start at a time when the web session appears.
-	warming atomic.Bool
+	warming   atomic.Bool
+	signingIn atomic.Bool // a sign-in (Authenticate) is in progress
 
 	// authSem (one slot) is held by every backend start and by a sign-out once the
 	// sign-in it aborted has returned: concurrent starts would Stop/Start the backend
@@ -251,9 +252,11 @@ func (m *DRMManager) NoteWebSession() {
 		return
 	}
 	m.mu.RLock()
-	challenging := m.snapshot.State.Authentication == AuthChallenging
+	// While a sign-in runs (or waits for its code) the page's token says nothing about it: an
+	// older session marker must not report "logged in" and close the sign-in sheet early.
+	signingIn := m.snapshot.State.Authentication == AuthChallenging || m.snapshot.State.Authentication == AuthLoggingIn
 	m.mu.RUnlock()
-	if !challenging {
+	if !signingIn {
 		m.mergeAndEmit(DRMSnapshot{
 			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
 			Message: "web session",
@@ -358,6 +361,12 @@ func (m *DRMManager) startGuarded(ctx context.Context, replay bool, start func(c
 //   - !HasSession(): credentials are stored; wrapper's credentialHandler
 //     fires Challenge(ChallengeCredentials) and AuthCoordinator replies.
 func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error {
+	// One sign-in at a time: a second request would queue behind the first and then send
+	// another attempt to Apple, which counts toward its limit on wrong passwords.
+	if !m.signingIn.CompareAndSwap(false, true) {
+		return ErrSignInRunning
+	}
+	defer m.signingIn.Store(false)
 	err := m.startGuarded(ctx, true, func(ctx context.Context) error { return m.authenticate(ctx, creds) })
 	if errors.Is(err, ErrLogoutPending) {
 		m.mergeAndEmit(DRMSnapshot{
@@ -421,6 +430,9 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 	m.setManagerState(ManagerReady)
 	return nil
 }
+
+// SignInRunning reports whether a sign-in is in progress.
+func (m *DRMManager) SignInRunning() bool { return m.signingIn.Load() }
 
 // SubmitChallenge delivers a challenge reply (2FA code, device approval, etc.)
 // from the browser. Call this after receiving a DRM SSE event with

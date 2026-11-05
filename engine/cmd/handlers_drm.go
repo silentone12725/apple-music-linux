@@ -65,6 +65,10 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "DRM backend not available — drm binary not found at startup", http.StatusServiceUnavailable)
 		return
 	}
+	if s.dm.SignInRunning() {
+		http.Error(w, drm.ErrSignInRunning.Error(), http.StatusConflict)
+		return
+	}
 	go func() {
 		// Not r.Context(): that is cancelled the moment the 202 response is written,
 		// which would abort the login mid-flight. The server's shutdown context still

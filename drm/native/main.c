@@ -331,12 +331,19 @@ static void __attribute__((sysv_abi)) credentialHandler(struct shared_ptr *credR
             credReqHandler->obj)),
         need2FA ? "true" : "false");
 
-    if (amPasswordLen && strlen(amPassword) > amPasswordLen)
-        amPassword[amPasswordLen] = '\0';
-    int passLen = strlen(amPassword);
     int cancelled = 0;
+    if (!amUsername || !amPassword) {
+        /* Nobody is signing in (the credentials are dropped once a sign-in ends): Apple wants the
+         * account again mid-session, e.g. an expired token. Answering would resubmit an old password
+         * or ask for a code nobody expects; cancel and let the host show its own sign-in. */
+        fprintf(stderr, "[.] credentialHandler: no sign-in in progress, cancelling the request\n");
+        cancelled = 1;
+    }
+    if (!cancelled && amPasswordLen && strlen(amPassword) > amPasswordLen)
+        amPassword[amPasswordLen] = '\0';
+    int passLen = cancelled ? 0 : (int)strlen(amPassword);
 
-    if (need2FA) {
+    if (need2FA && !cancelled) {
         write_drm_state("WAITING_2FA");
         if (g_drm_auth_cb) {
             /* library mode: ask the Go engine for the 2FA code */
