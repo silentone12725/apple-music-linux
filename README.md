@@ -1,6 +1,6 @@
 <div align="center">
 
-# Adam
+# AML
 
 [![GitHub release](https://img.shields.io/github/v/release/silentone12725/apple-music-linux?include_prereleases&style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
@@ -33,7 +33,7 @@ An Apple Music desktop client for Linux and Windows — lossless audio on Linux,
 
 ## Contents
 
-[Features](#features) · [Roadmap](#roadmap) · [Requirements](#requirements) · [Download & Install](#download--install) · [Opening links](#opening-links-in-adam) · [Login](#login) · [Dev](#dev) · [Build](#build) · [Project structure](#project-structure) · [Changelog](#changelog) · [Community](#community) · [References](#references)
+[Features](#features) · [Roadmap](#roadmap) · [Requirements](#requirements) · [Download & Install](#download--install) · [Opening links](#opening-links-in-aml) · [Login](#login) · [Dev](#dev) · [Build](#build) · [Project structure](#project-structure) · [Changelog](#changelog) · [Community](#community) · [References](#references)
 
 ## Features
 
@@ -133,28 +133,28 @@ Four formats are available. The three Linux ones (A–C) contain the same build.
 No dependencies, no root required for a user install.
 
 ```bash
-chmod +x adam.run
-./adam.run
+chmod +x aml.run
+./aml.run
 ```
 
-This installs to `~/.local/lib/adam` and adds a launcher to `~/.local/bin`. A desktop entry and icon are registered automatically.
+This installs to `~/.local/lib/aml` and adds a launcher to `~/.local/bin`. A desktop entry and icon are registered automatically.
 
 **Other install options:**
 
 ```bash
-./adam.run --system       # install system-wide to /opt/ (needs sudo)
-./adam.run --force        # overwrite an existing installation
-./adam.run --no-lossless  # skip the FairPlay library download (lossless stays off)
-./adam.run --uninstall    # remove the installation
-./adam.run --help         # show all options
+./aml.run --system       # install system-wide to /opt/ (needs sudo)
+./aml.run --force        # overwrite an existing installation
+./aml.run --no-lossless  # skip the FairPlay library download (lossless stays off)
+./aml.run --uninstall    # remove the installation
+./aml.run --help         # show all options
 ```
 
-After install, launch from your app menu or run `adam` in a terminal.
+After install, launch from your app menu or run `aml` in a terminal.
 
 ### Lossless (ALAC) and the FairPlay libraries
 
-Lossless and hi-res playback decrypt through Apple's own Android FairPlay libraries, which Adam
-is not allowed to redistribute. They are downloaded on your machine instead (about 65 MB, pinned and checksum-verified), so Adam itself stays
+Lossless and hi-res playback decrypt through Apple's own Android FairPlay libraries, which AML
+is not allowed to redistribute. They are downloaded on your machine instead (about 65 MB, pinned and checksum-verified), so AML itself stays
 open source. The `.run` installer fetches them at the end of the install; the other formats fetch them on first launch.
 
 > [!NOTE]
@@ -169,8 +169,8 @@ open source. The `.run` installer fetches them at the end of the install; the ot
 - They come from the [wrapper project](https://github.com/WorldObservationLog/wrapper), with
   [a fork](https://github.com/silentone12725/wrapper) as fallback, pinned to fixed commits. Every file
   is checked against the SHA-256 list in `drm/fairplay-libs.lock`; a file that does not match is refused.
-- They go to `~/.config/adam/drm/rootfs/system/lib64`. To retry or repair, run the bundled
-  script: `sh ~/.local/lib/adam/resources/fetch-fairplay-libs.sh` (adjust the path for `--system`
+- They go to `~/.config/aml/drm/rootfs/system/lib64`. To retry or repair, run the bundled
+  script: `sh ~/.local/lib/aml/resources/fetch-fairplay-libs.sh` (adjust the path for `--system`
   installs or an extracted AppImage).
 
 </details>
@@ -180,13 +180,13 @@ open source. The `.run` installer fetches them at the end of the install; the ot
 No install needed — just run it directly.
 
 ```bash
-chmod +x Adam-*-x86_64.AppImage
-./Adam-*-x86_64.AppImage
+chmod +x aml-*-x86_64.AppImage
+./aml-*-x86_64.AppImage
 ```
 
 [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) can integrate it into your app menu automatically on first run.
 
-Release builds are made on Ubuntu 22.04 (glibc 2.35, checked in CI by `scripts/check-glibc.sh`) and packed with the static AppImage runtime, so they start on 22.04 and newer without `libfuse2`. If your system still has trouble mounting AppImages, run it without FUSE: `./Adam-*-x86_64.AppImage --appimage-extract-and-run`.
+Release builds are made on Ubuntu 22.04 (glibc 2.35, checked in CI by `scripts/check-glibc.sh`) and packed with the static AppImage runtime, so they start on 22.04 and newer without `libfuse2`. If your system still has trouble mounting AppImages, run it without FUSE: `./aml-*-x86_64.AppImage --appimage-extract-and-run`.
 
 ### Option C — Flatpak (118 MB, experimental)
 
@@ -194,16 +194,16 @@ A single-file Flatpak bundle that runs in the Flatpak sandbox. You need `flatpak
 
 ```bash
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install --user adam.flatpak
-flatpak run io.github.silentone12725.Adam
+flatpak install --user aml.flatpak
+flatpak run io.github.silentone12725.aml
 ```
 
-It also appears in your app menu as **Adam**. To remove it: `flatpak uninstall --user io.github.silentone12725.Adam`.
+It also appears in your app menu as **aml**. To remove it: `flatpak uninstall --user io.github.silentone12725.aml`.
 
 <details>
 <summary>Things to know</summary>
 
-- It keeps its own settings and web session under `~/.var/app/io.github.silentone12725.Adam/`, separate from the other formats, so you sign in again.
+- It keeps its own settings and web session under `~/.var/app/io.github.silentone12725.aml/`, separate from the other formats, so you sign in again.
 - Only one copy of the app can run at a time (the engine uses port 20025), so close the other formats first.
 - Wallpaper detection for the blur theme is limited by the sandbox; the software blur is used instead.
 - This is a self-hosted bundle, not a Flathub listing.
@@ -212,13 +212,13 @@ It also appears in your app menu as **Adam**. To remove it: `flatpak uninstall -
 
 ### Option D — Windows installer (experimental)
 
-`adam-setup-<version>.exe` is an NSIS installer for Windows 10/11 x64. It bundles the engine and a minimal FFmpeg, and plays AAC and music videos. The app follows Windows conventions: settings in `%APPDATA%\adam`, a native blur-behind window backdrop, and the same Apple Music pink default theme.
+`aml-setup-<version>.exe` is an NSIS installer for Windows 10/11 x64. It bundles the engine and a minimal FFmpeg, and plays AAC and music videos. The app follows Windows conventions: settings in `%APPDATA%\aml`, a native blur-behind window backdrop, and the same Apple Music pink default theme.
 
 Windows integration:
 
 - **Media controls** — the Windows media overlay, lock screen and hardware media keys show the current track and drive play/pause/next/previous/seek (SMTC).
 - **Taskbar** — thumbnail buttons (previous, play/pause, next), playback progress on the taskbar icon, and jump-list tasks.
-- **Startup** — optional *Launch at login* in the tray menu (starts hidden in the tray) and the `adam://` link handler.
+- **Startup** — optional *Launch at login* in the tray menu (starts hidden in the tray) and the `aml://` link handler.
 - **Discord Rich Presence** over the Windows named pipe.
 
 > [!NOTE]
@@ -228,13 +228,13 @@ Windows integration:
 
 The system tray requires the [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/). The glass UI uses a software blur fallback on GNOME — Mutter does not support compositor blur-behind.
 
-## Opening links in Adam
+## Opening links in aml
 
-Adam opens Apple Music links from other apps and from the command line (`adam <link>`):
+aml opens Apple Music links from other apps and from the command line (`aml <link>`):
 
-- **`adam://`** links always work: `adam://song/<id>`, `adam://album/<id>`, `adam://playlist/<id>`, `adam://play/<s|a|p|r>/<id>`, `adam://open/<s|a|p|r>/<id>` (add `?sf=us` for a storefront), or `adam://music.apple.com/...` with any Apple Music path.
+- **`aml://`** links always work: `aml://song/<id>`, `aml://album/<id>`, `aml://playlist/<id>`, `aml://play/<s|a|p|r>/<id>`, `aml://open/<s|a|p|r>/<id>` (add `?sf=us` for a storefront), or `aml://music.apple.com/...` with any Apple Music path.
 - **Apple Music URLs** (`https://music.apple.com/...` on any Apple Music host, including legacy `itunes.apple.com` links and `?i=` song links) play when they point at a song, album, playlist, artist or music video, and open in the app for any other page (browse, radio, search, curators, library, stations).
-- **Apple's own schemes** are the ones the Apple Music app registers (full list below). **Adam claims none of them until you turn them on in Settings → Links**, one by one, because claiming a scheme takes it away from whatever handles it now. `daap://` (shared iTunes libraries) and `itpc://` (podcast subscriptions) cannot be played in a web client, so Adam shows a notice for them.
+- **Apple's own schemes** are the ones the Apple Music app registers (full list below). **aml claims none of them until you turn them on in Settings → Links**, one by one, because claiming a scheme takes it away from whatever handles it now. `daap://` (shared iTunes libraries) and `itpc://` (podcast subscriptions) cannot be played in a web client, so aml shows a notice for them.
 
 <details>
 <summary>The 24 schemes Settings → Links can claim</summary>
@@ -243,7 +243,7 @@ Adam opens Apple Music links from other apps and from the command line (`adam <l
 
 </details>
 
-A plain `https://music.apple.com` link clicked in another app opens in your browser: operating systems do not let an app claim links for another company's website. To get from the browser into Adam, turn on `music://` and click **Open in Music** on the website, or use a URL-redirect browser extension that rewrites `music.apple.com` to `adam://music.apple.com`. On Windows you may also have to confirm the choice under Settings → Apps → Default apps.
+A plain `https://music.apple.com` link clicked in another app opens in your browser: operating systems do not let an app claim links for another company's website. To get from the browser into aml, turn on `music://` and click **Open in Music** on the website, or use a URL-redirect browser extension that rewrites `music.apple.com` to `aml://music.apple.com`. On Windows you may also have to confirm the choice under Settings → Apps → Default apps.
 
 ## Login
 
@@ -265,7 +265,7 @@ This authenticates the FairPlay layer. Without it, playback falls back to AAC 25
 2. Open **Account → Sign In…**, enter your Apple Account email and password, then the six-digit verification code Apple sends you
 
 <div align="center">
-  <img src="assets/screenshots/engine_login.png" alt="Adam Settings — lossless account sign-in" width="49%"/>
+  <img src="assets/screenshots/engine_login.png" alt="aml Settings — lossless account sign-in" width="49%"/>
   <img src="assets/screenshots/Account_logged_in.png" alt="Account signed in" width="49%"/>
 </div>
 
@@ -304,13 +304,13 @@ scripts/fetch-fairplay-libs.sh --dest drm/rootfs/system/lib64 --lock drm/fairpla
 **Rebuild the Go engine:**
 
 ```bash
-# CGO + the adamplay_backend tag are required for DRM (lossless, hi-res, MVs);
+# CGO + the amlplay_backend tag are required for DRM (lossless, hi-res, MVs);
 # without them the engine builds fine but silently falls back to AAC.
 # CGO's -L cannot take a path with spaces, hence the symlink.
-ln -sfT "$PWD/drm" /tmp/adam-drm
+ln -sfT "$PWD/drm" /tmp/aml-drm
 cd engine
-CGO_ENABLED=1 CGO_LDFLAGS='-L/tmp/adam-drm -Wl,-rpath,$ORIGIN' \
-  go build -tags adamplay_backend -o ../electron/dist/resources/engine ./cmd
+CGO_ENABLED=1 CGO_LDFLAGS='-L/tmp/aml-drm -Wl,-rpath,$ORIGIN' \
+  go build -tags amlplay_backend -o ../electron/dist/resources/engine ./cmd
 cp ../drm/libdrm_client.so ../electron/dist/resources/
 ```
 
@@ -320,8 +320,8 @@ cp ../drm/libdrm_client.so ../electron/dist/resources/
 make -C drm                    # DRM library + Android stub libraries
 cd electron
 NODE_ENV=production npm run dist      # engine, VLC subset + AppImage → electron/dist/*.AppImage
-cd .. && scripts/build-installer.sh   # .run installer → dist/adam.run
-scripts/build-flatpak.sh                # Flatpak bundle → dist/adam.flatpak (after one of the above)
+cd .. && scripts/build-installer.sh   # .run installer → dist/aml.run
+scripts/build-flatpak.sh                # Flatpak bundle → dist/aml.flatpak (after one of the above)
 ```
 
 ### Windows
@@ -339,7 +339,7 @@ scripts/build-flatpak.sh                # Flatpak bundle → dist/adam.flatpak (
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 ```
 
-The script builds `libdrm_client.dll` and `engine.exe` (CGO + the `adamplay_backend` tag), copies the MSYS2 runtime DLLs and an audio-only VLC subset, then runs electron-builder. This is the stable line: it does not ship the Android runtime that Windows lossless needs, which lives on the [`nightly`](https://github.com/silentone12725/apple-music-linux/tree/nightly) branch. The installer lands at `electron\dist\adam-setup-<version>.exe`.
+The script builds `libdrm_client.dll` and `engine.exe` (CGO + the `amlplay_backend` tag), copies the MSYS2 runtime DLLs and an audio-only VLC subset, then runs electron-builder. This is the stable line: it does not ship the Android runtime that Windows lossless needs, which lives on the [`nightly`](https://github.com/silentone12725/apple-music-linux/tree/nightly) branch. The installer lands at `electron\dist\aml-setup-<version>.exe`.
 
 | Option | Effect |
 |---|---|
@@ -384,7 +384,7 @@ apple-music-linux/
 ├── electron/                  Desktop shell
 │   ├── main.mjs               Main process: window, IPC, MPRIS2, tray, themes, prefs,
 │   │                          Discord / Last.fm / ListenBrainz, engine lifecycle
-│   ├── preload.cjs            adamBridge: the IPC surface exposed to music.apple.com
+│   ├── preload.cjs            amlBridge: the IPC surface exposed to music.apple.com
 │   ├── miniplayer.html        Mini player window (with miniplayer-preload.cjs)
 │   ├── src/                   Renderer code injected into the Apple Music web player
 │   │   ├── engine-playback.js   Playback, queue, settings panel, theming, MSE and MV pipelines
@@ -429,7 +429,7 @@ apple-music-linux/
 ├── verification/              API schema, QA console, benchmark and test harnesses
 ├── releases/                  Release notes (one file per version)
 ├── assets/                    Screenshots and tray icon
-├── adam-custom.example.css     Template for the Custom CSS theme
+├── aml-custom.example.css     Template for the Custom CSS theme
 ├── CHANGELOG.md
 └── go.work                    Go workspace (engine module)
 ```
@@ -444,12 +444,12 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## Community
 
-Questions, bug reports, feature requests and polls live on the [Adam Discord server](https://discord.gg/tY4v52KpVV).
+Questions, bug reports, feature requests and polls live on the [aml Discord server](https://discord.gg/tY4v52KpVV).
 
 ## References
 
 <details>
-<summary>Libraries and projects Adam builds on</summary>
+<summary>Libraries and projects aml builds on</summary>
 
 **Runtime**
 - [Electron](https://electronjs.org) — desktop shell
