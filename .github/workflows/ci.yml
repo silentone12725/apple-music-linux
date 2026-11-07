@@ -87,6 +87,8 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           clang-format --version
           make -C drm format-check
+      - name: Native DRM unit tests
+        run: make -C drm test
       - name: Shell syntax
         run: |
           for f in scripts/*.sh electron/build.sh; do

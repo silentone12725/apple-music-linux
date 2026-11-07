@@ -23,6 +23,7 @@ import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
 import { parseLink, isLinkArg } from './deeplink.mjs';
 import { createLinkSchemeManager } from './link-schemes.mjs';
 import { resolveThemeMode } from './theme-mode.mjs';
+import { isAllowedApplePermission } from './permission-policy.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
 import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
 import { validBackstop, writeBackstop, clearCredentialsFlow } from './drm-signout.mjs';
@@ -172,7 +173,53 @@ if (IS_LINUX) {
 }
 
 let win    = null;
+let miniWin = null;
 let tray   = null;
+
+// ── IPC sender check ─────────────────────────────────────────────────────────
+ // Register the sender guard before the first IPC listener. The Apple Music window
+ // gets the full bridge; the mini player gets only its three transport channels.
+const _MINI_CHANNELS = new Set(['miniplayer:toggle', 'miniplayer:expand', 'miniplayer:cmd']);
+function _senderAllowed(event, channel) {
+    const wc = event.sender;
+    if (win && !win.isDestroyed() && wc === win.webContents) {
+        return _httpsHost(event.senderFrame?.url) === 'music.apple.com';
+    }
+    return _MINI_CHANNELS.has(channel) && miniWin && !miniWin.isDestroyed() && wc === miniWin.webContents;
+}
+const _ipcHandle = ipcMain.handle.bind(ipcMain);
+const _ipcOn = ipcMain.on.bind(ipcMain);
+const _ipcRemoveListener = ipcMain.removeListener.bind(ipcMain);
+ipcMain.handle = (channel, fn) => _ipcHandle(channel, (event, ...args) => {
+    if (!_senderAllowed(event, channel)) {
+        console.warn(`[Adam] refused IPC invoke ${channel} from ${event.senderFrame?.url || 'unknown'}`);
+        throw new Error('forbidden');
+    }
+    return fn(event, ...args);
+});
+ipcMain.on = (channel, fn) => _ipcOn(channel, (event, ...args) => {
+    if (!_senderAllowed(event, channel)) {
+        console.warn(`[Adam] refused IPC message ${channel} from ${event.senderFrame?.url || 'unknown'}`);
+        return;
+    }
+    return fn(event, ...args);
+});
+// EventEmitter.once removes its listener before invoking it. Implement the one-shot
+// wrapper explicitly so an unauthorized frame cannot consume a legitimate ui-ready event.
+ipcMain.once = (channel, fn) => {
+    const guarded = (event, ...args) => {
+        if (!_senderAllowed(event, channel)) {
+            console.warn(`[Adam] refused IPC message ${channel} from ${event.senderFrame?.url || 'unknown'}`);
+            return;
+        }
+        _ipcRemoveListener(channel, guarded);
+        return fn(event, ...args);
+    };
+    _ipcOn(channel, guarded);
+    return ipcMain;
+};
+
+
 const linkSchemes = createLinkSchemeManager({ app, loadPrefs, savePrefs });
 // Windows blur theme uses the local Composition Gaussian backend on both supported Windows versions.
 const _acrylicBackend = !IS_WIN ? null
@@ -1640,37 +1687,6 @@ function applyPersistedViewSettings() {
     _applyAcrylicPage();
 }
 
-// ── IPC sender check ─────────────────────────────────────────────────────────
-// Every channel below is meant for the main Apple Music window — and only for the page
-// itself on the Apple origin (the preload exposes adamBridge nowhere else). The mini player
-// sends just the three transport channels. Registering through these wrappers makes that a
-// rule instead of a convention: a stray frame, a window opened later, or any other renderer
-// that obtained an ipcRenderer cannot reach the privileged handlers.
-const _MINI_CHANNELS = new Set(['miniplayer:toggle', 'miniplayer:expand', 'miniplayer:cmd']);
-function _senderAllowed(event, channel) {
-    const wc = event.sender;
-    if (win && !win.isDestroyed() && wc === win.webContents) {
-        return _httpsHost(event.senderFrame?.url) === 'music.apple.com';
-    }
-    return _MINI_CHANNELS.has(channel) && miniWin && !miniWin.isDestroyed() && wc === miniWin.webContents;
-}
-const _ipcHandle = ipcMain.handle.bind(ipcMain);
-const _ipcOn = ipcMain.on.bind(ipcMain);
-ipcMain.handle = (channel, fn) => _ipcHandle(channel, (event, ...args) => {
-    if (!_senderAllowed(event, channel)) {
-        console.warn(`[Adam] refused IPC invoke ${channel} from ${event.senderFrame?.url || 'unknown'}`);
-        throw new Error('forbidden');
-    }
-    return fn(event, ...args);
-});
-ipcMain.on = (channel, fn) => _ipcOn(channel, (event, ...args) => {
-    if (!_senderAllowed(event, channel)) {
-        console.warn(`[Adam] refused IPC message ${channel} from ${event.senderFrame?.url || 'unknown'}`);
-        return;
-    }
-    fn(event, ...args);
-});
-
 // Argument checks for the handlers a page can reach: a compromised page must not be able to
 // fill the disk, smuggle path separators into a dialog's default name, or poison prefs.
 function _str(v, max = 256) { return typeof v === 'string' && v.length > 0 && v.length <= max; }
@@ -2656,7 +2672,6 @@ ipcMain.on('app:open-external', (_, url) => {
 
 
 // ── Mini player (compact always-on-top now-playing window) ────────────────────
-let miniWin = null;
 
 function createMiniPlayer() {
     if (miniWin && !miniWin.isDestroyed()) { miniWin.show(); miniWin.focus(); return; }
@@ -2900,26 +2915,17 @@ app.whenReady().then(() => {
 
     console.log('[Adam] Electron ready, process.type:', process.type);
     const s = session.fromPartition('persist:apple-music');
-    // This session loads remote pages, so the default of "yes to everything" would hand a
-    // compromised page the camera, microphone, location, USB and the clipboard. Deny the
-    // capabilities Apple Music has no use for; everything else it asks for is still granted.
-    const DENIED_PERMISSIONS = new Set([
-        'media', 'geolocation', 'midi', 'midiSysex', 'hid', 'serial', 'usb', 'bluetooth',
-        'display-capture', 'clipboard-read', 'idle-detection', 'fileSystem', 'window-management',
-        'openExternal', 'speaker-selection',
-    ]);
-    // Sign-in embeds third-party storage from Apple pages, so storage access is granted to Apple
-    // origins only and denied everywhere else.
-    const isStorage = (perm) => perm === 'storage-access' || perm === 'top-level-storage-access';
-    s.setPermissionRequestHandler((wc, perm, cb) => {
-        const deny = DENIED_PERMISSIONS.has(perm) || (isStorage(perm) && !_navigationAllowed(wc?.getURL()));
-        if (deny) console.warn(`[Adam] denied permission request: ${perm}`);
-        cb(!deny);
+    // This session loads a remote page, so permissions are default-deny. Apple Music
+    // only needs storage access for Apple's own sign-in flows; every other capability
+    // remains unavailable unless a future feature adds an explicit, reviewed exception.
+    s.setPermissionRequestHandler((wc, perm, cb, details) => {
+        const allowed = isAllowedApplePermission(perm, details?.requestingUrl, wc?.getURL());
+        if (!allowed) console.warn(`[Adam] denied permission request: ${perm}`);
+        cb(allowed);
     });
-    s.setPermissionCheckHandler((wc, perm, origin) => {
-        if (isStorage(perm)) return _navigationAllowed(origin) && _navigationAllowed(wc?.getURL());
-        return !DENIED_PERMISSIONS.has(perm);
-    });
+    s.setPermissionCheckHandler((wc, perm, origin) =>
+        isAllowedApplePermission(perm, origin, wc?.getURL())
+    );
 
     // Trust the engine's self-signed loopback cert so <video src="https://127.0.0.1:PORT/…">
     // loads. This lets MV video use a real HTTPS origin → Chrome's native, reliable

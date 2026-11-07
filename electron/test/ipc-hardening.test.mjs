@@ -111,3 +111,17 @@ test('_senderAllowed: main window on the Apple origin, mini player only for tran
     assert.equal(ctx.f(ev(miniWc, 'file:///x/miniplayer.html'), 'store:write'), false, 'mini player may not use other channels');
     assert.equal(ctx.f(ev(otherWc, 'https://music.apple.com/us'), 'miniplayer:cmd'), false, 'unknown window');
 });
+
+test('IPC sender guards are installed before all registrations and cover one-shot listeners', () => {
+    const firstRegistration = MAIN.search(/\bipcMain\.(?:handle|on|once)\s*\(/);
+    const guardDefinition = MAIN.indexOf('function _senderAllowed');
+    assert.ok(firstRegistration >= 0, 'expected IPC registrations');
+    assert.ok(guardDefinition >= 0 && guardDefinition < firstRegistration,
+        'sender validation must be defined before the first IPC registration');
+
+    assert.match(MAIN, /ipcMain\.handle\s*=/, 'invoke handlers must be guarded');
+    assert.match(MAIN, /ipcMain\.on\s*=/, 'event handlers must be guarded');
+    assert.match(MAIN, /ipcMain\.once\s*=/, 'one-shot handlers must be guarded');
+    assert.match(MAIN, /_ipcRemoveListener\(channel, guarded\)/,
+        'unauthorized senders must not consume one-shot listeners');
+});
