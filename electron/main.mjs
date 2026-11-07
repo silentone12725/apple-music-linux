@@ -178,8 +178,8 @@ let miniWin = null;
 let tray   = null;
 
 // ── IPC sender check ─────────────────────────────────────────────────────────
- // Register the sender guard before the first IPC listener. The Apple Music window
- // gets the full bridge; the mini player gets only its three transport channels.
+// Register the sender guard before the first IPC listener. The Apple Music window
+// gets the full bridge; the mini player gets only its three transport channels.
 const _MINI_CHANNELS = new Set(['miniplayer:toggle', 'miniplayer:expand', 'miniplayer:cmd']);
 function _senderAllowed(event, channel) {
     const wc = event.sender;

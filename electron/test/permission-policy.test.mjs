@@ -25,7 +25,7 @@ test('Apple sign-in storage access is allowed only for HTTPS Apple origins', () 
     }
 });
 
-test('all permissions other than the two Apple storage-access permissions are denied', () => {
+test('unlisted permissions are denied by default', () => {
     for (const permission of [
         'media', 'geolocation', 'midi', 'midiSysex', 'hid', 'serial', 'usb',
         'bluetooth', 'display-capture', 'clipboard-read', 'idle-detection',

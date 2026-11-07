@@ -2,7 +2,7 @@
 // Keep this list deliberately small: adding a permission changes the capabilities
 // available to content loaded from a third-party-controlled web origin.
 
-const STORAGE_ACCESS_PERMISSIONS = new Set([
+const ALLOWED_APPLE_PERMISSIONS = new Set([
     'storage-access',
     'top-level-storage-access',
     'fullscreen',
@@ -29,7 +29,7 @@ function isSecureAppleUrl(value) {
  * top-level page's permission grant.
  */
 export function isAllowedApplePermission(permission, requestingUrl, topLevelUrl) {
-    return STORAGE_ACCESS_PERMISSIONS.has(permission) &&
+    return ALLOWED_APPLE_PERMISSIONS.has(permission) &&
         isSecureAppleUrl(requestingUrl) &&
         isSecureAppleUrl(topLevelUrl);
 }
