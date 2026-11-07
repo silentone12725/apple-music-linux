@@ -5,6 +5,7 @@
 const STORAGE_ACCESS_PERMISSIONS = new Set([
     'storage-access',
     'top-level-storage-access',
+    'fullscreen',
 ]);
 
 function isSecureAppleUrl(value) {
@@ -21,7 +22,9 @@ function isSecureAppleUrl(value) {
 /**
  * Return whether an Electron permission request is explicitly supported.
  *
- * Both the requesting frame and the top-level page must be HTTPS Apple origins.
+ * Both the requesting frame and the top-level page must be HTTPS Apple origins. Fullscreen
+ * is retained for Apple pages so video/fullscreen behavior does not regress; it is not
+ * granted to embedded third-party frames.
  * Checking both prevents an embedded third-party frame from inheriting the
  * top-level page's permission grant.
  */

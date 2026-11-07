@@ -24,6 +24,7 @@ import { parseLink, isLinkArg } from './deeplink.mjs';
 import { createLinkSchemeManager } from './link-schemes.mjs';
 import { resolveThemeMode } from './theme-mode.mjs';
 import { isAllowedApplePermission } from './permission-policy.mjs';
+import { installIpcSenderGuards } from './ipc-security.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
 import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
 import { validBackstop, writeBackstop, clearCredentialsFlow } from './drm-signout.mjs';
@@ -187,38 +188,7 @@ function _senderAllowed(event, channel) {
     }
     return _MINI_CHANNELS.has(channel) && miniWin && !miniWin.isDestroyed() && wc === miniWin.webContents;
 }
-const _ipcHandle = ipcMain.handle.bind(ipcMain);
-const _ipcOn = ipcMain.on.bind(ipcMain);
-const _ipcRemoveListener = ipcMain.removeListener.bind(ipcMain);
-ipcMain.handle = (channel, fn) => _ipcHandle(channel, (event, ...args) => {
-    if (!_senderAllowed(event, channel)) {
-        console.warn(`[Adam] refused IPC invoke ${channel} from ${event.senderFrame?.url || 'unknown'}`);
-        throw new Error('forbidden');
-    }
-    return fn(event, ...args);
-});
-ipcMain.on = (channel, fn) => _ipcOn(channel, (event, ...args) => {
-    if (!_senderAllowed(event, channel)) {
-        console.warn(`[Adam] refused IPC message ${channel} from ${event.senderFrame?.url || 'unknown'}`);
-        return;
-    }
-    return fn(event, ...args);
-});
-// EventEmitter.once removes its listener before invoking it. Implement the one-shot
-// wrapper explicitly so an unauthorized frame cannot consume a legitimate ui-ready event.
-ipcMain.once = (channel, fn) => {
-    const guarded = (event, ...args) => {
-        if (!_senderAllowed(event, channel)) {
-            console.warn(`[Adam] refused IPC message ${channel} from ${event.senderFrame?.url || 'unknown'}`);
-            return;
-        }
-        _ipcRemoveListener(channel, guarded);
-        return fn(event, ...args);
-    };
-    _ipcOn(channel, guarded);
-    return ipcMain;
-};
-
+installIpcSenderGuards(ipcMain, _senderAllowed);
 
 const linkSchemes = createLinkSchemeManager({ app, loadPrefs, savePrefs });
 // Windows blur theme uses the local Composition Gaussian backend on both supported Windows versions.
@@ -2919,12 +2889,13 @@ app.whenReady().then(() => {
     // only needs storage access for Apple's own sign-in flows; every other capability
     // remains unavailable unless a future feature adds an explicit, reviewed exception.
     s.setPermissionRequestHandler((wc, perm, cb, details) => {
-        const allowed = isAllowedApplePermission(perm, details?.requestingUrl, wc?.getURL());
+        const requestingUrl = details?.requestingUrl ?? (perm === 'fullscreen' ? wc?.getURL() : null);
+        const allowed = isAllowedApplePermission(perm, requestingUrl, wc?.getURL());
         if (!allowed) console.warn(`[Adam] denied permission request: ${perm}`);
         cb(allowed);
     });
-    s.setPermissionCheckHandler((wc, perm, origin) =>
-        isAllowedApplePermission(perm, origin, wc?.getURL())
+    s.setPermissionCheckHandler((wc, perm, requestingOrigin, details) =>
+        isAllowedApplePermission(perm, requestingOrigin, wc?.getURL() ?? details?.embeddingOrigin)
     );
 
     // Trust the engine's self-signed loopback cert so <video src="https://127.0.0.1:PORT/…">

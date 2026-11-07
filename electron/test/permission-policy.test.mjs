@@ -30,7 +30,7 @@ test('all permissions other than the two Apple storage-access permissions are de
         'media', 'geolocation', 'midi', 'midiSysex', 'hid', 'serial', 'usb',
         'bluetooth', 'display-capture', 'clipboard-read', 'idle-detection',
         'fileSystem', 'window-management', 'openExternal', 'speaker-selection',
-        'notifications', 'pointerLock', 'fullscreen', 'unknown',
+        'notifications', 'pointerLock', 'unknown',
     ]) {
         assert.equal(
             isAllowedApplePermission(permission, 'https://music.apple.com/', 'https://music.apple.com/'),
@@ -58,4 +58,19 @@ test('lookalike hosts and non-HTTPS top-level pages are denied', () => {
         false
     );
     assert.equal(isAllowedApplePermission('storage-access', null, 'https://music.apple.com/'), false);
+});
+
+test('fullscreen remains available to Apple pages but not third-party frames', () => {
+    assert.equal(
+        isAllowedApplePermission('fullscreen', 'https://music.apple.com/us/browse', 'https://music.apple.com/us/browse'),
+        true
+    );
+    assert.equal(
+        isAllowedApplePermission('fullscreen', 'https://video.example/frame', 'https://music.apple.com/us/browse'),
+        false
+    );
+    assert.equal(
+        isAllowedApplePermission('fullscreen', 'https://music.apple.com/us/browse', 'https://evil.example/'),
+        false
+    );
 });
