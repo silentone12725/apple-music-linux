@@ -442,6 +442,11 @@
       if (submittedId != null && ch.id !== submittedId) return "retry";
       return "none";
     }
+    if (ch?.type === "dialog_choice") {
+      if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "choice";
+      if (view !== "choice") return "choice";
+      return "none";
+    }
     if (st.authentication === "failed" && open) return view === "code" ? "expired" : "failed";
     return "none";
   }
@@ -487,6 +492,11 @@
   font-variant-numeric:tabular-nums;outline:none}
 #adam-account .digits input:disabled{opacity:.55}
 #adam-account.shake .digits{animation:adamShake .4s}
+#adam-account .code-links{margin:10px 0 0;display:flex;align-items:center;gap:6px;font-size:12px;color:rgba(235,235,245,.5)}
+#adam-account .code-links button.link-sm{min-width:0;height:auto;padding:0;background:none;box-shadow:none;color:rgba(235,235,245,.55);text-decoration:underline;cursor:pointer;font:inherit}
+#adam-account .code-links button.link-sm:hover{color:rgba(235,235,245,.8)}
+#adam-account .choice-list{align-self:stretch;display:flex;flex-direction:column;gap:6px;margin:4px 0 0}
+#adam-account .choice-list button{width:100%;justify-content:flex-start;text-align:left;padding:0 12px;height:36px;border-radius:8px;font-size:13px}
 #adam-account .bar{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px 14px;
   border-top:.5px solid rgba(255,255,255,.08);background:rgba(255,255,255,.02)}
 #adam-account button{min-width:76px;height:24px;padding:0 12px;border:0;border-radius:6px;cursor:default;
@@ -565,6 +575,7 @@
     }
     function ready() {
       if (view === "signin") return inputs[0]?.value.trim() && inputs[1]?.value;
+      if (view === "choice") return true;
       return inputs.map((i) => i.value).join("").length === CODE_LENGTH;
     }
     function render(header, content, buttons) {
@@ -684,6 +695,11 @@
         fields.appendChild(inp);
       }
       msg = el(doc, "div", { class: "msg", "aria-live": "polite" });
+      const resendBtn = el(doc, "button", { type: "button", class: "link-sm" }, "Resend code");
+      resendBtn.addEventListener("click", () => submitSpecialCode("__resend__", "Resending\u2026"));
+      const cantBtn = el(doc, "button", { type: "button", class: "link-sm" }, "Can\u2019t get to your devices?");
+      cantBtn.addEventListener("click", () => submitSpecialCode("__cant_devices__", "Loading options\u2026"));
+      const codeLinks = el(doc, "div", { class: "code-links" }, resendBtn, "\xB7", cantBtn);
       primary = button("Continue", { isPrimary: true, onClick: submitCodeNow });
       render(
         [
@@ -693,7 +709,8 @@
         [
           fields,
           msg,
-          el(doc, "div", { class: "note" }, "No code? Apple shows it on your other devices signed in to this Apple Account, and a code can also be read in Settings > your name > Sign-In & Security on an iPhone or iPad. Apple only sends a new code after a new sign-in.")
+          codeLinks,
+          el(doc, "div", { class: "note" }, "No code? Apple shows it on your other devices signed in to this Apple Account, and a code can also be read in Settings > your name > Sign-In & Security on an iPhone or iPad.")
         ],
         [button("Cancel", { onClick: cancel }), primary]
       );
@@ -724,6 +741,55 @@
       submittedId = null;
       setBusy(false);
       setMessage("Could not send the code. Try again.", true);
+    }
+    async function submitSpecialCode(value, busyLabel = "Sending\u2026") {
+      if (busy) return;
+      setMessage("");
+      setBusy(true, busyLabel);
+      submittedId = challengeId;
+      let ok = false;
+      try {
+        ok = await submitCode(value);
+      } catch {
+        ok = false;
+      }
+      if (view !== "code") return;
+      if (!ok) {
+        submittedId = null;
+        setBusy(false);
+        setMessage("Could not send. Try again.", true);
+      }
+    }
+    function showChoice(buttonsStr, title = "Recovery Options") {
+      view = "choice";
+      busy = false;
+      inputs = [];
+      const btnLabels = (buttonsStr || "").split("\n").filter(Boolean);
+      const list = el(doc, "div", { class: "choice-list" });
+      btnLabels.forEach((label, idx) => {
+        const b = button(label, {
+          onClick: async () => {
+            if (busy) return;
+            setBusy(true, "Sending\u2026");
+            submittedId = challengeId;
+            try {
+              await submitCode(String(idx));
+            } catch {
+            }
+          }
+        });
+        list.appendChild(b);
+      });
+      msg = el(doc, "div", { class: "msg", "aria-live": "polite" });
+      primary = null;
+      render(
+        [
+          el(doc, "h1", { id: "adam-account-title" }, title),
+          el(doc, "div", { class: "sub" }, "Choose how to receive your verification code.")
+        ],
+        [list, msg],
+        [button("Cancel Sign-In", { onClick: cancel })]
+      );
     }
     function wrongCode() {
       submittedId = null;
@@ -763,18 +829,25 @@
       primary = null;
     }
     function cancel() {
-      const running = view === "code" || view === "signin" && busy;
-      if (view === "code") dismissedId = challengeId;
+      const running = view === "code" || view === "choice" || view === "signin" && busy;
+      if (view === "code" || view === "choice") dismissedId = challengeId;
       close();
       if (running) onCancel();
     }
     function onSnapshot(snap) {
       const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId });
-      if (snap?.challenge?.type === "two_factor") challengeId = snap.challenge.id ?? null;
+      if (snap?.challenge?.type === "two_factor" || snap?.challenge?.type === "dialog_choice") {
+        challengeId = snap.challenge.id ?? null;
+      }
       switch (action) {
         case "code":
           showCode();
           break;
+        case "choice": {
+          const ch = snap?.challenge;
+          showChoice(ch?.metadata?.buttons ?? "", ch?.title || "Recovery Options");
+          break;
+        }
         case "retry":
           wrongCode();
           break;

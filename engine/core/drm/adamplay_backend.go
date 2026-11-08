@@ -856,14 +856,41 @@ const twoFactorTimeout = 5 * time.Minute
 // answerChallenge is called (via adamplayBridgeAuth) when Apple's sign-in needs
 // input. For a verification code it raises a two-factor challenge, which the
 // Settings sign-in form shows as a code field, and blocks until the user submits
-// it. Returns "" when nothing was entered, which fails that sign-in attempt.
+// it. For a dialog_choice: prefix it surfaces a ProtocolDialog sub-menu (e.g.
+// "Text code / Get a call / Can't use...") and returns the chosen button index.
+// Returns "" when nothing was entered, which fails that sign-in attempt.
 func (b *adamplayBackend) answerChallenge(kind string) string {
-	if kind != "2fa" {
-		return ""
-	}
 	h, _ := b.authSrcV.Load().(authSrcHolder)
 	if h.src == nil {
-		log.Printf("[drm] Apple asked for a verification code but no sign-in form is connected")
+		log.Printf("[drm] Apple asked for auth input (%s) but no sign-in form is connected", kind)
+		return ""
+	}
+
+	if strings.HasPrefix(kind, "dialog_choice:") {
+		// kind = "dialog_choice:<title>\n<btn0>\n<btn1>\n..."
+		rest := kind[len("dialog_choice:"):]
+		parts := strings.SplitN(rest, "\n", 2)
+		title := parts[0]
+		var buttons string
+		if len(parts) > 1 {
+			buttons = parts[1]
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), twoFactorTimeout)
+		defer cancel()
+		idx, err := h.src.Challenge(ctx, AuthChallenge{
+			Type:        ChallengeDialogChoice,
+			Title:       title,
+			Description: "Choose how to verify your identity.",
+			Metadata:    map[string]string{"buttons": buttons},
+		})
+		if err != nil {
+			log.Printf("[drm] dialog choice not answered: %v", err)
+			return "0"
+		}
+		return idx
+	}
+
+	if kind != "2fa" {
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), twoFactorTimeout)
@@ -877,6 +904,10 @@ func (b *adamplayBackend) answerChallenge(kind string) string {
 	if err != nil {
 		log.Printf("[drm] verification code not entered: %v", err)
 		return ""
+	}
+	// Pass special control values through without digit-stripping.
+	if code == "__resend__" || code == "__cant_devices__" {
+		return code
 	}
 	return verificationDigits(code)
 }

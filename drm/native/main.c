@@ -299,6 +299,9 @@ static void __attribute__((sysv_abi)) dialogHandler(int64_t j, struct shared_ptr
 
     struct std_vector *butVec =
         _ZNK17storeservicescore14ProtocolDialog7buttonsEv(protoDialogPtr->obj);
+    int btn_count = (int)((struct shared_ptr *)butVec->end - (struct shared_ptr *)butVec->begin);
+    int chosen_idx = 0; /* default: first (dismiss/cancel) */
+
     if (strcmp("Sign In", title) == 0) {
         for (struct shared_ptr *b = butVec->begin; b != butVec->end; ++b) {
             if (strcmp("Use Existing Apple ID",
@@ -310,6 +313,38 @@ static void __attribute__((sysv_abi)) dialogHandler(int64_t j, struct shared_ptr
                 break;
             }
         }
+    } else if (amUsername && g_drm_auth_cb && btn_count >= 2) {
+        /* During sign-in, any multi-button dialog is a user choice (e.g. the
+         * "Text code / Get a call / Can't use ..." phone-OTP sub-menu that Apple
+         * raises after the user taps "Can't get to your devices?").  Surface the
+         * options to the host so the user can pick one. */
+        char type_buf[512];
+        int pos = snprintf(type_buf, sizeof(type_buf), "dialog_choice:");
+        if (title && *title)
+            pos += snprintf(type_buf + pos, sizeof(type_buf) - pos, "%s", title);
+        for (struct shared_ptr *b = butVec->begin; b != butVec->end; ++b) {
+            const char *btn_title = std_string_data(
+                _ZNK17storeservicescore14ProtocolButton5titleEv(b->obj));
+            if (btn_title)
+                pos += snprintf(type_buf + pos, sizeof(type_buf) - pos, "\n%s", btn_title);
+        }
+
+        char choice[8] = {0};
+        write_drm_state("WAITING_DIALOG");
+        g_drm_auth_cb(type_buf, choice, sizeof(choice), g_drm_auth_ud);
+
+        /* Reply is a decimal button index ("0", "1", "2"). Default to 0. */
+        if (choice[0] >= '0' && choice[0] <= '9') {
+            int idx = choice[0] - '0';
+            chosen_idx = (idx < btn_count) ? idx : 0;
+        }
+
+        struct shared_ptr *picked = (struct shared_ptr *)butVec->begin + chosen_idx;
+        DRM_DEBUG("[.] dialogHandler: user picked button %d '%s'\n",
+            chosen_idx,
+            std_string_data(_ZNK17storeservicescore14ProtocolButton5titleEv(picked->obj)));
+        _ZN17storeservicescore22ProtocolDialogResponse17setSelectedButtonERKNSt6__ndk110shared_ptrINS_14ProtocolButtonEEE(
+            diagResp.obj, picked);
     } else {
         // Auto-dismiss: select the first button ("Not Now" for concurrent-stream dialogs, etc.).
         // Without a selected button handleProtocolDialogResponse dereferences NULL → SIGSEGV.
@@ -352,17 +387,28 @@ static void __attribute__((sysv_abi)) credentialHandler(struct shared_ptr *credR
         amPassword[amPasswordLen] = '\0';
     int passLen = cancelled ? 0 : (int)strlen(amPassword);
 
+    int responseType = cancelled ? 0 : 2;
     if (need2FA && !cancelled) {
         write_drm_state("WAITING_2FA");
         if (g_drm_auth_cb) {
-            /* library mode: ask the Go engine for the 2FA code */
-            char code[16] = {0};
+            /* library mode: ask the Go engine for the 2FA code (or a special action) */
+            char code[32] = {0};
             g_drm_auth_cb("2fa", code, sizeof(code), g_drm_auth_ud);
             if (code[0] == '\0') {
                 /* No code: answering with the bare password would only count as another wrong attempt
                  * at Apple, and repeated ones lock the account. Cancel instead. */
                 cancelled = 1;
                 g_auth_cancelled = 1;
+            } else if (strncmp(code, "__resend__", 10) == 0) {
+                /* User wants Apple to re-send the notification to trusted devices.
+                 * Response type 1 tells AuthenticateFlow to resend without submitting a code.
+                 * amPassword stays as-is (no code appended). */
+                responseType = 1;
+            } else if (strncmp(code, "__cant_devices__", 16) == 0) {
+                /* User can't access trusted devices: response type 3 tells AuthenticateFlow to
+                 * show the phone-OTP sub-menu (text/call), which arrives as a ProtocolDialog
+                 * through dialogHandler. amPassword stays as-is. */
+                responseType = 3;
             } else {
                 strncat(amPassword, code, 6);
             }
@@ -412,10 +458,15 @@ static void __attribute__((sysv_abi)) credentialHandler(struct shared_ptr *credR
     _ZN17storeservicescore19CredentialsResponse11setPasswordERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
         credResp.obj, &password);
 
+    if (cancelled) responseType = 0;
     _ZN17storeservicescore19CredentialsResponse15setResponseTypeENS0_12ResponseTypeE(
-        credResp.obj, cancelled ? 0 : 2);
-    /* 2 = the second (OK) button, 0 = the first (Cancel) button: AuthenticateFlow::_buttonActionForResponseType
-     * maps them to the dialog's buttons, and 0 ends the flow as cancelled. 1 would read as "no answer". */
+        credResp.obj, responseType);
+    /* Response types (AuthenticateFlow::_buttonActionForResponseType):
+     *   0 = Cancel (first button) — ends the flow as cancelled
+     *   1 = Resend notification to trusted devices
+     *   2 = OK / submit code (second button, confirmed)
+     *   3 = Can't get to your devices — triggers ProtocolDialog sub-menu via dialogHandler
+     * 1 was previously documented as "no answer" but maps to the resend action. */
 
     _ZN20androidstoreservices28AndroidPresentationInterface25handleCredentialsResponseERKNSt6__ndk110shared_ptrIN17storeservicescore19CredentialsResponseEEE(
         apInf.obj, &credResp);

@@ -42,6 +42,11 @@ export function promptAction(snap, { open, view = null, submittedId = null, dism
         if (submittedId != null && ch.id !== submittedId) return 'retry';
         return 'none';
     }
+    if (ch?.type === 'dialog_choice') {
+        if (!open) return ch.id != null && ch.id === dismissedId ? 'none' : 'choice';
+        if (view !== 'choice') return 'choice';
+        return 'none';
+    }
     if (st.authentication === 'failed' && open) return view === 'code' ? 'expired' : 'failed';
     return 'none';
 }
