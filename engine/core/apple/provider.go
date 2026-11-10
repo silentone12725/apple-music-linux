@@ -157,7 +157,7 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 		// Widevine license provider both understand.
 		// The catalog enhanced-HLS variants use URI="skd://…" (FairPlay CBCS),
 		// which requires a different key path not yet wired into the engine.
-		playlistURL, err = p.webplaybackAssetURL(ctx, req.AssetID, token, req.MUT, FlavorCTR256)
+		playlistURL, err = p.webplaybackAssetURL(ctx, req.AssetID, req.Storefront, token, req.MUT, FlavorCTR256)
 		if err != nil {
 			return nil, fmt.Errorf("webplayback AAC asset: %w", err)
 		}
@@ -259,7 +259,7 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 	}
 	a := mv.Data[0].Attributes
 
-	masterURL, err := p.webplaybackURL(ctx, req.AssetID, token, req.MUT)
+	masterURL, err := p.webplaybackURL(ctx, req.AssetID, req.Storefront, token, req.MUT)
 	if err != nil {
 		return nil, fmt.Errorf("webplayback API: %w", err)
 	}
@@ -631,10 +631,14 @@ func (p *appleMusicProvider) makeCBCSTrackOpener(
 // fetchWebplayback posts to Apple's webplayback endpoint and returns the raw
 // response body.  Both webplaybackURL (MV master) and webplaybackAssetURL
 // (song CTR asset) call this to avoid duplicating the HTTP logic.
-func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, token, mut string) ([]byte, error) {
+func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, storefront, token, mut string) ([]byte, error) {
 	tracer.FromContext(ctx).RecordWebplaybackStart()
 	defer tracer.FromContext(ctx).RecordWebplaybackEnd()
-	body, _ := json.Marshal(map[string]string{"salableAdamId": adamID})
+	reqBody := map[string]string{"salableAdamId": adamID}
+	if storefront != "" && storefront != "us" {
+		reqBody["country"] = strings.ToUpper(storefront)
+	}
+	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://play.music.apple.com/WebObjects/MZPlay.woa/wa/webPlayback",
 		bytes.NewReader(body))
@@ -660,8 +664,8 @@ func (p *appleMusicProvider) fetchWebplayback(ctx context.Context, adamID, token
 }
 
 // webplaybackURL returns the HLS master playlist URL for a music video.
-func (p *appleMusicProvider) webplaybackURL(ctx context.Context, adamID, token, mut string) (string, error) {
-	raw, err := p.fetchWebplayback(ctx, adamID, token, mut)
+func (p *appleMusicProvider) webplaybackURL(ctx context.Context, adamID, storefront, token, mut string) (string, error) {
+	raw, err := p.fetchWebplayback(ctx, adamID, storefront, token, mut)
 	if err != nil {
 		return "", err
 	}
@@ -683,8 +687,8 @@ func (p *appleMusicProvider) webplaybackURL(ctx context.Context, adamID, token, 
 // from Apple's webplayback assets list.  For standard AAC songs, use flavor
 // "28:ctrp256" — its media playlist carries URI="data:;base64,[kid]" in
 // EXT-X-KEY, which the HLS parser and Widevine license provider both handle.
-func (p *appleMusicProvider) webplaybackAssetURL(ctx context.Context, adamID, token, mut string, flavor AssetFlavor) (string, error) {
-	raw, err := p.fetchWebplayback(ctx, adamID, token, mut)
+func (p *appleMusicProvider) webplaybackAssetURL(ctx context.Context, adamID, storefront, token, mut string, flavor AssetFlavor) (string, error) {
+	raw, err := p.fetchWebplayback(ctx, adamID, storefront, token, mut)
 	if err != nil {
 		return "", err
 	}
