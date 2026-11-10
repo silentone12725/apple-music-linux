@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -481,5 +482,59 @@ func TestSelectVideoVariantWithCodec_NoCodecsAttribute(t *testing.T) {
 	}
 	if _, _, _, err := m.SelectVideoVariantWithCodec(480); err == nil {
 		t.Error("expected error when every variant exceeds maxHeight")
+	}
+}
+
+const alacMaster = `#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-alac-stereo-48000-24",AUTOSELECT=YES,CHANNELS="2",NAME="songEnhanced",SAMPLE-RATE=48000,BIT-DEPTH=24
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-alac-stereo-192000-24",AUTOSELECT=YES,CHANNELS="2",NAME="songEnhanced",SAMPLE-RATE=192000,BIT-DEPTH=24
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-stereo-256",AUTOSELECT=YES,CHANNELS="2",NAME="songEnhanced"
+#EXT-X-STREAM-INF:BANDWIDTH=1851627,CODECS="alac",AUDIO="audio-alac-stereo-48000-24"
+alac_48.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=6500000,CODECS="alac",AUDIO="audio-alac-stereo-192000-24"
+alac_192.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=270000,CODECS="mp4a.40.2",AUDIO="audio-stereo-256"
+aac.m3u8
+`
+
+func TestParseMaster_ALACFormat(t *testing.T) {
+	t.Parallel()
+	base, _ := url.Parse("https://example.com/p/master.m3u8")
+	m, err := parseMaster(base, base.String(), []byte(alacMaster))
+	if err != nil {
+		t.Fatalf("parseMaster: %v", err)
+	}
+	want := map[string][2]int{"alac_48.m3u8": {48000, 24}, "alac_192.m3u8": {192000, 24}, "aac.m3u8": {0, 0}}
+	for _, v := range m.Variants {
+		name := v.URL[strings.LastIndex(v.URL, "/")+1:]
+		if got := [2]int{v.SampleRate, v.BitDepth}; got != want[name] {
+			t.Errorf("%s: format %v, want %v", name, got, want[name])
+		}
+	}
+}
+
+func TestSelectALAC(t *testing.T) {
+	t.Parallel()
+	base, _ := url.Parse("https://example.com/p/master.m3u8")
+	m, _ := parseMaster(base, base.String(), []byte(alacMaster))
+	if v, ok := m.SelectALAC(true); !ok || v.SampleRate != 192000 {
+		t.Errorf("hi-res: got %d ok=%v, want 192000", v.SampleRate, ok)
+	}
+	if v, ok := m.SelectALAC(false); !ok || v.SampleRate != 48000 || v.BitDepth != 24 {
+		t.Errorf("no hi-res: got %d/%d ok=%v, want 48000/24", v.SampleRate, v.BitDepth, ok)
+	}
+
+	onlyHiRes := &Master{Variants: []Variant{{URL: "h", Bandwidth: 9, Codecs: "alac", SampleRate: 96000, BitDepth: 24}}}
+	if v, ok := onlyHiRes.SelectALAC(false); !ok || v.URL != "h" {
+		t.Errorf("only hi-res rendition: got %q ok=%v, want h", v.URL, ok)
+	}
+	unstated := &Master{Variants: []Variant{{URL: "a", Bandwidth: 1, Codecs: "alac"}, {URL: "b", Bandwidth: 2, Codecs: "alac"}}}
+	if v, ok := unstated.SelectALAC(false); !ok || v.URL != "b" {
+		t.Errorf("format unstated: got %q ok=%v, want highest bandwidth b", v.URL, ok)
+	}
+	none := &Master{Variants: []Variant{{URL: "x", Bandwidth: 1, Codecs: "mp4a.40.2"}}}
+	if _, ok := none.SelectALAC(true); ok {
+		t.Error("no ALAC variant: ok=true, want false")
 	}
 }

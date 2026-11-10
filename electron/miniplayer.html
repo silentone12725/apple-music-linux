@@ -200,7 +200,7 @@
       el.style.display = ''; el.className = 'spatial';
       el.innerHTML = 'SPATIAL AUDIO';
     } else if (qb.codec === 'alac') {
-      const hi = qb.sampleRate > 48000 || qb.bitDepth > 16;
+      const hi = qb.sampleRate > 48000;
       el.style.display = ''; el.className = 'lossless';
       el.innerHTML = LOSSLESS_SVG + (hi ? ' HI-RES' : '');
     } else {

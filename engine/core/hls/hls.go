@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +49,10 @@ type Variant struct {
 	// play this variant (for example FairPlay, PlayReady SL3000, Widevine hardware). Empty when the playlist does not
 	// say. A key system missing from it is one the server will not grant this variant's key to.
 	AllowedCPC string
+	// SampleRate and BitDepth are the SAMPLE-RATE and BIT-DEPTH of the audio rendition named by the variant's AUDIO
+	// group (Apple states them for ALAC). 0 when the playlist does not say.
+	SampleRate int
+	BitDepth   int
 }
 
 // Alternative is one audio/subtitle rendition in an HLS master playlist.
@@ -289,6 +294,61 @@ func allowedCPCByURI(master string) map[string]string {
 		}
 	}
 	return out
+}
+
+var (
+	mediaGroupRe = regexp.MustCompile(`GROUP-ID="([^"]*)"`)
+	sampleRateRe = regexp.MustCompile(`[,:]SAMPLE-RATE=(\d+)`)
+	bitDepthRe   = regexp.MustCompile(`[,:]BIT-DEPTH=(\d+)`)
+)
+
+// audioFormatByGroup maps each audio GROUP-ID in a master playlist to the {sample rate, bit depth} its EXT-X-MEDIA
+// line states. The m3u8 library does not expose SAMPLE-RATE or BIT-DEPTH, so the lines are read directly.
+func audioFormatByGroup(master string) map[string][2]int {
+	out := map[string][2]int{}
+	for _, raw := range strings.Split(master, "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "#EXT-X-MEDIA:") || !strings.Contains(line, "TYPE=AUDIO") {
+			continue
+		}
+		g := mediaGroupRe.FindStringSubmatch(line)
+		if g == nil {
+			continue
+		}
+		var f [2]int
+		if m := sampleRateRe.FindStringSubmatch(line); m != nil {
+			f[0], _ = strconv.Atoi(m[1])
+		}
+		if m := bitDepthRe.FindStringSubmatch(line); m != nil {
+			f[1], _ = strconv.Atoi(m[1])
+		}
+		if f != ([2]int{}) {
+			out[g[1]] = f
+		}
+	}
+	return out
+}
+
+// SelectALAC returns the ALAC variant to play: the highest-bandwidth one, kept to renditions of at most 48 kHz
+// unless hiRes is set (Apple's Hi-Res Lossless tier is the one above 48 kHz). When no ALAC rendition states a rate
+// of 48 kHz or less, it returns the highest-bandwidth ALAC variant. ok is false when there is no ALAC variant.
+func (m *Master) SelectALAC(hiRes bool) (v Variant, ok bool) {
+	var best, capped Variant
+	for _, c := range m.Variants {
+		if !strings.Contains(strings.ToLower(c.Codecs), "alac") {
+			continue
+		}
+		if best.URL == "" || c.Bandwidth > best.Bandwidth {
+			best = c
+		}
+		if c.SampleRate > 0 && c.SampleRate <= 48000 && (capped.URL == "" || c.Bandwidth > capped.Bandwidth) {
+			capped = c
+		}
+	}
+	if !hiRes && capped.URL != "" {
+		return capped, true
+	}
+	return best, best.URL != ""
 }
 
 // CPCSummary shortens an ALLOWED-CPC value for a log line: the key systems by name with their levels, for example
@@ -882,6 +942,7 @@ func parseMaster(base *url.URL, rawURL string, body []byte) (*Master, error) {
 	pl := from.(*m3u8.MasterPlaylist)
 	m := &Master{baseURL: base}
 	cpc := allowedCPCByURI(string(body))
+	formats := audioFormatByGroup(string(body))
 
 	for _, v := range pl.Variants {
 		if v == nil {
@@ -900,6 +961,8 @@ func parseMaster(base *url.URL, rawURL string, body []byte) (*Master, error) {
 			VideoRange:       v.VideoRange,
 			HDCPLevel:        v.HDCPLevel,
 			AllowedCPC:       cpc[v.URI],
+			SampleRate:       formats[v.Audio][0],
+			BitDepth:         formats[v.Audio][1],
 		})
 		for _, alt := range v.Alternatives {
 			if alt == nil || alt.URI == "" {

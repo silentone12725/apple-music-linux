@@ -1922,7 +1922,7 @@
       title = "Spatial Audio";
       detail = "Dolby Atmos \xB7 Binaural";
     } else if (codec === "alac") {
-      const hiRes = sampleRate > 48e3 || bitDepth > 16;
+      const hiRes = sampleRate > 48e3;
       const khz = sampleRate ? `${(sampleRate / 1e3).toFixed(sampleRate % 1e3 ? 1 : 0)} kHz` : "";
       const bits = bitDepth && bitDepth > 16 ? `${bitDepth}-bit ` : "";
       title = hiRes ? "Lossless" : "Lossless";
@@ -1957,7 +1957,7 @@
       label = "SPATIAL AUDIO";
       isSpatial = true;
     } else if (codec === "alac") {
-      isHiRes = sampleRate > 48e3 || bitDepth > 16;
+      isHiRes = sampleRate > 48e3;
       color = "#30d158";
       label = isHiRes ? "HI-RES" : "";
     } else {
@@ -2016,11 +2016,11 @@
     let _npBadge = null;
     let _npBadgeLast = "";
     function _npContent() {
-      const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
+      const { codec, sampleRate, spatialAudio } = _qualityBadgeInfo;
       if (spatialAudio === "binaural-lossless" || spatialAudio === "binaural")
         return { show: true, label: "Spatial Audio", icon: false };
       if (codec === "alac") {
-        const hi = sampleRate > 48e3 || bitDepth > 16;
+        const hi = sampleRate > 48e3;
         return { show: true, label: hi ? "Hi-Res Lossless" : "Lossless", icon: true };
       }
       return { show: false };

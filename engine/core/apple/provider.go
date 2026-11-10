@@ -139,12 +139,8 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 	switch {
 	case req.Atmos && traits["atmos"]:
 		codec, hlsFilter = pipeline.CodecAtmos, "ec-3"
-	case req.Lossless && req.HiRes && traits["hi-res-lossless"]:
+	case req.Lossless && (traits["lossless"] || traits["hi-res-lossless"]):
 		codec, hlsFilter = pipeline.CodecALAC, "alac"
-		sr, bd = extractALACQuality(a.AudioTraits)
-	case req.Lossless && traits["lossless"]:
-		codec, hlsFilter = pipeline.CodecALAC, "alac"
-		sr, bd = 44100, 16
 	default:
 		codec, hlsFilter = pipeline.CodecAAC, "mp4a.40.2"
 	}
@@ -166,9 +162,18 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 		if err != nil {
 			return nil, fmt.Errorf("open master playlist: %w", err)
 		}
-		playlistURL = master.SelectByCodec(hlsFilter)
-		if playlistURL == "" {
-			return nil, fmt.Errorf("no HLS variant matching codec %q", hlsFilter)
+		if codec == pipeline.CodecALAC {
+			// The playlist states each rendition's real format; report that, not a guess from the catalog traits.
+			v, ok := master.SelectALAC(req.HiRes)
+			if !ok {
+				return nil, fmt.Errorf("no HLS variant matching codec %q", hlsFilter)
+			}
+			playlistURL, sr, bd = v.URL, v.SampleRate, v.BitDepth
+		} else {
+			playlistURL = master.SelectByCodec(hlsFilter)
+			if playlistURL == "" {
+				return nil, fmt.Errorf("no HLS variant matching codec %q", hlsFilter)
+			}
 		}
 	}
 
@@ -722,20 +727,6 @@ func traitSet(traits []string) map[string]bool {
 		m[t] = true
 	}
 	return m
-}
-
-func extractALACQuality(traits []string) (sampleRate, bitDepth int) {
-	for _, t := range traits {
-		parts := strings.Split(t, "-")
-		if len(parts) >= 2 {
-			fmt.Sscanf(parts[len(parts)-2], "%d", &sampleRate)
-			fmt.Sscanf(parts[len(parts)-1], "%d", &bitDepth)
-			if sampleRate > 0 && bitDepth > 0 {
-				return
-			}
-		}
-	}
-	return 96000, 24
 }
 
 func fmtArtwork(template string, size int) string {
