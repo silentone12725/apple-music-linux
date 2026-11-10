@@ -148,27 +148,115 @@ static int (*orig_android_log_print)(int prio, const char *tag, const char *fmt,
 static int (*orig_android_log_write)(int prio, const char *tag, const char *text);
 static int (*orig_curl_easy_setopt)(void *curl, int option, ...);
 
-int32_t CURLOPT_SSL_VERIFYPEER = 64;
-int32_t CURLOPT_SSL_VERIFYHOST = 81;
-int32_t CURLOPT_PINNEDPUBLICKEY = 10230;
-int32_t CURLOPT_VERBOSE = 43;
+int32_t CURLOPT_SSL_VERIFYPEER    = 64;
+int32_t CURLOPT_SSL_VERIFYHOST    = 81;
+int32_t CURLOPT_PINNEDPUBLICKEY   = 10230;
+int32_t CURLOPT_VERBOSE           = 43;
+int32_t CURLOPT_WRITEFUNCTION     = 20011;
+int32_t CURLOPT_WRITEDATA         = 10001;
+
+typedef size_t (*curl_write_fn_t)(char *, size_t, size_t, void *);
+
+/* Per-handle write-callback patcher. Intercept WRITEFUNCTION / WRITEDATA so we
+ * can inspect and patch the GrandSlam lookup response body before the library
+ * processes it.  MAX_CURL_HANDLES covers concurrent requests with room to spare. */
+#define MAX_CURL_PATCHERS 16
+static struct {
+    void            *handle;
+    curl_write_fn_t  orig_fn;
+    void            *orig_ud;
+} g_wpatchers[MAX_CURL_PATCHERS];
+static int g_wpatcher_count = 0;
+
+static struct {
+    void            *handle;
+    curl_write_fn_t  orig_fn;
+    void            *orig_ud;
+} *wpatcher_for(void *handle, int create) {
+    for (int i = 0; i < g_wpatcher_count; i++)
+        if (g_wpatchers[i].handle == handle)
+            return &g_wpatchers[i];
+    if (!create || g_wpatcher_count >= MAX_CURL_PATCHERS) return NULL;
+    g_wpatchers[g_wpatcher_count].handle  = handle;
+    g_wpatchers[g_wpatcher_count].orig_fn = NULL;
+    g_wpatchers[g_wpatcher_count].orig_ud = NULL;
+    return &g_wpatchers[g_wpatcher_count++];
+}
+
+/* Patch "is-phone-number-supported</key><false/>" → "<true/> " in-place.
+ * Both tokens are 8 bytes; the replacement adds a trailing space so the buffer
+ * length stays identical (no realloc, no memmove needed). */
+static void patch_phone_support(char *data, size_t len) {
+    static const char KEY[]  = "is-phone-number-supported</key>";
+    static const char FROM[] = "<false/>";
+    static const char TO[]   = "<true/> ";   /* same 8-byte length */
+    const size_t KEY_LEN  = sizeof(KEY)  - 1;
+    const size_t FROM_LEN = sizeof(FROM) - 1;
+
+    if (len < KEY_LEN + FROM_LEN) return;
+    char *p = data;
+    char *end = data + len - KEY_LEN - FROM_LEN;
+    while (p <= end) {
+        if (memcmp(p, KEY, KEY_LEN) == 0) {
+            char *q = p + KEY_LEN;
+            /* Skip optional whitespace between key and value tag */
+            while (q < data + len - FROM_LEN && (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')) q++;
+            if (q + FROM_LEN <= data + len && memcmp(q, FROM, FROM_LEN) == 0) {
+                DRM_DEBUG("[phone-patch] patching is-phone-number-supported false→true\n");
+                memcpy(q, TO, FROM_LEN);
+                return;
+            }
+        }
+        p++;
+    }
+}
+
+/* libcurl write callback shim: patch body, then forward to the library's
+ * original callback using its original userdata pointer. */
+static size_t curl_write_hook(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    /* userdata is the index (cast to pointer) into g_wpatchers */
+    size_t idx = (size_t)(uintptr_t)userdata;
+    if (idx >= (size_t)g_wpatcher_count) return size * nmemb; /* safety */
+    patch_phone_support(ptr, size * nmemb);
+    curl_write_fn_t fn = g_wpatchers[idx].orig_fn;
+    void           *ud = g_wpatchers[idx].orig_ud;
+    if (!fn) return size * nmemb; /* no original callback; curl uses fwrite */
+    return fn(ptr, size, nmemb, ud);
+}
 
 int curl_easy_setopt_hook(void *curl, int32_t option, ...) {
     va_list args;
     va_start(args, option);
     void* param = va_arg(args, void*);
     va_end(args);
- 
-    if (option == CURLOPT_SSL_VERIFYPEER || 
-        option == CURLOPT_SSL_VERIFYHOST || 
+
+    if (option == CURLOPT_SSL_VERIFYPEER ||
+        option == CURLOPT_SSL_VERIFYHOST ||
         option == CURLOPT_PINNEDPUBLICKEY) {
         DRM_DEBUG("[+] hooked curl_easy_setopt %d\n", option);
         orig_curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
         return orig_curl_easy_setopt(curl, option, 0L);
-    }  else {
+    } else if (option == CURLOPT_WRITEFUNCTION) {
+        /* Intercept the write callback: store the library's fn, install ours. */
+        typeof(&g_wpatchers[0]) p = wpatcher_for(curl, 1);
+        if (p) {
+            int idx = (int)(p - g_wpatchers);
+            p->orig_fn = (curl_write_fn_t)param;
+            /* Point WRITEDATA at our patcher index so curl_write_hook can find it. */
+            orig_curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)(intptr_t)idx);
+            return orig_curl_easy_setopt(curl, option, (void*)curl_write_hook);
+        }
+        return orig_curl_easy_setopt(curl, option, param);
+    } else if (option == CURLOPT_WRITEDATA) {
+        /* Store original userdata; our hook reads it. Don't forward — the
+         * WRITEDATA registered with curl must stay as our patcher index. */
+        typeof(&g_wpatchers[0]) p = wpatcher_for(curl, 1);
+        if (p) { p->orig_ud = param; return 0; }
+        return orig_curl_easy_setopt(curl, option, param);
+    } else {
         return orig_curl_easy_setopt(curl, option, param);
     }
- 
+
 }
 
 int android_log_print_hook(int prio, const char *tag, const char *fmt, ...) {
@@ -300,6 +388,7 @@ static void __attribute__((sysv_abi)) dialogHandler(int64_t j, struct shared_ptr
     struct std_vector *butVec =
         _ZNK17storeservicescore14ProtocolDialog7buttonsEv(protoDialogPtr->obj);
     int btn_count = (int)((struct shared_ptr *)butVec->end - (struct shared_ptr *)butVec->begin);
+    fprintf(stderr, "[.] dialogHandler: title='%s' buttons=%d\n", title ? title : "", btn_count);
     int chosen_idx = 0; /* default: first (dismiss/cancel) */
 
     if (strcmp("Sign In", title) == 0) {
@@ -313,11 +402,11 @@ static void __attribute__((sysv_abi)) dialogHandler(int64_t j, struct shared_ptr
                 break;
             }
         }
-    } else if (amUsername && g_drm_auth_cb && btn_count >= 2) {
-        /* During sign-in, any multi-button dialog is a user choice (e.g. the
-         * "Text code / Get a call / Can't use ..." phone-OTP sub-menu that Apple
-         * raises after the user taps "Can't get to your devices?").  Surface the
-         * options to the host so the user can pick one. */
+    } else if (amUsername && g_drm_auth_cb && btn_count >= 1) {
+        /* During sign-in, surface any dialog with at least one button to the user
+         * (e.g. the "Text code / Get a call / Can't use ..." phone-OTP sub-menu
+         * that Apple raises after "Can't get to your devices?", which may have
+         * just one option when the account has no call option). */
         char type_buf[512];
         int pos = snprintf(type_buf, sizeof(type_buf), "dialog_choice:");
         if (title && *title)
