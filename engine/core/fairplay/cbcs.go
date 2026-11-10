@@ -223,13 +223,13 @@ func CBCSSource(adamID string, dialer CBCSDialer, fileURL string, keyURIs []stri
 	}
 }
 
-// upstreamKeyURIs keeps only the key tags on segments 0 (prefetch) and 1
-// (track content key), exactly like zhaarey/apple-music-downloader; later
-// EXT-X-KEY tags are ignored there and every remaining fragment decrypts with
-// the segment-1 key. Returns a copy so the shared playlist is never mutated.
+// upstreamKeyURIs preserves every key transition from the playlist. The shared
+// prefetch key can cover more than one segment: some tracks switch to their
+// content key on segment 2 (about 30 seconds), rather than segment 1.
+// Returns a copy so the shared playlist is never mutated.
 func upstreamKeyURIs(keyURIs []string) []string {
 	out := make([]string, len(keyURIs))
-	copy(out, keyURIs[:min(2, len(keyURIs))])
+	copy(out, keyURIs)
 	return out
 }
 
