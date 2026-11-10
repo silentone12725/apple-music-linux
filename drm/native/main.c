@@ -842,14 +842,6 @@ void *getKdContext(const char *const adam,
         fprintf(stderr, "[drm] key context unavailable: device token is missing\n");
         return NULL;
     }
-    /* Do not enter the Android key-session path until Windows has a live
-     * FairPlay subscription status. On an empty status vector the guest
-     * library throws while processing the placeholder startup key and its
-     * unwinder crashes the host process. */
-    if (!offlineFlag) {
-        fprintf(stderr, "[drm] key context unavailable: Windows FairPlay subscription is not active\n");
-        return NULL;
-    }
 #endif
     DRM_DEBUG("[.] adamId: %s, uri: %s\n", adam, uri);
 

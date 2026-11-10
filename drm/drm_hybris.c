@@ -85,8 +85,30 @@ static void setup_bionic_fs_base_win(void)
     g_bionic_tls_slots[1] = (uint64_t)(uintptr_t)g_bionic_pthread_stub; /* tid  */
     __asm__ volatile("wrfsbase %0" ::"r"((uint64_t)(uintptr_t)g_bionic_tls_slots) : "memory");
 }
+
+/* Windows commits a thread's stack one page at a time, through a guard page that must be
+ * touched in order; code built for Windows calls __chkstk before any frame over a page.
+ * Android code does not: FairPlay opens frames of 100 KB and more and writes to the far
+ * end first, which lands in reserved, uncommitted memory and faults with no stack left
+ * for any handler. Touch every page once so the whole stack is committed before guest
+ * code runs on this thread. The lowest pages stay untouched as the overflow guard. */
+void hybris_commit_thread_stack(void)
+{
+    static __thread int done;
+    if (done) return;
+    done = 1;
+    ULONG_PTR lo = 0, hi = 0;
+    GetCurrentThreadStackLimits(&lo, &hi);
+    volatile char *p = (volatile char *)((uintptr_t)__builtin_frame_address(0) & ~(uintptr_t)0xfff);
+    volatile char *stop = (volatile char *)lo + 4 * 0x1000;
+    while (p - 0x1000 > stop) {
+        p -= 0x1000;
+        (void)*p;
+    }
+}
 #else
 #include <dlfcn.h>
+void hybris_commit_thread_stack(void) {}
 #endif
 
 #include "drm_hybris.h"
@@ -470,6 +492,14 @@ int hybris_backend_init(
     const char *lib64_dir,
     const char *hybris_core_path)
 {
+    hybris_commit_thread_stack();
+#ifdef _WIN32
+    /* Windows' CRT fully buffers stderr when it is a file or pipe, so a crash in the
+     * guest code would lose the log lines that show where it happened. */
+    fflush(stderr);
+    setvbuf(stderr, NULL, _IONBF, 0);
+#endif
+
     /* libhybris-core.so dlopens its Android linker shim (q.so) from
      * $HYBRIS_LINKER_DIR (default /tmp/hybris-linker); it must be set before
      * the embedded core is loaded. */
@@ -644,6 +674,7 @@ int hybris_fairplay_init(const char *base_dir, const char *device_info,
                          drm_auth_cb_t auth_cb, void *auth_ud)
 {
     if (!g_hybris.initialized || !g_hybris.appmusic_available) return -1;
+    hybris_commit_thread_stack();
     if (g_hybris.fairplay_inited) {
         /* Already initialized — if new credentials are supplied, log in now. */
         if (username && password)
@@ -685,6 +716,7 @@ void *hybris_open_kd_ctx_from_uri(const char *adam, const char *uri, unsigned *e
         return NULL;
     }
     if (!adam || !uri) return NULL;
+    hybris_commit_thread_stack();
     if (drm_lib_is_recovery_active()) {
         fprintf(stderr, "[hybris] key context refused: lease recovery in progress\n");
         return NULL;
@@ -707,6 +739,7 @@ int hybris_backend_decrypt(void *ctx, unsigned epoch, uint8_t *data, uint32_t le
     if (!ctx || !data || !g_hybris.fairplay_inited) return -1;
     uint32_t whole = len & ~0xfU;
     if (whole == 0) return 0;
+    hybris_commit_thread_stack();
     pthread_mutex_lock(&g_fp_call_mutex);
     int ret;
     if (epoch != __atomic_load_n(&g_decrypt_epoch, __ATOMIC_SEQ_CST))
