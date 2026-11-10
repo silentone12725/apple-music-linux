@@ -184,6 +184,7 @@ type DRMSnapshot struct {
 	State        DRMState        `json:"state"`
 	Capabilities CapabilityState `json:"capabilities"`        // derived; at snapshot level, not state
 	Challenge    *AuthChallenge  `json:"challenge,omitempty"` // non-nil only when Auth == AuthChallenging
+	Failure      *SignInFailure  `json:"failure,omitempty"`   // why the last sign-in failed; set while Auth == AuthFailed
 	Timestamp    time.Time       `json:"timestamp"`
 	Message      string          `json:"message,omitempty"` // log text; never parsed for state
 }
@@ -197,6 +198,7 @@ var stateFileStrings = map[string]stateFileResult{
 	"STARTING":              {Process: ProcessStarting, FairPlay: FairPlayUnknown},
 	"LOGIN":                 {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthLoggingIn},
 	"WAITING_2FA":           {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
+	"WAITING_DIALOG":        {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
 	"INITIALIZING_FAIRPLAY": {Process: ProcessRunning, FairPlay: FairPlayInitializing, Auth: AuthLoggedIn},
 	"RUNNING":               {Process: ProcessRunning, FairPlay: FairPlayReady, Auth: AuthLoggedIn, Recovery: RecoveryIdle},
 	"RECOVERY":              {Process: ProcessRunning, FairPlay: FairPlayReady, Recovery: RecoveryRefreshing},

@@ -41,3 +41,18 @@ test('promptAction does not reopen a challenge the user cancelled', () => {
     assert.equal(promptAction(twoFactor(3), { open: false, dismissedId: 3 }), 'none');
     assert.equal(promptAction(twoFactor(4), { open: false, dismissedId: 3 }), 'code', 'a new challenge opens again');
 });
+
+test('promptAction: a sign-in that fails while the code is being asked for goes back to the form', async () => {
+    const { promptAction } = await import('../../src/engine/verification-code.js');
+    const failed = { state: { authentication: 'failed' }, message: 'timed out' };
+    assert.equal(promptAction(failed, { open: true, view: 'code' }), 'expired');
+    assert.equal(promptAction(failed, { open: true, view: 'signin' }), 'failed');
+    assert.equal(promptAction(failed, { open: false, view: null }), 'none');
+});
+
+test('promptAction: a cancelled sign-in (signed out, no failure) never reopens the sheet', async () => {
+    const { promptAction } = await import('../../src/engine/verification-code.js');
+    const out = { state: { authentication: 'logged_out' }, message: 'sign-in cancelled' };
+    assert.equal(promptAction(out, { open: true, view: 'signin' }), 'none');
+    assert.equal(promptAction(out, { open: false, view: null }), 'none');
+});

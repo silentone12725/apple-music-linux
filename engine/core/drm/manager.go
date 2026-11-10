@@ -21,7 +21,7 @@ var DefaultRestartPolicy = RestartPolicy{
 	MaxCrashRestarts: 5,
 	RestartBackoff:   []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second},
 	StartupTimeout:   60 * time.Second,
-	AuthTimeout:      120 * time.Second,
+	AuthTimeout:      7 * time.Minute, // covers the 5-minute wait for a verification code
 }
 
 // RestartPolicy controls how DRMManager responds to backend crashes.
@@ -78,7 +78,8 @@ type DRMManager struct {
 	closed atomic.Bool
 
 	// warming ensures one background backend start at a time when the web session appears.
-	warming atomic.Bool
+	warming   atomic.Bool
+	signingIn atomic.Bool // a sign-in (Authenticate) is in progress
 
 	// authSem (one slot) is held by every backend start and by a sign-out once the
 	// sign-in it aborted has returned: concurrent starts would Stop/Start the backend
@@ -251,9 +252,11 @@ func (m *DRMManager) NoteWebSession() {
 		return
 	}
 	m.mu.RLock()
-	challenging := m.snapshot.State.Authentication == AuthChallenging
+	// While a sign-in runs (or waits for its code) the page's token says nothing about it: an
+	// older session marker must not report "logged in" and close the sign-in sheet early.
+	signingIn := m.snapshot.State.Authentication == AuthChallenging || m.snapshot.State.Authentication == AuthLoggingIn
 	m.mu.RUnlock()
-	if !challenging {
+	if !signingIn {
 		m.mergeAndEmit(DRMSnapshot{
 			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
 			Message: "web session",
@@ -358,6 +361,15 @@ func (m *DRMManager) startGuarded(ctx context.Context, replay bool, start func(c
 //   - !HasSession(): credentials are stored; wrapper's credentialHandler
 //     fires Challenge(ChallengeCredentials) and AuthCoordinator replies.
 func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error {
+	// One sign-in at a time: a second request would queue behind the first and then send
+	// another attempt to Apple, which counts toward its limit on wrong passwords.
+	if !m.signingIn.CompareAndSwap(false, true) {
+		return ErrSignInRunning
+	}
+	defer m.signingIn.Store(false)
+	if until := m.session.SignInPausedUntil(); !until.IsZero() {
+		return &SignInPausedError{Until: until}
+	}
 	err := m.startGuarded(ctx, true, func(ctx context.Context) error { return m.authenticate(ctx, creds) })
 	if errors.Is(err, ErrLogoutPending) {
 		m.mergeAndEmit(DRMSnapshot{
@@ -370,7 +382,11 @@ func (m *DRMManager) Authenticate(ctx context.Context, creds Credentials) error 
 
 func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error {
 	m.auth.SetCredentials(creds) // stored in AuthCoordinator; used if challenged
+	defer m.auth.ClearCredentials()
 	m.setManagerState(ManagerInitializing)
+	// Replace the previous attempt's outcome right away: a client that polls (or reconnects)
+	// must not read an earlier failure as this attempt's result.
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggingIn}, Message: "signing in"})
 
 	loginCtx, cancel := context.WithTimeout(ctx, m.policy.AuthTimeout)
 	defer cancel()
@@ -387,16 +403,28 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 	loginCfg.Credentials = creds
 	authErr := m.backend.Start(loginCtx, loginCfg)
 	if authErr != nil {
+		if errors.Is(authErr, ErrSignInCancelled) {
+			// Nobody failed: the code was not given. Back to "signed out", without a failure.
+			m.setManagerState(ManagerReady)
+			m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggedOut}, Message: "sign-in cancelled"})
+			return fmt.Errorf("authenticate: %w", authErr)
+		}
 		m.setManagerState(ManagerFailed)
 		if creds.Email != "" {
+			f := ClassifySignInError(authErr)
+			m.session.NoteSignInOutcome(false, f)
 			// Fresh login failed — emit AuthFailed so the UI shows the error
 			// immediately instead of timing out after the poll interval expires.
 			m.mergeAndEmit(DRMSnapshot{
 				State:   DRMState{Authentication: AuthFailed},
-				Message: authErr.Error(),
+				Failure: &f,
+				Message: f.Message,
 			})
 		}
 		return fmt.Errorf("authenticate: %w", authErr)
+	}
+	if creds.Email != "" {
+		m.session.NoteSignInOutcome(true, SignInFailure{})
 	}
 	m.lastStart.Store(time.Now().UnixNano())
 	if creds.Email != "" {
@@ -417,6 +445,17 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 	m.setManagerState(ManagerReady)
 	return nil
 }
+
+// SignInPausedFor returns how long sign-ins stay paused after repeated rejections (0: not paused).
+func (m *DRMManager) SignInPausedFor() time.Duration {
+	if until := m.session.SignInPausedUntil(); !until.IsZero() {
+		return time.Until(until)
+	}
+	return 0
+}
+
+// SignInRunning reports whether a sign-in is in progress.
+func (m *DRMManager) SignInRunning() bool { return m.signingIn.Load() }
 
 // SubmitChallenge delivers a challenge reply (2FA code, device approval, etc.)
 // from the browser. Call this after receiving a DRM SSE event with
@@ -595,6 +634,12 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 		// Judge by the merged state: an unrelated update (Authentication unset) must not
 		// erase a challenge that is still waiting for the user.
 		m.snapshot.Challenge = nil
+	}
+
+	if snap.Failure != nil {
+		m.snapshot.Failure = snap.Failure
+	} else if snap.State.Authentication != 0 && snap.State.Authentication != AuthFailed {
+		m.snapshot.Failure = nil
 	}
 
 	// RecoveryUnknown (0) means the update carries no recovery state.

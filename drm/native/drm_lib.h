@@ -110,6 +110,9 @@ int drm_lib_debug_enabled(void);
  * Returns 0 on success, -1 on failure. */
 int drm_lib_login(const char *username, const char *password);
 
+/* Why the last sign-in or init failed, in words fit for the sign-in form ("" when unknown). */
+const char *drm_lib_last_error(void);
+
 #ifdef __cplusplus
 }
 #endif

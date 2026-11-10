@@ -164,10 +164,16 @@ const (
 	// Reply: "approved" or "denied".
 	// Metadata: {"device": "<device name>", "timeout": "<seconds>"}
 	ChallengeDeviceApproval
+
+	// ChallengeDialogChoice presents a list of options from a ProtocolDialog
+	// that Apple raises during sign-in (e.g. "Text code / Get a call / Can't use...").
+	// Reply: decimal button index ("0", "1", "2", ...).
+	// Metadata: {"buttons": "<btn0>\n<btn1>\n..."}
+	ChallengeDialogChoice
 )
 
 func (t AuthChallengeType) String() string {
-	return [...]string{"credentials", "two_factor", "device_approval"}[t]
+	return [...]string{"credentials", "two_factor", "device_approval", "dialog_choice"}[t]
 }
 
 func (t AuthChallengeType) MarshalJSON() ([]byte, error) {

@@ -12,6 +12,9 @@ import (
 // not be completed yet: no session may be started or reused until it finishes.
 var ErrLogoutPending = errors.New("sign-out in progress or incomplete")
 
+// ErrSignInRunning is returned by Authenticate while another sign-in is still in progress.
+var ErrSignInRunning = errors.New("a sign-in is already running")
+
 // gateState says whether sessions may be started or reused.
 type gateState int
 
@@ -266,10 +269,3 @@ func (m *DRMManager) restartPath(res SignOutResult, why string) (SignOutResult, 
 
 // RestartPending reports that a sign-out needs the process to restart.
 func (m *DRMManager) RestartPending() bool { return m.restartPending.Load() }
-
-// ResendCode asks Apple for a new verification code by answering the pending code
-// challenge with no code, keeping the credentials so Apple can ask again. Probe:
-// what Apple does next decides the resend design.
-func (m *DRMManager) ResendCode() error {
-	return m.auth.Resend()
-}

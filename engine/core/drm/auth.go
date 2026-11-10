@@ -51,6 +51,14 @@ func (a *AuthCoordinator) SetCredentials(creds Credentials) {
 	a.mu.Unlock()
 }
 
+// ClearCredentials forgets the stored credentials once a sign-in attempt is over, so a
+// later request for credentials cannot silently resubmit an old password.
+func (a *AuthCoordinator) ClearCredentials() {
+	a.mu.Lock()
+	a.stored = Credentials{}
+	a.mu.Unlock()
+}
+
 // Abort ends a sign-in in progress: it forgets the stored credentials, ends a
 // pending verification-code challenge (the backend gets no code and that sign-in
 // attempt fails) and refuses further code challenges until SetCredentials is
@@ -79,25 +87,6 @@ func (a *AuthCoordinator) SubmitReply(reply string) error {
 	case a.pending <- reply:
 		// A challenge accepts exactly one reply.
 		a.pending = nil
-		return nil
-	default:
-		return fmt.Errorf("authentication challenge already answered")
-	}
-}
-
-// Resend answers the pending verification-code challenge with no code, so Apple
-// rejects that attempt and (if it behaves as for a wrong code) asks again and sends
-// a new code. Unlike Abort it keeps the credentials and the next challenge works.
-func (a *AuthCoordinator) Resend() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.pending == nil {
-		return fmt.Errorf("no authentication challenge pending")
-	}
-	select {
-	case a.pending <- "":
-		a.pending = nil
-		a.cancelPending = nil
 		return nil
 	default:
 		return fmt.Errorf("authentication challenge already answered")

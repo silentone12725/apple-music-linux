@@ -754,7 +754,6 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("POST /api/v1/drm/logout", cors(s.handleDRMLogout))
 	mux.HandleFunc("DELETE /api/v1/drm/session", cors(s.handleDRMClearSession))
 	mux.HandleFunc("POST /api/v1/drm/forget-device", cors(s.handleDRMForgetDevice))
-	mux.HandleFunc("POST /api/v1/drm/challenge/resend", cors(s.handleDRMResend))
 
 	// Library — local metadata cache (songs, playlists, playlist tracks).
 	// Mirrors what Android's MediaLibrary and Windows' AMPLibraryAgent provide:

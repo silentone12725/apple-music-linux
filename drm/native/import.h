@@ -308,20 +308,14 @@ extern struct std_vector _ZNK17storeservicescore16PurchaseResponse5itemsEv(void 
 extern struct std_vector _ZNK17storeservicescore12PurchaseItem6assetsEv(void *);
 extern union std_string *_ZNK17storeservicescore13PurchaseAsset3URLEv(void *, void *);
 extern union std_string *_ZNK17storeservicescore13PurchaseAsset11downloadKeyEv(void *, void *);
-#ifdef _WIN32
-/* On Windows the bridge returns a pointer to the error code object. */
+/* errorCode() returns a reference to the ErrorCode object inside the condition (its address is
+ * this+0x20, see the library), not the code: reading it as an int gave the low half of a pointer. */
 struct native_error_code { int value; int padding; void *category; };
 extern struct native_error_code *_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *);
 static inline int store_error_code(void *err) {
 	struct native_error_code *c = _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err);
 	return c ? c->value : -1;
 }
-#else
-extern int _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *);
-static inline int store_error_code(void *err) {
-	return _ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(err);
-}
-#endif
 extern const char *_ZNK17storeservicescore19StoreErrorCondition4whatEv(void *);
 extern struct shared_ptr *_ZNK17storeservicescore20AuthenticateResponse5errorEv(void *);
 extern union std_string *_ZNK17storeservicescore20AuthenticateResponse15customerMessageEv(void *);

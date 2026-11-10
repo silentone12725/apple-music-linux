@@ -95,12 +95,105 @@ extern char *g_music_token;
 
 /* ── Module state ───────────────────────────────────────────────────────────*/
 
+/* The host frees the strings it passes in as soon as the call returns, but the wrapper reads these
+ * later (drm-state file, token files, a second credentials request), so it keeps its own copies. */
+static char            g_base_dir_copy[1024];
+static char            g_device_info_copy[512];
+static char            g_username_copy[320];
+static char            g_pw_buf[256]; /* the password (and the code appended to it) while a sign-in runs */
+
+/* A sign-in is over: forget the account so a later request for credentials cannot resubmit it. */
+static void forget_credentials(void)
+{
+    memset(g_pw_buf, 0, sizeof(g_pw_buf));
+    memset(g_username_copy, 0, sizeof(g_username_copy));
+    amPassword = NULL;
+    amUsername = NULL;
+    amPasswordLen = 0;
+}
+extern char            g_last_auth_error[];
+
 static int             g_init_result = 0;  /* 0 = success, -1 = failed */
 static pthread_mutex_t g_init_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
 /* ── drm_lib_init ───────────────────────────────────────────────────────────*/
 
-int drm_lib_init(const drm_lib_config_t *cfg)
+/* Fetch the storefront, developer and music tokens for the signed-in account (0 on success). */
+static int fetch_account_tokens(const drm_lib_config_t *cfg, struct shared_ptr reqCtx)
+{
+    g_storefront_id = get_account_storefront_id(reqCtx);
+    if (!g_storefront_id) {
+        fprintf(stderr, "[drm_lib] failed to get storefront ID\n");
+        snprintf(g_last_auth_error, 256, "Signed in, but Apple returned no storefront ID");
+        return -1;
+    }
+    DRM_DEBUG("[drm_lib] storefront_id=%s, get_dev_token\n", g_storefront_id);
+    g_dev_token = get_dev_token(reqCtx);
+#ifdef _WIN32
+    if (!g_dev_token && cfg->base_dir && !g_music_token) {
+        /* The device-token endpoint can be unavailable while an authenticated
+         * Music token from the app session is still usable. Try that cache
+         * before failing init. */
+        char tok_path[1024];
+        snprintf(tok_path, sizeof(tok_path), "%s/MUSIC_TOKEN", cfg->base_dir);
+        FILE *tf = fopen(tok_path, "r");
+        if (tf) {
+            char buf[8192];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, tf);
+            fclose(tf);
+            buf[n] = '\0';
+            while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' ')) buf[--n] = '\0';
+            if (n > 0) {
+                g_music_token = strdup(buf);
+                fprintf(stderr, "[drm_lib] dev token unavailable; using cached MUSIC_TOKEN (%zu bytes)\n", n);
+            }
+        }
+    }
+    if (!g_dev_token && !g_music_token) {
+        fprintf(stderr, "[drm_lib] failed to get dev token and no cached MUSIC_TOKEN is available\n");
+        snprintf(g_last_auth_error, 256, "Signed in, but Apple returned no dev token");
+        return -1;
+    }
+    if (g_dev_token) {
+        DRM_DEBUG("[drm_lib] dev_token ok, get_music_token\n");
+        g_music_token = get_music_user_token(get_guid(), g_dev_token, reqCtx);
+    }
+#else
+    if (!g_dev_token) {
+        fprintf(stderr, "[drm_lib] failed to get dev token\n");
+        snprintf(g_last_auth_error, 256, "Signed in, but Apple returned no dev token");
+        return -1;
+    }
+    DRM_DEBUG("[drm_lib] dev_token ok, get_music_token\n");
+    g_music_token = get_music_user_token(get_guid(), g_dev_token, reqCtx);
+#endif
+    if (!g_music_token && cfg->base_dir) {
+        /* createMusicToken failed (session may be expired) — fall back to the
+         * MUSIC_TOKEN stored in drm/files/ by the web-session path. */
+        char tok_path[1024];
+        snprintf(tok_path, sizeof(tok_path), "%s/MUSIC_TOKEN", cfg->base_dir);
+        FILE *tf = fopen(tok_path, "r");
+        if (tf) {
+            char buf[8192];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, tf);
+            fclose(tf);
+            buf[n] = '\0';
+            while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' ')) buf[--n] = '\0';
+            if (n > 0) {
+                g_music_token = strdup(buf);
+                DRM_DEBUG("[drm_lib] music_token: using stored token from disk (%zu bytes)\n", n);
+            }
+        }
+    }
+    if (!g_music_token) {
+        fprintf(stderr, "[drm_lib] failed to get music token\n");
+        snprintf(g_last_auth_error, 256, "Signed in, but Apple returned no music token");
+        return -1;
+    }
+    return 0;
+}
+
+static int drm_lib_init_impl(const drm_lib_config_t *cfg)
 {
     pthread_mutex_lock(&g_init_mutex);
 
@@ -125,7 +218,8 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     /* Synthesise a fake args_info from cfg so the rest of main.c still works */
     memset(&args_info, 0, sizeof(args_info));
     if (cfg->base_dir) {
-        args_info.base_dir_arg = (char *)cfg->base_dir;
+        snprintf(g_base_dir_copy, sizeof(g_base_dir_copy), "%s", cfg->base_dir);
+        args_info.base_dir_arg = g_base_dir_copy;
         args_info.base_dir_given = 1;
     }
     {
@@ -133,7 +227,8 @@ int drm_lib_init(const drm_lib_config_t *cfg)
         const char *di = (cfg->device_info && cfg->device_info[0])
             ? cfg->device_info
             : "Music/4.9/Android/10/Samsung S9/7663313/en-US/en-US/dc28071e981c439e";
-        args_info.device_info_arg = (char *)di;
+        snprintf(g_device_info_copy, sizeof(g_device_info_copy), "%s", di);
+        args_info.device_info_arg = g_device_info_copy;
         args_info.device_info_given = (cfg->device_info && cfg->device_info[0]) ? 1 : 0;
         /* split device_infos just like main() does */
         static char *di_copy = NULL;
@@ -149,13 +244,13 @@ int drm_lib_init(const drm_lib_config_t *cfg)
 
     /* Credentials for fresh login */
     if (cfg->username && cfg->password) {
-        amUsername = (char *)cfg->username;
+        snprintf(g_username_copy, sizeof(g_username_copy), "%s", cfg->username);
+        amUsername = g_username_copy;
         /* Allocate a mutable buffer (credentialHandler appends the 2FA code) */
-        static char pw_buf[256];
-        strncpy(pw_buf, cfg->password, sizeof(pw_buf) - 1);
-        pw_buf[sizeof(pw_buf) - 1] = '\0';
-        amPassword = pw_buf;
-        amPasswordLen = strlen(pw_buf);
+        strncpy(g_pw_buf, cfg->password, sizeof(g_pw_buf) - 1);
+        g_pw_buf[sizeof(g_pw_buf) - 1] = '\0';
+        amPassword = g_pw_buf;
+        amPasswordLen = strlen(g_pw_buf);
         args_info.login_arg = NULL; /* not used in library mode */
         args_info.login_given = 0;
     }
@@ -218,81 +313,20 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     DRM_DEBUG("[drm_lib] offline=%d, get_storefront_id\n", offlineFlag);
 
     /* Cache account tokens */
-    g_storefront_id = get_account_storefront_id(reqCtx);
-    if (!g_storefront_id) {
-        fprintf(stderr, "[drm_lib] failed to get storefront ID\n");
-        g_init_result = -1;
-#ifdef _WIN32
-        hybris_guest_fs_leave();
-#endif
-        pthread_mutex_unlock(&g_init_mutex);
-        return -1;
+    int trc = fetch_account_tokens(cfg, reqCtx);
+    if (trc != 0 && !(cfg->username && cfg->password)) {
+        /* No password to offer and the stored session did not give tokens: let the library renew the
+         * existing account on its own (AuthenticateFlow::runWithTimeout goes straight to
+         * _authenticateUsingExistingAccount when the account is known). Anything that would need the
+         * user is cancelled by credentialHandler, which finds no credentials. */
+        extern uint8_t login(struct shared_ptr ctx);
+        fprintf(stderr, "[drm_lib] stored session gave no tokens; trying a silent sign-in\n");
+        if (login(reqCtx))
+            trc = fetch_account_tokens(cfg, reqCtx);
+        else
+            snprintf(g_last_auth_error, 256, "Your Apple session has expired. Sign in again.");
     }
-    DRM_DEBUG("[drm_lib] storefront_id=%s, get_dev_token\n", g_storefront_id);
-    g_dev_token = get_dev_token(reqCtx);
-#ifdef _WIN32
-    if (!g_dev_token && cfg->base_dir && !g_music_token) {
-        /* The device-token endpoint can be unavailable while an authenticated
-         * Music token from the app session is still usable. Try that cache
-         * before failing init. */
-        char tok_path[1024];
-        snprintf(tok_path, sizeof(tok_path), "%s/MUSIC_TOKEN", cfg->base_dir);
-        FILE *tf = fopen(tok_path, "r");
-        if (tf) {
-            char buf[8192];
-            size_t n = fread(buf, 1, sizeof(buf) - 1, tf);
-            fclose(tf);
-            buf[n] = '\0';
-            while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' ')) buf[--n] = '\0';
-            if (n > 0) {
-                g_music_token = strdup(buf);
-                fprintf(stderr, "[drm_lib] dev token unavailable; using cached MUSIC_TOKEN (%zu bytes)\n", n);
-            }
-        }
-    }
-    if (!g_dev_token && !g_music_token) {
-        fprintf(stderr, "[drm_lib] failed to get dev token and no cached MUSIC_TOKEN is available\n");
-        g_init_result = -1;
-#ifdef _WIN32
-        hybris_guest_fs_leave();
-#endif
-        pthread_mutex_unlock(&g_init_mutex);
-        return -1;
-    }
-    if (g_dev_token) {
-        DRM_DEBUG("[drm_lib] dev_token ok, get_music_token\n");
-        g_music_token = get_music_user_token(get_guid(), g_dev_token, reqCtx);
-    }
-#else
-    if (!g_dev_token) {
-        fprintf(stderr, "[drm_lib] failed to get dev token\n");
-        g_init_result = -1;
-        pthread_mutex_unlock(&g_init_mutex);
-        return -1;
-    }
-    DRM_DEBUG("[drm_lib] dev_token ok, get_music_token\n");
-    g_music_token = get_music_user_token(get_guid(), g_dev_token, reqCtx);
-#endif
-    if (!g_music_token && cfg->base_dir) {
-        /* createMusicToken failed (session may be expired) — fall back to the
-         * MUSIC_TOKEN stored in drm/files/ by the web-session path. */
-        char tok_path[1024];
-        snprintf(tok_path, sizeof(tok_path), "%s/MUSIC_TOKEN", cfg->base_dir);
-        FILE *tf = fopen(tok_path, "r");
-        if (tf) {
-            char buf[8192];
-            size_t n = fread(buf, 1, sizeof(buf) - 1, tf);
-            fclose(tf);
-            buf[n] = '\0';
-            while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' || buf[n-1] == ' ')) buf[--n] = '\0';
-            if (n > 0) {
-                g_music_token = strdup(buf);
-                DRM_DEBUG("[drm_lib] music_token: using stored token from disk (%zu bytes)\n", n);
-            }
-        }
-    }
-    if (!g_music_token) {
-        fprintf(stderr, "[drm_lib] failed to get music token\n");
+    if (trc != 0) {
         g_init_result = -1;
 #ifdef _WIN32
         hybris_guest_fs_leave();
@@ -321,19 +355,26 @@ int drm_lib_init(const drm_lib_config_t *cfg)
     return 0;
 }
 
+int drm_lib_init(const drm_lib_config_t *cfg)
+{
+    int rc = drm_lib_init_impl(cfg);
+    forget_credentials();
+    return rc;
+}
+
 /* ── drm_lib_login ──────────────────────────────────────────────────────────*/
 
-int drm_lib_login(const char *username, const char *password)
+static int drm_lib_login_impl(const char *username, const char *password)
 {
     if (!username || !password) return -1;
 
     extern char *amUsername, *amPassword;
-    amUsername = (char *)username;
-    static char pw_buf[256];
-    strncpy(pw_buf, password, sizeof(pw_buf) - 1);
-    pw_buf[sizeof(pw_buf) - 1] = '\0';
-    amPassword = pw_buf;
-    amPasswordLen = strlen(pw_buf);
+    snprintf(g_username_copy, sizeof(g_username_copy), "%s", username);
+    amUsername = g_username_copy;
+    strncpy(g_pw_buf, password, sizeof(g_pw_buf) - 1);
+    g_pw_buf[sizeof(g_pw_buf) - 1] = '\0';
+    amPassword = g_pw_buf;
+    amPasswordLen = strlen(g_pw_buf);
 
     extern uint8_t login(struct shared_ptr ctx);
     if (!login(reqCtx)) {
@@ -341,7 +382,41 @@ int drm_lib_login(const char *username, const char *password)
         return -1;
     }
     DRM_DEBUG("[drm_lib] login ok\n");
+
+    /* A sign-in into a running wrapper (another account, or one that expired) changes the account the
+     * cached tokens belong to: fetch them again, as drm_lib_init does after its own sign-in. */
+    char *sf = get_account_storefront_id(reqCtx);
+    if (!sf) {
+        snprintf(g_last_auth_error, 256, "Signed in, but Apple returned no storefront");
+        return -1;
+    }
+    g_storefront_id = sf;
+    char *dev = get_dev_token(reqCtx);
+    char *mt = dev ? get_music_user_token(get_guid(), dev, reqCtx) : NULL;
+    if (!mt) {
+        snprintf(g_last_auth_error, 256, "Signed in, but Apple returned no music token");
+        return -1;
+    }
+    g_dev_token = dev;
+    g_music_token = mt;
+    if (args_info.base_dir_arg) {
+        write_storefront_id();
+        write_music_token();
+    }
     return 0;
+}
+
+int drm_lib_login(const char *username, const char *password)
+{
+    int rc = drm_lib_login_impl(username, password);
+    forget_credentials();
+    return rc;
+}
+
+/* Why the last sign-in failed, in words fit for the sign-in form ("" when there is nothing to say). */
+const char *drm_lib_last_error(void)
+{
+    return g_last_auth_error;
 }
 
 /* A C++ exception unwinding out of drm_lib_init (or a SVError recovered by longjmp) skips the unlock calls, which would
@@ -350,6 +425,7 @@ int drm_lib_login(const char *username, const char *password)
 void drm_lib_abort_init(void)
 {
     g_init_result = -1;
+    forget_credentials();
     pthread_mutex_trylock(&g_init_mutex); /* held by the aborted init, or free: either way it ends unlocked */
     pthread_mutex_unlock(&g_init_mutex);
     if (g_drm_state_cb) g_drm_state_cb("FAILED", g_drm_state_ud);
