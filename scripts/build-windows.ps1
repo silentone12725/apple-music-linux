@@ -112,8 +112,14 @@ if ($HybrisDir) {
     Copy-Item $QSo $QBackup -Force
     Copy-Item "$HybrisDir\hybris-linker\q.so" $QSo -Force
 }
-# libcrypto plus whatever MSYS2 DLLs it (transitively) imports; system DLLs are skipped.
+# libcrypto plus every MSYS2 DLL that it or the packed binaries (engine, DRM DLL, hybris core) import, transitively;
+# system DLLs are skipped. libdrm_client.dll and libhybris-core.dll need libstdc++, libgcc_s and libwinpthread.
 $queue = [System.Collections.Queue]::new(); $queue.Enqueue('libcrypto-3-x64.dll'); $seen = @{}
+foreach ($bin in 'engine.exe', 'libdrm_client.dll', 'libhybris-core.dll') {
+    if (Test-Path "$Out\$bin") {
+        & "$Msys\objdump.exe" -p "$Out\$bin" | Select-String 'DLL Name' | ForEach-Object { $queue.Enqueue(($_ -split ':')[1].Trim()) }
+    }
+}
 while ($queue.Count) {
     $dll = $queue.Dequeue()
     if ($seen[$dll]) { continue }; $seen[$dll] = $true
