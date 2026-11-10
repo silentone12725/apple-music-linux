@@ -15,6 +15,9 @@
   build and is restored afterwards). Apple's FairPlay libraries are downloaded by the app on first launch.
   Without -HybrisDir the installer is the release one: the DRM DLL is built but the Android runtime is not shipped.
 
+  -EngineExe packs a prebuilt engine.exe instead of running go build (for example one cross-compiled on Linux with
+  llvm-mingw, when Defender blocks the cgo build on Windows).
+
   Prerequisites: MSYS2 UCRT64 (gcc, make, openssl) on PATH, Go, Node, a 64-bit VLC 3.x install,
   and git (to fetch the libvlc headers, which the VLC installer does not ship).
 
@@ -27,6 +30,7 @@ param(
     [string]$VlcInclude = '',      # a directory containing vlc\vlc.h; fetched from VideoLAN's git when empty
     [string]$Msys = 'C:\msys64\ucrt64\bin',
     [string]$HybrisDir = '',       # nightly: a libhybris-win build directory (libhybris-core.dll, hybris-linker\q.so)
+    [string]$EngineExe = '',       # a prebuilt engine.exe (cgo + adamplay_backend, e.g. cross-compiled on Linux) to pack instead of building one
     [switch]$SkipInstaller
 )
 $ErrorActionPreference = 'Stop'
@@ -85,11 +89,16 @@ $env:CGO_ENABLED = '1'
 $env:CC = 'gcc'
 $env:CGO_CFLAGS = "-I$($Link -replace '\\','/')/inc"
 $env:CGO_LDFLAGS = "-L$($Link -replace '\\','/')/vlc -L$($Link -replace '\\','/')/drm"
-Push-Location "$Repo\engine"
-try {
-    go build -tags adamplay_backend -ldflags '-w -s' -trimpath -o "$Out\engine.exe" .\cmd
-    if ($LASTEXITCODE -ne 0) { throw 'engine build failed' }
-} finally { Pop-Location }
+if ($EngineExe) {
+    if (-not (Test-Path $EngineExe)) { throw "-EngineExe: $EngineExe not found" }
+    Copy-Item $EngineExe "$Out\engine.exe"
+} else {
+    Push-Location "$Repo\engine"
+    try {
+        go build -tags adamplay_backend -ldflags '-w -s' -trimpath -o "$Out\engine.exe" .\cmd
+        if ($LASTEXITCODE -ne 0) { throw 'engine build failed' }
+    } finally { Pop-Location }
+}
 
 # ── 3. Runtime DLLs ──────────────────────────────────────────────────────────
 Write-Host '[3/6] runtime DLLs'
