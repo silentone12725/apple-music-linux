@@ -247,7 +247,8 @@ A plain `https://music.apple.com` link clicked in another app opens in your brow
 
 ## Login
 
-Two sign-ins are needed on Linux.
+Linux uses a web session and a native FairPlay session. A password-based web
+sign-in can also start the native sign-in automatically.
 
 ### 1. Apple Music web session
 
@@ -260,6 +261,13 @@ Sign in on first launch the same way you would at music.apple.com. This covers A
 ### 2. Lossless account (lossless, hi-res)
 
 This authenticates the FairPlay layer. Without it, playback falls back to AAC 256 kbps.
+
+When you submit a password in Apple's web sign-in, Adam also attempts the native
+FairPlay sign-in once web authorization succeeds. That password is held in memory
+for at most five minutes while waiting for web authorization and is never saved by
+this flow. Apple may request a separate native verification code. Existing native
+sessions are preserved. With passkeys, an already signed-in web session, or if the
+automatic attempt fails, use the account form below.
 
 1. Click the **Settings** cog wheel next to your account button
 2. Open **Account → Sign In…**, enter your Apple Account email and password, then the six-digit verification code Apple sends you

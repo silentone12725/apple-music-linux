@@ -898,7 +898,29 @@
     return { ok: true, note: res.warning === "durability" ? SIGN_OUT_TEXT.durability : "" };
   }
 
+  // src/engine/mpris-status.js
+  function reconcileVlcMprisStatus({
+    state,
+    positionMs,
+    reportedStatus,
+    paused,
+    loading,
+    seeking
+  }) {
+    if (loading || seeking || !Number.isFinite(positionMs) || positionMs <= 0) {
+      return null;
+    }
+    if (state === "playing" && !paused && reportedStatus !== "Playing") {
+      return "Playing";
+    }
+    if (state === "paused" && paused && reportedStatus === "Playing") {
+      return "Paused";
+    }
+    return null;
+  }
+
   // src/engine-playback.js
+  var _rendererMprisStatus = null;
   var _accountSheetInstance = null;
   var _onAccountSignedIn = null;
   var _accountNote = null;
@@ -4318,7 +4340,20 @@
     }
     if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event("timeupdate"));
     if (++_vlcTickCount % 4 === 0) {
-      window.adamBridge?.mprisUpdate?.({ position: _vlcPosMs * 1e3 });
+      const status = reconcileVlcMprisStatus({
+        state,
+        positionMs: posMs,
+        reportedStatus: _rendererMprisStatus,
+        paused: _vlcPaused,
+        loading: _vlcLoading,
+        seeking: _vlcSeekFrozen
+      });
+      const update = { position: _vlcPosMs * 1e3 };
+      if (status) {
+        update.status = status;
+        _rendererMprisStatus = status;
+      }
+      window.adamBridge?.mprisUpdate?.(update);
     }
     if (_seekBurstLog > 0) {
       _seekBurstLog--;
@@ -7155,6 +7190,7 @@
     };
     function sendMprisStatus(status, { isResume = false } = {}) {
       const seeked = isResume && status === "Playing" && _vlcPosMs > 0;
+      _rendererMprisStatus = status;
       window.adamBridge?.mprisUpdate?.({ status, position: _mprisPosMs() * 1e3, seeked });
     }
     function _pushMiniState() {
@@ -7172,7 +7208,7 @@
         if (mk.nowPlayingItem) sendMprisMetadata(mk.nowPlayingItem);
         _pushMiniState();
         const playing = mk.playbackState === window.MusicKit?.PlaybackStates?.playing;
-        window.adamBridge?.mprisUpdate?.({ status: playing ? "Playing" : "Paused", position: _mprisPosMs() * 1e3 });
+        sendMprisStatus(playing ? "Playing" : "Paused");
       } catch (_) {
       }
     });

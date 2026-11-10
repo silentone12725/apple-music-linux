@@ -31,6 +31,11 @@ import { avSyncAction } from './engine/av-sync.js';
 import { actualDurationSec, lengthDiffers, lengthAfterOverrun } from './engine/track-end.js';
 import { createAccountSheet } from './engine/account-sheet.js';
 import { signOutFlow } from './engine/sign-out.js';
+import { reconcileVlcMprisStatus } from './engine/mpris-status.js';
+
+// Updated by renderer-sent status changes; the authoritative VLC poll can
+// repair a missed MusicKit state event once real audio playback is observed.
+let _rendererMprisStatus = null;
 
 // Apple Account sheet (FairPlay sign-in + verification code), shared by the SSE
 // handler and Settings. The engine runs Apple's sign-in and asks for the code
@@ -3863,9 +3868,21 @@ function _vlcUpdatePosition(posMs, state, mkAudio) {
         if (_mkInstance) bridgeDuration(_mkInstance, _durationSec);
     }
     if (_vlcPosMs !== prevPos) mkAudio.dispatchEvent(new Event('timeupdate'));
-    // Update MPRIS position every ~1s (every 4 ticks × 250ms).
+    // Update MPRIS position every ~1s (every 4 ticks × 250ms). A MusicKit
+    // "playing" event may have been skipped while the VLC position was still
+    // zero, leaving KDE stuck on Stopped despite audible lossless playback.
+    // Only the active, settled VLC playback poll can repair that state.
     if (++_vlcTickCount % 4 === 0) {
-        window.adamBridge?.mprisUpdate?.({ position: _vlcPosMs * 1000 }); // ms → µs
+        const status = reconcileVlcMprisStatus({
+            state, positionMs: posMs, reportedStatus: _rendererMprisStatus,
+            paused: _vlcPaused, loading: _vlcLoading, seeking: _vlcSeekFrozen,
+        });
+        const update = { position: _vlcPosMs * 1000 }; // ms → µs
+        if (status) {
+            update.status = status;
+            _rendererMprisStatus = status;
+        }
+        window.adamBridge?.mprisUpdate?.(update);
     }
     // Burst-log every tick for 20 ticks (5s) after a seek.
     if (_seekBurstLog > 0) {
@@ -7087,6 +7104,7 @@ async function setup() {
         // jumping: on fresh track starts _vlcPosMs is 0/stale until VLC reports
         // its first tick, which causes the seek bar to visibly skip ahead.
         const seeked = isResume && status === 'Playing' && _vlcPosMs > 0;
+        _rendererMprisStatus = status;
         window.adamBridge?.mprisUpdate?.({ status, position: _mprisPosMs() * 1000, seeked });
     }
 
@@ -7113,7 +7131,7 @@ async function setup() {
             if (mk.nowPlayingItem) sendMprisMetadata(mk.nowPlayingItem);
             _pushMiniState();
             const playing = mk.playbackState === window.MusicKit?.PlaybackStates?.playing;
-            window.adamBridge?.mprisUpdate?.({ status: playing ? 'Playing' : 'Paused', position: _mprisPosMs() * 1000 });
+            sendMprisStatus(playing ? 'Playing' : 'Paused');
         } catch (_) {}
     });
 
