@@ -430,7 +430,7 @@
     const focus = Math.min(index + digits.length, CODE_LENGTH - 1);
     return { digits: next, focus };
   }
-  function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null }) {
+  function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null, challengeId = null }) {
     const st = snap?.state ?? {};
     if (st.fairplay === "ready" || snap?.capabilities?.cbcs === true || st.authentication === "logged_in") {
       return open ? "close" : "none";
@@ -440,6 +440,7 @@
       if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "code";
       if (view !== "code") return "code";
       if (submittedId != null && ch.id !== submittedId) return "retry";
+      if (submittedId == null && challengeId != null && ch.id !== challengeId) return "code";
       return "none";
     }
     if (ch?.type === "dialog_choice") {
@@ -497,6 +498,9 @@
 #adam-account .code-links button.link-sm:hover{color:rgba(235,235,245,.8)}
 #adam-account .choice-list{align-self:stretch;display:flex;flex-direction:column;gap:6px;margin:4px 0 0}
 #adam-account .choice-list button{width:100%;justify-content:flex-start;text-align:left;padding:0 12px;height:36px;border-radius:8px;font-size:13px}
+#adam-account .phone-opts{align-self:stretch;display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin:8px 0 0;padding:8px 10px;background:rgba(255,255,255,.06);border-radius:8px}
+#adam-account .phone-opts button:not(.link-sm){width:100%;justify-content:flex-start;text-align:left;padding:0 10px;height:34px;border-radius:7px;font-size:13px}
+#adam-account .phone-opts .link-sm{align-self:center;margin-top:2px}
 #adam-account .bar{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px 14px;
   border-top:.5px solid rgba(255,255,255,.08);background:rgba(255,255,255,.02)}
 #adam-account button{min-width:76px;height:24px;padding:0 12px;border:0;border-radius:6px;cursor:default;
@@ -698,8 +702,30 @@
       const resendBtn = el(doc, "button", { type: "button", class: "link-sm" }, "Resend code");
       resendBtn.addEventListener("click", () => submitSpecialCode("__resend__", "Resending\u2026"));
       const cantBtn = el(doc, "button", { type: "button", class: "link-sm" }, "Can\u2019t get to your devices?");
-      cantBtn.addEventListener("click", () => submitSpecialCode("__cant_devices__", "Loading options\u2026"));
       const codeLinks = el(doc, "div", { class: "code-links" }, resendBtn, "\xB7", cantBtn);
+      let phoneOptsEl = null;
+      function closePhoneOpts() {
+        phoneOptsEl?.remove();
+        phoneOptsEl = null;
+      }
+      cantBtn.addEventListener("click", () => {
+        if (phoneOptsEl) {
+          closePhoneOpts();
+          return;
+        }
+        if (busy) return;
+        phoneOptsEl = el(doc, "div", { class: "phone-opts" });
+        const smsBtn = button("Text me a verification code", {
+          onClick: () => {
+            closePhoneOpts();
+            submitSpecialCode("__cant_devices__", "Sending SMS\u2026");
+          }
+        });
+        const cancelLink = el(doc, "button", { type: "button", class: "link-sm" }, "Cancel");
+        cancelLink.addEventListener("click", closePhoneOpts);
+        phoneOptsEl.append(smsBtn, cancelLink);
+        codeLinks.after(phoneOptsEl);
+      });
       primary = button("Continue", { isPrimary: true, onClick: submitCodeNow });
       render(
         [
@@ -746,7 +772,6 @@
       if (busy) return;
       setMessage("");
       setBusy(true, busyLabel);
-      submittedId = challengeId;
       let ok = false;
       try {
         ok = await submitCode(value);
@@ -755,7 +780,6 @@
       }
       if (view !== "code") return;
       if (!ok) {
-        submittedId = null;
         setBusy(false);
         setMessage("Could not send. Try again.", true);
       }
@@ -835,7 +859,7 @@
       if (running) onCancel();
     }
     function onSnapshot(snap) {
-      const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId });
+      const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
       if (snap?.challenge?.type === "two_factor" || snap?.challenge?.type === "dialog_choice") {
         challengeId = snap.challenge.id ?? null;
       }
@@ -1898,7 +1922,7 @@
       title = "Spatial Audio";
       detail = "Dolby Atmos \xB7 Binaural";
     } else if (codec === "alac") {
-      const hiRes = sampleRate > 48e3 || bitDepth > 16;
+      const hiRes = sampleRate > 48e3;
       const khz = sampleRate ? `${(sampleRate / 1e3).toFixed(sampleRate % 1e3 ? 1 : 0)} kHz` : "";
       const bits = bitDepth && bitDepth > 16 ? `${bitDepth}-bit ` : "";
       title = hiRes ? "Lossless" : "Lossless";
@@ -1933,7 +1957,7 @@
       label = "SPATIAL AUDIO";
       isSpatial = true;
     } else if (codec === "alac") {
-      isHiRes = sampleRate > 48e3 || bitDepth > 16;
+      isHiRes = sampleRate > 48e3;
       color = "#30d158";
       label = isHiRes ? "HI-RES" : "";
     } else {
@@ -1992,11 +2016,11 @@
     let _npBadge = null;
     let _npBadgeLast = "";
     function _npContent() {
-      const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
+      const { codec, sampleRate, spatialAudio } = _qualityBadgeInfo;
       if (spatialAudio === "binaural-lossless" || spatialAudio === "binaural")
         return { show: true, label: "Spatial Audio", icon: false };
       if (codec === "alac") {
-        const hi = sampleRate > 48e3 || bitDepth > 16;
+        const hi = sampleRate > 48e3;
         return { show: true, label: hi ? "Hi-Res Lossless" : "Lossless", icon: true };
       }
       return { show: false };

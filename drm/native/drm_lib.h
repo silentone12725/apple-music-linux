@@ -113,6 +113,10 @@ int drm_lib_login(const char *username, const char *password);
 /* Why the last sign-in or init failed, in words fit for the sign-in form ("" when unknown). */
 const char *drm_lib_last_error(void);
 
+/* Call on a thread before it first runs Apple's Android code (no-op off Windows). Android
+ * code skips the stack probes Windows needs, so its large frames would otherwise fault. */
+void hybris_commit_thread_stack(void);
+
 #ifdef __cplusplus
 }
 #endif

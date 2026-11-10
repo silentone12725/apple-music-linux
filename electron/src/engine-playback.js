@@ -1267,7 +1267,7 @@ function _showQualityPopup(anchorEl) {
         title  = 'Spatial Audio';
         detail = 'Dolby Atmos · Binaural';
     } else if (codec === 'alac') {
-        const hiRes = sampleRate > 48000 || bitDepth > 16;
+        const hiRes = sampleRate > 48000;
         const khz   = sampleRate ? `${(sampleRate / 1000).toFixed(sampleRate % 1000 ? 1 : 0)} kHz` : '';
         const bits  = bitDepth && bitDepth > 16 ? `${bitDepth}-bit ` : '';
         title  = hiRes ? 'Lossless' : 'Lossless';
@@ -1315,7 +1315,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
         label    = 'SPATIAL AUDIO';
         isSpatial = true;
     } else if (codec === 'alac') {
-        isHiRes  = sampleRate > 48000 || bitDepth > 16;
+        isHiRes  = sampleRate > 48000; // Apple: 48 kHz/24-bit is Lossless, Hi-Res is above 48 kHz
         color    = '#30d158';
         label    = isHiRes ? 'HI-RES' : '';
     } else {
@@ -1397,11 +1397,11 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
     let _npBadgeLast = ''; // last rendered content key — skip DOM write when unchanged
 
     function _npContent() {
-        const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
+        const { codec, sampleRate, spatialAudio } = _qualityBadgeInfo;
         if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural')
             return { show: true, label: 'Spatial Audio', icon: false };
         if (codec === 'alac') {
-            const hi = sampleRate > 48000 || bitDepth > 16;
+            const hi = sampleRate > 48000;
             return { show: true, label: hi ? 'Hi-Res Lossless' : 'Lossless', icon: true };
         }
         return { show: false };

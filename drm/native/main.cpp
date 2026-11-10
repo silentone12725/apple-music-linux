@@ -65,6 +65,7 @@
 extern "C" void refresh_decrypt_ctx(void);
 extern "C" int  is_preshare_ctx_ready(void);
 extern "C" void handle(int fd);
+extern "C" void hybris_commit_thread_stack(void);
 
 // ---------------------------------------------------------------------------
 // RecoveryState — the daemon's lifecycle state machine
@@ -125,6 +126,7 @@ static void schedule_recovery(int code)
 
 static void recovery_worker()
 {
+    hybris_commit_thread_stack(); // refresh_decrypt_ctx() runs Apple's lease and key code on this thread
     int consec_fails = 0;
 
     while (true) {

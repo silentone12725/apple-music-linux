@@ -30,7 +30,7 @@ export function spreadDigits(current, index, text) {
  * Snapshots keep a pending challenge until sign-in moves on, so challenges are
  * told apart by ID, and a challenge the user cancelled is not reopened.
  */
-export function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null }) {
+export function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null, challengeId = null }) {
     const st = snap?.state ?? {};
     if (st.fairplay === 'ready' || snap?.capabilities?.cbcs === true || st.authentication === 'logged_in') {
         return open ? 'close' : 'none';
@@ -40,6 +40,9 @@ export function promptAction(snap, { open, view = null, submittedId = null, dism
         if (!open) return ch.id != null && ch.id === dismissedId ? 'none' : 'code';
         if (view !== 'code') return 'code';
         if (submittedId != null && ch.id !== submittedId) return 'retry';
+        // New challenge arrived after a special code (resend / can't-reach-devices):
+        // submittedId is null but the challenge ID changed — reset to fresh code entry.
+        if (submittedId == null && challengeId != null && ch.id !== challengeId) return 'code';
         return 'none';
     }
     if (ch?.type === 'dialog_choice') {

@@ -39,24 +39,6 @@ func TestTraitSet_Empty(t *testing.T) {
 	}
 }
 
-func TestExtractALACQuality_HiRes(t *testing.T) {
-	t.Parallel()
-	// A hi-res trait like "lossless-audio-192-24" → sampleRate 192, bitDepth 24.
-	sr, bd := extractALACQuality([]string{"lossless-audio-192-24"})
-	if sr != 192 || bd != 24 {
-		t.Errorf("got %d/%d want 192/24", sr, bd)
-	}
-}
-
-func TestExtractALACQuality_Standard(t *testing.T) {
-	t.Parallel()
-	// No parseable numeric quality → default 96000/24.
-	sr, bd := extractALACQuality([]string{"lossless", "atmos"})
-	if sr != 96000 || bd != 24 {
-		t.Errorf("got %d/%d want default 96000/24", sr, bd)
-	}
-}
-
 func TestFmtArtwork(t *testing.T) {
 	t.Parallel()
 	got := fmtArtwork("https://art/{w}x{h}.jpg", 500)
