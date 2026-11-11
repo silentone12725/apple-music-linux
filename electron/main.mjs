@@ -684,7 +684,7 @@ function _applyThemeVars(palette) {
         setVar('--adam-bg-color', ${bg});
         // Apple's page paints its own tinted controls (sidebar icons, links, toggles) from --systemBlue*;
         // the theme's accent replaces that blue so the palette stays consistent (Apple Music = pink, New Blue = blue).
-        for (const n of ${JSON.stringify(SYSTEM_BLUE_VARS)}) setVar(n, ${JSON.stringify(p.accent || '')});
+        for (const n of ${JSON.stringify(SYSTEM_BLUE_VARS)}) setVar(n, ${JSON.stringify(p.tint || p.accent || '')});
         let bd = document.getElementById('_adamAccentBg');
         if (!bd) {
             bd = document.createElement('div');
@@ -1720,7 +1720,7 @@ ipcMain.on = (channel, fn) => _ipcOn(channel, (event, ...args) => {
 // fill the disk, smuggle path separators into a dialog's default name, or poison prefs.
 function _str(v, max = 256) { return typeof v === 'string' && v.length > 0 && v.length <= max; }
 function _safeName(v) { return String(v).replace(/[^\w .()-]/g, '_').slice(0, 64) || 'preset'; }
-const _PALETTE_KEYS = new Set(['accent', 'bgColor', 'navBg', 'navBorder', 'accentActive', 'appearance']);
+const _PALETTE_KEYS = new Set(['accent', 'tint', 'bgColor', 'navBg', 'navBorder', 'accentActive', 'appearance']);
 const _COLOR_RE = /^[#a-zA-Z0-9(),.%\s/-]{1,64}$/;
 function _paletteEntryOk(key, value) {
     if (!_PALETTE_KEYS.has(key) || typeof value !== 'string') return false;

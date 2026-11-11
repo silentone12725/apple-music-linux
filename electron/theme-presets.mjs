@@ -5,6 +5,8 @@ export const DEFAULT_PRESET = 'Apple Music';
 export const BUILTIN_PRESETS = {
     'Apple Music': () => ({
         accent:       '#fc3c44',
+        // Where Apple's page uses its blue (sidebar icons, links): the pink of the app icon.
+        tint:         '#fb5c74',
         appearance:   'dark',
         bgColor:      '#000000',
         navBg:        '#303030',
@@ -38,7 +40,7 @@ export function migrateThemePrefs(prefs) {
     return true;
 }
 
-const PALETTE_COLOR_KEYS = ['accent', 'bgColor', 'navBg', 'navBorder', 'accentActive'];
+const PALETTE_COLOR_KEYS = ['accent', 'tint', 'bgColor', 'navBg', 'navBorder', 'accentActive'];
 // Colour syntax only: no quotes, semicolons, braces, url() or backslashes can get through.
 const SAFE_COLOR = /^[#\w\s().,%/+-]{0,100}$/;
 
