@@ -668,8 +668,6 @@ function _findInNavStack(stack, cursor, href) {
         : /\/library\//.test(path) ? 'grid'
         : 'shelves';
     const bar = (w, h, extra = '') => `<div class="sk" style="width:${w};height:${h}px;${extra}"></div>`;
-    const tiles = (n, w, h, lines) => `<div class="row" style="grid-template-columns:repeat(${n},1fr)">` +
-        Array.from({ length: n }, () => `<div><div class="sk art" style="height:${h}px"></div>${lines ? bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px') : ''}</div>`).join('') + '</div>';
     const buildSkel = (kind, w) => {
         const inner = Math.max(300, w - 80);
         const cols = (tile) => Math.max(2, Math.round((inner + 20) / (tile + 20) - 0.2));
@@ -687,10 +685,14 @@ function _findInNavStack(stack, cursor, href) {
             return bar('220px', 28, 'margin:36px 0 22px') + `<div class="row" style="grid-template-columns:repeat(${cols(180)},1fr);row-gap:24px">${Array.from({ length: cols(180) * 3 }, () =>
                 `<div><div class="sk art" style="aspect-ratio:1"></div>${bar('70%', 12, 'margin-top:8px')}${bar('45%', 12, 'margin-top:3px')}</div>`).join('')}</div>`;
         }
-        const big = Math.max(2, Math.min(3, cols(273)));
-        return bar('150px', 34, 'margin:36px 0 18px') + head(150).replace('margin:30px 0 12px', 'margin:0 0 12px') +
-            tiles(big, 273, 364, true).replace('<div class="sk art" style="height:364px">', '<div class="sk art" style="height:364px">') +
-            head(160) + tiles(cols(200), 200, 200, true);
+        // Home-style shelves scroll sideways, so the last tile runs off the right edge instead of ending at the padding.
+        const shelf = (w, h, lines) => `<div style="display:flex;gap:20px;margin-right:-40px">` +
+            Array.from({ length: Math.ceil((inner + 40) / (w + 20)) + 1 }, () =>
+                `<div style="flex:none;width:${w}px"><div class="sk art" style="height:${h}px"></div>${lines ? bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px') : ''}</div>`).join('') + '</div>';
+        const big = Math.round(inner * 0.3227), sq = Math.round(inner * 0.2364);
+        const shead = (t, top, bottom) => bar(`${t}px`, 17, `margin:${top}px 0 ${bottom}px`);
+        return bar('120px', 30, 'margin:36px 0 0') + shead(150, 48, 12) + shelf(big, Math.round(big * 1.333), false) +
+            shead(160, 54, 15) + shelf(sq, sq, true);
     };
     document.documentElement.appendChild(skel);
     const mainEl = () => document.querySelector('main') || document.querySelector('[role=main]');
