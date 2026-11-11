@@ -11,6 +11,15 @@ export const BUILTIN_PRESETS = {
         navBorder:    '#3b3b3b',
         accentActive: 'hsla(358, 87%, 60%, 0.28)',
     }),
+    // Apple's system blue, read from the page's own --systemBlue token (#0a84ff).
+    'New Blue': () => ({
+        accent:       '#0a84ff',
+        appearance:   'dark',
+        bgColor:      '#000000',
+        navBg:        '#303030',
+        navBorder:    '#3b3b3b',
+        accentActive: 'hsla(211, 100%, 52%, 0.28)',
+    }),
 };
 
 export const defaultPalette = () => BUILTIN_PRESETS[DEFAULT_PRESET]();

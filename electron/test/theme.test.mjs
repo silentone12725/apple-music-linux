@@ -5,8 +5,9 @@ import assert from 'node:assert/strict';
 import { BUILTIN_PRESETS, DEFAULT_PRESET, defaultPalette, migrateThemePrefs, THEME_VERSION } from '../theme-presets.mjs';
 import { parseGsettingsUri, gnomeWallpaperPath, imageMime } from '../wallpaper.mjs';
 
-test('the one built-in preset is a fixed neutral palette with red only as the accent', () => {
-    assert.deepEqual(Object.keys(BUILTIN_PRESETS), ['Apple Music']);
+test('the built-in presets are fixed neutral palettes, the default with red as the accent', () => {
+    assert.deepEqual(Object.keys(BUILTIN_PRESETS), ['Apple Music', 'New Blue']);
+    assert.equal(BUILTIN_PRESETS['New Blue']().accent, '#0a84ff');
     assert.equal(DEFAULT_PRESET, 'Apple Music');
     const p = defaultPalette();
     assert.equal(p.accent, '#fc3c44');

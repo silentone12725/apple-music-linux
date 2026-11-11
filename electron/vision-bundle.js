@@ -623,10 +623,24 @@ function _findInNavStack(stack, cursor, href) {
         #adam-nav-activity[hidden] { display: none; }
         #adam-nav-activity svg { display: block; width: 100%; height: 100%;
             animation: adam-nav-spin 1s steps(12) infinite; }
+        #adam-nav-skel { position: fixed; z-index: 5; pointer-events: none; box-sizing: border-box;
+            padding: 0 40px; overflow: hidden; color: var(--adam-nav-text, #fff); }
+        /* No background of its own: the old page is hidden instead, so whatever the theme paints behind
+           the page (palette colour, blurred wallpaper, compositor blur, plain black) shows through. */
+        html.adam-nav-loading main { visibility: hidden !important; }
+        #adam-nav-skel[hidden] { display: none; }
+        #adam-nav-skel .sk { background: color-mix(in srgb, currentColor 10%, transparent); border-radius: 4px; position: relative; overflow: hidden; }
+        #adam-nav-skel .sk::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+            background: linear-gradient(90deg, transparent, color-mix(in srgb, currentColor 8%, transparent), transparent);
+            animation: adam-nav-sheen 1.3s infinite; }
+        #adam-nav-skel .row { display: grid; gap: 20px; }
+        #adam-nav-skel .art { border-radius: 10px; }
+        @keyframes adam-nav-sheen { to { transform: translateX(100%); } }
         @keyframes adam-nav-spin { to { transform: rotate(360deg); } }
         @keyframes adam-nav-pulse { 50% { opacity: 0.35; } }
         @media (prefers-reduced-motion: reduce) {
             #adam-nav-activity svg { animation: adam-nav-pulse 1.4s ease-in-out infinite; }
+            #adam-nav-skel .sk::after { animation: none; }
         }`;
     document.documentElement.appendChild(css);
     const el = document.createElement('div');
@@ -641,7 +655,57 @@ function _findInNavStack(stack, cursor, href) {
     el.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">${ticks}</svg>`;
     document.documentElement.appendChild(el);
 
-    let link = null, from = '', showTimer = null, poll = null;
+    // Placeholder over the content area while the next page's tiles are still on their way.
+    const skel = document.createElement('div');
+    skel.id = 'adam-nav-skel';
+    skel.hidden = true;
+    skel.setAttribute('aria-hidden', 'true');
+    // Mirrors the page's own geometry (measured on the live DOM): 40px side padding, 20px gaps, 17px/700
+    // shelf headings, 10px-radius artwork, 12px/15px lockup lines. The kind of page comes from the target path.
+    const kindOf = (path) =>
+        /\/search/.test(path) ? 'search'
+        : /\/(library\/songs|playlist|album|station)\b/.test(path) || /\/library\/playlist/.test(path) ? 'rows'
+        : /\/library\//.test(path) ? 'grid'
+        : 'shelves';
+    const bar = (w, h, extra = '') => `<div class="sk" style="width:${w};height:${h}px;${extra}"></div>`;
+    const tiles = (n, w, h, lines) => `<div class="row" style="grid-template-columns:repeat(${n},1fr)">` +
+        Array.from({ length: n }, () => `<div><div class="sk art" style="height:${h}px"></div>${lines ? bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px') : ''}</div>`).join('') + '</div>';
+    const buildSkel = (kind, w) => {
+        const inner = Math.max(300, w - 80);
+        const cols = (tile) => Math.max(2, Math.round((inner + 20) / (tile + 20) - 0.2));
+        const head = (t) => bar(`${t}px`, 17, 'margin:30px 0 12px');
+        if (kind === 'search') {
+            return bar('100%', 36, 'border-radius:18px;margin:12px 0 28px;max-width:372px;margin-left:auto;margin-right:auto') +
+                head(160) + `<div style="height:70px;width:269px;margin-bottom:28px;border-radius:7px" class="sk"></div>` + head(170) +
+                `<div class="row" style="grid-template-columns:repeat(${cols(269)},1fr)">${Array.from({ length: cols(269) * 3 }, () => '<div class="sk art" style="height:151px"></div>').join('')}</div>`;
+        }
+        if (kind === 'rows') {
+            return bar('34%', 28, 'margin:36px 0 24px') + Array.from({ length: 10 }, () =>
+                `<div style="display:flex;align-items:center;gap:12px;height:56px;border-top:1px solid color-mix(in srgb, currentColor 7%, transparent)">${bar('40px', 40, 'flex:none')}<div style="flex:1">${bar('38%', 12)}${bar('22%', 10, 'margin-top:6px')}</div></div>`).join('');
+        }
+        if (kind === 'grid') {
+            return bar('220px', 28, 'margin:36px 0 22px') + `<div class="row" style="grid-template-columns:repeat(${cols(180)},1fr);row-gap:24px">${Array.from({ length: cols(180) * 3 }, () =>
+                `<div><div class="sk art" style="aspect-ratio:1"></div>${bar('70%', 12, 'margin-top:8px')}${bar('45%', 12, 'margin-top:3px')}</div>`).join('')}</div>`;
+        }
+        const big = Math.max(2, Math.min(3, cols(273)));
+        return bar('150px', 34, 'margin:36px 0 18px') + head(150).replace('margin:30px 0 12px', 'margin:0 0 12px') +
+            tiles(big, 273, 364, true).replace('<div class="sk art" style="height:364px">', '<div class="sk art" style="height:364px">') +
+            head(160) + tiles(cols(200), 200, 200, true);
+    };
+    document.documentElement.appendChild(skel);
+    const mainEl = () => document.querySelector('main') || document.querySelector('[role=main]');
+    const placeSkel = () => {
+        const m = mainEl();
+        if (!m) return false;
+        const r = m.getBoundingClientRect();
+        Object.assign(skel.style, { left: `${Math.round(r.left)}px`, top: `${Math.round(r.top)}px`,
+            width: `${Math.round(r.width)}px`, height: `${Math.round(innerHeight - r.top)}px` });
+        return true;
+    };
+    // The new page has real content once its artwork or list rows are in the content area.
+    const pageReady = () => !!mainEl()?.querySelector('[data-testid="artwork-component"], [data-testid="track-list-item"], .songs-list-row');
+
+    let link = null, from = '', to = '', showTimer = null, poll = null;
     const place = () => {
         const r = link.getBoundingClientRect();
         el.style.left = `${Math.round(r.right - 30)}px`;
@@ -649,7 +713,7 @@ function _findInNavStack(stack, cursor, href) {
     };
     const stop = () => {
         clearTimeout(showTimer); clearInterval(poll);
-        showTimer = poll = null; link = null; el.hidden = true;
+        showTimer = poll = null; link = null; el.hidden = true; skel.hidden = true; document.documentElement.classList.remove('adam-nav-loading');
     };
     window.addEventListener('click', (e) => {
         if (!e.isTrusted || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
@@ -659,13 +723,13 @@ function _findInNavStack(stack, cursor, href) {
         try { path = new URL(a.href, location.href).pathname; } catch { return; }
         if (path === location.pathname) return;
         stop();
-        link = a; from = location.pathname;
+        link = a; from = location.pathname; to = path;
         el.setAttribute('aria-label', `Loading ${(a.textContent || '').trim()}`);
         const started = Date.now();
-        showTimer = setTimeout(() => { if (link) { place(); el.hidden = false; } }, SHOW_AFTER_MS);
+        showTimer = setTimeout(() => { if (link) { place(); el.hidden = false; if (placeSkel()) { skel.hidden = false; skel.innerHTML = buildSkel(kindOf(to), skel.clientWidth || 926); document.documentElement.classList.add('adam-nav-loading'); } } }, SHOW_AFTER_MS);
         poll = setInterval(() => {
-            if (location.pathname !== from || Date.now() - started > GIVE_UP_MS) stop();
-            else if (!el.hidden) place();
+            if (Date.now() - started > GIVE_UP_MS || (location.pathname !== from && pageReady())) stop();
+            else if (!el.hidden) { place(); placeSkel(); }
         }, 100);
     }, true);
 })();
