@@ -345,7 +345,7 @@ The script builds the DRM DLL and the CGO engine, packs the hybris runtime next 
 
 ### Publishing a nightly
 
-Name the files `adam-nightly-<date>-linux.run` and `adam-setup-nightly-<date>-windows-drm.exe`, put them in a shared folder with a `SHA256SUMS`, and post the link in the nightly channel with a short list of what changed. Never commit `drm/files` (a personal Apple session) or Apple's FairPlay libraries.
+Name the files `adam-nightly-<date>-linux.run` and `adam-setup-nightly-<date>-windows-drm.exe`, put them in a shared folder with a `SHA256SUMS`, and post the link in the nightly channel. Keep the changelog separate from that announcement: add the build's entry at the top of `NIGHTLY_CHANGELOG.md` (the history, newest first) and post the same entry as its own message in the nightly channel. Never commit `drm/files` (a personal Apple session) or Apple's FairPlay libraries.
 
 ### Testing the first-launch download
 
