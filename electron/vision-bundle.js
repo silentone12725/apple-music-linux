@@ -666,6 +666,7 @@ function _findInNavStack(stack, cursor, href) {
         /\/search/.test(path) ? 'search'
         : /\/(library\/songs|playlist|album|station)\b/.test(path) || /\/library\/playlist/.test(path) ? 'rows'
         : /\/library\//.test(path) ? 'grid'
+        : /\/new\/?$/.test(path) ? 'new'
         : 'shelves';
     const bar = (w, h, extra = '') => `<div class="sk" style="width:${w};height:${h}px;${extra}"></div>`;
     const buildSkel = (kind, w) => {
@@ -684,6 +685,17 @@ function _findInNavStack(stack, cursor, href) {
         if (kind === 'grid') {
             return bar('220px', 28, 'margin:36px 0 22px') + `<div class="row" style="grid-template-columns:repeat(${cols(180)},1fr);row-gap:24px">${Array.from({ length: cols(180) * 3 }, () =>
                 `<div><div class="sk art" style="aspect-ratio:1"></div>${bar('70%', 12, 'margin-top:8px')}${bar('45%', 12, 'margin-top:3px')}</div>`).join('')}</div>`;
+        }
+        if (kind === 'new') {
+            // Wide editorial cards (eyebrow, two-line title, artwork), then a square shelf and a song list.
+            const hero = Math.round(inner * 0.4965), sqn = Math.round(inner * 0.2364);
+            const row = (w, h, body) => `<div style="display:flex;gap:20px;margin-right:-40px">` + Array.from({ length: Math.ceil((inner + 40) / (w + 20)) + 1 }, () => `<div style="flex:none;width:${w}px">${body(h)}</div>`).join('') + '</div>';
+            const songs = Array.from({ length: 3 }, () => `<div style="display:flex;align-items:center;gap:12px;height:55px">${bar('40px', 40, 'flex:none')}<div style="flex:1">${bar('36%', 12)}${bar('20%', 10, 'margin-top:6px')}</div></div>`).join('');
+            return bar('90px', 30, 'margin:37px 0 0') +
+                row(hero, 241, (h) => bar('30%', 10, 'margin-top:35px') + bar('72%', 17, 'margin-top:8px') + bar('44%', 17, 'margin-top:6px') + `<div class="sk art" style="height:${h}px;margin-top:19px"></div>`) +
+                bar('126px', 17, 'margin:46px 0 16px') +
+                row(sqn, sqn, (h) => `<div class="sk art" style="height:${h}px"></div>` + bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px')) +
+                bar('155px', 17, 'margin:50px 0 14px') + songs;
         }
         // Home-style shelves scroll sideways, so the last tile runs off the right edge instead of ending at the padding.
         const shelf = (w, h, lines) => `<div style="display:flex;gap:20px;margin-right:-40px">` +
