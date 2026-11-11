@@ -664,26 +664,51 @@ function _findInNavStack(stack, cursor, href) {
     // shelf headings, 10px-radius artwork, 12px/15px lockup lines. The kind of page comes from the target path.
     const kindOf = (path) =>
         /\/search/.test(path) ? 'search'
-        : /\/(library\/songs|playlist|album|station)\b/.test(path) || /\/library\/playlist/.test(path) ? 'rows'
+        : /\/library\/artists\/?$/.test(path) ? 'artists'
+        : /\/library\/music-videos\/?$/.test(path) ? 'videos'
+        : /\/(library\/playlist|playlist|album)\/[^/]+/.test(path) ? 'detail'
+        : /\/(library\/songs|station)\b/.test(path) ? 'rows'
         : /\/library\//.test(path) ? 'grid'
         : /\/new\/?$/.test(path) ? 'new'
         : 'shelves';
     const bar = (w, h, extra = '') => `<div class="sk" style="width:${w};height:${h}px;${extra}"></div>`;
-    const buildSkel = (kind, w) => {
+    const buildSkel = (kind, w, h) => {
+        const need = (px, pitch) => Math.max(2, Math.ceil(px / pitch) + 1); // rows to fill the window height
         const inner = Math.max(300, w - 80);
         const cols = (tile) => Math.max(2, Math.round((inner + 20) / (tile + 20) - 0.2));
         const head = (t) => bar(`${t}px`, 17, 'margin:30px 0 12px');
         if (kind === 'search') {
             return bar('100%', 36, 'border-radius:18px;margin:12px 0 28px;max-width:372px;margin-left:auto;margin-right:auto') +
                 head(160) + `<div style="height:70px;width:269px;margin-bottom:28px;border-radius:7px" class="sk"></div>` + head(170) +
-                `<div class="row" style="grid-template-columns:repeat(${cols(269)},1fr)">${Array.from({ length: cols(269) * 3 }, () => '<div class="sk art" style="height:151px"></div>').join('')}</div>`;
+                `<div class="row" style="grid-template-columns:repeat(${cols(269)},1fr)">${Array.from({ length: cols(269) * need(h - 250, 171) }, () => '<div class="sk art" style="height:151px"></div>').join('')}</div>`;
+        }
+        // Absolutely placed blocks, offsets measured on the live pages (content box starts at the 40px padding).
+        const at = (l, t, w, h, extra = '') => `<div class="sk" style="position:absolute;left:${l};top:${t}px;width:${w};height:${h}px;${extra}"></div>`;
+        const titleBand = () => bar('110px', 15, 'margin:9px auto 14px');
+        if (kind === 'videos') {
+            return titleBand() + `<div class="row" style="grid-template-columns:repeat(${cols(197)},1fr);row-gap:34px">${Array.from({ length: cols(197) * need(h - 38, 180) }, () =>
+                `<div><div class="sk art" style="aspect-ratio:16/9;border-radius:7px"></div>${bar('70%', 12, 'margin-top:8px')}${bar('45%', 12, 'margin-top:3px')}</div>`).join('')}</div>`;
+        }
+        if (kind === 'artists') {
+            // Two panes: the artist list (240px, 54px rows with round avatars) and the selected artist's albums.
+            const list = Array.from({ length: need(h - 38, 54) }, (_, i) => `<div style="display:flex;align-items:center;gap:12px;height:54px;padding:0 10px;border-bottom:1px solid color-mix(in srgb, currentColor 7%, transparent);${i === 0 ? 'background:color-mix(in srgb, currentColor 10%, transparent)' : ''}"><div class="sk" style="width:36px;height:36px;border-radius:50%;flex:none"></div>${bar(`${50 + (i * 17) % 35}%`, 12)}</div>`).join('');
+            return `<div style="position:absolute;inset:0"><div style="position:absolute;left:0;right:0;top:0">${bar('110px', 15, 'margin:9px auto 14px')}</div>
+                <div style="position:absolute;left:0;top:38px;width:240px">${list}</div>
+                <div style="position:absolute;left:280px;top:0;right:40px;bottom:0">${bar('90px', 26, 'position:absolute;left:0;top:48px')}${bar('300px', 300, 'position:absolute;left:0;top:118px;border-radius:7px')}${bar('240px', 12, 'position:absolute;left:0;top:428px')}${bar('60px', 12, 'position:absolute;left:0;top:446px')}</div></div>`;
+        }
+        if (kind === 'detail') {
+            const rows = Array.from({ length: need(h - 386, 54) }, (_, i) => { const y = 386 + i * 54;
+                return at('7px', y + 7, '40px', 40, 'border-radius:5px') + at('59px', y + 20, `${28 + (i * 13) % 22}%`, 12) + at('50%', y + 20, '17%', 12) + at('calc(100% - 68px)', y + 20, '36px', 12); }).join('');
+            return `<div style="position:relative;height:100%">${at('0', 44, '270px', 270, 'border-radius:10px')}${at('304px', 121, '48%', 30)}${at('304px', 160, '22%', 24)}${at('304px', 190, '16%', 12)}
+                ${at('304px', 278, '36px', 36, 'border-radius:50%')}${at('352px', 278, '130px', 36, 'border-radius:18px')}${at('494px', 278, '36px', 36, 'border-radius:50%')}
+                ${at('7px', 363, '40px', 12)}${at('50%', 363, '48px', 12)}${at('calc(100% - 68px)', 363, '36px', 12)}${rows}</div>`;
         }
         if (kind === 'rows') {
-            return bar('34%', 28, 'margin:36px 0 24px') + Array.from({ length: 10 }, () =>
+            return bar('34%', 28, 'margin:36px 0 24px') + Array.from({ length: need(h - 90, 56) }, () =>
                 `<div style="display:flex;align-items:center;gap:12px;height:56px;border-top:1px solid color-mix(in srgb, currentColor 7%, transparent)">${bar('40px', 40, 'flex:none')}<div style="flex:1">${bar('38%', 12)}${bar('22%', 10, 'margin-top:6px')}</div></div>`).join('');
         }
         if (kind === 'grid') {
-            return bar('220px', 28, 'margin:36px 0 22px') + `<div class="row" style="grid-template-columns:repeat(${cols(180)},1fr);row-gap:24px">${Array.from({ length: cols(180) * 3 }, () =>
+            return bar('220px', 28, 'margin:36px 0 22px') + `<div class="row" style="grid-template-columns:repeat(${cols(180)},1fr);row-gap:24px">${Array.from({ length: cols(180) * need(h - 80, 230) }, () =>
                 `<div><div class="sk art" style="aspect-ratio:1"></div>${bar('70%', 12, 'margin-top:8px')}${bar('45%', 12, 'margin-top:3px')}</div>`).join('')}</div>`;
         }
         if (kind === 'new') {
@@ -695,7 +720,8 @@ function _findInNavStack(stack, cursor, href) {
                 row(hero, 241, (h) => bar('30%', 10, 'margin-top:35px') + bar('72%', 17, 'margin-top:8px') + bar('44%', 17, 'margin-top:6px') + `<div class="sk art" style="height:${h}px;margin-top:19px"></div>`) +
                 bar('126px', 17, 'margin:46px 0 16px') +
                 row(sqn, sqn, (h) => `<div class="sk art" style="height:${h}px"></div>` + bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px')) +
-                bar('155px', 17, 'margin:50px 0 14px') + songs;
+                bar('155px', 17, 'margin:50px 0 14px') + songs +
+                Array.from({ length: Math.max(0, Math.ceil((h - 1000) / 300)) }, () => shead(150, 40, 15) + row(sqn, sqn, (hh) => `<div class="sk art" style="height:${hh}px"></div>` + bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px'))).join('');
         }
         // Home-style shelves scroll sideways, so the last tile runs off the right edge instead of ending at the padding.
         const shelf = (w, h, lines) => `<div style="display:flex;gap:20px;margin-right:-40px">` +
@@ -704,9 +730,19 @@ function _findInNavStack(stack, cursor, href) {
         const big = Math.round(inner * 0.3227), sq = Math.round(inner * 0.2364);
         const shead = (t, top, bottom) => bar(`${t}px`, 17, `margin:${top}px 0 ${bottom}px`);
         return bar('120px', 30, 'margin:36px 0 0') + shead(150, 48, 12) + shelf(big, Math.round(big * 1.333), false) +
-            shead(160, 54, 15) + shelf(sq, sq, true);
+            shead(160, 54, 15) + shelf(sq, sq, true) +
+            Array.from({ length: Math.max(0, Math.ceil((h - 860) / 300)) }, () => shead(150, 40, 15) + shelf(sq, sq, true)).join('');
     };
     document.documentElement.appendChild(skel);
+    // Rebuilt whenever the window changes size, so the placeholders always fill what is on screen.
+    let skelKey = '';
+    const renderSkel = () => {
+        const w = skel.clientWidth || 926, h = skel.clientHeight || innerHeight;
+        const key = `${to}|${w}x${h}`;
+        if (key === skelKey) return;
+        skelKey = key;
+        skel.innerHTML = buildSkel(kindOf(to), w, h);
+    };
     const mainEl = () => document.querySelector('main') || document.querySelector('[role=main]');
     const placeSkel = () => {
         const m = mainEl();
@@ -720,6 +756,7 @@ function _findInNavStack(stack, cursor, href) {
     const pageReady = () => !!mainEl()?.querySelector('[data-testid="artwork-component"], [data-testid="track-list-item"], .songs-list-row');
 
     let link = null, from = '', to = '', showTimer = null, poll = null;
+    window.addEventListener('resize', () => { if (!skel.hidden) { placeSkel(); renderSkel(); } });
     const place = () => {
         const r = link.getBoundingClientRect();
         el.style.left = `${Math.round(r.right - 30)}px`;
@@ -740,10 +777,10 @@ function _findInNavStack(stack, cursor, href) {
         link = a; from = location.pathname; to = path;
         el.setAttribute('aria-label', `Loading ${(a.textContent || '').trim()}`);
         const started = Date.now();
-        showTimer = setTimeout(() => { if (link) { place(); el.hidden = false; if (placeSkel()) { skel.hidden = false; skel.innerHTML = buildSkel(kindOf(to), skel.clientWidth || 926); document.documentElement.classList.add('adam-nav-loading'); } } }, SHOW_AFTER_MS);
+        showTimer = setTimeout(() => { if (link) { place(); el.hidden = false; if (placeSkel()) { skel.hidden = false; skelKey = ''; renderSkel(); document.documentElement.classList.add('adam-nav-loading'); } } }, SHOW_AFTER_MS);
         poll = setInterval(() => {
             if (Date.now() - started > GIVE_UP_MS || (location.pathname !== from && pageReady())) stop();
-            else if (!el.hidden) { place(); placeSkel(); }
+            else if (!el.hidden) { place(); placeSkel(); if (!skel.hidden) renderSkel(); }
         }, 100);
     }, true);
 })();
