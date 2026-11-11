@@ -662,6 +662,9 @@ function _applyThemeVars(palette) {
     const bg = JSON.stringify(p.bgColor || (isLight ? 'hsl(0,0%,96%)' : 'hsl(0,0%,10%)'));
     const navText = JSON.stringify(isLight ? 'rgba(0,0,0,0.85)' : '');
     const navTextSec = JSON.stringify(isLight ? 'rgba(0,0,0,0.5)' : '');
+    // A palette saved before presets had a tint (or hand-edited to the Apple Music accent) gets that preset's tint.
+    const dflt = defaultPalette();
+    const tint = p.tint || (p.accent === dflt.accent ? dflt.tint : p.accent) || '';
     const prefs = loadPrefs();
     const navAlpha = prefs.themeNavBgAlpha ?? 0.72;
     const navBg = JSON.stringify(_withAlpha(p.navBg || '', navAlpha) || p.navBg || '');
@@ -684,7 +687,7 @@ function _applyThemeVars(palette) {
         setVar('--adam-bg-color', ${bg});
         // Apple's page paints its own tinted controls (sidebar icons, links, toggles) from --systemBlue*;
         // the theme's accent replaces that blue so the palette stays consistent (Apple Music = pink, New Blue = blue).
-        for (const n of ${JSON.stringify(SYSTEM_BLUE_VARS)}) setVar(n, ${JSON.stringify(p.tint || p.accent || '')});
+        for (const n of ${JSON.stringify(SYSTEM_BLUE_VARS)}) setVar(n, ${JSON.stringify(tint)});
         let bd = document.getElementById('_adamAccentBg');
         if (!bd) {
             bd = document.createElement('div');
