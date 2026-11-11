@@ -46,14 +46,23 @@ export async function isOwnedOrphanWindows(pid, binary, port, query = queryWindo
     return new RegExp(`--api\\s+"?${Number(port)}"?(\\s|$)`).test(info.cmdline);
 }
 
+// Signal 0 checks existence only. EPERM means the process exists but is not ours.
+export function pidAlive(pid, kill = process.kill.bind(process)) {
+    try { kill(pid, 0); return true; } catch (e) { return e?.code === 'EPERM'; }
+}
+
 export async function recoverOrphanEngine({ lockPath, binary, dataDir, port, log = console.log,
-    plat = process.platform, query = queryWindowsProcess }) {
+    plat = process.platform, query = queryWindowsProcess, alive = pidAlive }) {
     let pid;
     try {
         const owner = readFileSync(lockPath, 'utf8').trim();
         if (!/^\d+$/.test(owner)) return;
         pid = Number(owner);
     } catch { return; }
+    // The lock file keeps the last engine's pid after a clean exit, so this runs on
+    // almost every launch. A gone process needs no ownership check (on Windows that
+    // check starts PowerShell: ~0.2 s, more when cold).
+    if (!alive(pid)) return;
     const owned = async () => (plat === 'win32'
         ? isOwnedOrphanWindows(pid, binary, port, query)
         : isOwnedOrphan(pid, binary, dataDir, port));
@@ -91,15 +100,24 @@ export function createEngineLifecycle({ prepare, spawn, onOutput = () => {}, onS
     let stopped = false;
     let restartTimer = null;
     let backoff = restartDelay;
+    let reloading = false;
     const quitting = () => stopped || isQuitting();
     const restart = (startedAt) => {
         if (quitting() || restartTimer) return;
-        backoff = Date.now() - startedAt > 30_000 ? restartDelay : Math.min(backoff * 2, 30_000);
-        log(`[Adam] Restarting engine in ${backoff} ms`);
+        // A reload asked for this exit: come back at once. The backoff is for crashes,
+        // and it doubled for every reload of an engine younger than 30 s.
+        let delay = 0;
+        if (reloading) {
+            reloading = false;
+        } else {
+            backoff = Date.now() - startedAt > 30_000 ? restartDelay : Math.min(backoff * 2, 30_000);
+            delay = backoff;
+            log(`[Adam] Restarting engine in ${delay} ms`);
+        }
         restartTimer = setTimeout(() => {
             restartTimer = null;
             if (!quitting()) void start();
-        }, backoff);
+        }, delay);
     };
     function start() {
         if (quitting() || child) return Promise.resolve();
@@ -162,7 +180,8 @@ export function createEngineLifecycle({ prepare, spawn, onOutput = () => {}, onS
     // exit handler's normal restart path brings it back.
     function reload() {
         if (quitting() || !child) return;
-        try { child.kill('SIGTERM'); } catch {}
+        reloading = true;
+        try { child.kill('SIGTERM'); } catch { reloading = false; }
     }
     return { start, stop, reload };
 }

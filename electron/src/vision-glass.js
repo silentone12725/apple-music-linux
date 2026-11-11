@@ -13,25 +13,10 @@
     if (typeof window.adamReady !== 'function') return;
     if (window._adamReadyFired) return;
 
-    // Poll the engine's DRM status until FairPlay (or Widevine) reports ready.
-    // Returns true as soon as either is ready, false after exhausting retries.
-    const waitForDRM = async (maxMs = 10000) => {
-        const engine = window._adamEngineURL || 'https://127.0.0.1:20025';
-        const deadline = Date.now() + maxMs;
-        while (Date.now() < deadline) {
-            try {
-                const d = await fetch(`${engine}/api/v1/drm/status`).then(r => r.json());
-                const s = d?.state ?? d ?? {};
-                if (s.fairplay === 'ready' || s.widevine === 'ready') return true;
-            } catch { /* engine not up yet — keep polling */ }
-            await new Promise(r => setTimeout(r, 400));
-        }
-        return false; // timed out — let the 12 s main-process fallback handle it
-    };
-
-    const fire = async () => {
-        if (window._adamReadyFired) return;
-        await waitForDRM(10000);
+    // Show as soon as the sidebar and player bar are rendered. This used to wait up to
+    // 10 s for FairPlay as well, which kept a ready UI hidden (~2.7 s on a normal start,
+    // the full 7 s fallback with no DRM session); playback waits for FairPlay itself.
+    const fire = () => {
         if (window._adamReadyFired) return;
         window._adamReadyFired = true;
         window.adamReady();
@@ -113,14 +98,14 @@ sheet.replaceSync(`
   footer > * { display: none !important; }
 
   /* ── Songs library column header bar — glass-themed instead of solid dark ── */
-  [class*="library-track--header"] {
+  .library-track--header {
     background: rgba(255,255,255,0.05) !important;
     backdrop-filter: blur(20px) saturate(1.8) !important;
     -webkit-backdrop-filter: blur(20px) saturate(1.8) !important;
     border-bottom: 0.5px solid rgba(255,255,255,0.10) !important;
     color: rgba(255,255,255,0.45) !important;
   }
-  [class*="library-track--header"] * {
+  .library-track--header * {
     color: rgba(255,255,255,0.45) !important;
     font-size: 11px !important;
     letter-spacing: 0.04em !important;
@@ -128,7 +113,7 @@ sheet.replaceSync(`
   }
 
   /* ── Strip alternating row zebra striping in virtual lists ── */
-  [class*="row-zebra-striping"] [class*="virtual-row"],
+  .row-zebra-striping [class*="virtual-row"],
   [class*="songs-list__item--alternate"],
   [class*="songs-list__item--odd"],
   [class*="songs-list__item--even"] { background: transparent !important; }
@@ -163,7 +148,7 @@ sheet.replaceSync(`
     transition: background 0.18s ease !important;
   }
   /* White glass pill overlay via ::before — unaffected by Apple's background rules */
-  [class*="pill-container"] [class*="pill-option--selected"]::before {
+  [class*="pill-container"] .search-scope-bar__pill-option--selected::before {
     content: '' !important;
     display: block !important;
     position: absolute !important;
@@ -177,24 +162,24 @@ sheet.replaceSync(`
     z-index: 0 !important;
   }
   /* Keep label text above the overlay */
-  [class*="pill-container"] [class*="pill-option"] [class*="pill-label"] {
+  [class*="pill-container"] [class*="pill-option"] .search-scope-bar__pill-label {
     position: relative !important;
     z-index: 1 !important;
   }
-  [class*="pill-container"] [class*="pill-option"] [class*="pill-label"] {
+  [class*="pill-container"] [class*="pill-option"] .search-scope-bar__pill-label {
     color: rgba(255,255,255,0.45) !important;
     transition: color 0.15s !important;
   }
-  [class*="pill-container"] [class*="pill-option--selected"] [class*="pill-label"] {
+  [class*="pill-container"] .search-scope-bar__pill-option--selected .search-scope-bar__pill-label {
     color: rgba(255,255,255,0.95) !important;
     font-weight: 600 !important;
   }
 
   /* ── Accessory button select (Playlist Type, Sort dropdowns) — strip dark background ──
      Apple: .select.svelte-XXXX = specificity 0,2,0. Use 3 attr selectors (0,3,0) to win. */
-  [class*="accessory-button"] [class*="select"][class*="svelte"],
-  [class*="accessory-button"] [class*="select-text"][class*="svelte"],
-  [class*="accessory-button"] [class*="select-chevron"][class*="svelte"] {
+  .accessory-button [class*="select"][class*="svelte"],
+  .accessory-button [class*="select-text"][class*="svelte"],
+  .accessory-button [class*="select-chevron"][class*="svelte"] {
     background: transparent !important;
     background-color: transparent !important;
   }
@@ -203,12 +188,12 @@ sheet.replaceSync(`
      Apple sets scrollbar-width:thin on the nav container, which suppresses
      ::-webkit-scrollbar pseudo-elements entirely in Chrome 121+. Force auto
      to restore webkit control, then apply custom styles. */
-  [class*="navigation__scrollable"][class*="svelte"] { scrollbar-width: auto !important; }
-  [class*="navigation__scrollable"]::-webkit-scrollbar       { width: 3px !important; }
-  [class*="navigation__scrollable"]::-webkit-scrollbar-track { background: transparent !important; box-shadow: none !important; }
-  [class*="navigation__scrollable"]::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.28) !important; border-radius: 9999px !important; border: none !important; }
-  [class*="navigation__scrollable"]::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.55) !important; }
-  [class*="navigation__scrollable"]:hover::-webkit-scrollbar { width: 7px !important; }
+  .navigation__scrollable-container[class*="svelte"] { scrollbar-width: auto !important; }
+  .navigation__scrollable-container::-webkit-scrollbar       { width: 3px !important; }
+  .navigation__scrollable-container::-webkit-scrollbar-track { background: transparent !important; box-shadow: none !important; }
+  .navigation__scrollable-container::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.28) !important; border-radius: 9999px !important; border: none !important; }
+  .navigation__scrollable-container::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.55) !important; }
+  .navigation__scrollable-container:hover::-webkit-scrollbar { width: 7px !important; }
 
   /* ── Account button — strip pill, keep context menu ──
      Apple: .account-menu.svelte-XXXX.account-menu--expanded = 3 classes (0,3,0).
@@ -230,7 +215,7 @@ sheet.replaceSync(`
      .search-suggestions to <body> when Svelte mounts it, so the wrapper's
      compositing layer no longer traps the dropdown's backdrop-filter.
      Both can now blur independently and always-on. */
-  [class*="search-input-wrapper"] {
+  .search-input-wrapper {
     background: rgba(255,255,255,0.11) !important;
     backdrop-filter: blur(24px) saturate(1.8) !important;
     -webkit-backdrop-filter: blur(24px) saturate(1.8) !important;
@@ -239,7 +224,7 @@ sheet.replaceSync(`
     box-shadow: none !important;
   }
   /* Strip the inner input's own background so it doesn't double-layer */
-  [class*="search-input__text-field"],
+  .search-input__text-field,
   [id="search-input__text-field"] {
     background: transparent !important;
     backdrop-filter: none !important;
@@ -488,7 +473,7 @@ function _findNavHeader() {
             const nav = document.querySelector('nav.navigation');
             if (!nav) return null;
             for (const child of nav.children) {
-                if (child.querySelector('img[src*="apple"], [aria-label*="Music"], [class*="logo"], [class*="brand"]'))
+                if (child.querySelector('img[src*="apple"], [aria-label*="Music"], .logo, [class*="brand"]'))
                     return child;
             }
             return nav.firstElementChild || null;
@@ -617,4 +602,70 @@ function _findInNavStack(stack, cursor, href) {
     new MutationObserver(() => {
         if (!document.getElementById('adam-nav-buttons') && _findNavHeader()) attach();
     }).observe(document.documentElement, { childList: true, subtree: true });
+})();
+
+// ── Sidebar navigation feedback ───────────────────────────────────────────────
+// Apple's router changes the URL only after the next page's data has loaded, which can take
+// seconds on a first visit (Search: 1–5 s). Until then a click looks like it did nothing.
+// Following Apple's Human Interface Guidelines for progress indicators: the wait cannot be
+// measured, so this is an indeterminate activity indicator (a spinner, not a bar that pretends
+// to know how far along it is); it sits beside the control that was clicked, is unlabelled, is
+// transient (only while the wait lasts), and is hidden for waits too short to notice.
+(function navActivity() {
+    if (document.getElementById('adam-nav-activity')) return;
+    const SHOW_AFTER_MS = 250;   // quicker navigations finish before a spinner would only flash
+    const GIVE_UP_MS    = 20000; // a stalled load: stop animating rather than spin forever
+    const css = document.createElement('style');
+    css.id = 'adam-nav-activity-css';
+    css.textContent = `
+        #adam-nav-activity { position: fixed; width: 16px; height: 16px; z-index: 2147483647;
+            pointer-events: none; color: rgba(235, 235, 245, 0.6); }
+        #adam-nav-activity[hidden] { display: none; }
+        #adam-nav-activity svg { display: block; width: 100%; height: 100%;
+            animation: adam-nav-spin 1s steps(12) infinite; }
+        @keyframes adam-nav-spin { to { transform: rotate(360deg); } }
+        @keyframes adam-nav-pulse { 50% { opacity: 0.35; } }
+        @media (prefers-reduced-motion: reduce) {
+            #adam-nav-activity svg { animation: adam-nav-pulse 1.4s ease-in-out infinite; }
+        }`;
+    document.documentElement.appendChild(css);
+    const el = document.createElement('div');
+    el.id = 'adam-nav-activity';
+    el.hidden = true;
+    el.setAttribute('role', 'progressbar'); // indeterminate: no aria-valuenow
+    el.setAttribute('aria-busy', 'true');
+    let ticks = '';
+    for (let i = 0; i < 12; i++) {
+        ticks += `<line x1="8" y1="1.8" x2="8" y2="4.8" transform="rotate(${i * 30} 8 8)" opacity="${(0.18 + 0.82 * (i / 11)).toFixed(2)}"/>`;
+    }
+    el.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">${ticks}</svg>`;
+    document.documentElement.appendChild(el);
+
+    let link = null, from = '', showTimer = null, poll = null;
+    const place = () => {
+        const r = link.getBoundingClientRect();
+        el.style.left = `${Math.round(r.right - 30)}px`;
+        el.style.top  = `${Math.round(r.top + r.height / 2 - 8)}px`;
+    };
+    const stop = () => {
+        clearTimeout(showTimer); clearInterval(poll);
+        showTimer = poll = null; link = null; el.hidden = true;
+    };
+    window.addEventListener('click', (e) => {
+        if (!e.isTrusted || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        const a = e.target?.closest?.('nav a[href]');
+        if (!a) return;
+        let path;
+        try { path = new URL(a.href, location.href).pathname; } catch { return; }
+        if (path === location.pathname) return;
+        stop();
+        link = a; from = location.pathname;
+        el.setAttribute('aria-label', `Loading ${(a.textContent || '').trim()}`);
+        const started = Date.now();
+        showTimer = setTimeout(() => { if (link) { place(); el.hidden = false; } }, SHOW_AFTER_MS);
+        poll = setInterval(() => {
+            if (location.pathname !== from || Date.now() - started > GIVE_UP_MS) stop();
+            else if (!el.hidden) place();
+        }, 100);
+    }, true);
 })();

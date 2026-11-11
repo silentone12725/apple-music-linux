@@ -1672,6 +1672,7 @@ async function _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, w
     try {
         await waitIdle();
         if (pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
+        try { sb.abort(); } catch (_) {}
         if (sb.buffered.length > 0) sb.remove(0, Infinity);
         await waitIdle();
         // Discard decoded frames before seekSec so playback starts sample-
@@ -1761,7 +1762,7 @@ async function _mseNetworkSeek(sb, audio, ms, seekSec) {
         sb.addEventListener('error',     fail, { once: true });
     });
 
-    try { await waitSBIdle(); if (ms.readyState === 'open') sb.remove(0, Infinity); await waitSBIdle(); } catch (_) {}
+    try { await waitSBIdle(); if (ms.readyState === 'open') { sb.abort(); sb.remove(0, Infinity); } await waitSBIdle(); } catch (_) {}
 
     // Strip decoded frames before seekSec — the engine's sub-segment trimming
     // (PassthroughStreaming) already drops fMP4 fragments ending before seekSec,
@@ -1809,8 +1810,10 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
         }
     }
 
-    // Cache re-inject path (backward seeks outside buffer).
-    if (_chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
+    // Cache re-inject path: only for backward seeks, which the cache (a prefix of the stream) covers.
+    // A seek past the buffered end (resume while the track is still downloading) needs the network.
+    const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : 0;
+    if (seekSec < bufEnd && _chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
         _mseCacheSeek(sb, audio, ms, seekSec);
         return;
     }
@@ -5328,15 +5331,22 @@ function _resumeClear() {
     window.adamBridge?.storeDelete(_RESUME_KEY).catch(() => {});
 }
 
-function _resumeShowChip(mk, saved) {
+// `keep` is set after a memory-maintenance reload (main.mjs): the page reloaded while nobody was
+// looking, so the chip waits for the user instead of vanishing after 20 s.
+function _resumeShowChip(mk, saved, keep = false) {
     if (document.getElementById('adam-resume-chip')) return;
     const FF = 'font-family:-apple-system,SF Pro Text,system-ui,sans-serif;';
     const chip = document.createElement('div');
     chip.id = 'adam-resume-chip';
+    if (keep) chip.dataset.keep = '1';
     chip.style.cssText = 'position:fixed;bottom:110px;right:22px;z-index:99997;display:flex;align-items:center;gap:12px;' +
-        'max-width:360px;padding:12px 14px;border-radius:14px;background:rgba(30,30,32,0.92);' +
-        'border:0.5px solid rgba(255,255,255,0.14);box-shadow:0 10px 40px rgba(0,0,0,0.55);' +
-        'backdrop-filter:blur(28px) saturate(1.8);-webkit-backdrop-filter:blur(28px) saturate(1.8);' +
+        // Apple-style material: translucent, so the blur (the same one the rest of the glass UI uses,
+        // including its Settings value) shows what is behind; a hairline and a top highlight define the edge.
+        'max-width:360px;padding:12px 14px;border-radius:16px;background:rgba(48,48,52,0.5);' +
+        'border:0.5px solid rgba(255,255,255,0.16);' +
+        'box-shadow:0 8px 32px rgba(0,0,0,0.38),inset 0 0.5px 0 rgba(255,255,255,0.18);' +
+        'backdrop-filter:blur(var(--adam-glass-blur,28px)) saturate(1.8);' +
+        '-webkit-backdrop-filter:blur(var(--adam-glass-blur,28px)) saturate(1.8);' +
         'transform:translateY(20px);opacity:0;transition:transform 0.3s,opacity 0.3s;' + FF;
     if (saved.artworkUrl) {
         const art = document.createElement('img');
@@ -5356,20 +5366,33 @@ function _resumeShowChip(mk, saved) {
     chip.appendChild(txt);
     const playBtn = document.createElement('button');
     playBtn.innerHTML = _svgPlaySm;
+    // A neutral glass button, not the brand red: the chip should not outshine what is being played.
+    const _playBg = 'rgba(255,255,255,0.16)', _playBgHover = 'rgba(255,255,255,0.26)';
     playBtn.style.cssText = 'width:36px;height:36px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;' +
-        'background:#fc3c44;color:#fff;display:flex;align-items:center;justify-content:center;';
+        `background:${_playBg};color:#fff;display:flex;align-items:center;justify-content:center;transition:background 0.15s;`;
+    playBtn.onmouseenter = () => { playBtn.style.background = _playBgHover; };
+    playBtn.onmouseleave = () => { playBtn.style.background = _playBg; };
+    playBtn.setAttribute('aria-label', 'Resume playback');
     const dismiss = document.createElement('button');
     dismiss.innerHTML = _svgClose;
     dismiss.style.cssText = 'width:24px;height:24px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;' +
-        'background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.6);display:flex;align-items:center;justify-content:center;';
-    const close = () => { chip.style.opacity = '0'; chip.style.transform = 'translateY(20px)'; setTimeout(() => chip.remove(), 300); };
+        'background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.6);display:flex;align-items:center;justify-content:center;';
+    dismiss.setAttribute('aria-label', 'Dismiss');
+    const onPlayback = () => { if (mk.isPlaying) close(); };
+    const close = () => {
+        chip.style.opacity = '0'; chip.style.transform = 'translateY(20px)'; setTimeout(() => chip.remove(), 300);
+        try { mk.removeEventListener('playbackStateDidChange', onPlayback); } catch (_) {}
+        window.adamBridge?.storeDelete('adam_mem_reload').catch(() => {});
+    };
+    // Starting anything else makes the old session moot.
+    if (keep) { try { mk.addEventListener('playbackStateDidChange', onPlayback); } catch (_) {} }
     dismiss.onclick = close;
     playBtn.onclick = () => { close(); _resumePlay(mk, saved); };
     chip.append(playBtn, dismiss);
     document.body.appendChild(chip);
     requestAnimationFrame(() => { chip.style.opacity = '1'; chip.style.transform = 'translateY(0)'; });
     // Auto-dismiss after 20s if untouched.
-    setTimeout(() => { if (document.getElementById('adam-resume-chip')) close(); }, 20000);
+    if (!keep) setTimeout(() => { if (document.getElementById('adam-resume-chip')) close(); }, 20000);
 }
 
 // Seek to the saved position once the target track is actually playing —
@@ -5379,10 +5402,15 @@ function _resumeSeekWhenReady(mk, saved) {
     let tries = 0;
     const iv = setInterval(() => {
         tries++;
-        if (_currentAssetId === saved.adamId && _durationSec > 0) {
+        const ready = _currentAssetId === saved.adamId && _durationSec > 0;
+        // Seek inside the buffer when the download has reached the position (a native seek, no refetch);
+        // seeking into data that is still arriving races the stream that is filling it.
+        const sb = _activeSb;
+        const buffered = !!sb && sb.buffered.length > 0 && sb.buffered.end(sb.buffered.length - 1) > saved.positionSec + 2;
+        if (ready && (buffered || _streamComplete || tries > 120)) { // ~30s, then seek over the network
             clearInterval(iv);
             try { mk.seekToTime(Math.min(saved.positionSec, _durationSec - 1)); } catch (_) {}
-        } else if (tries > 40) { // ~10s give-up
+        } else if (tries > 160) {
             clearInterval(iv);
         }
     }, 250);
@@ -5449,8 +5477,10 @@ async function _resumeSetup(mk) {
     // barely started, where "resume" adds nothing.
     const queueLen = (saved.containers || []).reduce((n, c) => n + (c.items?.length || 0), 0);
     const midTrack = saved.positionSec >= 5 && !(saved.durationSec && saved.positionSec > saved.durationSec - 5);
-    if (queueLen <= 1 && !midTrack) return;
-    _resumeShowChip(mk, saved);
+    if (queueLen <= 1 && !midTrack) { window.adamBridge?.storeDelete('adam_mem_reload').catch(() => {}); return; }
+    let keep = false;
+    try { const t = Number(await window.adamBridge?.storeRead('adam_mem_reload')); keep = t > 0 && Date.now() - t < 12 * 3600 * 1000; } catch (_) {}
+    _resumeShowChip(mk, saved, keep);
 }
 
 // ── Discord Rich Presence (renderer side) ─────────────────────────────────────
@@ -7152,6 +7182,13 @@ async function setup() {
             }
             return;
         }
+        // After a memory-maintenance reload the queue is gone until the Resume chip is used: let a
+        // media key or the tray's Play do that, so the reload never costs a keystroke.
+        const _wantsPlay = cmd === 'play' || (cmd === 'playpause' && mk.playbackState !== window.MusicKit?.PlaybackStates?.playing);
+        if (_wantsPlay) {
+            const chip = document.getElementById('adam-resume-chip');
+            if (chip?.dataset.keep === '1') { chip.querySelector('button')?.click(); return; }
+        }
         switch (cmd) {
             case 'play':      mk.play().catch(() => {}); break;
             case 'pause':     mk.pause(); break;
@@ -8326,7 +8363,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
     let portaled = null;
 
     function positionPortal(el) {
-        const bar = document.querySelector('[class*="search-input-wrapper"]');
+        const bar = document.querySelector('.search-input-wrapper');
         if (!bar) return;
         const r = bar.getBoundingClientRect();
         el.style.setProperty('position', 'fixed', 'important');
@@ -8347,7 +8384,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
     // Try to portal whatever suggestions exist inside the wrapper right now.
     // Returns true if portaled, false if not found yet.
     function tryScan() {
-        const bar = document.querySelector('[class*="search-input-wrapper"]');
+        const bar = document.querySelector('.search-input-wrapper');
         if (!bar) return false;
         const sugg = bar.querySelector('[class*="search-suggestions"]');
         if (!sugg) return false;
@@ -8362,7 +8399,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
                 if (node.nodeType !== 1) continue;
                 const sugg = node.matches('[class*="search-suggestions"]') ? node
                     : node.querySelector('[class*="search-suggestions"]');
-                if (sugg && sugg.closest('[class*="search-input-wrapper"]')) {
+                if (sugg && sugg.closest('.search-input-wrapper')) {
                     doPortal(sugg);
                     return;
                 }
@@ -8399,7 +8436,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
     // Attach to the search field now, and re-attach after SPA navigations
     function attachToSearchInput() {
         wireSearchInput(document.querySelector(
-            '#search-input__text-field, [class*="search-input__text-field"]'
+            '#search-input__text-field, .search-input__text-field'
         ));
     }
 
@@ -8666,8 +8703,13 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
     // the viewport that is not a card, shelf, header cover or player art.
     function markPageArt() {
         const vw = innerWidth, vh = innerHeight;
-        for (const el of document.querySelectorAll('.artwork-component:not([data-adam-page-art])')) {
-            if (el.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) continue;
+        // Runs on every frame the page changes; a grid page has hundreds of artworks. Ones
+        // inside a lockup, shelf, nav or player never qualify, so mark them once and skip them.
+        for (const el of document.querySelectorAll('.artwork-component:not([data-adam-page-art]):not([data-adam-art-skip])')) {
+            if (el.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) {
+                el.setAttribute('data-adam-art-skip', '');
+                continue;
+            }
             const r = el.getBoundingClientRect();
             if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el.setAttribute('data-adam-page-art', '');
         }
@@ -10934,6 +10976,7 @@ window.adamGetQueueInfo = function () {
     // so they're never clipped by account-menu's own overflow/stacking context.
     const _szN = 28;
     let _cogResizeObs = null;
+    let _cogRow = null; // account row the cog buttons were last placed against
 
     function mountSettingsCog() {
         const accountRow = findAccountRow();
@@ -10973,6 +11016,7 @@ window.adamGetQueueInfo = function () {
             nav.appendChild(miniBtn);
         }
         _positionCogButtons(nav, accountRow, cog, dlBtn, miniBtn);
+        _cogRow = accountRow;
 
         if (!_cogResizeObs) {
             _cogResizeObs = new ResizeObserver(() => {
@@ -10983,8 +11027,10 @@ window.adamGetQueueInfo = function () {
                 const m   = document.getElementById('adam-miniplayer-btn');
                 if (row && n && c && d && m) _positionCogButtons(n, row, c, d, m);
             });
-            _cogResizeObs.observe(nav);
         }
+        // Observing an element twice is a no-op; a re-mounted sidebar brings new elements.
+        _cogResizeObs.observe(nav);
+        _cogResizeObs.observe(accountRow);
     }
 
     function _styleNavBtn(btn) {
@@ -11027,7 +11073,14 @@ window.adamGetQueueInfo = function () {
 
     // Watch the entire document so the cog re-mounts after SPA navigation
     // replaces the sidebar (observing only parent misses parent-level removals).
+    // Runs on every frame the page changes, so stay cheap while the buttons are in place:
+    // remounting re-runs the account-row search and two forced layouts (getBoundingClientRect).
+    // The ResizeObserver above repositions them when the sidebar or the row changes size.
     watchDomSettled(() => {
+        if (_cogRow?.isConnected &&
+            document.getElementById('adam-settings-cog')?.isConnected &&
+            document.getElementById('adam-downloads-btn')?.isConnected &&
+            document.getElementById('adam-miniplayer-btn')?.isConnected) return;
         if (findAccountRow()) mountSettingsCog();
     });
 

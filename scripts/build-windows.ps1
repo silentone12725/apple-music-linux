@@ -137,8 +137,18 @@ Copy-Item "$VlcDir\libvlc.dll", "$VlcDir\libvlccore.dll" $vlcOut
 foreach ($d in 'access', 'audio_filter', 'audio_mixer', 'audio_output', 'codec', 'demux', 'packetizer', 'stream_filter', 'control', 'misc') {
     if (Test-Path "$VlcDir\plugins\$d") { Copy-Item "$VlcDir\plugins\$d" "$vlcOut\plugins\$d" -Recurse }
 }
-# The cache lists the full plugin set; a stale one makes VLC rescan on every start, so drop it.
+# VLC's plugins.dat must describe exactly the packed subset. Without it libvlc_new loads every
+# plugin DLL on each start, and on the first launch after an install Defender scans all of them:
+# about a minute before the engine answers. With it VLC loads only the plugins it uses (~0.2 s).
+# vlc-cache-gen itself pays that scan once, here at build time.
 Remove-Item "$vlcOut\plugins\plugins.dat" -ErrorAction SilentlyContinue
+$cacheGen = Join-Path $VlcDir 'vlc-cache-gen.exe'
+if (Test-Path $cacheGen) {
+    & $cacheGen "$vlcOut\plugins" | Out-Null
+    if (-not (Test-Path "$vlcOut\plugins\plugins.dat")) { throw 'vlc-cache-gen did not write plugins.dat' }
+} else {
+    Write-Warning "vlc-cache-gen.exe not found in $VlcDir`: the first launch after install will stall while VLC loads every plugin"
+}
 
 # Minimal FFmpeg: the engine runs it for music-video remux and export. Prebuilt and committed
 # (scripts/build-ffmpeg-windows.sh regenerates it), so the app needs nothing installed.

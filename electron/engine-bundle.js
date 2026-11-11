@@ -2287,6 +2287,10 @@
     try {
       await waitIdle();
       if (pipeCtrl.signal.aborted || ms.readyState !== "open") return;
+      try {
+        sb.abort();
+      } catch (_) {
+      }
       if (sb.buffered.length > 0) sb.remove(0, Infinity);
       await waitIdle();
       try {
@@ -2403,7 +2407,10 @@
     });
     try {
       await waitSBIdle();
-      if (ms.readyState === "open") sb.remove(0, Infinity);
+      if (ms.readyState === "open") {
+        sb.abort();
+        sb.remove(0, Infinity);
+      }
       await waitSBIdle();
     } catch (_) {
     }
@@ -2447,7 +2454,8 @@
         return;
       }
     }
-    if (_chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
+    const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : 0;
+    if (seekSec < bufEnd && _chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
       _mseCacheSeek(sb, audio, ms, seekSec);
       return;
     }
@@ -5645,12 +5653,13 @@
     window.adamBridge?.storeDelete(_RESUME_KEY).catch(() => {
     });
   }
-  function _resumeShowChip(mk, saved) {
+  function _resumeShowChip(mk, saved, keep = false) {
     if (document.getElementById("adam-resume-chip")) return;
     const FF = "font-family:-apple-system,SF Pro Text,system-ui,sans-serif;";
     const chip = document.createElement("div");
     chip.id = "adam-resume-chip";
-    chip.style.cssText = "position:fixed;bottom:110px;right:22px;z-index:99997;display:flex;align-items:center;gap:12px;max-width:360px;padding:12px 14px;border-radius:14px;background:rgba(30,30,32,0.92);border:0.5px solid rgba(255,255,255,0.14);box-shadow:0 10px 40px rgba(0,0,0,0.55);backdrop-filter:blur(28px) saturate(1.8);-webkit-backdrop-filter:blur(28px) saturate(1.8);transform:translateY(20px);opacity:0;transition:transform 0.3s,opacity 0.3s;" + FF;
+    if (keep) chip.dataset.keep = "1";
+    chip.style.cssText = "position:fixed;bottom:110px;right:22px;z-index:99997;display:flex;align-items:center;gap:12px;max-width:360px;padding:12px 14px;border-radius:16px;background:rgba(48,48,52,0.5);border:0.5px solid rgba(255,255,255,0.16);box-shadow:0 8px 32px rgba(0,0,0,0.38),inset 0 0.5px 0 rgba(255,255,255,0.18);backdrop-filter:blur(var(--adam-glass-blur,28px)) saturate(1.8);-webkit-backdrop-filter:blur(var(--adam-glass-blur,28px)) saturate(1.8);transform:translateY(20px);opacity:0;transition:transform 0.3s,opacity 0.3s;" + FF;
     if (saved.artworkUrl) {
       const art = document.createElement("img");
       art.src = saved.artworkUrl;
@@ -5666,15 +5675,39 @@
     chip.appendChild(txt);
     const playBtn = document.createElement("button");
     playBtn.innerHTML = _svgPlaySm;
-    playBtn.style.cssText = "width:36px;height:36px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;background:#fc3c44;color:#fff;display:flex;align-items:center;justify-content:center;";
+    const _playBg = "rgba(255,255,255,0.16)", _playBgHover = "rgba(255,255,255,0.26)";
+    playBtn.style.cssText = `width:36px;height:36px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;background:${_playBg};color:#fff;display:flex;align-items:center;justify-content:center;transition:background 0.15s;`;
+    playBtn.onmouseenter = () => {
+      playBtn.style.background = _playBgHover;
+    };
+    playBtn.onmouseleave = () => {
+      playBtn.style.background = _playBg;
+    };
+    playBtn.setAttribute("aria-label", "Resume playback");
     const dismiss = document.createElement("button");
     dismiss.innerHTML = _svgClose;
-    dismiss.style.cssText = "width:24px;height:24px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.6);display:flex;align-items:center;justify-content:center;";
+    dismiss.style.cssText = "width:24px;height:24px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.6);display:flex;align-items:center;justify-content:center;";
+    dismiss.setAttribute("aria-label", "Dismiss");
+    const onPlayback = () => {
+      if (mk.isPlaying) close();
+    };
     const close = () => {
       chip.style.opacity = "0";
       chip.style.transform = "translateY(20px)";
       setTimeout(() => chip.remove(), 300);
+      try {
+        mk.removeEventListener("playbackStateDidChange", onPlayback);
+      } catch (_) {
+      }
+      window.adamBridge?.storeDelete("adam_mem_reload").catch(() => {
+      });
     };
+    if (keep) {
+      try {
+        mk.addEventListener("playbackStateDidChange", onPlayback);
+      } catch (_) {
+      }
+    }
     dismiss.onclick = close;
     playBtn.onclick = () => {
       close();
@@ -5686,7 +5719,7 @@
       chip.style.opacity = "1";
       chip.style.transform = "translateY(0)";
     });
-    setTimeout(() => {
+    if (!keep) setTimeout(() => {
       if (document.getElementById("adam-resume-chip")) close();
     }, 2e4);
   }
@@ -5695,13 +5728,16 @@
     let tries = 0;
     const iv = setInterval(() => {
       tries++;
-      if (_currentAssetId === saved.adamId && _durationSec > 0) {
+      const ready = _currentAssetId === saved.adamId && _durationSec > 0;
+      const sb = _activeSb;
+      const buffered = !!sb && sb.buffered.length > 0 && sb.buffered.end(sb.buffered.length - 1) > saved.positionSec + 2;
+      if (ready && (buffered || _streamComplete || tries > 120)) {
         clearInterval(iv);
         try {
           mk.seekToTime(Math.min(saved.positionSec, _durationSec - 1));
         } catch (_) {
         }
-      } else if (tries > 40) {
+      } else if (tries > 160) {
         clearInterval(iv);
       }
     }, 250);
@@ -5784,8 +5820,18 @@
     }
     const queueLen = (saved.containers || []).reduce((n, c) => n + (c.items?.length || 0), 0);
     const midTrack = saved.positionSec >= 5 && !(saved.durationSec && saved.positionSec > saved.durationSec - 5);
-    if (queueLen <= 1 && !midTrack) return;
-    _resumeShowChip(mk, saved);
+    if (queueLen <= 1 && !midTrack) {
+      window.adamBridge?.storeDelete("adam_mem_reload").catch(() => {
+      });
+      return;
+    }
+    let keep = false;
+    try {
+      const t = Number(await window.adamBridge?.storeRead("adam_mem_reload"));
+      keep = t > 0 && Date.now() - t < 12 * 3600 * 1e3;
+    } catch (_) {
+    }
+    _resumeShowChip(mk, saved, keep);
   }
   var _discordEnabled = false;
   function _isPausedNow() {
@@ -7245,6 +7291,14 @@
         }
         return;
       }
+      const _wantsPlay = cmd === "play" || cmd === "playpause" && mk.playbackState !== window.MusicKit?.PlaybackStates?.playing;
+      if (_wantsPlay) {
+        const chip = document.getElementById("adam-resume-chip");
+        if (chip?.dataset.keep === "1") {
+          chip.querySelector("button")?.click();
+          return;
+        }
+      }
       switch (cmd) {
         case "play":
           mk.play().catch(() => {
@@ -8202,7 +8256,7 @@
   (function initSearchSuggestionsPortal() {
     let portaled = null;
     function positionPortal(el2) {
-      const bar = document.querySelector('[class*="search-input-wrapper"]');
+      const bar = document.querySelector(".search-input-wrapper");
       if (!bar) return;
       const r = bar.getBoundingClientRect();
       el2.style.setProperty("position", "fixed", "important");
@@ -8219,7 +8273,7 @@
       document.body.appendChild(sugg);
     }
     function tryScan() {
-      const bar = document.querySelector('[class*="search-input-wrapper"]');
+      const bar = document.querySelector(".search-input-wrapper");
       if (!bar) return false;
       const sugg = bar.querySelector('[class*="search-suggestions"]');
       if (!sugg) return false;
@@ -8231,7 +8285,7 @@
         for (const node of m.addedNodes) {
           if (node.nodeType !== 1) continue;
           const sugg = node.matches('[class*="search-suggestions"]') ? node : node.querySelector('[class*="search-suggestions"]');
-          if (sugg && sugg.closest('[class*="search-input-wrapper"]')) {
+          if (sugg && sugg.closest(".search-input-wrapper")) {
             doPortal(sugg);
             return;
           }
@@ -8259,7 +8313,7 @@
     }
     function attachToSearchInput() {
       wireSearchInput(document.querySelector(
-        '#search-input__text-field, [class*="search-input__text-field"]'
+        "#search-input__text-field, .search-input__text-field"
       ));
     }
     attachToSearchInput();
@@ -8495,8 +8549,11 @@
     (document.head || document.documentElement).appendChild(style);
     function markPageArt() {
       const vw = innerWidth, vh = innerHeight;
-      for (const el2 of document.querySelectorAll(".artwork-component:not([data-adam-page-art])")) {
-        if (el2.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) continue;
+      for (const el2 of document.querySelectorAll(".artwork-component:not([data-adam-page-art]):not([data-adam-art-skip])")) {
+        if (el2.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) {
+          el2.setAttribute("data-adam-art-skip", "");
+          continue;
+        }
         const r = el2.getBoundingClientRect();
         if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el2.setAttribute("data-adam-page-art", "");
       }
@@ -10894,6 +10951,7 @@
     }
     const _szN = 28;
     let _cogResizeObs = null;
+    let _cogRow = null;
     function mountSettingsCog() {
       const accountRow = findAccountRow();
       const nav = document.querySelector("nav.navigation") || document.querySelector("nav");
@@ -10939,6 +10997,7 @@
         nav.appendChild(miniBtn);
       }
       _positionCogButtons(nav, accountRow, cog, dlBtn, miniBtn);
+      _cogRow = accountRow;
       if (!_cogResizeObs) {
         _cogResizeObs = new ResizeObserver(() => {
           const row = findAccountRow();
@@ -10948,8 +11007,9 @@
           const m = document.getElementById("adam-miniplayer-btn");
           if (row && n && c && d && m) _positionCogButtons(n, row, c, d, m);
         });
-        _cogResizeObs.observe(nav);
       }
+      _cogResizeObs.observe(nav);
+      _cogResizeObs.observe(accountRow);
     }
     function _styleNavBtn(btn) {
       const sz = _szN + "px";
@@ -10994,6 +11054,7 @@
       miniBtn.style.right = `${10 + 2 * (_szN + gap)}px`;
     }
     watchDomSettled(() => {
+      if (_cogRow?.isConnected && document.getElementById("adam-settings-cog")?.isConnected && document.getElementById("adam-downloads-btn")?.isConnected && document.getElementById("adam-miniplayer-btn")?.isConnected) return;
       if (findAccountRow()) mountSettingsCog();
     });
     window.__adamOpenEngineSettings = openSettings;

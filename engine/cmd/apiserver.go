@@ -508,6 +508,7 @@ type ServerConfig struct {
 
 // NewAPIServer wires all routes.
 func NewAPIServer(port int, cfg ServerConfig) *APIServer {
+	setupStart := time.Now()
 	initMVPrefs()
 	listenPort.Store(int32(port))
 	epoch := newEpochManager()
@@ -780,7 +781,9 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 
 	// VLC player — libvlc-backed playback for ALAC/Atmos that the browser cannot decode.
 	// Routes are no-ops when libvlc is not installed; frontend falls back to MSE.
+	vlcStart := time.Now()
 	s.vlcPlayer, _ = vlc.New() // nil if libvlc unavailable
+	vlcSetup := time.Since(vlcStart)
 	mux.HandleFunc("POST /api/v1/vlc/load", cors(s.handleVLCLoad))
 	mux.HandleFunc("POST /api/v1/vlc/pause", cors(s.handleVLCPause))
 	mux.HandleFunc("POST /api/v1/vlc/resume", cors(s.handleVLCResume))
@@ -814,6 +817,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    64 << 10,
 	}
+	slog.Info("engine setup", "total", time.Since(setupStart).Round(time.Millisecond), "libvlc", vlcSetup.Round(time.Millisecond))
 	return s
 }
 

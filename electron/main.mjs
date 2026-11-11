@@ -2,6 +2,7 @@ import * as electronMain from 'electron/main';
 const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, net: electronNet } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
 import { createEngineLifecycle, recoverOrphanEngine, isPortFree } from './engine-lifecycle.mjs';
+import { createMemoryMaintenance, readConfigFromEnv, toMb } from './memory-maintenance.mjs';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
 // A terminal that goes away (closed window, SSH drop) surfaces as EPIPE or EIO.
@@ -912,9 +913,10 @@ function createWindow() {
     //   3. Fade the window in once the actual UI is rendered.
     // Fallback: force-show after 12 s so a slow network never hangs forever.
     let shown = false;
-    const showWindow = () => {
+    const showWindow = (reason) => {
         if (shown) return;
         shown = true;
+        console.log(`[Adam] Window shown (${reason}) ${Math.round(performance.now())} ms after start`);
         if (_startHidden) return; // launched at login: stay in the tray until asked
         win.setOpacity(0);
         win.show();
@@ -940,7 +942,7 @@ function createWindow() {
         clearTimeout(_bgTimer);
         _bgTimer = setTimeout(refreshBlurBg, 500);
     });
-    const showFallback = setTimeout(showWindow, 7000);
+    const showFallback = setTimeout(() => showWindow('fallback'), 7000);
 
     // True while the offline page replaces Apple Music. Chromium's error page still reports the failed
     // Apple URL, so the URL alone cannot tell the injection code to stand down.
@@ -955,12 +957,12 @@ function createWindow() {
         win.loadFile(path.join(__dirname, 'offline.html'), { hash: offlineHash(errorCode, errorDescription) })
             .catch(e => console.error('[Adam] offline page failed:', e.message));
         clearTimeout(showFallback);
-        showWindow();
+        showWindow('offline');
     });
 
     ipcMain.once('app:ui-ready', () => {
         clearTimeout(showFallback);
-        showWindow();
+        showWindow('ui-ready');
     });
     // Debug logging: on when started from a terminal or with ADAM_DEBUG=1; DevTools only with
     // ADAM_DEVTOOLS (see DEBUG_OUTPUT).
@@ -992,14 +994,14 @@ function createWindow() {
         :root { --adam-glass-blur: ${glassBlur}px; --adam-glass-opacity: ${glassOpacity}; --adam-art-tint: rgba(255,255,255,0); --adam-fallback-bg: none; --adam-bg-blur: ${bgBlur}px; }
         html, body { background: transparent !important; overscroll-behavior: none !important; }
         /* Strip grey tint from alternating content sections — let album art / wallpaper show through */
-        .section--alternate, [class*="section--alternate"] { background: transparent !important; }
+        .section--alternate { background: transparent !important; }
         /* "Also available in the iTunes Store" CTA — hidden everywhere. Matched by
            aria-label (Apple keeps "iTunes" in it across locales) since its classes
            are generic Svelte hashes; the :has() rules drop the wrapper too so no
            empty gap is left behind. */
         button[aria-label*="iTunes"],
         [data-testid="button-base-wrapper"]:has(> button[aria-label*="iTunes"]),
-        [class*="native-cta-wrapper"]:has(button[aria-label*="iTunes"]) { display: none !important; }
+        .tracklist-footer__native-cta-wrapper:has(button[aria-label*="iTunes"]) { display: none !important; }
         nav.navigation {
             background: rgba(255,255,255,var(--adam-glass-opacity)) !important;
             backdrop-filter: blur(var(--adam-glass-blur)) !important;
@@ -1266,7 +1268,7 @@ function createWindow() {
         [class*="scope-bar"]::before, [class*="scope-bar"]::after,
         [class*="search"] > [class*="gradient"] { display: none !important; background: none !important; }
         /* Search input — transparent + blur */
-        [data-testid="search-input"], [class*="search-input-wrapper"] {
+        [data-testid="search-input"], .search-input-wrapper {
             background: rgba(255,255,255,0.08) !important;
             backdrop-filter: blur(12px) !important;
             -webkit-backdrop-filter: blur(12px) !important;
@@ -1274,7 +1276,7 @@ function createWindow() {
             border-radius: 10px !important;
             box-shadow: none !important;
         }
-        [data-testid="search-input"]:focus-within, [class*="search-input-wrapper"]:focus-within {
+        [data-testid="search-input"]:focus-within, .search-input-wrapper:focus-within {
             border-color: rgba(255,255,255,0.3) !important;
         }
         /* Remove auto-pink focus rings and selection highlight globally */
@@ -1407,8 +1409,16 @@ function createWindow() {
     win.webContents.on('did-navigate', () => {
         // Only show if the initial ready-signal already fired; don't interrupt the
         // first-load sequence where the window stays hidden until content is loaded.
-        if (shown && !win.isVisible()) win.show();
+        // A memory-maintenance reload happens while the window is hidden on purpose.
+        if (shown && !win.isVisible() && !memoryMaintenance.isReloading) win.show();
     });
+
+    // ── Idle memory maintenance (see memory-maintenance.mjs) ─────────────────
+    // Apple's page never releases the pages you leave, so reload it while nobody is looking.
+    win.webContents.on('did-finish-load', () => memoryMaintenance.pageLoaded());
+    for (const ev of ['focus', 'show', 'restore']) win.on(ev, () => memoryMaintenance.setActive(true));
+    for (const ev of ['blur', 'hide', 'minimize']) win.on(ev, () => memoryMaintenance.setActive(false));
+    memoryMaintenance.start();
 
     // Hide on close instead of destroying — keeps the page alive in memory so
     win.on('close', (e) => {
@@ -1418,8 +1428,35 @@ function createWindow() {
         } else removeCompositionBackdrop(win);
     });
 
-    win.on('closed', () => { win = null; });
+    win.on('closed', () => { memoryMaintenance.stop(); win = null; });
 }
+
+// The renderer's memory as the OS sees it (working set, MB), or null when it cannot be read.
+function _rendererMemoryMb() {
+    try {
+        const pid = win?.webContents?.getOSProcessId?.();
+        const m = app.getAppMetrics().find(x => x.pid === pid);
+        return m ? toMb(m.memory.workingSetSize) : null;
+    } catch { return null; }
+}
+
+const memoryMaintenance = createMemoryMaintenance({
+    getWin: () => win,
+    rendererMb: _rendererMemoryMb,
+    isPlaying: () => _lastMprisStatus === 'Playing',
+    msSincePlaying: () => _lastMprisStatus === 'Playing' ? 0 : (_playStoppedAt == null ? Infinity : Date.now() - _playStoppedAt),
+    onApplePage: () => !!win && _httpsHost(win.webContents.getURL()) === 'music.apple.com',
+    // Settings, the sign-in sheet and Apple's own dialogs are all <dialog> elements.
+    dialogOpen: () => win.webContents.executeJavaScript("!!document.querySelector('dialog[open]')").catch(() => true),
+    // On by default; `memoryReload` = false in the store (or ADAM_MEM_RELOAD=0) turns it off.
+    isEnabled: async () => process.env.ADAM_MEM_RELOAD !== '0' && (await _storeLoad()).memoryReload !== false,
+    // The page reads this on load: a reload of ours keeps the Resume chip until it is used.
+    markReload: async () => { const store = await _storeLoad(); store.adam_mem_reload = Date.now(); _storeDirty = true; await _storeFlushNow(); },
+    // Make the page write its queue and position now, then give that IPC time to land.
+    flushRenderer: async () => { win.webContents.send('app:flush-and-quit'); await new Promise(r => setTimeout(r, 600)); },
+    reload: () => win.webContents.reload(),
+    log: (m) => console.log('[Adam]', m),
+}, readConfigFromEnv());
 
 // Popups opened for authentication keep their opener and session. No adamBridge is exposed to
 // them (see auth-preload.cjs). A blank popup is allowed because sites open first and navigate
@@ -2128,6 +2165,7 @@ function createMprisPlayer() {
 }
 
 let _lastMprisStatus   = null;
+let _playStoppedAt     = null; // when playback last left 'Playing'; memory maintenance waits a minute after it
 let _lastMprisMetadata = null;
 let _lastMprisPosition = 0; // µs
 let _lastMprisShuffle  = false;
@@ -2200,7 +2238,10 @@ function replayMprisState() {
 
 ipcMain.on('mpris:update', (_, data) => {
     // Track each field independently so all survive across reconnects.
-    if (data.status)           _lastMprisStatus   = data.status;
+    if (data.status) {
+        if (_lastMprisStatus === 'Playing' && data.status !== 'Playing') _playStoppedAt = Date.now();
+        _lastMprisStatus = data.status;
+    }
     if (_reloadEngineOnPause && data.status && data.status !== 'Playing') {
         _reloadEngineOnPause = false;
         engineLifecycle.reload();
@@ -2808,7 +2849,7 @@ protocol.registerSchemesAsPrivileged([{
 }]);
 
 // Resolved faststart cache path per video-dl pathname, so range requests skip the
-// engine info round-trip. Entries are session-scoped URLs; harmless to let grow.
+// engine info round-trip. Capped where entries are added.
 const _mvPathCache = new Map();
 
 // Serve a local media file with proper Range → 206 handling for <video>.
@@ -2959,6 +3000,8 @@ app.whenReady().then(() => {
                     if (info && info.cached && info.path) {
                         cachedPath = info.path;
                         _mvPathCache.set(u.pathname, cachedPath);
+                        // One entry per video watched; keep the newest 200 (a Map iterates oldest first).
+                        if (_mvPathCache.size > 200) _mvPathCache.delete(_mvPathCache.keys().next().value);
                         console.log(`[adam-video] resolved path for ${u.pathname} → ${cachedPath}`);
                     } else {
                         console.log(`[adam-video] not cached yet (preparing) → 503`);
@@ -3055,6 +3098,10 @@ app.whenReady().then(() => {
             sendCmd: (c) => win?.webContents.send('mpris:cmd', c),
         });
     }
+    // Start the engine before building the window so its startup overlaps the window's
+    // instead of following it. engine-playback.js checks reachability and falls back to
+    // the Apple CDN if the engine isn't running, so a missing binary is not fatal.
+    startEngine();
     createWindow();
     if (winIntegration) {
         winIntegration.init();
@@ -3078,10 +3125,6 @@ app.whenReady().then(() => {
             console.warn('[Adam] media key shortcut already taken by another app:', key);
     }
 
-    // Always attempt to start the engine API server.  engine-playback.js checks
-    // reachability at startup and silently falls back to the Apple CDN if the
-    // engine isn't running, so a missing binary is not a hard failure.
-    startEngine();
     ensureFairPlayLibs();
 
     // Cold-start deep link: if Adam was launched with a URL argument (e.g. from

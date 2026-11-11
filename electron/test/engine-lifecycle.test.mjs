@@ -7,7 +7,7 @@ import net from 'node:net';
 import { mkdtempSync, writeFileSync, readFileSync, statSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createEngineLifecycle, isOwnedOrphan, isOwnedOrphanWindows, isPortFree, recoverOrphanEngine } from '../engine-lifecycle.mjs';
+import { createEngineLifecycle, isOwnedOrphan, isOwnedOrphanWindows, isPortFree, pidAlive, recoverOrphanEngine } from '../engine-lifecycle.mjs';
 
 const noop = () => {};
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -204,4 +204,45 @@ test('reload restarts a running engine and is a no-op once stopped', async () =>
     lifecycle.reload();
     await wait(30);
     assert.equal(children.length, 2, 'reload after stop must not start a new engine');
+});
+
+test('reload restarts at once instead of with the crash backoff', async () => {
+    const children = [];
+    const lifecycle = createEngineLifecycle({
+        prepare: async () => {},
+        spawn: () => { const c = fakeChild(); children.push(c); return c; },
+        log: noop, restartDelay: 200,
+    });
+    await lifecycle.start();
+    lifecycle.reload();
+    await wait(60);
+    assert.equal(children.length, 2, 'a reload must not wait for the restart delay');
+    lifecycle.reload();
+    await wait(60);
+    assert.equal(children.length, 3, 'a second reload of a young engine must not back off either');
+
+    children[2].emit('exit', 1, null);   // a crash still waits for the backoff
+    await wait(60);
+    assert.equal(children.length, 3, 'a crash must still wait for the backoff');
+    await lifecycle.stop();
+});
+
+test('pidAlive treats a missing process as gone and a foreign one as alive', () => {
+    const throwing = code => () => { const e = new Error(code); e.code = code; throw e; };
+    assert.equal(pidAlive(4242, () => true), true);
+    assert.equal(pidAlive(4242, throwing('ESRCH')), false);
+    assert.equal(pidAlive(4242, throwing('EPERM')), true);
+});
+
+test('recovery skips the ownership check when the recorded engine is gone', async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'adam-lock-gone-'));
+    const lockPath = path.join(directory, 'engine-session.lock');
+    writeFileSync(lockPath, '4242\n');
+    let queried = false;
+    try {
+        await recoverOrphanEngine({ lockPath, binary: 'C:\\x\\engine.exe', dataDir: directory, port: 20025, log: noop,
+            plat: 'win32', alive: () => false, query: async () => { queried = true; return null; } });
+        assert.equal(queried, false, 'a dead pid must not start a PowerShell query');
+        assert.equal(readFileSync(lockPath, 'utf8'), '4242\n');
+    } finally { rmSync(directory, { recursive: true, force: true }); }
 });

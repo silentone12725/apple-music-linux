@@ -233,3 +233,45 @@ if (document.readyState === 'loading') {
 } else {
     setupAppleMusicPage();
 }
+
+// ── Early sidebar clicks ──────────────────────────────────────────────────────
+// The sidebar is server-rendered and visible a moment before Apple's app has
+// attached its router. A click in that window either falls through to a plain
+// link (the whole page reloads) or is dropped while the app starts. Until the
+// player bar exists (rendered by the started app), hold sidebar clicks and replay
+// the last one once it does. Registered at document start, before any page script.
+;(function guardEarlySidebarClicks() {
+    if (!IS_APPLE_MUSIC) return;
+    const READY = '.web-chrome-playback-lcd, .player-lcd, [data-testid="lcd-metadata"]';
+    let held = null;
+    let poll = null;
+    const appReady = () => document.readyState !== 'loading' && !!document.querySelector(READY);
+    const onClick = (e) => {
+        if (appReady()) { window.removeEventListener('click', onClick, true); return; }
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        const link = e.target?.closest?.('nav a[href]');
+        if (!link) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        held = link.getAttribute('href');
+        if (poll) return;
+        const started = Date.now();
+        poll = setInterval(() => {
+            if (!appReady()) {
+                if (Date.now() - started > 10000) { clearInterval(poll); poll = null; held = null; }
+                return;
+            }
+            clearInterval(poll);
+            poll = null;
+            window.removeEventListener('click', onClick, true);
+            const href = held;
+            held = null;
+            // Hydration may have swapped the node; find the live link by its href.
+            setTimeout(() => {
+                const target = [...document.querySelectorAll('nav a[href]')].find(a => a.getAttribute('href') === href);
+                target?.click();
+            }, 50);
+        }, 50);
+    };
+    window.addEventListener('click', onClick, true);
+})();
