@@ -11,14 +11,14 @@ export const BUILTIN_PRESETS = {
         navBorder:    '#3b3b3b',
         accentActive: 'hsla(358, 87%, 60%, 0.28)',
     }),
-    // Apple's system blue, read from the page's own --systemBlue token (#0a84ff).
+    // The blue the current Apple Music web UI tints its sidebar icons with (its --keyAccentColor, #5ac8f5).
     'New Blue': () => ({
-        accent:       '#0a84ff',
+        accent:       '#5ac8f5',
         appearance:   'dark',
         bgColor:      '#000000',
         navBg:        '#303030',
         navBorder:    '#3b3b3b',
-        accentActive: 'hsla(211, 100%, 52%, 0.28)',
+        accentActive: 'hsla(198, 89%, 65%, 0.28)',
     }),
 };
 

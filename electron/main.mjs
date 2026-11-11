@@ -649,6 +649,11 @@ function _withAlpha(color, alpha) {
     return color;
 }
 
+// Apple's web player tints its sidebar icons and controls from these tokens (--keyAccentColor is the
+// current cyan-blue #5ac8f5, --systemBlue the older #0a84ff).
+const SYSTEM_BLUE_VARS = ['--keyAccentColor', '--systemCyan', '--systemBlue', '--systemBlue-vibrant', '--systemBlue-default_IC', '--systemBlue-vibrant_IC',
+    '--systemBlue-rollover', '--systemBlue-pressed', '--systemBlue-deepPressed', '--keyColor-focus-color'];
+
 function _applyThemeVars(palette) {
     if (!win || !palette) return;
     const p = sanitizePalette(palette) ?? defaultPalette(); // a poisoned saved palette must not break startup
@@ -677,6 +682,9 @@ function _applyThemeVars(palette) {
         setVar('--adam-nav-text', ${navText});
         setVar('--adam-nav-text-sec', ${navTextSec});
         setVar('--adam-bg-color', ${bg});
+        // Apple's page paints its own tinted controls (sidebar icons, links, toggles) from --systemBlue*;
+        // the theme's accent replaces that blue so the palette stays consistent (Apple Music = pink, New Blue = blue).
+        for (const n of ${JSON.stringify(SYSTEM_BLUE_VARS)}) setVar(n, ${JSON.stringify(p.accent || '')});
         let bd = document.getElementById('_adamAccentBg');
         if (!bd) {
             bd = document.createElement('div');
@@ -693,7 +701,7 @@ function _clearThemeVars() {
     nativeTheme.themeSource = _acrylicBackend ? _acrylicSettings().theme : 'system';
     win.webContents.executeJavaScript(`(function(){
         const r = document.documentElement;
-        ['--adam-nav-bg','--adam-nav-border','--adam-accent','--adam-accent-active','--adam-nav-text','--adam-nav-text-sec','--adam-bg-color']
+        ['--adam-nav-bg','--adam-nav-border','--adam-accent','--adam-accent-active','--adam-nav-text','--adam-nav-text-sec','--adam-bg-color', ...${JSON.stringify(SYSTEM_BLUE_VARS)}]
             .forEach(v => r.style.removeProperty(v));
         document.getElementById('_adamAccentBg')?.remove();
         document.getElementById('_adamCustomBg')?.remove();
