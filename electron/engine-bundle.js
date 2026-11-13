@@ -377,9 +377,12 @@
 
   // src/engine/vlc-end.js
   var VLC_MAX_RETRIES = 2;
-  function classifyVlcEnd({ posMs, trackEndMs, reason, retryCount, sourceEof }) {
+  function classifyVlcEnd({ posMs, trackEndMs, reason, retryCount, sourceEof, sourceFailed = false }) {
     if (posMs < 2e3 && trackEndMs > 5e3 && retryCount < VLC_MAX_RETRIES) {
       return { action: "retry", fromMs: 0, delayMs: 1500 };
+    }
+    if ((sourceFailed || reason === "error") && retryCount < VLC_MAX_RETRIES) {
+      return { action: "retry", fromMs: Math.max(0, posMs), delayMs: 500 };
     }
     const endWindowMs = reason === "error" ? 3e3 : Math.min(1e4, trackEndMs * 0.1);
     const shortOfEnd = posMs > 2e3 && trackEndMs > 5e3 && posMs < trackEndMs - endWindowMs;
@@ -387,6 +390,7 @@
     if (shortOfEnd && !dataEnded && retryCount < VLC_MAX_RETRIES) {
       return { action: "retry", fromMs: posMs, delayMs: 500 };
     }
+    if (sourceFailed || reason === "error" || shortOfEnd && !dataEnded || posMs < 2e3 && trackEndMs > 5e3) return { action: "stop" };
     return { action: "advance", shortOfReported: shortOfEnd && dataEnded };
   }
 
@@ -1514,6 +1518,7 @@
   var _vlcSeekOffsetMs = 0;
   var _vlcOverrunLogged = false;
   var _vlcSourceEof = false;
+  var _vlcSourceFailed = false;
   var _vlcRetryCount = 0;
   var _vlcPrevState = null;
   var _vlcLoading = false;
@@ -4479,12 +4484,19 @@
   function _vlcHandleEnded(posMs, mkAudio, reason = "ended") {
     stopVLCPoll();
     const trackEndMs = Math.round(_durationSec * 1e3);
-    const end = classifyVlcEnd({ posMs, trackEndMs, reason, retryCount: _vlcRetryCount, sourceEof: _vlcSourceEof });
+    const end = classifyVlcEnd({ posMs, trackEndMs, reason, retryCount: _vlcRetryCount, sourceEof: _vlcSourceEof, sourceFailed: _vlcSourceFailed });
     if (end.action === "retry") {
       _vlcRetryCount++;
       if (end.fromMs === 0) _vlcSeekOffsetMs = 0;
       console.warn(`[Adam VLC] ${end.fromMs === 0 ? "premature end" : "false end"} at ${posMs}ms (track=${trackEndMs}ms) \u2014 reloading to resume at ${end.fromMs}ms attempt ${_vlcRetryCount}`);
       _vlcRetryFrom(end.fromMs, mkAudio, end.delayMs);
+      return;
+    }
+    if (end.action === "stop") {
+      _vlcPaused = true;
+      _vlcLoading = false;
+      mkAudio.dispatchEvent(new Event("pause"));
+      _adamToast("Playback failed. Select this track again to retry.");
       return;
     }
     if (end.shortOfReported) {
@@ -4528,10 +4540,11 @@
       if (!r.ok) throw new Error(`VLC status: HTTP ${r.status}`);
       if (_sessionId !== mySession || generation !== _vlcPollGeneration) return;
       _vlcErrCount = 0;
-      const { posMs, lengthMs, state, volume, muted, eof } = await r.json();
+      const { posMs, lengthMs, state, volume, muted, eof, failed } = await r.json();
       if (_sessionId !== mySession || generation !== _vlcPollGeneration || transportRevision !== _vlcTransport.revision || _vlcTransport.pending) return;
       _vlcSyncVolume?.(volume, muted);
       _vlcSourceEof = eof === true;
+      _vlcSourceFailed = failed === true;
       _vlcHandleLength(lengthMs);
       _vlcUpdatePosition(posMs, state, mkAudio);
       if (state === _vlcPrevState) return;
@@ -4554,6 +4567,7 @@
     _vlcTickCount = 0;
     _vlcLengthSet = false;
     _vlcSourceEof = false;
+    _vlcSourceFailed = false;
     _vlcOverrunLogged = false;
     _vlcFetching = false;
     const mySession = _sessionId;

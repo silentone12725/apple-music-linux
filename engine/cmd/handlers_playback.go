@@ -394,14 +394,16 @@ func (s *APIServer) startCacheDownload(id string, spw *diskcache.StreamingPutWri
 	downloadCtx, cancel := context.WithTimeout(s.shutdownCtx, 15*time.Minute) // shutdownCtx: from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1)
 	go func() {
 		defer cancel()
-		defer s.alac.done(id)
+		defer s.alac.done(id, spw)
 		vlog.Printf("[cache] startCacheDownload calling pm.Stream: session=%s", id)
 		if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, s.alac.writer(downloadCtx, id, spw)); err != nil {
 			log.Printf("[cache] startCacheDownload pm.Stream ERROR: session=%s err=%v", id, err)
 			spw.Discard()
 		} else {
 			vlog.Printf("[cache] startCacheDownload SUCCESS: session=%s", id)
-			spw.Commit()
+			if err := spw.Commit(); err != nil {
+				log.Printf("[cache] commit failed: session=%s err=%v", id, err)
+			}
 		}
 	}()
 }
@@ -426,19 +428,33 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	bgCtx, cancel := context.WithTimeout(s.shutdownCtx, 10*time.Minute) // shutdownCtx: from PR #1
+	// Publish the streaming writer before acknowledging the pre-warm. Playback
+	// can consume its bytes immediately instead of racing a non-streaming put.
+	spw, f, err := s.diskCache.BeginStreamingPutOrGet(sess.AssetID, qualifier)
+	if err != nil {
+		cancel()
+		http.Error(w, "cannot start precache", http.StatusInternalServerError)
+		return
+	}
+	if f != nil {
+		f.Close()
+		cancel()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if spw == nil {
+		cancel()
+		w.WriteHeader(http.StatusAccepted) // another writer owns this exact key
+		return
+	}
 	go func() {
 		defer cancel()
-		defer s.alac.done(id)
-		pw, err := s.diskCache.BeginPut(sess.AssetID, qualifier)
-		if err != nil || pw == nil {
+		defer s.alac.done(id, spw)
+		if err := s.pm.Stream(bgCtx, id, pipeline.KindAudio, s.alac.writer(bgCtx, id, spw)); err != nil {
+			spw.Discard()
 			return
 		}
-		if err := s.pm.Stream(bgCtx, id, pipeline.KindAudio, s.alac.writer(bgCtx, id, pw)); err != nil {
-			pw.Discard()
-			return
-		}
-		if err := pw.Commit(); err != nil {
-			pw.Discard()
+		if err := spw.Commit(); err != nil {
 			return
 		}
 		log.Printf("[precache] disk cache populated assetId=%s sessionId=%s", sess.AssetID, id)
