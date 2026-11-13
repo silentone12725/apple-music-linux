@@ -1,0 +1,46 @@
+name: Issue tracker
+
+# Reconciles every issue with the PRs and releases that fix it. The 3-hourly schedule is authoritative; every other
+# trigger only runs the same job sooner. No pull_request_target (GitHub blocks it by default on public repos from
+# 2 Dec 2026): fork PR bodies are read as data through the API. See .github/TRACKING.md.
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  push:
+    branches: [main, nightly]
+  release:
+    types: [published]
+  issues:
+    types: [opened, reopened, closed, labeled, unlabeled, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+  # Fires after CI finishes for any pull_request activity (opened, edited, synchronize, ...), fork PRs included.
+  # Consumes no artifacts and runs no PR code. ci.yml must keep its pull_request types (a test enforces it).
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: read
+  contents: read
+
+# One running and at most one pending run: every run reconciles all issues, so a dropped pending run loses nothing.
+concurrency:
+  group: adam-tracking
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.repository == 'silentone12725/apple-music-linux'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Reconcile issues
+        run: node .github/scripts/reconcile.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}

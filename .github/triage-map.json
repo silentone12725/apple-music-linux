@@ -1,0 +1,20 @@
+{
+  "component": {
+    "Playback (AAC)": "comp:playback",
+    "Lossless (ALAC)": "comp:lossless",
+    "Atmos / spatial audio": "comp:atmos",
+    "Music videos": "comp:video",
+    "Downloads": "comp:downloads",
+    "Sign-in / DRM": "comp:drm-login",
+    "Theme / UI": "comp:ui-theme",
+    "Media keys / MPRIS": "comp:mpris",
+    "Scrobbling": "comp:scrobbling",
+    "Packaging / install": "comp:packaging",
+    "Other": null
+  },
+  "platform": {
+    "Linux": "os:linux",
+    "Windows": "os:windows",
+    "Other": null
+  }
+}
