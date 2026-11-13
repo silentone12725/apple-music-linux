@@ -1,0 +1,24 @@
+name: Issue triage
+
+# Sets the scope labels (component and platform) from the bug report form. Nothing else: the state labels belong to
+# tracking.yml, and untrusted issue text is read through the API, never interpolated into a command.
+on:
+  issues:
+    types: [opened, reopened, edited]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  scope:
+    if: github.repository == 'silentone12725/apple-music-linux'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Apply scope labels
+        run: node .github/scripts/triage-run.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
