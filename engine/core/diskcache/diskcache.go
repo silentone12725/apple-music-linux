@@ -88,7 +88,11 @@ func (c *Cache) WaitForWriter(ctx context.Context, assetID, qualifier string) er
 	case <-p.done:
 		return p.err
 	case <-p.ready:
-		if _, published := c.streaming.Load(c.filename(assetID, qualifier)); !published {
+		writer, published := c.streaming.Load(c.filename(assetID, qualifier))
+		// ready only announces publication. A terminal writer can remain in
+		// streaming until its reference cleanup and pending notification finish.
+		// Such a writer cannot supply a new reader; wait for its real result.
+		if !published || writer.(*StreamingPutWriter).Finished() {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -185,4 +186,157 @@ func TestStreamingFileFinishAndReferences(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Hold the observable finish prefix (done, but still published and reserved)
+// until all waiters have tried it. This needs no production timing hook.
+func TestWaitForTerminalStreamingWriter(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		publicationErr error
+		sourceErr      error
+		rename         bool
+	}{
+		{name: "commit success"},
+		{name: "sync ENOSPC", publicationErr: syscall.ENOSPC},
+		{name: "sync EIO", publicationErr: syscall.EIO},
+		{name: "rename permission", publicationErr: os.ErrPermission, rename: true},
+		{name: "source EIO", sourceErr: syscall.EIO},
+		{name: "source short write", sourceErr: io.ErrShortWrite},
+		{name: "source canceled", sourceErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c, err := New(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				w, err := c.BeginStreamingPut("song", "alac")
+				if err != nil {
+					t.Fatal(err)
+				}
+				r := w.NewReader()
+				defer r.Close()
+				if _, err := w.Write([]byte("audio")); err != nil {
+					t.Fatal(err)
+				}
+				if tc.publicationErr != nil {
+					fail := func(*os.File) error { return tc.publicationErr }
+					if tc.rename {
+						c.renameFile = func(string, string) error { return tc.publicationErr }
+					} else {
+						c.syncFile = fail
+					}
+				}
+				w.mu.Lock()
+				w.done = true
+				w.writeErr = tc.sourceErr
+				w.producerErr = tc.sourceErr
+				w.mu.Unlock()
+				if c.GetStreaming("song", "alac") != w {
+					t.Fatal("streaming marker missing from fixture")
+				}
+				select {
+				case <-w.pending.done:
+					t.Fatal("pending already finished")
+				default:
+				}
+				if extra := w.NewReaderIfActive(); extra != nil {
+					extra.Close()
+					t.Error("terminal reader accepted")
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				const count = 8
+				results := make(chan error, count)
+				for range count {
+					go func() { results <- c.WaitForWriter(ctx, "song", "alac") }()
+				}
+				synctest.Wait()
+				early := 0
+				for range count {
+					select {
+					case got := <-results:
+						early++
+						t.Errorf("false readiness before terminal publication: %v", got)
+					default:
+					}
+				}
+				if other, err := c.BeginStreamingPut("song", "alac"); other != nil || err != nil {
+					t.Fatalf("duplicate writer=%v err=%v", other, err)
+				}
+				want := tc.publicationErr
+				if tc.sourceErr != nil {
+					want = tc.sourceErr
+				}
+				if err := w.Commit(); !errors.Is(err, want) {
+					t.Errorf("commit=%v want=%v", err, want)
+				}
+				for i := early; i < count; i++ {
+					if got := <-results; !errors.Is(got, want) {
+						t.Errorf("waiter=%v want=%v", got, want)
+					}
+				}
+				data, readErr := io.ReadAll(r)
+				if string(data) != "audio" || !errors.Is(readErr, tc.sourceErr) {
+					t.Errorf("reader=%q %v want=%v", data, readErr, tc.sourceErr)
+				}
+				if f, hit := c.Get("song", "alac"); hit != (want == nil) {
+					t.Errorf("cache hit=%v", hit)
+				} else if f != nil {
+					f.Close()
+				}
+				if c.GetStreaming("song", "alac") != nil {
+					t.Error("streaming marker retained")
+				}
+				if _, held := c.inFlight.Load(w.key); held {
+					t.Error("reservation retained")
+				}
+				if w.refs.Load() != 1 {
+					t.Errorf("refs=%d", w.refs.Load())
+				}
+				if err := w.Commit(); !errors.Is(err, want) {
+					t.Error("repeat commit lost result")
+				}
+				w.Discard()
+			})
+		})
+	}
+}
+
+func TestWaitForTerminalStreamingWriterCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, err := New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := c.BeginStreamingPut("song", "alac")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer w.Discard()
+		w.mu.Lock()
+		w.done = true
+		w.mu.Unlock()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { result <- c.WaitForWriter(ctx, "song", "alac") }()
+		synctest.Wait()
+		select {
+		case err := <-result:
+			t.Errorf("returned before cancellation: %v", err)
+			return
+		default:
+		}
+		cancel()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel=%v", err)
+		}
+		select {
+		case <-w.pending.done:
+			t.Fatal("cancellation finished the producer")
+		default:
+		}
+	})
 }
