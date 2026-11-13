@@ -99,6 +99,7 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if selectionErr != nil {
+		respondLoadAbandoned(w, r)
 		return
 	}
 	src, err := s.openVLCSource(r.Context(), req.SessionID, sess.AssetID, sess.Codec, foreground)
@@ -107,8 +108,11 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		current, _ := s.vlcLoads.runIfCurrent(loadSeq, func() error { return nil })
 		if !current {
 			http.Error(w, "superseded by a newer load", http.StatusConflict)
-		} else if s.vlcSourceContextErr(r.Context()) == nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		} else if s.vlcSourceContextErr(r.Context()) != nil {
+			respondLoadAbandoned(w, r)
+		} else {
+			logVLCLoadFailure("open", err)
+			http.Error(w, openFailureMessage(err), http.StatusInternalServerError)
 		}
 		return
 	}
@@ -148,8 +152,11 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		s.alac.release(foreground)
 		if !loaded {
 			http.Error(w, "superseded by a newer load", http.StatusConflict)
-		} else if !errors.Is(err, errLoadAbandoned) {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		} else if errors.Is(err, errLoadAbandoned) {
+			respondLoadAbandoned(w, r)
+		} else {
+			logVLCLoadFailure("player", err)
+			http.Error(w, "playback load failed", http.StatusInternalServerError)
 		}
 		return
 	}
@@ -333,6 +340,41 @@ func (s *APIServer) vlcSourceContextErr(ctx context.Context) error {
 		return err
 	}
 	return s.shutdownCtx.Err()
+}
+
+// respondLoadAbandoned ends a load that was cut short. A caller that went away is not
+// waiting for an answer, so nothing is written. When the engine itself is shutting
+// down the caller is still connected, and an empty reply would read as a 200.
+func respondLoadAbandoned(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Err() != nil {
+		return
+	}
+	http.Error(w, "engine is shutting down", http.StatusServiceUnavailable)
+}
+
+// openFailureMessage is what the caller is told when no audio source could be opened.
+// The underlying error can wrap CDN URLs and file paths, and the renderer shows the
+// reply text in its console and logs, so only a fixed message goes out.
+func openFailureMessage(err error) string {
+	if seriousVLCCacheError(err) {
+		return "audio cache unavailable"
+	}
+	return "audio source unavailable"
+}
+
+// logVLCLoadFailure records why a load failed without the text of errors that can
+// carry signed URLs or paths: the errno or the error type is kept. Errors raised by the
+// player itself are fixed strings and are logged as they are.
+func logVLCLoadFailure(stage string, err error) {
+	var errno syscall.Errno
+	switch {
+	case stage == "player":
+		log.Printf("[vlc] load failed: stage=%s: %v", stage, err)
+	case errors.As(err, &errno):
+		log.Printf("[vlc] load failed: stage=%s cause=%v", stage, errno)
+	default:
+		log.Printf("[vlc] load failed: stage=%s (error type %T)", stage, err)
+	}
 }
 
 func seriousVLCCacheError(err error) bool {

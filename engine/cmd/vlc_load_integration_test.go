@@ -115,3 +115,34 @@ func TestLoadOrderingRejectsLateSource(t *testing.T) {
 		})
 	}
 }
+
+// A load that is cut short by engine shutdown must say so; an empty reply would be a 200.
+func TestLoadAnsweredWhenEngineShutsDown(t *testing.T) {
+	s, a, shutdown := playback02Server(t, playback02Source(func(ctx context.Context, dst io.Writer) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}), true)
+	p, err := vlc.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	s.vlcPlayer = p
+	shutdown()
+
+	post := func(ctx context.Context) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		body := bytes.NewBufferString(fmt.Sprintf(`{"sessionId":%q}`, a.ID))
+		s.handleVLCLoad(w, httptest.NewRequest(http.MethodPost, "/vlc/load", body).WithContext(ctx))
+		return w
+	}
+	if w := post(t.Context()); w.Code != http.StatusServiceUnavailable || !bytes.Contains(w.Body.Bytes(), []byte("shutting down")) {
+		t.Fatalf("shutdown load = %d %q, want 503 shutting down", w.Code, w.Body.String())
+	}
+
+	gone, cancel := context.WithCancel(t.Context())
+	cancel()
+	if w := post(gone); w.Body.Len() != 0 {
+		t.Fatalf("a caller that left was sent %d %q", w.Code, w.Body.String())
+	}
+}
