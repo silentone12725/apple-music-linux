@@ -480,6 +480,7 @@ type APIServer struct {
 	libStore    *library.Store      // local library metadata cache (songs, playlists)
 	vlcPlayer   *vlc.Player         // nil when libvlc is not available
 	vlcGate     vlcGate             // session that currently owns vlcPlayer
+	vlcLoads    loadOrder           // keeps /vlc/load requests in arrival order
 
 	tokenMu     sync.RWMutex
 	cachedToken string // bearer token cached from the most recent browser request

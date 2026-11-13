@@ -95,4 +95,24 @@ test('the generated bundle executes the same failure stop and natural end behavi
     context._vlcRetryCount = 0;
     end(239000);
     assert.equal(calls.next, 1);
+    context._vlcRetryCount = 2;
+    end(239500, 'error');
+    assert.equal(calls.next, 2);
+    context._vlcSourceFailed = true;
+    end(239500, 'error');
+    assert.equal(calls.next, 2);
+    assert.equal(calls.pause, 2);
+});
+
+test('the real handler advances clean-EOF decoder tails but stops conflicting source failures', () => {
+    for (const retry of [0, 1, 2]) {
+        const { calls, end } = setup({ _vlcSourceEof: true, _vlcRetryCount: retry });
+        end(239500, 'error');
+        assert.equal(calls.next, 1);
+        assert.equal(calls.retry, 0);
+    }
+    const { calls, end } = setup({ _vlcSourceEof: true, _vlcSourceFailed: true, _vlcRetryCount: 2 });
+    end(239500, 'error');
+    assert.equal(calls.next, 0);
+    assert.equal(calls.pause, 1);
 });

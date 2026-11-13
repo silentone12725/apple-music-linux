@@ -79,3 +79,39 @@ test('clean EOF still advances across successive tracks without retries', () => 
             sourceEof: true, sourceFailed: false }).action, 'advance');
     }
 });
+
+test('end classification matrix preserves near-end decoder recovery without advancing source failures', () => {
+    let cases = 0;
+    for (const trackEndMs of [4000, 20000, 240000]) {
+        for (const posMs of [0, 800, 2500, trackEndMs / 2, trackEndMs - 500, trackEndMs]) {
+            for (const reason of ['ended', 'error']) for (const sourceEof of [false, true]) {
+                for (const sourceFailed of [false, true]) for (const retryCount of [0, 1, 2]) {
+                    const input = { trackEndMs, posMs, reason, sourceEof, sourceFailed, retryCount };
+                    const result = classifyVlcEnd(input);
+                    const neverStarted = posMs < 2000 && trackEndMs > 5000;
+                    const nearDecoderEnd = reason === 'error' && sourceEof && !sourceFailed &&
+                        posMs > 2000 && trackEndMs > 0 && posMs >= trackEndMs - Math.min(3000, trackEndMs * 0.1);
+                    const earlyNaturalEnd = posMs > 2000 && trackEndMs > 5000 &&
+                        posMs < trackEndMs - Math.min(10000, trackEndMs * 0.1) && !sourceEof;
+                    let expected = 'advance';
+                    if (neverStarted || sourceFailed || (reason === 'error' && !nearDecoderEnd) ||
+                        (reason === 'ended' && earlyNaturalEnd)) expected = retryCount < 2 ? 'retry' : 'stop';
+                    assert.equal(result.action, expected, JSON.stringify(input));
+                    if (expected === 'retry') {
+                        assert.equal(result.delayMs, neverStarted ? 1500 : 500);
+                        assert.equal(result.fromMs, neverStarted ? 0 : Math.max(0, posMs));
+                    }
+                    cases++;
+                }
+            }
+        }
+    }
+    assert.equal(cases, 432);
+});
+
+test('239.5 seconds of a 240 second track advances on clean-EOF decoder error at every retry count', () => {
+    for (const retryCount of [0, 1, 2]) {
+        assert.equal(classifyVlcEnd({ posMs: 239500, trackEndMs: 240000, reason: 'error',
+            sourceEof: true, sourceFailed: false, retryCount }).action, 'advance');
+    }
+});

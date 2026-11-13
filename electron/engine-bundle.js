@@ -381,6 +381,8 @@
     if (posMs < 2e3 && trackEndMs > 5e3 && retryCount < VLC_MAX_RETRIES) {
       return { action: "retry", fromMs: 0, delayMs: 1500 };
     }
+    const decoderTailEnded = reason === "error" && sourceEof === true && !sourceFailed && posMs > 2e3 && trackEndMs > 0 && posMs >= trackEndMs - Math.min(3e3, trackEndMs * 0.1);
+    if (decoderTailEnded) return { action: "advance", shortOfReported: false };
     if ((sourceFailed || reason === "error") && retryCount < VLC_MAX_RETRIES) {
       return { action: "retry", fromMs: Math.max(0, posMs), delayMs: 500 };
     }

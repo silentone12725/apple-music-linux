@@ -11,6 +11,12 @@ export function classifyVlcEnd({ posMs, trackEndMs, reason, retryCount, sourceEo
     if (posMs < 2000 && trackEndMs > 5000 && retryCount < VLC_MAX_RETRIES) {
         return { action: 'retry', fromMs: 0, delayMs: 1500 };
     }
+    // A byte EOF alone does not prove successful decoding. Only tolerate a
+    // decoder error at the tail, with no source failure and a known duration.
+    // Cap the 3 s tolerance at 10% for short tracks.
+    const decoderTailEnded = reason === 'error' && sourceEof === true && !sourceFailed &&
+        posMs > 2000 && trackEndMs > 0 && posMs >= trackEndMs - Math.min(3000, trackEndMs * 0.1);
+    if (decoderTailEnded) return { action: 'advance', shortOfReported: false };
     if ((sourceFailed || reason === 'error') && retryCount < VLC_MAX_RETRIES) {
         return { action: 'retry', fromMs: Math.max(0, posMs), delayMs: 500 };
     }

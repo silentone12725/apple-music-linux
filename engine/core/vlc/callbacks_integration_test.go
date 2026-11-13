@@ -145,3 +145,15 @@ func TestNativeRepeatedSourceRelease(t *testing.T) {
 }
 
 var _ io.ReadSeeker = (*observedSource)(nil)
+
+func TestNativeRejectedSourceOwnership(t *testing.T) {
+	p := nativePlayer(t)
+	p.Close()
+	src := &observedSource{Reader: bytes.NewReader(silentWAV(1))}
+	if err := p.LoadSource(src); err == nil {
+		t.Fatal("closed player accepted source")
+	}
+	if src.closes.Load() != 1 || src.aborts.Load() != 1 {
+		t.Fatalf("rejected source ownership: closes=%d aborts=%d", src.closes.Load(), src.aborts.Load())
+	}
+}

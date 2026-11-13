@@ -37,6 +37,10 @@ var unsafeChars = regexp.MustCompile(`[^a-zA-Z0-9_\-]`)
 type Cache struct {
 	dir string
 
+	syncFile   func(*os.File) error
+	renameFile func(string, string) error
+	removeFile func(string) error
+
 	limitBytes atomic.Int64 // 0 = unlimited
 	ttlDays    atomic.Int64 // 0 = never expire
 
@@ -60,9 +64,10 @@ type Cache struct {
 // ready publishes a streaming writer; done releases a non-streaming writer or
 // reports a failed setup. Only the writer closes these channels.
 type pendingPut struct {
-	ready chan struct{}
-	done  chan struct{}
-	err   error // published by closing done
+	ready      chan struct{}
+	done       chan struct{}
+	err        error // published by closing done
+	finishOnce sync.Once
 }
 
 func newPendingPut() *pendingPut {
@@ -101,9 +106,11 @@ func (c *Cache) WaitForWriter(ctx context.Context, assetID, qualifier string) er
 }
 
 func (c *Cache) finishPut(key string, p *pendingPut, err error) {
-	p.err = err
-	c.inFlight.Delete(key)
-	close(p.done)
+	p.finishOnce.Do(func() {
+		p.err = err
+		c.inFlight.CompareAndDelete(key, p)
+		close(p.done)
+	})
 }
 
 // New returns a Cache rooted at dir, creating it if necessary.
@@ -111,7 +118,7 @@ func New(dir string) (*Cache, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Cache{dir: dir}, nil
+	return &Cache{dir: dir, syncFile: (*os.File).Sync, renameFile: commitRename, removeFile: os.Remove}, nil
 }
 
 // SetConfig updates the cache limits atomically.  Zero means unlimited/no-expiry.
@@ -233,12 +240,15 @@ func commitRename(tmp, final string) error {
 // Commit closes the temp file and renames it to its final path.
 // After Commit the cache triggers eviction if a size limit is set.
 func (pw *PutWriter) Commit() error {
+	err := pw.cache.syncFile(pw.File)
 	pw.File.Close()
 	pw.committed = true
 	// Rename BEFORE releasing the in-flight marker: once it is gone, a new
 	// BeginPut/BeginStreamingPut may O_TRUNC the same .tmp path, which would
 	// truncate this file just before it becomes the committed entry.
-	err := commitRename(pw.File.Name(), pw.finalPath)
+	if err == nil {
+		err = pw.cache.renameFile(pw.File.Name(), pw.finalPath)
+	}
 	if err != nil {
 		os.Remove(pw.File.Name())
 	}
@@ -298,6 +308,46 @@ func (c *Cache) Clear() error {
 	return nil
 }
 
+const staleTmpAge = 24 * time.Hour
+
+// Only cache-owned regular .m4a.tmp leaves are eligible. Capture identity before
+// claiming, then recheck under the same reservation used by every producer.
+func (c *Cache) sweepStaleTmp() {
+	entries, _ := os.ReadDir(c.dir)
+	cutoff := time.Now().Add(-staleTmpAge)
+	for _, entry := range entries {
+		name := entry.Name()
+		stem := strings.TrimSuffix(name, ".m4a.tmp")
+		if stem == name || !strings.Contains(stem, "-") || unsafeChars.MatchString(stem) {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && info.Mode().IsRegular() && info.ModTime().Before(cutoff) {
+			_ = c.removeStaleTmp(name, info, cutoff)
+		}
+	}
+}
+
+func (c *Cache) removeStaleTmp(name string, observed os.FileInfo, cutoff time.Time) (err error) {
+	key := strings.TrimSuffix(name, ".tmp")
+	pending := newPendingPut()
+	if _, loaded := c.inFlight.LoadOrStore(key, pending); loaded {
+		return nil
+	}
+	defer func() { c.finishPut(key, pending, err) }()
+	path := filepath.Join(c.dir, name)
+	current, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(observed, current) || !current.ModTime().Before(cutoff) {
+		return nil
+	}
+	return c.removeFile(path)
+}
+
 // Evict removes the oldest entries (by mtime) until the total size is below
 // the configured limit.  No-op when no limit is set.
 func (c *Cache) Evict() {
@@ -306,6 +356,7 @@ func (c *Cache) Evict() {
 		return
 	}
 	defer c.evicting.Store(false)
+	c.sweepStaleTmp()
 	for {
 		c.evictOnce()
 		if !c.evictAgain.Swap(false) {
@@ -383,11 +434,15 @@ type StreamingPutWriter struct {
 	key       string
 	cache     *Cache
 
-	mu       sync.Mutex
-	cond     *sync.Cond
-	written  int64
-	done     bool  // set by Commit or Discard
-	writeErr error // non-nil when Discard was called
+	mu          sync.Mutex
+	cond        *sync.Cond
+	written     int64
+	done        bool  // set by Commit or Discard
+	writeErr    error // terminal source error, distinct from cache publication failure
+	producerErr error // first Write failure, guarded by mu
+
+	terminalOnce sync.Once // serializes terminal operations, never holds mu during filesystem I/O
+	terminalErr  error     // published by terminalOnce
 
 	refs atomic.Int32 // 1 (writer) + N readers; file closes when it hits 0
 }
@@ -402,15 +457,36 @@ func NewStreamingFile(f *os.File) *StreamingPutWriter {
 	return w
 }
 
-// FinishFile is the terminal operation for NewStreamingFile, called exactly
-// once by its producer. Preserve the original I/O or cancellation error.
+// FinishFile ends a NewStreamingFile producer, preserving its first result.
+// On cache/committed writers it is a no-op: their owner must Commit/Discard/Release.
 func (sw *StreamingPutWriter) FinishFile(err error) {
+	if sw.cache != nil {
+		return
+	}
+	sw.terminalOnce.Do(func() {
+		sw.mu.Lock()
+		if sw.producerErr != nil {
+			err = sw.producerErr
+		}
+		sw.mu.Unlock()
+		sw.finish(err, err)
+	})
+}
+
+// finish releases the producer exactly once, from a terminalOnce callback.
+// Filesystem operations run outside mu so readers can drain buffered bytes.
+func (sw *StreamingPutWriter) finish(commitErr, readerErr error) {
+	sw.terminalErr = commitErr
 	sw.mu.Lock()
 	sw.done = true
-	sw.writeErr = err
+	sw.writeErr = readerErr
 	sw.mu.Unlock()
 	sw.cond.Broadcast()
 	sw.decRef()
+	if sw.pending != nil {
+		sw.cache.streaming.CompareAndDelete(sw.key, sw)
+		sw.cache.finishPut(sw.key, sw.pending, commitErr)
+	}
 }
 
 // BeginStreamingPut opens a temp file with O_RDWR so concurrent readers can
@@ -472,13 +548,23 @@ func (c *Cache) GetStreaming(assetID, qualifier string) *StreamingPutWriter {
 }
 
 func (sw *StreamingPutWriter) Write(p []byte) (int, error) {
-	n, err := sw.file.Write(p)
-	if n > 0 {
-		sw.mu.Lock()
-		sw.written += int64(n)
-		sw.mu.Unlock()
-		sw.cond.Broadcast()
+	sw.mu.Lock()
+	first := sw.producerErr
+	sw.mu.Unlock()
+	if first != nil {
+		return 0, first
 	}
+	n, err := sw.file.Write(p)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	sw.mu.Lock()
+	sw.written += int64(n)
+	if sw.producerErr == nil {
+		sw.producerErr = err
+	}
+	sw.mu.Unlock()
+	sw.cond.Broadcast()
 	return n, err
 }
 
@@ -489,42 +575,53 @@ func (sw *StreamingPutWriter) decRef() {
 	}
 }
 
-// Commit renames the temp file to its final path and signals all readers that
-// writing is done. Call exactly once after all Write calls succeed.
+// Commit is valid only for a cache put. Repeated calls return the first
+// terminal result; concurrent Commit/Discard calls are won by the first entrant.
+// The producer must finish Write calls before terminating.
 func (sw *StreamingPutWriter) Commit() error {
-	// Rename BEFORE releasing the in-flight/streaming markers (see PutWriter.Commit).
-	// Readers keep working across the rename: they hold the open descriptor.
-	err := commitRename(sw.file.Name(), sw.finalPath)
-	if err != nil {
-		os.Remove(sw.file.Name())
+	if sw.pending == nil {
+		return errors.New("diskcache: commit requires a cache put")
 	}
-	sw.cache.streaming.Delete(sw.key)
-	sw.mu.Lock()
-	sw.done = true
-	sw.writeErr = err
-	sw.mu.Unlock()
-	sw.cond.Broadcast()
-	sw.decRef()
-	sw.cache.finishPut(sw.key, sw.pending, err)
-	if err != nil {
-		return err
-	}
-	go sw.cache.Evict()
-	return nil
+	sw.terminalOnce.Do(func() {
+		// All writes have returned. Publication failure does not invalidate
+		// complete bytes already held by readers; source failure still does.
+		sw.mu.Lock()
+		sourceErr := sw.producerErr
+		sw.mu.Unlock()
+		err := sourceErr
+		if err == nil {
+			err = sw.cache.syncFile(sw.file)
+		}
+		if err == nil {
+			err = sw.cache.renameFile(sw.file.Name(), sw.finalPath)
+		}
+		if err != nil {
+			sw.cache.removeFile(sw.file.Name())
+		}
+		sw.finish(err, sourceErr)
+		if err == nil {
+			go sw.cache.Evict()
+		}
+	})
+	return sw.terminalErr
 }
 
-// Discard deletes the temp file and signals readers with an error.
-// Call exactly once when writing fails or is abandoned.
+// Discard terminates a cache put with an error. Repeated calls are no-ops.
+// On spool/committed writers it is a no-op; use FinishFile/Release respectively.
 func (sw *StreamingPutWriter) Discard() {
-	os.Remove(sw.file.Name())
-	sw.cache.streaming.Delete(sw.key)
-	sw.mu.Lock()
-	sw.done = true
-	sw.writeErr = errors.New("streaming cache download failed or was abandoned")
-	sw.mu.Unlock()
-	sw.cond.Broadcast()
-	sw.decRef()
-	sw.cache.finishPut(sw.key, sw.pending, sw.writeErr)
+	if sw.pending == nil {
+		return
+	}
+	sw.terminalOnce.Do(func() {
+		os.Remove(sw.file.Name())
+		sw.mu.Lock()
+		err := sw.producerErr
+		sw.mu.Unlock()
+		if err == nil {
+			err = errors.New("streaming cache download failed or was abandoned")
+		}
+		sw.finish(err, err)
+	})
 }
 
 // NewReader returns a StreamingReader that reads from the temp file as it is
