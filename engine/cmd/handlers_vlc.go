@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -44,6 +45,9 @@ func invalidateALACCacheIfStale(cacheDir string) {
 	_ = os.WriteFile(verFile, []byte(alacCacheVersion), 0o644)
 }
 
+// errLoadAbandoned marks a load whose request was cancelled before it reached the player.
+var errLoadAbandoned = errors.New("vlc load abandoned")
+
 func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 	if s.vlcPlayer == nil {
 		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
@@ -67,6 +71,7 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found or expired", http.StatusNotFound)
 		return
 	}
+	loadSeq := s.vlcLoads.begin()
 	// The player is about to wait on this session's bytes: let its download go first.
 	// Nothing to protect when the file is cached or the download is already well ahead.
 	hold := true
@@ -87,13 +92,31 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 	if src == nil {
 		s.alac.done(req.SessionID) // served over HTTP (no cache); nothing of ours to wait for
 	}
-	if src != nil {
-		vlog.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
-		err = s.vlcPlayer.LoadSource(src)
-	} else {
+	// A newer load, or a caller that has gone away, makes this one stale: it must not
+	// replace what is playing. The source it opened is only released.
+	loaded, err := s.vlcLoads.runIfCurrent(loadSeq, func() error {
+		if r.Context().Err() != nil {
+			return errLoadAbandoned
+		}
+		if src != nil {
+			vlog.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
+			return s.vlcPlayer.LoadSource(src)
+		}
 		url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
 		log.Printf("[vlc] load url=%s startMs=%d (no disk cache)", url, req.StartMs)
-		err = s.vlcPlayer.Load(url)
+		return s.vlcPlayer.Load(url)
+	})
+	if !loaded || err == errLoadAbandoned {
+		if src != nil {
+			src.Abort()
+			src.Close()
+		}
+		if loaded {
+			return // the caller left; nobody is waiting for a response
+		}
+		log.Printf("[vlc] load session=%s superseded by a newer load", req.SessionID)
+		http.Error(w, "superseded by a newer load", http.StatusConflict)
+		return
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

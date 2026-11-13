@@ -180,12 +180,17 @@ func commitRename(tmp, final string) error {
 // Commit closes the temp file and renames it to its final path.
 // After Commit the cache triggers eviction if a size limit is set.
 func (pw *PutWriter) Commit() error {
+	// Flush before the rename publishes the name: after a crash or power loss a
+	// committed entry must not be a truncated file that Get would trust.
+	err := pw.File.Sync()
 	pw.File.Close()
 	pw.committed = true
 	// Rename BEFORE releasing the in-flight marker: once it is gone, a new
 	// BeginPut/BeginStreamingPut may O_TRUNC the same .tmp path, which would
 	// truncate this file just before it becomes the committed entry.
-	err := commitRename(pw.File.Name(), pw.finalPath)
+	if err == nil {
+		err = commitRename(pw.File.Name(), pw.finalPath)
+	}
 	if err != nil {
 		os.Remove(pw.File.Name())
 	}
@@ -244,6 +249,26 @@ func (c *Cache) Clear() error {
 	return nil
 }
 
+// staleTmpAge is how old a .tmp file must be before it counts as orphaned. A live
+// writer touches its file on every write and a download is cut off after minutes,
+// so nothing legitimate is anywhere near this old.
+const staleTmpAge = 24 * time.Hour
+
+// sweepStaleTmp removes .tmp files left behind by a crash or kill; eviction
+// skips them, so they would otherwise stay on disk forever.
+func (c *Cache) sweepStaleTmp() {
+	entries, _ := os.ReadDir(c.dir)
+	cutoff := time.Now().Add(-staleTmpAge)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tmp") {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
+			os.Remove(filepath.Join(c.dir, e.Name()))
+		}
+	}
+}
+
 // Evict removes the oldest entries (by mtime) until the total size is below
 // the configured limit.  No-op when no limit is set.
 func (c *Cache) Evict() {
@@ -252,6 +277,7 @@ func (c *Cache) Evict() {
 		return
 	}
 	defer c.evicting.Store(false)
+	c.sweepStaleTmp()
 	for {
 		c.evictOnce()
 		if !c.evictAgain.Swap(false) {
@@ -333,6 +359,7 @@ type StreamingPutWriter struct {
 	written  int64
 	done     bool  // set by Commit or Discard
 	writeErr error // non-nil when Discard was called
+	finished bool  // Commit or Discard has run; a second call must not touch the key again
 
 	refs atomic.Int32 // 1 (writer) + N readers; file closes when it hits 0
 }
@@ -392,12 +419,40 @@ func (sw *StreamingPutWriter) decRef() {
 	}
 }
 
+// errStreamingFinished is returned by Commit when the writer already ended.
+var errStreamingFinished = errors.New("diskcache: streaming put already finished")
+
+// claimFinish reports whether this call owns the writer's single terminal
+// transition. Commit and Discard are each "exactly once", but a second call must
+// not delete the in-flight marker of a newer writer for the same key, or remove
+// that writer's temp file.
+func (sw *StreamingPutWriter) claimFinish() bool {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	if sw.finished {
+		return false
+	}
+	sw.finished = true
+	return true
+}
+
 // Commit renames the temp file to its final path and signals all readers that
 // writing is done. Call exactly once after all Write calls succeed.
 func (sw *StreamingPutWriter) Commit() error {
+	if !sw.claimFinish() {
+		return errStreamingFinished
+	}
+	// Flush before the rename publishes the name: after a crash or power loss a
+	// committed entry must not be a truncated file that Get would trust. A failed
+	// flush only means the file is not cached; readers already hold every byte.
+	err := sw.file.Sync()
+	var readErr error
+	if err == nil {
+		err = commitRename(sw.file.Name(), sw.finalPath)
+		readErr = err
+	}
 	// Rename BEFORE releasing the in-flight/streaming markers (see PutWriter.Commit).
 	// Readers keep working across the rename: they hold the open descriptor.
-	err := commitRename(sw.file.Name(), sw.finalPath)
 	if err != nil {
 		os.Remove(sw.file.Name())
 	}
@@ -405,7 +460,7 @@ func (sw *StreamingPutWriter) Commit() error {
 	sw.cache.streaming.Delete(sw.key)
 	sw.mu.Lock()
 	sw.done = true
-	sw.writeErr = err
+	sw.writeErr = readErr
 	sw.mu.Unlock()
 	sw.cond.Broadcast()
 	sw.decRef()
@@ -417,8 +472,11 @@ func (sw *StreamingPutWriter) Commit() error {
 }
 
 // Discard deletes the temp file and signals readers with an error.
-// Call exactly once when writing fails or is abandoned.
+// Call exactly once when writing fails or is abandoned; later calls do nothing.
 func (sw *StreamingPutWriter) Discard() {
+	if !sw.claimFinish() {
+		return
+	}
 	os.Remove(sw.file.Name())
 	sw.cache.inFlight.Delete(sw.key)
 	sw.cache.streaming.Delete(sw.key)
