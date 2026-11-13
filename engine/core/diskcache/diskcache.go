@@ -485,10 +485,14 @@ func (sw *StreamingPutWriter) finish(commitErr, readerErr error) {
 	sw.done = true
 	sw.writeErr = readerErr
 	sw.mu.Unlock()
+	// Unpublish before releasing the writer's reference: once that reference goes the
+	// file may be closed, and GetStreaming must not hand the writer to anyone after that.
+	if sw.pending != nil {
+		sw.cache.streaming.CompareAndDelete(sw.key, sw)
+	}
 	sw.cond.Broadcast()
 	sw.decRef()
 	if sw.pending != nil {
-		sw.cache.streaming.CompareAndDelete(sw.key, sw)
 		sw.cache.finishPut(sw.key, sw.pending, commitErr)
 	}
 }
@@ -644,6 +648,9 @@ func (sw *StreamingPutWriter) Finished() bool {
 	return sw.done
 }
 
+// NewReader returns a reader from byte 0. Only call it on a writer the caller owns or
+// knows is unfinished: a finished writer's file may already be closed. Callers that
+// found the writer through GetStreaming must use NewReaderIfActive.
 func (sw *StreamingPutWriter) NewReader() *StreamingReader {
 	sw.refs.Add(1)
 	return &StreamingReader{sw: sw}
@@ -653,6 +660,8 @@ func (sw *StreamingPutWriter) NewReader() *StreamingReader {
 // file. Reads block when the reader catches up to the writer, just like
 // NewReader, but start from the given byte offset rather than zero. Use this
 // to serve HTTP Range requests from an in-progress streaming download.
+// Like NewReader it is unsafe on a writer found through GetStreaming; use
+// NewReaderAtIfActive there.
 func (sw *StreamingPutWriter) NewReaderAt(offset int64) *StreamingReader {
 	sw.refs.Add(1)
 	return &StreamingReader{sw: sw, pos: offset}
@@ -697,13 +706,20 @@ func (sw *StreamingPutWriter) Release() { sw.decRef() }
 // NewReaderIfActive is NewReader, but returns nil once the writer has
 // committed or discarded — the temp file may already be closed or renamed.
 func (sw *StreamingPutWriter) NewReaderIfActive() *StreamingReader {
+	return sw.NewReaderAtIfActive(0)
+}
+
+// NewReaderAtIfActive is NewReaderAt, but returns nil once the writer has committed or
+// discarded. The check and the reference are taken under the same lock that finish()
+// uses to mark the writer done, so a reader it returns always has an open file.
+func (sw *StreamingPutWriter) NewReaderAtIfActive(offset int64) *StreamingReader {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 	if sw.done {
 		return nil
 	}
 	sw.refs.Add(1)
-	return &StreamingReader{sw: sw}
+	return &StreamingReader{sw: sw, pos: offset}
 }
 
 // ErrReaderAborted is returned by Read after Abort.

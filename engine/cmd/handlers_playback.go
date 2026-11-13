@@ -279,7 +279,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		//
 		// During first play, Accept-Ranges: bytes is advertised so VLC knows it
 		// can send Range requests for seeking. A concurrent Range request hits
-		// GetStreaming and is served by a NewReaderAt on the in-progress writer —
+		// GetStreaming and is served by a NewReaderAtIfActive on the in-progress writer —
 		// it blocks at the byte level (Android RandomAccessFile model) until the
 		// requested offset is available, then streams from there.
 		if sess.Codec == "alac" {
@@ -302,19 +302,29 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 						w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 						return
 					}
-					// Offset is available: serve as 206 so VLC treats this as a
-					// ranged response and doesn't reset its position counter to 0.
-					// Use a 1 GiB sentinel for the total size (no ALAC file is that
-					// large) since the true size is unknown during streaming.
-					const sentinel = int64(1 << 30)
-					w.Header().Set("Content-Type", "audio/mp4")
-					w.Header().Set("Accept-Ranges", "bytes")
-					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, sentinel-1, sentinel))
-					w.WriteHeader(http.StatusPartialContent)
-					reader := spw.NewReaderAt(offset)
-					defer reader.Close()
-					io.Copy(w, reader) //nolint:errcheck
-					return
+					// Take the reader before any header goes out: if the download
+					// finished since GetStreaming, the writer's file may already be
+					// closed and the committed file serves the range instead.
+					if reader := spw.NewReaderAtIfActive(offset); reader != nil {
+						defer reader.Close()
+						// Offset is available: serve as 206 so VLC treats this as a
+						// ranged response and doesn't reset its position counter to 0.
+						// Use a 1 GiB sentinel for the total size (no ALAC file is that
+						// large) since the true size is unknown during streaming.
+						const sentinel = int64(1 << 30)
+						w.Header().Set("Content-Type", "audio/mp4")
+						w.Header().Set("Accept-Ranges", "bytes")
+						w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, sentinel-1, sentinel))
+						w.WriteHeader(http.StatusPartialContent)
+						io.Copy(w, reader) //nolint:errcheck
+						return
+					}
+					if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
+						defer f.Close()
+						w.Header().Set("Content-Type", "audio/mp4")
+						http.ServeContent(w, r, "", time.Time{}, f)
+						return
+					}
 				}
 			}
 
