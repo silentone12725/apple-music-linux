@@ -34,6 +34,7 @@ import { gnomeWallpaperPath } from './wallpaper.mjs';
 import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS } from './acrylic.mjs';
 import https from 'https';
 import { autoAuthenticate } from './drm-autoauth.mjs';
+import { UnifiedLogin, isAppleLoginOrigin, captureSubmittedAppleLogin } from './unified-login.mjs';
 import { fetchFairPlayLibs } from './fairplay-fetch.mjs';
 import { setCompositionBackdrop, setNativeCaptionDrag, removeCompositionBackdrop } from './composition-backdrop.mjs';
 import { cleanBlur, cleanGlassOpacity, sidebarOpacityControl, artNavAlpha } from './src/engine/sidebar-glass.js';
@@ -1481,6 +1482,18 @@ const memoryMaintenance = createMemoryMaintenance({
 // second; every later navigation of a popup is gated by `allowed`. `inWindow` URLs are loaded in
 // the opener's own window instead of a popup.
 function configureAuthPopups(contents, allowed, inWindow = () => false) {
+    contents.on('frame-created', (_event, { frame }) => {
+        frame?.on('dom-ready', () => {
+            if (_signedIn || !isAppleLoginOrigin(frame.url)) return;
+            const url = frame.url;
+            frame.executeJavaScript(`(${captureSubmittedAppleLogin.toString()})()`).then(creds => {
+                if (!creds) return;
+                try {
+                    if (!frame.isDestroyed() && frame.url === url && !_signedIn) unifiedLogin.captureCredentials(creds);
+                } finally { creds.email = creds.password = ''; }
+            }).catch(() => {});
+        });
+    });
     contents.setWindowOpenHandler(({ url }) => {
         if (inWindow(url)) {
             contents.loadURL(url).catch(() => {});
@@ -1499,6 +1512,9 @@ function configureAuthPopups(contents, allowed, inWindow = () => false) {
         return { action: 'deny' };
     });
     contents.on('did-create-window', (child) => {
+        const childContentsId = child.webContents.id;
+        _appleAuthContents.add(childContentsId);
+        child.webContents.once('destroyed', () => _appleAuthContents.delete(childContentsId));
         const gate = (event, url) => {
             if (url === 'about:blank' || allowed(url)) return;
             event.preventDefault();
@@ -1671,8 +1687,17 @@ function engineRequest(method, urlPath, body) {
     });
 }
 
-ipcMain.on('app:auth-state', (_e, signedIn) => {
+const _appleAuthContents = new Set();
+const unifiedLogin = new UnifiedLogin({ request: engineRequest });
+app.on('before-quit', () => unifiedLogin.clear());
+
+ipcMain.on('app:auth-state', (event, signedIn) => {
+    if (event.sender !== win?.webContents || _httpsHost(event.senderFrame?.url) !== 'music.apple.com') return;
     const on = signedIn === true;
+    if (on) void unifiedLogin.complete().then(outcome => {
+        if (outcome === 'manual-required') console.warn('[Adam] Complete FairPlay sign-in in Account settings');
+    }).catch(() => console.warn('[Adam] Unified sign-in unavailable; use Account settings'));
+    else if (_signedIn) unifiedLogin.clear();
     if (on === _signedIn) return;
     _signedIn = on;
     const p = loadPrefs();
@@ -2518,6 +2543,7 @@ ipcMain.handle('drm:saved-email', async () => {
 // backstop ('account' | 'device') is passed only when the engine route failed; it is
 // recorded first, and if that fails nothing else happens (drm-signout.mjs).
 ipcMain.handle('drm:clear-credentials', async (_, opts) => {
+    unifiedLogin.clear();
     const backstop = opts?.backstop ?? null;
     if (backstop !== null && !validBackstop(backstop)) console.warn('[Adam] Ignoring invalid sign-out scope:', backstop);
     const res = await clearCredentialsFlow({
@@ -2959,6 +2985,15 @@ app.whenReady().then(() => {
 
     console.log('[Adam] Electron ready, process.type:', process.type);
     const s = session.fromPartition('persist:apple-music');
+    // Observe only the password the user submits to Apple's sign-in endpoint,
+    // from the player or its owned popups. No renderer gets a credential bridge.
+    s.webRequest.onBeforeRequest({ urls: ['https://idmsa.apple.com/appleauth/auth/signin*',
+        'https://appleid.apple.com/appleauth/auth/signin*', 'https://account.apple.com/appleauth/auth/signin*'] }, (details, callback) => {
+        if (!_signedIn && (details.webContentsId === win?.webContents.id || _appleAuthContents.has(details.webContentsId))) {
+            unifiedLogin.capture(details);
+        }
+        callback({});
+    });
     // This session loads remote pages, so the default of "yes to everything" would hand a
     // compromised page the camera, microphone, location, USB and the clipboard. Deny the
     // capabilities Apple Music has no use for; everything else it asks for is still granted.

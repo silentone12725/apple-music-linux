@@ -20,7 +20,8 @@ export async function autoAuthenticate({ request, creds, forget, sleep = (ms) =>
     if (!status || status.status !== 200 || !status.json) return 'no-engine';
     const st = status.json.state ?? {};
     // A session still loading must not be replaced by a fresh sign-in, which would ask Apple for another code.
-    if (st.fairplay === 'ready' || st.session === 'valid') return 'has-session';
+    if (st.fairplay === 'ready' || st.session === 'valid' ||
+        ['logging_in', 'challenging', 'logged_in'].includes(st.authentication)) return 'has-session';
 
     log('Auto-authenticating with saved DRM credentials');
     const sentAt = now();

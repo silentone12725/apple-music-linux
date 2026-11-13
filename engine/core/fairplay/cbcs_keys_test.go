@@ -73,11 +73,11 @@ func TestSendFragKeyStartsWithFragmentZeroKey(t *testing.T) {
 	}
 }
 
-// Like upstream, only the keys on segments 0 and 1 are used; later tags are ignored.
+// Key changes may occur after the first two segments and must reach decryption.
 func TestUpstreamKeyURIs(t *testing.T) {
 	in := []string{cbcsPrefetchKey, "skd://real", "", "skd://later"}
 	got := upstreamKeyURIs(in)
-	want := []string{cbcsPrefetchKey, "skd://real", "", ""}
+	want := []string{cbcsPrefetchKey, "skd://real", "", "skd://later"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("key %d = %q, want %q", i, got[i], want[i])
@@ -99,5 +99,46 @@ func TestCBCSSourceFromPastEnd(t *testing.T) {
 	skip, actual := src.SourceFrom(999)
 	if s := skip.(*cbcsSkipSource); s.startFrag != 2 || actual != 20 {
 		t.Fatalf("startFrag=%d actual=%.1f, want last segment (2) at 20.0", s.startFrag, actual)
+	}
+}
+
+// Real playlists can use the sentinel for two ~15-second segments, then switch
+// to the track key. Exercise the production source and wire handshake, not just
+// the playlist copy, and ensure seeking past that boundary selects the same key.
+func TestCBCSKeyTransitionAfterThirtySeconds(t *testing.T) {
+	const contentKey = "skd://itunes.apple.com/p1536720561/c23"
+	keys := []string{cbcsPrefetchKey, "", contentKey, "", "skd://rotation"}
+	src := CBCSSource("6826288474", nil, "", keys, 178994).(*cbcsSource)
+	var buf bytes.Buffer
+	rw := bufio.NewReadWriter(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&buf))
+	src.sendFragKey(0, rw)
+	rw.Flush()
+	buf.Reset()
+	src.sendFragKey(1, rw)
+	rw.Flush()
+	if buf.Len() != 0 {
+		t.Fatal("second segment must retain the sentinel without another handshake")
+	}
+	src.sendFragKey(2, rw)
+	rw.Flush()
+	want := append([]byte{0, 0, 0, 0, byte(len(src.adamID))}, src.adamID...)
+	want = append(want, byte(len(contentKey)))
+	want = append(want, contentKey...)
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("segment 2 must switch to the content key, got %q", buf.Bytes())
+	}
+	if got := FirstAudioKeyURI(keys); got != contentKey {
+		t.Fatalf("warm content key = %q, want %q", got, contentKey)
+	}
+	media := &hls.CBCSMedia{KeyURIs: keys, SegmentDurations: []float64{14.95365, 14.95365, 14.95365, 14.95365, 14.95365}}
+	seekable := CBCSSeekableSource(src.adamID, nil, media, 178994)
+	for _, tc := range []struct {
+		at   float64
+		want string
+	}{{35, contentKey}, {65, "skd://rotation"}} {
+		seek, _ := seekable.SourceFrom(tc.at)
+		if got := seek.(*cbcsSkipSource).startKey; got != tc.want {
+			t.Errorf("seek %.0fs key = %q, want %q", tc.at, got, tc.want)
+		}
 	}
 }

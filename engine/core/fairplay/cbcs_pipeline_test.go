@@ -46,6 +46,11 @@ type encryptedTrack struct {
 
 func buildEncryptedTrack(t *testing.T, nFrags int) encryptedTrack {
 	t.Helper()
+	return buildEncryptedTrackWithPrefetch(t, nFrags, 1)
+}
+
+func buildEncryptedTrackWithPrefetch(t *testing.T, nFrags, prefetchFrags int) encryptedTrack {
+	t.Helper()
 	rng := rand.New(rand.NewSource(1))
 	init := mp4.CreateEmptyInit()
 	init.AddEmptyTrack(44100, "audio", "en")
@@ -79,7 +84,7 @@ func buildEncryptedTrack(t *testing.T, nFrags int) encryptedTrack {
 			})
 		}
 		key := contentAK
-		if f == 0 {
+		if f < prefetchFrags {
 			key = prefetchAK
 		}
 		if err := mp4.EncryptFragment(frag, key, testIV, ipd); err != nil {
@@ -300,12 +305,13 @@ func TestCBCSSeekStartsMidTrackWithTheContentKey(t *testing.T) {
 	}
 }
 
-// Upstream only uses the key tags on segments 0 and 1; a later tag must not be
-// sent to FairPlay (here it is unknown to the server and would kill the stream).
-func TestCBCSIgnoresKeyTagsAfterSegmentOne(t *testing.T) {
+// A later declared content key must be opened, including after the usual
+// prefetch-to-content transition has already happened.
+func TestCBCSHonorsLaterKeyTags(t *testing.T) {
 	tr := buildEncryptedTrack(t, 4)
-	fp := newFakeFairPlay(t, map[string][]byte{cbcsPrefetchKey: prefetchAK, testContentKey: contentAK})
-	keys := []string{cbcsPrefetchKey, testContentKey, "", "skd://itunes.apple.com/p1/c99"}
+	const laterKey = "skd://itunes.apple.com/p1/c99"
+	fp := newFakeFairPlay(t, map[string][]byte{cbcsPrefetchKey: prefetchAK, testContentKey: contentAK, laterKey: contentAK})
+	keys := []string{cbcsPrefetchKey, testContentKey, "", laterKey}
 
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -314,8 +320,24 @@ func TestCBCSIgnoresKeyTagsAfterSegmentOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkFragments(t, decodeOutput(t, out.Bytes()), tr.plain, 0)
-	if got := fp.opened(); len(got) != 2 {
-		t.Fatalf("keys opened = %q, want only the prefetch and content keys", got)
+	if got := fp.opened(); len(got) != 3 || got[2] != testAdamID+" "+laterKey {
+		t.Fatalf("keys opened = %q, want prefetch, content and later keys", got)
+	}
+}
+
+func TestCBCSPipelineDecryptsTwoPrefetchSegments(t *testing.T) {
+	tr := buildEncryptedTrackWithPrefetch(t, 5, 2)
+	fp := newFakeFairPlay(t, map[string][]byte{cbcsPrefetchKey: prefetchAK, testContentKey: contentAK})
+	keys := []string{cbcsPrefetchKey, "", testContentKey, "", ""}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := CBCSSource(testAdamID, DialerFromAddr(fp.ln.Addr().String()), serveFile(t, tr.file), keys, 0).Stream(ctx, &out); err != nil {
+		t.Fatal(err)
+	}
+	checkFragments(t, decodeOutput(t, out.Bytes()), tr.plain, 0)
+	if got := fp.opened(); len(got) != 2 || got[1] != testAdamID+" "+testContentKey {
+		t.Fatalf("keys opened = %q, want sentinel then the delayed content key", got)
 	}
 }
 

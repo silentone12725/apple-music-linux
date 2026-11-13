@@ -17,7 +17,7 @@ import (
 // alacCacheVersion is bumped whenever a bug fix changes which bytes are written
 // to the ALAC disk cache. On mismatch, all *-alac.m4a files are deleted so VLC
 // never replays a fragment-0 that was written by the old, broken key path.
-const alacCacheVersion = "cbcs-fairplay-upstream-v9"
+const alacCacheVersion = "cbcs-fairplay-key-transitions-v10"
 
 // invalidateALACCacheIfStale deletes every committed ALAC cache file when the
 // on-disk version marker does not match alacCacheVersion. This is a one-time
