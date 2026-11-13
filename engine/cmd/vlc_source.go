@@ -92,8 +92,12 @@ func newTransientVLCSource(parent context.Context, produce func(context.Context,
 func (s *transientVLCSource) Abort() {
 	s.cancel()
 	s.StreamingReader.Abort()
-	// Wait for an in-flight disk write. Later writes see the canceled context.
+	// Wait for an in-flight write, then latch cancellation without replacing
+	// an earlier disk error. Later writes must keep returning that first error.
 	s.writer.mu.Lock()
+	if s.writer.err == nil {
+		s.writer.err = s.writer.ctx.Err()
+	}
 	s.writer.mu.Unlock()
 }
 

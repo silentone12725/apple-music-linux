@@ -14,7 +14,103 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
+
+type abortWriteBoundary struct {
+	entered chan struct{}
+	resume  chan struct{}
+	err     error
+	short   bool
+	calls   int
+}
+
+func (w *abortWriteBoundary) Write(p []byte) (int, error) {
+	w.calls++
+	close(w.entered)
+	<-w.resume
+	if w.short {
+		return len(p) - 1, nil
+	}
+	if w.err != nil {
+		return 0, w.err
+	}
+	return len(p), nil
+}
+
+func TestTransientVLCSourceAbortWaitsForInFlightWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		short bool
+	}{
+		{"successful write", nil, false},
+		{"ENOSPC", syscall.ENOSPC, false},
+		{"EIO", syscall.EIO, false},
+		{"short write", io.ErrShortWrite, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := &abortWriteBoundary{entered: make(chan struct{}), resume: make(chan struct{}), err: tc.err, short: tc.short}
+			writeDone := make(chan error, 1)
+			src, err := newTransientVLCSource(t.Context(), func(_ context.Context, writer io.Writer) error {
+				writer.(*transientWriter).dst = dst
+				_, err := writer.Write([]byte("audio"))
+				writeDone <- err
+				return nil // ignored errors must still reach the reader
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Also unblock the fake disk on an assertion failure, before Close waits.
+			defer src.Close()
+			defer func() {
+				select {
+				case <-dst.resume:
+				default:
+					close(dst.resume)
+				}
+			}()
+			<-dst.entered // the actual Write holds the mutex inside the disk call
+			aborted := make(chan struct{})
+			go func() { src.Abort(); close(aborted) }()
+			<-src.writer.ctx.Done() // Abort has begun cancellation
+			select {
+			case <-aborted:
+				t.Fatal("Abort returned while the disk Write was still blocked")
+			case <-time.After(50 * time.Millisecond): // negative assertion, not a scheduling sleep
+			}
+			close(dst.resume)
+			select {
+			case <-aborted:
+			case <-time.After(time.Second):
+				t.Fatal("Abort did not return after the disk Write left its critical section")
+			}
+			if err := <-writeDone; !errors.Is(err, tc.err) {
+				t.Fatalf("in-flight Write error = %v, want %v", err, tc.err)
+			}
+			<-src.done
+			want := tc.err
+			if want == nil {
+				want = context.Canceled
+			}
+			src.writer.mu.Lock()
+			latched := src.writer.err
+			src.writer.mu.Unlock()
+			if !errors.Is(latched, want) {
+				t.Fatalf("latched error = %v, want %v", latched, want)
+			}
+			if n, err := src.writer.Write([]byte("late")); n != 0 || !errors.Is(err, want) || dst.calls != 1 {
+				t.Fatalf("write after Abort = %d, %v; disk calls=%d", n, err, dst.calls)
+			}
+			// Observe producer completion independently of the aborted reader.
+			reader := src.StreamingReader.Writer().NewReader()
+			defer reader.Close()
+			if _, err := io.ReadAll(reader); !errors.Is(err, want) {
+				t.Fatalf("producer completion lost the original error: %v", err)
+			}
+		})
+	}
+}
 
 func TestAnonymousVLCFileOwnershipAndUnlink(t *testing.T) {
 	dir := t.TempDir()
