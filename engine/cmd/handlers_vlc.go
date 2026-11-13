@@ -1,17 +1,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
+	"engine/core/diskcache"
+	"engine/core/pipeline"
 	"engine/core/vlc"
-	"engine/internal/vlog"
 )
 
 // alacCacheVersion is bumped whenever a bug fix changes which bytes are written
@@ -45,7 +50,6 @@ func invalidateALACCacheIfStale(cacheDir string) {
 	_ = os.WriteFile(verFile, []byte(alacCacheVersion), 0o644)
 }
 
-// errLoadAbandoned marks a load whose request was cancelled before it reached the player.
 var errLoadAbandoned = errors.New("vlc load abandoned")
 
 func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
@@ -82,52 +86,79 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 			hold = false
 		}
 	}
-	s.alac.Foreground(req.SessionID, hold)
-	src, err := s.openVLCSource(req.SessionID, sess.AssetID, sess.Codec)
-	if err != nil {
-		s.alac.done(req.SessionID)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if src == nil {
-		s.alac.done(req.SessionID) // served over HTTP (no cache); nothing of ours to wait for
-	}
-	// A newer load, or a caller that has gone away, makes this one stale: it must not
-	// replace what is playing. The source it opened is only released.
-	loaded, err := s.vlcLoads.runIfCurrent(loadSeq, func() error {
-		if r.Context().Err() != nil {
+	var foreground uint64
+	selected, selectionErr := s.vlcLoads.runIfCurrent(loadSeq, func() error {
+		if err := s.vlcSourceContextErr(r.Context()); err != nil {
 			return errLoadAbandoned
 		}
-		if src != nil {
-			vlog.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
-			return s.vlcPlayer.LoadSource(src)
-		}
-		url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
-		log.Printf("[vlc] load url=%s startMs=%d (no disk cache)", url, req.StartMs)
-		return s.vlcPlayer.Load(url)
+		foreground = s.alac.Foreground(req.SessionID, hold)
+		return nil
 	})
-	if !loaded || err == errLoadAbandoned {
-		if src != nil {
-			src.Abort()
-			src.Close()
-		}
-		if loaded {
-			return // the caller left; nobody is waiting for a response
-		}
-		log.Printf("[vlc] load session=%s superseded by a newer load", req.SessionID)
+	if !selected {
 		http.Error(w, "superseded by a newer load", http.StatusConflict)
 		return
 	}
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if selectionErr != nil {
+		respondLoadAbandoned(w, r)
 		return
 	}
-	s.vlcGate.set(req.SessionID)
-	// If a specific start position was requested, seek there after VLC reaches
-	// playing state. SetTime is async and polls until VLC is ready.
-	if req.StartMs > 0 {
-		s.vlcPlayer.SetTime(req.StartMs)
-		log.Printf("[vlc] SetTime startMs=%d queued after load", req.StartMs)
+	src, err := s.openVLCSource(r.Context(), req.SessionID, sess.AssetID, sess.Codec, foreground)
+	if err != nil {
+		s.alac.release(foreground)
+		current, _ := s.vlcLoads.runIfCurrent(loadSeq, func() error { return nil })
+		if !current {
+			http.Error(w, "superseded by a newer load", http.StatusConflict)
+		} else if s.vlcSourceContextErr(r.Context()) != nil {
+			respondLoadAbandoned(w, r)
+		} else {
+			logVLCLoadFailure("open", err)
+			http.Error(w, openFailureMessage(err), http.StatusInternalServerError)
+		}
+		return
+	}
+	if reader, ok := src.(*diskcache.StreamingReader); ok {
+		writer := reader.Writer()
+		s.alac.bindWriter(foreground, writer, hold)
+		// Check after binding: completion either releases this selection through
+		// done(), or is already visible here. Never hold both mutexes together.
+		if writer.Written() >= alacStartBytes || writer.Finished() {
+			s.alac.release(foreground)
+		}
+	} else if _, cached := src.(*fileSource); cached {
+		s.alac.release(foreground)
+	}
+	// Source opening/waiting is outside the ordering lock. Ownership transfers
+	// at the LoadSource invocation, including all of its failure returns.
+	handedOff := false
+	loaded, err := s.vlcLoads.runIfCurrent(loadSeq, func() error {
+		if s.vlcSourceContextErr(r.Context()) != nil {
+			return errLoadAbandoned
+		}
+		handedOff = true
+		if err := s.vlcPlayer.LoadSource(src); err != nil {
+			return err
+		}
+		s.vlcGate.set(req.SessionID)
+		if req.StartMs > 0 {
+			s.vlcPlayer.SetTime(req.StartMs)
+		}
+		return nil
+	})
+	if !handedOff {
+		src.Abort()
+		src.Close()
+	}
+	if !loaded || err != nil {
+		s.alac.release(foreground)
+		if !loaded {
+			http.Error(w, "superseded by a newer load", http.StatusConflict)
+		} else if errors.Is(err, errLoadAbandoned) {
+			respondLoadAbandoned(w, r)
+		} else {
+			logVLCLoadFailure("player", err)
+			http.Error(w, "playback load failed", http.StatusInternalServerError)
+		}
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -165,7 +196,8 @@ func (s *APIServer) handleVLCTime(w http.ResponseWriter, r *http.Request) {
 		"volume":   volume, // live mixer state, from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1)
 		"muted":    muted,
 		// eof: the source ended cleanly, so an "ended" state is the real end of the data, not a failed read.
-		"eof": s.vlcPlayer.SourceEnded(),
+		"eof":    s.vlcPlayer.SourceEnded(),
+		"failed": s.vlcPlayer.SourceFailed(),
 	})
 }
 
@@ -226,20 +258,37 @@ func (s *APIServer) handleVLCVolume(w http.ResponseWriter, r *http.Request) {
 
 // openVLCSource returns a libvlc callback source for the session's audio:
 // the committed cache file, a reader on the in-progress download, or a
-// freshly started download. Returns (nil, nil) when no cache reader can be
-// had, in which case the caller falls back to the loopback HTTP endpoint.
-func (s *APIServer) openVLCSource(id, assetID, codec string) (vlc.Source, error) {
-	if s.diskCache == nil {
-		return nil, nil
+// freshly started download. Without a usable persistent cache, a private
+// temporary spool supplies the same read/seek callbacks and is removed on close.
+func (s *APIServer) openVLCSource(ctx context.Context, id, assetID, codec string, foreground uint64) (vlc.Source, error) {
+	if err := s.vlcSourceContextErr(ctx); err != nil {
+		return nil, err
 	}
-	// A download can commit between the checks below; retry once to pick up
-	// the committed file.
-	for range 2 {
+	if s.diskCache == nil {
+		return s.transientVLCSourceForRequest(ctx, id, nil, foreground)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	stopShutdown := context.AfterFunc(s.shutdownCtx, cancel)
+	defer stopShutdown()
+	var waitErr error
+	// Notifications cover writer publication and completion. Bound churn too:
+	// no spinning if other producers repeatedly claim and release this key.
+	for range 4 {
+		if err := s.vlcSourceContextErr(ctx); err != nil {
+			return nil, err
+		}
+		if seriousVLCCacheError(waitErr) {
+			return nil, fmt.Errorf("wait for audio cache: %w", waitErr)
+		}
+		if err := waitCtx.Err(); err != nil {
+			return s.transientVLCSourceForRequest(ctx, id, errors.Join(waitErr, err), foreground)
+		}
 		if f, ok := s.diskCache.Get(assetID, codec); ok {
 			fi, err := f.Stat()
 			if err != nil {
 				f.Close()
-				return nil, err
+				return s.transientVLCSourceForRequest(ctx, id, err, foreground)
 			}
 			return &fileSource{File: f, size: fi.Size()}, nil
 		}
@@ -247,20 +296,139 @@ func (s *APIServer) openVLCSource(id, assetID, codec string) (vlc.Source, error)
 			if r := spw.NewReaderIfActive(); r != nil {
 				return r, nil
 			}
+			waitErr = s.diskCache.WaitForWriter(waitCtx, assetID, codec)
+			// Failed owners release the key before notifying; recheck/claim on
+			// the next bounded iteration. Request/shutdown cancellation wins.
+			if waitErr != nil && waitCtx.Err() == nil && !seriousVLCCacheError(waitErr) {
+				logVLCCacheRecovery(waitErr)
+			}
 			continue
 		}
-		spw, err := s.diskCache.BeginStreamingPut(assetID, codec)
+		spw, f, err := s.diskCache.BeginStreamingPutOrGet(assetID, codec)
 		if err != nil {
-			return nil, err
+			return s.transientVLCSourceForRequest(ctx, id, err, foreground)
+		}
+		if f != nil {
+			fi, err := f.Stat()
+			if err != nil {
+				f.Close()
+				return s.transientVLCSourceForRequest(ctx, id, err, foreground)
+			}
+			return &fileSource{File: f, size: fi.Size()}, nil
 		}
 		if spw != nil {
+			if err := s.vlcSourceContextErr(ctx); err != nil {
+				spw.Discard()
+				return nil, err
+			}
 			r := spw.NewReader()
 			s.startCacheDownload(id, spw)
 			return r, nil
 		}
+		waitErr = s.diskCache.WaitForWriter(waitCtx, assetID, codec)
+		if waitErr != nil && waitCtx.Err() == nil && !seriousVLCCacheError(waitErr) {
+			logVLCCacheRecovery(waitErr)
+		}
 	}
-	// A non-streaming precache holds the key; the HTTP endpoint streams uncached.
-	return nil, nil
+	return s.transientVLCSourceForRequest(ctx, id, errors.Join(waitErr, errors.New("audio cache writer changed repeatedly")), foreground)
+}
+
+// A source may outlive the load HTTP request, but creation must respect both
+// that request and shutdown. Producer ownership stays with the cache or VLC.
+func (s *APIServer) vlcSourceContextErr(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.shutdownCtx.Err()
+}
+
+// respondLoadAbandoned ends a load that was cut short. A caller that went away is not
+// waiting for an answer, so nothing is written. When the engine itself is shutting
+// down the caller is still connected, and an empty reply would read as a 200.
+func respondLoadAbandoned(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Err() != nil {
+		return
+	}
+	http.Error(w, "engine is shutting down", http.StatusServiceUnavailable)
+}
+
+// openFailureMessage is what the caller is told when no audio source could be opened.
+// The underlying error can wrap CDN URLs and file paths, and the renderer shows the
+// reply text in its console and logs, so only a fixed message goes out.
+func openFailureMessage(err error) string {
+	if seriousVLCCacheError(err) {
+		return "audio cache unavailable"
+	}
+	return "audio source unavailable"
+}
+
+// logVLCLoadFailure records why a load failed without the text of errors that can
+// carry signed URLs or paths: the errno or the error type is kept. Errors raised by the
+// player itself are fixed strings and are logged as they are.
+func logVLCLoadFailure(stage string, err error) {
+	var errno syscall.Errno
+	switch {
+	case stage == "player":
+		log.Printf("[vlc] load failed: stage=%s: %v", stage, err)
+	case errors.As(err, &errno):
+		log.Printf("[vlc] load failed: stage=%s cause=%v", stage, errno)
+	default:
+		log.Printf("[vlc] load failed: stage=%s (error type %T)", stage, err)
+	}
+}
+
+func seriousVLCCacheError(err error) bool {
+	return errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EIO) || errors.Is(err, os.ErrPermission)
+}
+
+func logVLCCacheRecovery(err error) {
+	// Do not print arbitrary producer errors (which can contain signed URLs).
+	// Filesystem errno retains useful diagnostics without paths or URLs.
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		log.Printf("[vlc] audio cache recovery: cause=%v", errno)
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		log.Printf("[vlc] audio cache wait timed out; using private source")
+	} else {
+		log.Printf("[vlc] audio cache owner failed; rechecking source (error type %T)", err)
+	}
+}
+
+func (s *APIServer) transientVLCSourceForRequest(ctx context.Context, id string, cacheErr error, foreground uint64) (vlc.Source, error) {
+	if err := s.vlcSourceContextErr(ctx); err != nil {
+		return nil, err
+	}
+	// These indicate a real storage failure, rather than an unavailable cache
+	// directory or writer contention. Do not mask them with another download.
+	if seriousVLCCacheError(cacheErr) {
+		return nil, fmt.Errorf("audio cache: %w", cacheErr)
+	}
+	if cacheErr != nil {
+		logVLCCacheRecovery(cacheErr)
+	}
+	src, err := s.transientVLCSource(id, foreground)
+	if err != nil {
+		return nil, fmt.Errorf("private audio source: %w", errors.Join(cacheErr, err))
+	}
+	if err := s.vlcSourceContextErr(ctx); err != nil {
+		src.Abort()
+		src.Close()
+		return nil, err
+	}
+	return src, nil
+}
+
+func (s *APIServer) transientVLCSource(id string, foreground uint64) (vlc.Source, error) {
+	return newTransientVLCSource(s.shutdownCtx, func(ctx context.Context, w io.Writer) error {
+		defer func() {
+			if foreground != 0 {
+				s.alac.release(foreground)
+			} else {
+				s.alac.done(id)
+			}
+		}()
+		return s.pm.Stream(ctx, id, pipeline.KindAudio, s.alac.writer(ctx, id, w))
+	})
 }
 
 // fileSource adapts a committed cache file to vlc.Source. Reads never block,

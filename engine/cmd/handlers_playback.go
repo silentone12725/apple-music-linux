@@ -279,7 +279,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 		//
 		// During first play, Accept-Ranges: bytes is advertised so VLC knows it
 		// can send Range requests for seeking. A concurrent Range request hits
-		// GetStreaming and is served by a NewReaderAt on the in-progress writer —
+		// GetStreaming and is served by a NewReaderAtIfActive on the in-progress writer —
 		// it blocks at the byte level (Android RandomAccessFile model) until the
 		// requested offset is available, then streams from there.
 		if sess.Codec == "alac" {
@@ -302,19 +302,29 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 						w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 						return
 					}
-					// Offset is available: serve as 206 so VLC treats this as a
-					// ranged response and doesn't reset its position counter to 0.
-					// Use a 1 GiB sentinel for the total size (no ALAC file is that
-					// large) since the true size is unknown during streaming.
-					const sentinel = int64(1 << 30)
-					w.Header().Set("Content-Type", "audio/mp4")
-					w.Header().Set("Accept-Ranges", "bytes")
-					w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, sentinel-1, sentinel))
-					w.WriteHeader(http.StatusPartialContent)
-					reader := spw.NewReaderAt(offset)
-					defer reader.Close()
-					io.Copy(w, reader) //nolint:errcheck
-					return
+					// Take the reader before any header goes out: if the download
+					// finished since GetStreaming, the writer's file may already be
+					// closed and the committed file serves the range instead.
+					if reader := spw.NewReaderAtIfActive(offset); reader != nil {
+						defer reader.Close()
+						// Offset is available: serve as 206 so VLC treats this as a
+						// ranged response and doesn't reset its position counter to 0.
+						// Use a 1 GiB sentinel for the total size (no ALAC file is that
+						// large) since the true size is unknown during streaming.
+						const sentinel = int64(1 << 30)
+						w.Header().Set("Content-Type", "audio/mp4")
+						w.Header().Set("Accept-Ranges", "bytes")
+						w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, sentinel-1, sentinel))
+						w.WriteHeader(http.StatusPartialContent)
+						io.Copy(w, reader) //nolint:errcheck
+						return
+					}
+					if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
+						defer f.Close()
+						w.Header().Set("Content-Type", "audio/mp4")
+						http.ServeContent(w, r, "", time.Time{}, f)
+						return
+					}
 				}
 			}
 
@@ -394,14 +404,16 @@ func (s *APIServer) startCacheDownload(id string, spw *diskcache.StreamingPutWri
 	downloadCtx, cancel := context.WithTimeout(s.shutdownCtx, 15*time.Minute) // shutdownCtx: from PR #1 (https://github.com/silentone12725/apple-music-linux/pull/1)
 	go func() {
 		defer cancel()
-		defer s.alac.done(id)
+		defer s.alac.done(id, spw)
 		vlog.Printf("[cache] startCacheDownload calling pm.Stream: session=%s", id)
 		if err := s.pm.Stream(downloadCtx, id, pipeline.KindAudio, s.alac.writer(downloadCtx, id, spw)); err != nil {
 			log.Printf("[cache] startCacheDownload pm.Stream ERROR: session=%s err=%v", id, err)
 			spw.Discard()
 		} else {
 			vlog.Printf("[cache] startCacheDownload SUCCESS: session=%s", id)
-			spw.Commit()
+			if err := spw.Commit(); err != nil {
+				log.Printf("[cache] commit failed: session=%s err=%v", id, err)
+			}
 		}
 	}()
 }
@@ -426,19 +438,33 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	bgCtx, cancel := context.WithTimeout(s.shutdownCtx, 10*time.Minute) // shutdownCtx: from PR #1
+	// Publish the streaming writer before acknowledging the pre-warm. Playback
+	// can consume its bytes immediately instead of racing a non-streaming put.
+	spw, f, err := s.diskCache.BeginStreamingPutOrGet(sess.AssetID, qualifier)
+	if err != nil {
+		cancel()
+		http.Error(w, "cannot start precache", http.StatusInternalServerError)
+		return
+	}
+	if f != nil {
+		f.Close()
+		cancel()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if spw == nil {
+		cancel()
+		w.WriteHeader(http.StatusAccepted) // another writer owns this exact key
+		return
+	}
 	go func() {
 		defer cancel()
-		defer s.alac.done(id)
-		pw, err := s.diskCache.BeginPut(sess.AssetID, qualifier)
-		if err != nil || pw == nil {
+		defer s.alac.done(id, spw)
+		if err := s.pm.Stream(bgCtx, id, pipeline.KindAudio, s.alac.writer(bgCtx, id, spw)); err != nil {
+			spw.Discard()
 			return
 		}
-		if err := s.pm.Stream(bgCtx, id, pipeline.KindAudio, s.alac.writer(bgCtx, id, pw)); err != nil {
-			pw.Discard()
-			return
-		}
-		if err := pw.Commit(); err != nil {
-			pw.Discard()
+		if err := spw.Commit(); err != nil {
 			return
 		}
 		log.Printf("[precache] disk cache populated assetId=%s sessionId=%s", sess.AssetID, id)

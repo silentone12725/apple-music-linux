@@ -39,7 +39,8 @@ type callbackMedia struct {
 	opaque unsafe.Pointer
 	// eof is set when the source reported a clean end of data (all bytes delivered, no error) and cleared when libvlc
 	// seeks. A read that failed or was aborted never sets it, so it tells the real end of the data from a failure.
-	eof atomic.Bool
+	eof    atomic.Bool
+	failed atomic.Bool // source read error, distinct from a clean byte EOF
 }
 
 func newCallbackMedia(src Source) *callbackMedia {
@@ -106,6 +107,7 @@ func (cm *callbackMedia) read(p []byte) int {
 			return 0
 		}
 		if err != nil {
+			cm.failed.Store(true)
 			return -1
 		}
 	}
