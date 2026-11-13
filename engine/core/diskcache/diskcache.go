@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -40,6 +42,8 @@ type Cache struct {
 	syncFile   func(*os.File) error
 	renameFile func(string, string) error
 	removeFile func(string) error
+
+	syncUnsupportedLogged atomic.Bool // the "cannot flush" note is logged once per cache
 
 	limitBytes atomic.Int64 // 0 = unlimited
 	ttlDays    atomic.Int64 // 0 = never expire
@@ -227,6 +231,25 @@ func (c *Cache) BeginPut(assetID, qualifier string) (*PutWriter, error) {
 	}, nil
 }
 
+// flushForPublish makes a finished temp file durable before the rename publishes its name, so a
+// crash or power loss cannot leave a truncated file under a committed name. A filesystem that cannot
+// flush at all (some FUSE, virtiofs, 9p and network mounts answer EINVAL, ENOTSUP or ENOSYS) cannot
+// offer that guarantee, and refusing to publish there would mean no track is ever cached: the file is
+// published unflushed instead. Any other error (EIO, ENOSPC, ...) is a real failure and is returned.
+func (c *Cache) flushForPublish(f *os.File) error {
+	err := c.syncFile(f)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errors.ErrUnsupported) || errors.Is(err, syscall.EINVAL) {
+		if c.syncUnsupportedLogged.CompareAndSwap(false, true) {
+			log.Printf("[cache] this filesystem cannot flush files (%v); caching without a flush", err)
+		}
+		return nil
+	}
+	return err
+}
+
 // commitRename moves a finished temp file to its final name. Windows will not replace a file that something
 // has open (a replay being served from the same entry, say); there the entry that is already in place is
 // kept and the temp file dropped, since both were built for the same asset and quality and hold the same bytes.
@@ -244,7 +267,7 @@ func commitRename(tmp, final string) error {
 // Commit closes the temp file and renames it to its final path.
 // After Commit the cache triggers eviction if a size limit is set.
 func (pw *PutWriter) Commit() error {
-	err := pw.cache.syncFile(pw.File)
+	err := pw.cache.flushForPublish(pw.File)
 	pw.File.Close()
 	pw.committed = true
 	// Rename BEFORE releasing the in-flight marker: once it is gone, a new
@@ -598,7 +621,7 @@ func (sw *StreamingPutWriter) Commit() error {
 		sw.mu.Unlock()
 		err := sourceErr
 		if err == nil {
-			err = sw.cache.syncFile(sw.file)
+			err = sw.cache.flushForPublish(sw.file)
 		}
 		if err == nil {
 			err = sw.cache.renameFile(sw.file.Name(), sw.finalPath)
