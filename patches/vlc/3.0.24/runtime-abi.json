@@ -1,0 +1,17 @@
+{
+  "version": "3.0.24",
+  "sourceRevision": "3.0.24-rc1-0-g6de05adcba",
+  "sourceHashes": {
+    "modules/demux/mp4/mp4.c": "e9df988be9e2a1b59ee7298c1b97bf97e432a217ee1768d917cedd6619cd9335",
+    "modules/demux/mp4/fragments.c": "507e3ac77002c6eb0b302e9bb48788a6592193efdcb279173fd1740da3344c49",
+    "modules/demux/mp4/libmp4.c": "f04a808010bdca936743d4375fd0ccedbcf99e00011747d77c1db18f7d5cc89c",
+    "modules/demux/mp4/essetup.c": "be9044269987e47d9b0477e54af1e618f231d7578025bd4b7d63267aba120b8b",
+    "modules/demux/mp4/meta.c": "764d2fe28f6300a8979a976f7611b9b08ea203b8ef2b7bc0527ee14ab915195a",
+    "modules/demux/asf/asfpacket.c": "afe2545dfb3dfc3902eccc9d85bbcb759fc493ec1f1ebafc71d198b2f1c09121"
+  },
+  "runtimeHashes": {
+    "libvlc.so.5.6.1": "2948f0fd8f01942a9661edd929478939f235b9b4f7f7184951def77e25c0e10b",
+    "libvlccore.so.9.0.1": "e948905079b434b584edb983b482606f800386e8dfb1eec1a839c48f8c3d7e92"
+  },
+  "patchSHA256": "b39a6ceae73f1941d3ba4b0b7fcc301919d6fa0c3a864aca960f93ac3cacf5dc"
+}

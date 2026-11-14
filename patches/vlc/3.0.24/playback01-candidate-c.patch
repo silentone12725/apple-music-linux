@@ -1,0 +1,39 @@
+--- baseline/mp4.c
++++ candidate/mp4.c
+@@ -4637,22 +4637,25 @@
+     }
+     else
+     {
+-        vlc_tick_t i_segment_end = INT64_MAX;
++        /* Exhausted runs contain queued samples, not the current output time.
++         * Pace to their selected-stream bound using the usual demux quantum. */
++        vlc_tick_t i_segment_end = p_sys->i_nztime;
+         for( unsigned i = 0; i < p_sys->i_tracks; i++ )
+         {
+-            mp4_track_t *tk = &p_sys->track[i];
+-            if( tk->b_ok || tk->b_chapters_source ||
+-               (!tk->b_selected && !p_sys->b_seekable) )
++            const mp4_track_t *tk = &p_sys->track[i];
++            if( !tk->b_ok || tk->b_chapters_source || !tk->b_selected ||
++                tk->context.runs.i_count == 0 )
+                 continue;
+-            vlc_tick_t i_track_end = MP4_rescale_mtime( tk->i_time, tk->i_timescale );
+-            if( i_track_end < i_segment_end  )
+-                i_segment_end = i_track_end;
+-        }
+-        if( i_segment_end != INT64_MAX )
+-        {
+-            p_sys->i_nztime = i_segment_end;
++            const vlc_tick_t i_track_end = MP4_rescale_mtime( tk->i_time, tk->i_timescale );
++            i_segment_end = __MAX( i_segment_end, i_track_end );
++        }
++        if( i_segment_end > p_sys->i_nztime )
++        {
++            p_sys->i_nztime += __MIN( DEMUX_INCREMENT, i_segment_end - p_sys->i_nztime );
+             p_sys->i_pcr = VLC_TICK_0 + p_sys->i_nztime;
+             es_out_SetPCR( p_demux->out, p_sys->i_pcr );
++            if( p_sys->i_nztime < i_segment_end )
++                i_status = VLC_DEMUXER_SUCCESS; /* Keep the exhausted fragment. */
+         }
+     }
+ 
