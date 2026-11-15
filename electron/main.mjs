@@ -322,8 +322,6 @@ function ensureEngineConfig() {
             'storefront: us',
             'media-user-token: ""',
             'authorization-token: ""',
-            'decrypt-m3u8-port: 127.0.0.1:10020',
-            'get-m3u8-port: 127.0.0.1:20020',
             'get-m3u8-from-device: true',
             'get-m3u8-mode: hires',
             'aac-type: aac-lc',
@@ -1639,6 +1637,11 @@ ipcMain.once('app:ui-ready', async () => {
             forget: async () => {
                 const s = await _storeLoad();
                 delete s.drm_email; delete s.drm_password; delete s.drm_verified;
+                _storeDirty = true; _storeFlush();
+            },
+            dropPassword: async () => {
+                const s = await _storeLoad();
+                delete s.drm_password; // keep the email (and the verified mark): it pre-fills the sign-in form
                 _storeDirty = true; _storeFlush();
             },
             log: m => console.log('[Adam]', m),

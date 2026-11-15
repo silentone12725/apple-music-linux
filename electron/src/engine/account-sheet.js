@@ -149,7 +149,11 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         return inputs.map(i => i.value).join('').length === CODE_LENGTH;
     }
 
+    // Sheet transitions go to the page log, so a report of "it closed by itself" shows what closed it.
+    const trace = (what) => { try { console.log(`[Adam Account] ${what}`); } catch { /* no console */ } };
+
     function render(header, content, buttons) {
+        trace(`show ${view}`);
         ensureDialog();
         const body = el(doc, 'div', { class: 'body' });
         body.insertAdjacentHTML('beforeend', APP_ICON);
@@ -379,6 +383,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
     }
 
     function close() {
+        trace(`close from ${view} ${(new Error().stack ?? '').split('\n')[2]?.trim() ?? ''}`);
         stopPoll();
         hidePassword();
         if (dlg?.open) dlg.close();
@@ -394,6 +399,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
 
     function onSnapshot(snap) {
         const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
+        if (action !== 'none') trace(`snapshot auth=${snap?.state?.authentication} challenge=${snap?.challenge?.type ?? '-'} → ${action}`);
         if (snap?.challenge?.type === 'two_factor' || snap?.challenge?.type === 'dialog_choice') {
             challengeId = snap.challenge.id ?? null;
         }

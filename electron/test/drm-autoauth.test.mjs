@@ -21,9 +21,9 @@ function engine({ statuses, post = { status: 202, json: {} } }) {
     };
 }
 const run = (e, extra = {}) => {
-    let forgotten = 0;
-    return autoAuthenticate({ request: e.request, creds, forget: async () => { forgotten++; }, sleep: e.sleep, now: e.now, timeoutMs: 60_000, ...extra })
-        .then((outcome) => ({ outcome, forgotten }));
+    let forgotten = 0, passwordDropped = 0;
+    return autoAuthenticate({ request: e.request, creds, forget: async () => { forgotten++; }, dropPassword: async () => { passwordDropped++; }, sleep: e.sleep, now: e.now, timeoutMs: 60_000, ...extra })
+        .then((outcome) => (passwordDropped ? { outcome, forgotten, passwordDropped } : { outcome, forgotten }));
 };
 
 test('engine unreachable: nothing sent, credentials kept', async () => {
@@ -68,14 +68,14 @@ test('a failure reported before this attempt began is ignored', async () => {
     assert.deepEqual(await run(e), { outcome: 'signed-in', forgotten: 0 });
 });
 
-test('a verification-code challenge drops the details and leaves this attempt to the sign-in sheet', async () => {
+test('a verification-code challenge drops only the password and leaves this attempt to the sign-in sheet', async () => {
     const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'challenging' } }] });
-    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 1 });
+    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 0, passwordDropped: 1 });
 });
 
-test('an unattended sign-in that Apple wants a code for ends quietly: no sheet, the details are dropped', async () => {
+test('an unattended sign-in that Apple wants a code for ends quietly: no sheet, only the password is dropped', async () => {
     const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logging_in' } }, { state: { authentication: 'logged_out' }, message: 'sign-in cancelled' }] });
-    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 1 });
+    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 0, passwordDropped: 1 });
     assert.ok(!e.calls.some((c) => c.includes('challenge')), 'no challenge was answered');
 });
 

@@ -583,7 +583,14 @@
       if (view === "choice") return true;
       return inputs.map((i) => i.value).join("").length === CODE_LENGTH;
     }
+    const trace = (what) => {
+      try {
+        console.log(`[Adam Account] ${what}`);
+      } catch {
+      }
+    };
     function render(header, content, buttons) {
+      trace(`show ${view}`);
       ensureDialog();
       const body = el(doc, "div", { class: "body" });
       body.insertAdjacentHTML("beforeend", APP_ICON);
@@ -867,6 +874,7 @@
       }, pollMs);
     }
     function close() {
+      trace(`close from ${view} ${(new Error().stack ?? "").split("\n")[2]?.trim() ?? ""}`);
       stopPoll();
       hidePassword();
       if (dlg?.open) dlg.close();
@@ -885,6 +893,7 @@
     }
     function onSnapshot(snap) {
       const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
+      if (action !== "none") trace(`snapshot auth=${snap?.state?.authentication} challenge=${snap?.challenge?.type ?? "-"} \u2192 ${action}`);
       if (snap?.challenge?.type === "two_factor" || snap?.challenge?.type === "dialog_choice") {
         challengeId = snap.challenge.id ?? null;
       }

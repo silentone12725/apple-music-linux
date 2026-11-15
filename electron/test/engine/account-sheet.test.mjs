@@ -142,3 +142,30 @@ test('a new dialog after the first is shown, not ignored', () => {
     sheet.onSnapshot({ state: { authentication: 'challenging' }, challenge: { type: 'dialog_choice', id: 2, title: 'Recovery Options', metadata: { buttons: 'Text me\nCall me' } } });
     assert.ok(labelled(dlg, 'Text me'), 'the second dialog replaced the first');
 });
+
+test('Retry keeps the sign-in form when Apple ends the cancelled attempt with a failure', async () => {
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const { sheet, dlg } = setup({ submitCode: async () => { await gate; return true; }, savedEmail: async () => 'me@example.com' });
+    sheet.onSnapshot(wrongPasswordSnap(1));
+    labelled(dlg, 'Retry').click();
+    // The engine's reply to the dialog and the failed attempt arrive over SSE before the POST resolves.
+    sheet.onSnapshot({ state: { authentication: 'logging_in' } });
+    sheet.onSnapshot({ state: { authentication: 'failed' }, failure: { message: 'sign-in cancelled' } });
+    release();
+    await tick(); await tick(); await tick();
+    assert.equal(dlg().open, true, 'the sheet is still open');
+    assert.match(dlg().textContent, /Sign-In Required|Sign in with your Apple Account/);
+    assert.equal(inputs(dlg).length >= 2, true, 'the password field is there');
+});
+
+test('a failure after Retry shows Apple’s message on the form, then later snapshots leave it alone', async () => {
+    const { sheet, dlg } = setup({ savedEmail: async () => 'me@example.com' });
+    sheet.onSnapshot(wrongPasswordSnap(1));
+    labelled(dlg, 'Retry').click();
+    await tick(); await tick(); await tick();
+    sheet.onSnapshot({ state: { authentication: 'failed' }, failure: { message: 'sign-in cancelled' } });
+    sheet.onSnapshot({ state: { authentication: 'logged_out' } });
+    assert.equal(dlg().open, true);
+    assert.equal(inputs(dlg).length >= 2, true);
+});
