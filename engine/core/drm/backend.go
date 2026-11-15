@@ -188,4 +188,8 @@ func (t AuthChallengeType) MarshalJSON() ([]byte, error) {
 type Credentials struct {
 	Email    string
 	Password string
+	// Unattended marks a sign-in nobody is watching (saved details tried at launch). When Apple wants a verification
+	// code or a recovery choice, no prompt is shown and the sign-in ends as cancelled, instead of asking the user for a
+	// code they never requested.
+	Unattended bool
 }

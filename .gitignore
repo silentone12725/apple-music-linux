@@ -77,6 +77,7 @@ drm/rootfs/mpl_db/
 # ── DRM client (native backend) build artifacts ───────────────────────────────
 # Built from drm/ via make; not source.
 drm/libdrm_client.so
+drm/tests/prologue_test
 drm/tests/test_fairplay
 drm/tests/test_device
 drm/tests/test_fp_exchange
@@ -195,3 +196,4 @@ electron/native/*.dll
 electron/native/*.obj
 electron/native/*.lib
 electron/native/*.exp
+drm/tests/tlsver_test

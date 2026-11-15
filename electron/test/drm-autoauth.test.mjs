@@ -14,7 +14,7 @@ function engine({ statuses, post = { status: 202, json: {} } }) {
         sleep: async (ms) => { clock += ms; },
         request: async (method, path, body) => {
             calls.push(method + ' ' + path);
-            if (method === 'POST') { assert.deepEqual(body, creds); return post; }
+            if (method === 'POST') { assert.deepEqual(body, { ...creds, unattended: true }); return post; }
             const s = statuses[Math.min(i++, statuses.length - 1)];
             return s === null ? null : { status: 200, json: { timestamp: new Date(clock + 500).toISOString(), ...s } };
         },
@@ -71,6 +71,17 @@ test('a failure reported before this attempt began is ignored', async () => {
 test('a verification-code challenge drops the details and leaves this attempt to the sign-in sheet', async () => {
     const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'challenging' } }] });
     assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 1 });
+});
+
+test('an unattended sign-in that Apple wants a code for ends quietly: no sheet, the details are dropped', async () => {
+    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logging_in' } }, { state: { authentication: 'logged_out' }, message: 'sign-in cancelled' }] });
+    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 1 });
+    assert.ok(!e.calls.some((c) => c.includes('challenge')), 'no challenge was answered');
+});
+
+test('a plain logged-out report without the cancel message is not read as a code request', async () => {
+    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logged_out' }, message: '' }] });
+    assert.deepEqual(await run(e, { timeoutMs: 6000 }), { outcome: 'timeout', forgotten: 0 });
 });
 
 test('a rejected request body clears the credentials; an engine without DRM does not', async () => {

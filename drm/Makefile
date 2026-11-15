@@ -185,7 +185,7 @@ $(TARGET): $(OBJS) $(HYBRIS_OBJS) $(NATIVE_OBJS) $(EMBED_BLOB_OBJS) $(EMBEDDED_L
 %.o: %.c $(HEADERS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-drm_hybris.o: drm_hybris.c drm_hybris.h embedded_loader.h native/drm_lib.h
+drm_hybris.o: drm_hybris.c drm_hybris.h prologue.h tlsver.h embedded_loader.h native/drm_lib.h
 	$(CC) $(HYBRIS_CFLAGS) -Wno-pedantic -c -o $@ $<
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -227,13 +227,19 @@ uninstall:
 	rm -f $(addprefix $(DESTDIR)/usr/include/,$(HEADERS))
 
 # Unit tests for header-only wrapper helpers (adapted from PR #1).
-NATIVE_C_TESTS = tests/music_token_request_test tests/subscription_status_test
+NATIVE_C_TESTS = tests/music_token_request_test tests/subscription_status_test tests/prologue_test tests/tlsver_test
 
 tests/music_token_request_test: tests/music_token_request_test.c native/music_token_request.h native/cJSON.c
 	$(CC) -std=gnu11 -g -Inative -o $@ tests/music_token_request_test.c native/cJSON.c -lm
 
 tests/subscription_status_test: tests/subscription_status_test.c native/subscription_status.h
 	$(CC) -std=gnu11 -g -Inative -o $@ tests/subscription_status_test.c
+
+tests/prologue_test: tests/prologue_test.c prologue.h
+	$(CC) -std=gnu11 -g -Wall -Wextra -I. -o $@ tests/prologue_test.c
+
+tests/tlsver_test: tests/tlsver_test.c tlsver.h
+	$(CC) -std=gnu11 -g -Wall -Wextra -I. -o $@ tests/tlsver_test.c
 
 test: $(TEST_TARGET) $(NATIVE_C_TESTS)
 	@$(TEST_TARGET)
@@ -252,7 +258,7 @@ $(WINDOWS_BUILD_DIR)/drm_linux.o: drm_linux.c drm_types.h
 	@mkdir -p $(WINDOWS_BUILD_DIR)
 	$(MINGW_CC) $(WINDOWS_CFLAGS) -Wno-format-truncation -c -o $@ $<
 
-$(WINDOWS_BUILD_DIR)/drm_hybris.o: drm_hybris.c drm_hybris.h embedded_loader.h native/drm_lib.h
+$(WINDOWS_BUILD_DIR)/drm_hybris.o: drm_hybris.c drm_hybris.h prologue.h tlsver.h tlsver.h embedded_loader.h native/drm_lib.h
 	@mkdir -p $(WINDOWS_BUILD_DIR)
 	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -Wno-pedantic -c -o $@ $<
 
@@ -303,8 +309,8 @@ windows-build: $(WINDOWS_TARGET)
 windows-check: windows-loader-check windows-build
 
 # Our own C/C++ (style in /.clang-format). Vendored and third-party files are excluded.
-FORMAT_SRCS = drm_linux.c drm_hybris.c drm_hybris.h drm_types.h embedded_loader.c \
-              embedded_loader.h stubs/empty_stub.c tests/test_drm_linux.c \
+FORMAT_SRCS = drm_linux.c drm_hybris.c drm_hybris.h prologue.h tlsver.h tests/tlsver_test.c drm_types.h embedded_loader.c \
+              embedded_loader.h stubs/empty_stub.c tests/test_drm_linux.c tests/prologue_test.c \
               native/android_shim.c native/guard.cpp
 
 analyze:

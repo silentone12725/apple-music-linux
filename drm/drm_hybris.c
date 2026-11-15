@@ -162,6 +162,8 @@ static struct {
 
 /* ── Init ────────────────────────────────────────────────────────────────────*/
 
+#include "tlsver.h"
+
 #ifndef _WIN32
 /* ── curl write-callback patcher ─────────────────────────────────────────────
  * hybris_libc_shim_hook returns these shims for every curl symbol that
@@ -267,9 +269,30 @@ static size_t curl_write_shim(char *ptr, size_t size, size_t nmemb, void *ud)
  * callback; until then (default fwrite writer, or WRITEDATA set before
  * WRITEFUNCTION) it is forwarded and also remembered, so nothing is lost.
  */
+/* TLS 1.3 as the minimum version for every Android libcurl handle, set when the URL is given. libcurl refuses the handshake
+ * when the server will not do 1.3, so there is no fallback: ADAM_TLS=default leaves the library's own choice alone. */
+static int tls13_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("ADAM_TLS");
+        v = !(e && strcmp(e, "default") == 0);
+    }
+    return v;
+}
+
 static int curl_setopt_intercept(void *handle, int option, void *param,
                                  curl_setopt_fn_t fwd)
 {
+    if (tls13_enabled()) {
+        long v = tls13_sslversion(option, (long)param);
+        if (v >= 0) {
+            if (option == CURLOPT_URL_VAL)
+                fwd(handle, CURLOPT_SSLVERSION_VAL, (void *)v); /* an old libcurl rejects it: ignored */
+            else
+                param = (void *)v;
+        }
+    }
     if (option == CURLOPT_WRITEFUNCTION_VAL) {
         pthread_mutex_lock(&g_wp_lock);
         watcher_t *w = wp_find(handle, 1);
@@ -331,64 +354,14 @@ static int adam_curl_easy_setopt_elf(void *handle, int option, ...)
     return curl_setopt_intercept(handle, option, param, g_orig_android_setopt);
 }
 
-/* Length of the whole instructions at p covering at least `need` bytes, or 0 if
- * an instruction outside the known position-independent prologue set is met
- * (anything RIP-relative or unknown), in which case the hook is refused. */
-static size_t prologue_len(const uint8_t *p, size_t need)
-{
-    size_t n = 0;
-    while (n < need) {
-        const uint8_t *q = p + n;
-        if (q[0] == 0xF3 && q[1] == 0x0F && q[2] == 0x1E && q[3] == 0xFA) {
-            n += 4;
-            continue;
-        } /* endbr64 */
-        if (q[0] >= 0x50 && q[0] <= 0x57) {
-            n += 1;
-            continue;
-        } /* push r64 */
-        if (q[0] == 0x41 && q[1] >= 0x50 && q[1] <= 0x57) {
-            n += 2;
-            continue;
-        } /* push r8-r15 */
-        if ((q[0] & 0xFA) == 0x48 && (q[1] == 0x89 || q[1] == 0x8B) && (q[2] & 0xC0) == 0xC0) {
-            n += 3;
-            continue;
-        } /* mov r,r */
-        if (q[0] == 0x48 && q[1] == 0x83 && (q[2] & 0xF8) == 0xE8) {
-            n += 4;
-            continue;
-        } /* sub r,imm8 */
-        if (q[0] == 0x48 && q[1] == 0x81 && (q[2] & 0xF8) == 0xE8) {
-            n += 7;
-            continue;
-        } /* sub r,imm32 */
-        if (q[0] >= 0xB8 && q[0] <= 0xBF) {
-            n += 5;
-            continue;
-        } /* mov r32,imm32 */
-        return 0;
-    }
-    return n;
-}
+/* The prologue decoder and trampoline builder live in prologue.h so they can be unit tested on the real libcurl bytes. */
+#include "prologue.h"
 
 static int build_setopt_trampoline(void *orig_fn)
 {
-    size_t n = prologue_len((const uint8_t *)orig_fn, 12);
-    if (!n || n > 24) return 0;
-    uint8_t *tr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (tr == MAP_FAILED) return 0;
-    void *cont = (char *)orig_fn + n;
-    uint8_t jmp[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0}; /* movabs rax,cont; jmp rax */
-    memcpy(jmp + 2, &cont, 8);
-    memcpy(tr, orig_fn, n);
-    memcpy(tr + n, jmp, sizeof(jmp));
-    if (mprotect(tr, 4096, PROT_READ | PROT_EXEC) != 0) {
-        munmap(tr, 4096);
-        return 0;
-    }
-    __builtin___clear_cache((char *)tr, (char *)tr + n + sizeof(jmp));
-    g_orig_android_setopt = (curl_setopt_fn_t)(void *)tr;
+    void *tr = build_trampoline(orig_fn, 12);
+    if (!tr) return 0;
+    g_orig_android_setopt = (curl_setopt_fn_t)tr;
     return 1;
 }
 #endif
