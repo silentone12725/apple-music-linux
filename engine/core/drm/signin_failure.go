@@ -52,7 +52,7 @@ func ClassifySignInError(err error) SignInFailure {
 		return false
 	}
 	switch {
-	case has("forgot your password", "more than once", "too many", "locked", "disabled", "temporarily"):
+	case has("forgot your password", "more than once", "too many", "locked", "disabled", "temporarily locked", "temporarily disabled"):
 		return SignInFailure{FailLocked, "Apple has blocked sign-ins for now after several wrong attempts. Wait a while, or reset your password, then try again.", "https://iforgot.apple.com"}
 	case has("terms", "agree"):
 		return SignInFailure{FailTerms, "Apple needs you to accept its terms before this account can sign in. Accept them at account.apple.com, then try again.", "https://account.apple.com"}

@@ -71,12 +71,12 @@ type AccountTokenSource interface {
 
 	// GetProgressiveMVURL fetches a progressive video URL and associated
 	// downloadKey (base64 FairPlay token; empty if not available) for the given
-	// adamID through the wrapper's native Android StoreKit auth (port 40020).
+	// adamID. The in-process wrapper has no such call any more (the standalone wrapper's TCP
+	// services were removed), so the native backend answers with an error.
 	GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error)
 
-	// DecryptItunSamples decrypts itun-encrypted samples via the wrapper's
-	// port 50020. Requires a prior GetProgressiveMVURL call for the same adamID
-	// to initialize the decryptor.
+	// DecryptItunSamples decrypts itun-encrypted samples. Requires a prior GetProgressiveMVURL call
+	// for the same adamID to initialize the decryptor. The native backend does not support it.
 	DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error)
 }
 
@@ -336,8 +336,8 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 		},
 	}
 
-	// Try to obtain the progressive CDN URL and downloadKey from the native
-	// wrapper (port 40020). The downloadKey is sent as an HTTP cookie to the
+	// Try to obtain the progressive CDN URL and downloadKey from the DRM backend (the native
+	// backend does not provide them). The downloadKey is sent as an HTTP cookie to the
 	// CDN (Android pattern) — the CDN authorises server-side decryption.
 	// Non-fatal: HLS CBCS path is always the primary; this is an optimisation.
 	// Opt-in (ADAM_MV_PROGRESSIVE=1): the request costs seconds on every open, and nothing
