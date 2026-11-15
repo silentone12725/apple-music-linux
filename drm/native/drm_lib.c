@@ -16,7 +16,7 @@
 #define IMPORT_H_NO_DATA_DEFS
 #include "import.h"
 #include "drm_lib.h"
-#include "cmdline.h"
+#include "args.h"
 
 #ifdef _WIN32
 static int drm_windows_setenv(const char *name, const char *value, int overwrite)
@@ -42,17 +42,14 @@ extern struct shared_ptr drm_init_ctx(void);
 extern struct shared_ptr apInf;
 extern uint8_t           leaseMgr[16];
 extern struct shared_ptr reqCtx;
-extern struct gengetopt_args_info args_info;
+extern struct adam_args args_info;
 extern char             *amUsername, *amPassword;
 extern size_t            amPasswordLen;
-extern int               decryptCount;
+extern size_t            amPasswordCap;
 extern int               offlineFlag;
 extern char             *device_infos[9];
 extern void             *FHinstance;
 extern void             *preshareCtx;
-extern struct shared_ptr g_itun_decryptor;
-extern unsigned long     g_itun_adam_id;
-extern pthread_mutex_t   g_itun_mutex;
 
 extern drm_auth_cb_t  g_drm_auth_cb;
 extern void          *g_drm_auth_ud;
@@ -100,16 +97,44 @@ extern char *g_music_token;
 static char            g_base_dir_copy[1024];
 static char            g_device_info_copy[512];
 static char            g_username_copy[320];
-static char            g_pw_buf[256]; /* the password (and the code appended to it) while a sign-in runs */
+static char           *g_pw_buf; /* the password (and the code appended to it) while a sign-in runs, sized to the password */
+static size_t          g_pw_cap;
+
+/* Keeps a private copy of the password with room for the 6-digit code credentialHandler appends. A fixed buffer would
+ * either cut a long password (a wrong attempt at Apple) or overflow when the code is added. */
+static int set_password(const char *password)
+{
+    size_t len = strlen(password);
+    size_t cap = len + 16;
+    char *buf = calloc(1, cap);
+    if (!buf) return -1;
+    memcpy(buf, password, len);
+    if (g_pw_buf) {
+        memset(g_pw_buf, 0, g_pw_cap);
+        free(g_pw_buf);
+    }
+    g_pw_buf = buf;
+    g_pw_cap = cap;
+    amPassword = g_pw_buf;
+    amPasswordCap = g_pw_cap;
+    amPasswordLen = len;
+    return 0;
+}
 
 /* A sign-in is over: forget the account so a later request for credentials cannot resubmit it. */
 static void forget_credentials(void)
 {
-    memset(g_pw_buf, 0, sizeof(g_pw_buf));
+    if (g_pw_buf) {
+        memset(g_pw_buf, 0, g_pw_cap);
+        free(g_pw_buf);
+        g_pw_buf = NULL;
+        g_pw_cap = 0;
+    }
     memset(g_username_copy, 0, sizeof(g_username_copy));
     amPassword = NULL;
     amUsername = NULL;
     amPasswordLen = 0;
+    amPasswordCap = 0;
 }
 extern char            g_last_auth_error[];
 
@@ -220,17 +245,15 @@ static int drm_lib_init_impl(const drm_lib_config_t *cfg)
     if (cfg->base_dir) {
         snprintf(g_base_dir_copy, sizeof(g_base_dir_copy), "%s", cfg->base_dir);
         args_info.base_dir_arg = g_base_dir_copy;
-        args_info.base_dir_given = 1;
     }
     {
-        /* Use provided device_info or fall back to the same default as cmdline.c */
+        /* Use provided device_info or fall back to the wrapper's default device */
         const char *di = (cfg->device_info && cfg->device_info[0])
             ? cfg->device_info
             : "Music/4.9/Android/10/Samsung S9/7663313/en-US/en-US/dc28071e981c439e";
         snprintf(g_device_info_copy, sizeof(g_device_info_copy), "%s", di);
         args_info.device_info_arg = g_device_info_copy;
-        args_info.device_info_given = (cfg->device_info && cfg->device_info[0]) ? 1 : 0;
-        /* split device_infos just like main() does */
+        /* split the device string into its nine fields */
         static char *di_copy = NULL;
         if (di_copy) free(di_copy);
         di_copy = strdup(di);
@@ -246,13 +269,12 @@ static int drm_lib_init_impl(const drm_lib_config_t *cfg)
     if (cfg->username && cfg->password) {
         snprintf(g_username_copy, sizeof(g_username_copy), "%s", cfg->username);
         amUsername = g_username_copy;
-        /* Allocate a mutable buffer (credentialHandler appends the 2FA code) */
-        strncpy(g_pw_buf, cfg->password, sizeof(g_pw_buf) - 1);
-        g_pw_buf[sizeof(g_pw_buf) - 1] = '\0';
-        amPassword = g_pw_buf;
-        amPasswordLen = strlen(g_pw_buf);
-        args_info.login_arg = NULL; /* not used in library mode */
-        args_info.login_given = 0;
+        /* A mutable copy with room for the 2FA code credentialHandler appends */
+        if (set_password(cfg->password) != 0) {
+            fprintf(stderr, "[drm_lib] out of memory\n");
+            pthread_mutex_unlock(&g_init_mutex);
+            return -1;
+        }
     }
 
     /*
@@ -371,10 +393,7 @@ static int drm_lib_login_impl(const char *username, const char *password)
     extern char *amUsername, *amPassword;
     snprintf(g_username_copy, sizeof(g_username_copy), "%s", username);
     amUsername = g_username_copy;
-    strncpy(g_pw_buf, password, sizeof(g_pw_buf) - 1);
-    g_pw_buf[sizeof(g_pw_buf) - 1] = '\0';
-    amPassword = g_pw_buf;
-    amPasswordLen = strlen(g_pw_buf);
+    if (set_password(password) != 0) return -1;
 
     extern uint8_t login(struct shared_ptr ctx);
     if (!login(reqCtx)) {
@@ -420,7 +439,7 @@ const char *drm_lib_last_error(void)
 }
 
 /* A C++ exception unwinding out of drm_lib_init (or a SVError recovered by longjmp) skips the unlock calls, which would
- * hang the next init and drm_lib_shutdown on g_init_mutex. The exception barrier calls this when init did not return
+ * hang the next init on g_init_mutex. The exception barrier calls this when init did not return
  * normally, on the thread that ran it; the trylock keeps it a no-op if the mutex is somehow free. Adapted from PR #1. */
 void drm_lib_abort_init(void)
 {
@@ -429,79 +448,6 @@ void drm_lib_abort_init(void)
     pthread_mutex_trylock(&g_init_mutex); /* held by the aborted init, or free: either way it ends unlocked */
     pthread_mutex_unlock(&g_init_mutex);
     if (g_drm_state_cb) g_drm_state_cb("FAILED", g_drm_state_ud);
-}
-
-/* ── drm_lib_shutdown ───────────────────────────────────────────────────────*/
-
-void drm_lib_shutdown(void)
-{
-    /* No clean shutdown API in the underlying library — just reset callbacks
-     * so no further callbacks fire after the Go engine destroys its context. */
-    pthread_mutex_lock(&g_init_mutex);
-    g_drm_auth_cb  = NULL;
-    g_drm_state_cb = NULL;
-    pthread_mutex_unlock(&g_init_mutex);
-}
-
-/* ── drm_lib_get_m3u8 ───────────────────────────────────────────────────────*/
-
-char *drm_lib_get_m3u8(unsigned long adam_id)
-{
-    const char *url;
-    if (offlineFlag)
-        url = get_m3u8_method_download(reqCtx, adam_id, NULL);
-    else
-        url = get_m3u8_method_play(leaseMgr, adam_id, NULL);
-
-    if (!url)
-        return NULL;
-    char *ret = strdup(url);
-    free((void *)url);
-    return ret;
-}
-
-/* ── drm_lib_get_account ────────────────────────────────────────────────────*/
-
-char *drm_lib_get_account(void)
-{
-    if (!g_storefront_id || !g_dev_token || !g_music_token)
-        return NULL;
-
-    /* Build JSON: {"storefront_id":"…","dev_token":"…","music_token":"…"} */
-    size_t len = strlen(g_storefront_id) + strlen(g_dev_token) +
-                 strlen(g_music_token) + 80;
-    char *buf = malloc(len);
-    if (!buf)
-        return NULL;
-    snprintf(buf, len,
-        "{\"storefront_id\":\"%s\",\"dev_token\":\"%s\",\"music_token\":\"%s\"}",
-        g_storefront_id, g_dev_token, g_music_token);
-    return buf;
-}
-
-/* ── drm_lib_get_mv ─────────────────────────────────────────────────────────*/
-
-int drm_lib_get_mv(unsigned long adam_id, char **out_url, char **out_dk,
-                   int *out_has_itun)
-{
-    char *dk = NULL;
-    const char *url = get_progressive_method_play(leaseMgr, adam_id, &dk);
-    if (!url) {
-        url = get_m3u8_method_play(leaseMgr, adam_id, &dk);
-    }
-    if (!url)
-        return -1;
-
-    *out_url = strdup(url);
-    free((void *)url);
-    *out_dk = dk ? strdup(dk) : NULL;
-    if (dk) free(dk);
-
-    pthread_mutex_lock(&g_itun_mutex);
-    *out_has_itun = (g_itun_decryptor.obj != NULL && g_itun_adam_id == adam_id) ? 1 : 0;
-    pthread_mutex_unlock(&g_itun_mutex);
-
-    return 0;
 }
 
 /* ── drm_lib_open_kd_ctx ────────────────────────────────────────────────────*/
@@ -518,39 +464,12 @@ int drm_lib_decrypt(void *kd_ctx, uint8_t *sample, uint32_t size)
     if (!kd_ctx || !sample)
         return -1;
     /* getKdContext() returns the key-context slot, not the context itself:
-     * handle() in main.c (the proven TCP path) calls the decryptor with
-     * *kdContext. Passing kd_ctx directly decrypts with the wrong context and
+     * the decryptor takes *kdContext. Passing kd_ctx directly decrypts with the wrong context and
      * yields garbage samples. */
     void *ctx = *(void **)kd_ctx;
     if (!ctx)
         return -1;
     NfcRKVnxuKZy04KWbdFu71Ou(ctx, (uint32_t)5, sample, sample, (size_t)size);
-    return 0;
-}
-
-/* ── drm_lib_decrypt_itun ───────────────────────────────────────────────────*/
-
-int drm_lib_decrypt_itun(unsigned long adam_id, uint8_t *sample,
-                          uint32_t in_size, uint32_t *out_size)
-{
-    pthread_mutex_lock(&g_itun_mutex);
-    void *dec_obj   = g_itun_decryptor.obj;
-    unsigned long dec_adam = g_itun_adam_id;
-    pthread_mutex_unlock(&g_itun_mutex);
-
-    if (!dec_obj) {
-        fprintf(stderr, "[drm_lib] itun: no decryptor (call drm_lib_get_mv first)\n");
-        return -1;
-    }
-    if (dec_adam != adam_id) {
-        fprintf(stderr, "[drm_lib] itun: adamId mismatch: have %lu, got %lu\n",
-                dec_adam, adam_id);
-        return -1;
-    }
-
-    uint32_t out_len = 0;
-    _ZN17SVPastisDecryptor13decryptSampleEPKhRKjPj(dec_obj, sample, &in_size, &out_len);
-    *out_size = out_len;
     return 0;
 }
 

@@ -5,9 +5,10 @@
  * sit. The decoder knows a fixed set of such instructions and returns 0 for anything else, in which case the hook is
  * refused and libcurl is left untouched (phone OTP then falls back to the "can't reach devices" behaviour).
  *
- * One position-dependent instruction is handled: a short conditional jump (Jcc rel8) whose target lies OUTSIDE the copied
- * bytes. It is re-emitted as an inverted short jump over a register-preserving absolute jump, so the target is still the
- * original function body. A jump into the copied bytes themselves would need the copy re-laid out, so it is refused.
+ * Two position-dependent instructions are handled. A short conditional jump (Jcc rel8) whose target lies OUTSIDE the copied
+ * bytes is re-emitted as an inverted short jump over a register-preserving absolute jump, so the target is still the
+ * original function body; a jump into the copied bytes themselves would need the copy re-laid out, so it is refused. A
+ * call rel32 is re-emitted as an indirect call through an inline 8-byte target (the callee is outside the copy).
  *
  * Extend the decoder, never copy a fixed length: guessing a length once let the hook land in the middle of an instruction. */
 #ifndef ADAM_PROLOGUE_H
@@ -26,7 +27,9 @@ typedef struct {
     uint8_t off;  /* offset of the instruction in the function */
     uint8_t len;  /* its length */
     uint8_t jcc;  /* 0x70..0x7F for a short conditional jump, else 0 */
+    uint8_t call; /* 1 for call rel32 */
     int16_t dest; /* jcc only: branch target as an offset from the start of the function */
+    int32_t rel;  /* call only: the rel32 displacement, from the end of the instruction */
 } pro_ins;
 
 /* Decodes whole instructions from p until at least `need` bytes are covered. Returns the number of bytes covered and fills
@@ -37,8 +40,9 @@ static size_t prologue_scan(const uint8_t *p, size_t need, pro_ins *ins, size_t 
     while (n < need) {
         const uint8_t *q = p + n;
         size_t len = 0;
-        uint8_t jcc = 0;
+        uint8_t jcc = 0, call = 0;
         int16_t dest = 0;
+        int32_t rel = 0;
         if (c == PRO_MAX_INS) return 0;
         if (q[0] == 0xF3 && q[1] == 0x0F && q[2] == 0x1E && q[3] == 0xFA) {
             len = 4; /* endbr64 */
@@ -62,6 +66,12 @@ static size_t prologue_scan(const uint8_t *p, size_t need, pro_ins *ins, size_t 
             len = 5; /* movaps [rsp+disp8], xmm */
         } else if (q[0] == 0x0F && q[1] == 0x29 && (q[2] & 0xC7) == 0x84 && q[3] == 0x24) {
             len = 8; /* movaps [rsp+disp32], xmm */
+        } else if (q[0] == 0x64 && (q[1] == 0x48 || q[1] == 0x4C) && q[2] == 0x8B && (q[3] & 0xC7) == 0x04 && q[4] == 0x25) {
+            len = 9; /* mov r64, fs:[abs32]: the stack protector canary load; fs-relative, so position independent */
+        } else if (q[0] == 0xE8) {
+            len = 5; /* call rel32: position dependent, rewritten when the trampoline is built */
+            call = 1;
+            rel = (int32_t)((uint32_t)q[1] | (uint32_t)q[2] << 8 | (uint32_t)q[3] << 16 | (uint32_t)q[4] << 24);
         } else if (q[0] >= 0x70 && q[0] <= 0x7F) {
             len = 2; /* Jcc rel8: position dependent, rewritten when the trampoline is built */
             jcc = q[0];
@@ -72,7 +82,9 @@ static size_t prologue_scan(const uint8_t *p, size_t need, pro_ins *ins, size_t 
         ins[c].off = (uint8_t)n;
         ins[c].len = (uint8_t)len;
         ins[c].jcc = jcc;
+        ins[c].call = call;
         ins[c].dest = dest;
+        ins[c].rel = rel;
         c++;
         n += len;
     }
@@ -103,7 +115,15 @@ static void *build_trampoline(const void *fn, size_t need)
     if (tr == MAP_FAILED) return NULL;
     size_t pos = 0;
     for (size_t i = 0; i < count; i++) {
-        if (ins[i].jcc) {
+        if (ins[i].call) {
+            /* call rel32  ->  call [rip+2] ; jmp over ; .quad target ; over: (the return address is the jmp) */
+            static const uint8_t pre[8] = {0xFF, 0x15, 0x02, 0x00, 0x00, 0x00, 0xEB, 0x08};
+            const uint8_t *target = f + ins[i].off + ins[i].len + ins[i].rel;
+            memcpy(tr + pos, pre, sizeof(pre));
+            pos += sizeof(pre);
+            memcpy(tr + pos, &target, sizeof(target));
+            pos += sizeof(target);
+        } else if (ins[i].jcc) {
             /* Jcc target  ->  J!cc over ; jmp [rip+0] ; .quad target ; over: */
             tr[pos++] = (uint8_t)(ins[i].jcc ^ 1);
             tr[pos++] = PRO_JMP_LEN;

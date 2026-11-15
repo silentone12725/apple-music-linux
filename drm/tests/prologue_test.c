@@ -93,8 +93,8 @@ static void test_refusals(void)
 {
     pro_ins ins[PRO_MAX_INS];
     size_t count = 0;
-    const uint8_t call[16] = {0xE8, 1, 2, 3, 4};
-    CHECK(prologue_scan(call, 12, ins, &count) == 0, "call rel32 is refused");
+    const uint8_t callrel[16] = {0xFF, 0x15, 1, 2, 3, 4}; /* call [rip+x]: RIP-relative memory operand */
+    CHECK(prologue_scan(callrel, 12, ins, &count) == 0, "an indirect RIP-relative call is refused");
     const uint8_t riprel[16] = {0x48, 0x8D, 0x05, 1, 2, 3, 4}; /* lea rax,[rip+x] */
     CHECK(prologue_scan(riprel, 12, ins, &count) == 0, "RIP-relative lea is refused");
     const uint8_t testmem[16] = {0x84, 0x05, 1, 2, 3, 4}; /* test [rip+x],al: memory operand */
@@ -126,9 +126,48 @@ static void test_refusals(void)
     }
 }
 
+/* The first bytes of curl_easy_cleanup and curl_easy_reset in the same libcurl: push rbx ; sub rsp,0x60 ; mov rax,fs:[0x28], and
+ * push rbx ; mov rbx,rdi ; call Curl_free_request_state ; mov rdi,rbx. */
+static const uint8_t CLEANUP[16] = {0x53, 0x48, 0x83, 0xEC, 0x60, 0x64, 0x48, 0x8B, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, 0x48, 0x89};
+static const uint8_t RESET[16] = {0x53, 0x48, 0x89, 0xFB, 0xE8, 0x27, 0x1B, 0xFD, 0xFF, 0x48, 0x89, 0xDF, 0xE8, 0, 0, 0};
+
+static void test_cleanup_and_reset_decode(void)
+{
+    pro_ins ins[PRO_MAX_INS];
+    size_t count = 0;
+    CHECK(prologue_scan(CLEANUP, 12, ins, &count) == 14 && count == 3, "cleanup: push, sub, canary load cover 14 bytes");
+    CHECK(prologue_scan(RESET, 12, ins, &count) == 12 && count == 4, "reset: push, mov, call, mov cover 12 bytes");
+    CHECK(ins[2].call == 1 && ins[2].rel == (int32_t)0xFFFD1B27, "reset: the call is recognised with its displacement");
+}
+
+/* A call inside the copied bytes is rewritten to an absolute call: the trampoline must reach the callee, return into the
+ * copy and carry on, whatever the original bytes (overwritten by the hook) say. */
+static void test_call_is_relocated(void)
+{
+    uint8_t *f = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(f != MAP_FAILED, "mmap");
+    if (f == MAP_FAILED) return;
+    memset(f, 0xCC, 4096);
+    /* push rbx ; mov rbx,rdi ; call +0xF7 (helper at 0x100) ; mov rdi,rbx ; lea rax,[rax+rdi] ; pop rbx ; ret */
+    static const uint8_t head[] = {0x53, 0x48, 0x89, 0xFB, 0xE8, 0xF7, 0x00, 0x00, 0x00, 0x48, 0x89, 0xDF, 0x48, 0x8D, 0x04, 0x38, 0x5B, 0xC3};
+    memcpy(f, head, sizeof(head));
+    static const uint8_t helper[] = {0x48, 0x8D, 0x87, 0xE8, 0x03, 0x00, 0x00, 0xC3}; /* lea rax,[rdi+1000] ; ret */
+    memcpy(f + 0x100, helper, sizeof(helper));
+    typedef long (*lfn)(long);
+    CHECK(((lfn)(void *)f)(7) == 1014, "original: helper result plus the argument");
+    lfn tr = (lfn)build_trampoline(f, 12);
+    CHECK(tr != NULL, "trampoline built around a call");
+    if (!tr) return;
+    memset(f, 0xCC, 12);
+    CHECK(tr(7) == 1014, "trampoline: the call reaches the helper, returns into the copy and the rest runs");
+    CHECK(tr(100) == 1200, "trampoline: a second argument");
+}
+
 int main(void)
 {
     test_real_bytes_decode();
+    test_cleanup_and_reset_decode();
+    test_call_is_relocated();
     test_trampoline_matches_original();
     test_registers_survive();
     test_refusals();

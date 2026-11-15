@@ -65,7 +65,6 @@ static void *sym(const char *name) {
     return p;
 }
 
-
 /* ── hand-built make_shared (newer Apple Music builds inline these instead of exporting them) ──────────────────────
  * libc++ make_shared lays out [control block: vptr, shared_owners, weak_owners, pad][object at +0x20]. The sizes and
  * the enable_shared_from_this offset are taken from the 5.2.1 libs' own inlined copies. */
@@ -114,7 +113,6 @@ static void construct_presentation(void *obj, void *arg) {
     if (!fn) fn = sym("_ZN20androidstoreservices28AndroidPresentationInterfaceC1Ev");
     fn(obj);
 }
-
 
 /* ── RequestContextConfig callbacks (4.9.x / 5.x) ───────────────────────────────────────────────────────────────────
  * Newer Apple Music builds expect the host app to supply a set of std::function callbacks (cookies, a key/value store,
@@ -483,19 +481,6 @@ void hybris_init_callbacks(void) {
 
 /* ── function stubs ──────────────────────────────────────────────────────── */
 
-void _ZN20androidstoreservices30SVSubscriptionStatusMgrFactory6createEv(struct shared_ptr *out) {
-    static void (__attribute__((sysv_abi)) *fn)(struct shared_ptr*) = NULL;
-    if (!fn) fn = sym("_ZN20androidstoreservices30SVSubscriptionStatusMgrFactory6createEv");
-    fn(out);
-}
-
-void _ZN20androidstoreservices27SVSubscriptionStatusMgrImpl33checkSubscriptionStatusFromSourceERKNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEEERKNS_23SVSubscriptionStatusMgr26SVSubscriptionStatusSourceE(
-    struct shared_ptr *a, void *b, struct shared_ptr *c, int *d) {
-    static void (__attribute__((sysv_abi)) *fn)(struct shared_ptr*,void*,struct shared_ptr*,int*) = NULL;
-    if (!fn) fn = sym("_ZN20androidstoreservices27SVSubscriptionStatusMgrImpl33checkSubscriptionStatusFromSourceERKNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEEERKNS_23SVSubscriptionStatusMgr26SVSubscriptionStatusSourceE");
-    fn(a,b,c,d);
-}
-
 void _ZN17storeservicescore14RequestContext24setFairPlayDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(void *obj, union std_string *path) {
     static void (__attribute__((sysv_abi)) *fn)(void*,union std_string*) = NULL;
     if (!fn) fn = sym("_ZN17storeservicescore14RequestContext24setFairPlayDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
@@ -627,18 +612,6 @@ void *_ZN21SVFootHillSessionCtrl8instanceEv() {
     if (!fn) fn = sym("_ZN21SVFootHillSessionCtrl8instanceEv");
     return fn();
 }
-void *_ZN21SVFootHillSessionCtrl7destroyEv() {
-    static void *(__attribute__((sysv_abi)) *fn)(void) = NULL;
-    if (!fn) fn = sym("_ZN21SVFootHillSessionCtrl7destroyEv");
-    return fn();
-}
-
-void _ZN21SVFootHillSessionCtrl9cleanKeysERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE(
-    void *obj, union std_string *key) {
-    static void (__attribute__((sysv_abi)) *fn)(void*,union std_string*) = NULL;
-    if (!fn) fn = sym("_ZN21SVFootHillSessionCtrl9cleanKeysERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE");
-    fn(obj,key);
-}
 
 void _ZN21SVFootHillSessionCtrl16getPersistentKeyERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_S8_S8_S8_S8_S8_(
     struct shared_ptr *ret, void *obj,
@@ -656,25 +629,6 @@ void _ZN21SVFootHillSessionCtrl14decryptContextERKNSt6__ndk112basic_stringIcNS0_
     static void (__attribute__((sysv_abi)) *fn)(struct shared_ptr*,void*,union std_string*) = NULL;
     if (!fn) fn = sym("_ZN21SVFootHillSessionCtrl14decryptContextERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEERKN11SVDecryptor15SVDecryptorTypeERKb");
     fn(ret,obj,ckc);
-}
-
-void _ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev(struct shared_ptr *sp) {
-    static void (__attribute__((sysv_abi)) *fn)(struct shared_ptr*) = NULL;
-    if (!fn && have_export("_ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev"))
-        fn = sym("_ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev");
-    if (!fn) {
-        /* Not exported by newer builds: release the strong reference the way libc++'s shared_ptr destructor does. */
-        void **cb = sp->ctrl_blk;
-        if (!cb) return;
-        if (__atomic_fetch_add((long *)&cb[1], -1, __ATOMIC_ACQ_REL) == 0) {
-            ((void (__attribute__((sysv_abi)) *)(void *))((void **)cb[0])[2])(cb);   /* __on_zero_shared */
-            static void (__attribute__((sysv_abi)) *release_weak)(void *) = NULL;
-            if (!release_weak) release_weak = sym("_ZNSt6__ndk119__shared_weak_count14__release_weakEv");
-            release_weak(cb);
-        }
-        return;
-    }
-    fn(sp);
 }
 
 void **_ZNK18SVFootHillPContext9kdContextEv(void *obj) {
@@ -797,11 +751,6 @@ void _ZN17storeservicescore20RequestContextConfigC2Ev(void *obj) {
     if (!fn) fn = sym("_ZN17storeservicescore20RequestContextConfigC2Ev");
     fn(obj);
 }
-void _ZN17storeservicescore20RequestContextConfig9setCPFlagEb(void *obj, uint8_t flag) {
-    static void (__attribute__((sysv_abi)) *fn)(void*,uint8_t) = NULL;
-    if (!fn) fn = sym("_ZN17storeservicescore20RequestContextConfig9setCPFlagEb");
-    fn(obj,flag);
-}
 
 #define CFG_SETTER(name) \
 void name(void *obj, union std_string *s) { \
@@ -834,50 +783,6 @@ void _ZN21RequestContextManager9configureERKNSt6__ndk110shared_ptrIN17storeservi
     fn(ctx);
 }
 
-struct shared_ptr *_ZN22SVPlaybackLeaseManager12requestAssetERKmRKNSt6__ndk16vectorINS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS7_IS9_EEEERKb(
-    void *obj, void *unused, unsigned long *adamId, struct std_vector *flavors, uint8_t *offline) {
-    static struct shared_ptr *(__attribute__((sysv_abi)) *fn)(void*,void*,unsigned long*,struct std_vector*,uint8_t*) = NULL;
-    if (!fn) fn = sym("_ZN22SVPlaybackLeaseManager12requestAssetERKmRKNSt6__ndk16vectorINS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS7_IS9_EEEERKb");
-    return fn(obj,unused,adamId,flavors,offline);
-}
-
-int _ZNK23SVPlaybackAssetResponse13hasValidAssetEv(void *obj) {
-    static int (__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZNK23SVPlaybackAssetResponse13hasValidAssetEv");
-    return fn(obj);
-}
-struct shared_ptr *_ZNK23SVPlaybackAssetResponse13playbackAssetEv(void *obj) {
-    static struct shared_ptr *(__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZNK23SVPlaybackAssetResponse13playbackAssetEv");
-    return fn(obj);
-}
-int _ZNK23SVPlaybackAssetResponse9errorCodeEv(void *obj) {
-    static int (__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZNK23SVPlaybackAssetResponse9errorCodeEv");
-    return fn(obj);
-}
-union std_string *_ZNK23SVPlaybackAssetResponse12errorMessageEv(void *obj, void *out) {
-    static union std_string *(__attribute__((sysv_abi)) *fn)(void*,void*) = NULL;
-    if (!fn) fn = sym("_ZNK23SVPlaybackAssetResponse12errorMessageEv");
-    return fn(obj,out);
-}
-
-union std_string *_ZNK17storeservicescore13PlaybackAsset9URLStringEv(void *obj, uint8_t *out) {
-    static union std_string *(__attribute__((sysv_abi)) *fn)(void*,uint8_t*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore13PlaybackAsset9URLStringEv");
-    return fn(obj,out);
-}
-union std_string *_ZNK17storeservicescore13PlaybackAsset7flavorEv(void *obj, void *out) {
-    static union std_string *(__attribute__((sysv_abi)) *fn)(void*,void*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore13PlaybackAsset7flavorEv");
-    return fn(obj,out);
-}
-union std_string *_ZNK17storeservicescore13PlaybackAsset11downloadKeyEv(void *obj, void *out) {
-    static union std_string *(__attribute__((sysv_abi)) *fn)(void*,void*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore13PlaybackAsset11downloadKeyEv");
-    return fn(obj,out);
-}
-
 union std_string *_ZNK17storeservicescore14RequestContext20storeFrontIdentifierERKNSt6__ndk110shared_ptrINS_6URLBagEEE(
     void *obj, void *unused, struct shared_ptr *urlbag) {
     static union std_string *(__attribute__((sysv_abi)) *fn)(void*,void*,struct shared_ptr*) = NULL;
@@ -888,18 +793,6 @@ union std_string *_ZNK17storeservicescore14RequestContext20storeFrontIdentifierE
 void _ZN21SVFootHillSessionCtrl16resetAllContextsEv(void *obj) {
     static void (__attribute__((sysv_abi)) *fn)(void*) = NULL;
     if (!fn) fn = sym("_ZN21SVFootHillSessionCtrl16resetAllContextsEv");
-    fn(obj);
-}
-
-void _ZN8FootHillC2ERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_(
-    void *obj, union std_string *root, union std_string *lib) {
-    static void (__attribute__((sysv_abi)) *fn)(void*,union std_string*,union std_string*) = NULL;
-    if (!fn) fn = sym("_ZN8FootHillC2ERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_");
-    fn(obj,root,lib);
-}
-void _ZN8FootHill24defaultContextIdentifierEv(void *obj) {
-    static void (__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZN8FootHill24defaultContextIdentifierEv");
     fn(obj);
 }
 
@@ -977,62 +870,6 @@ struct shared_ptr *_ZNK17storeservicescore11URLResponse18underlyingResponseEv(vo
     return fn(obj);
 }
 
-void *_ZN17storeservicescore15PurchaseRequestC2ERKNSt6__ndk110shared_ptrINS_14RequestContextEEE(
-    void *obj, struct shared_ptr *ctx) {
-    static void *(__attribute__((sysv_abi)) *fn)(void*,struct shared_ptr*) = NULL;
-    if (!fn) fn = sym("_ZN17storeservicescore15PurchaseRequestC2ERKNSt6__ndk110shared_ptrINS_14RequestContextEEE");
-    return fn(obj,ctx);
-}
-void *_ZN17storeservicescore15PurchaseRequest23setProcessDialogActionsEb(void *obj, int flag) {
-    static void *(__attribute__((sysv_abi)) *fn)(void*,int) = NULL;
-    if (!fn) fn = sym("_ZN17storeservicescore15PurchaseRequest23setProcessDialogActionsEb");
-    return fn(obj,flag);
-}
-void *_ZN17storeservicescore15PurchaseRequest12setURLBagKeyERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(void *obj, union std_string *s) {
-    static void *(__attribute__((sysv_abi)) *fn)(void*,union std_string*) = NULL;
-    if (!fn) fn = sym("_ZN17storeservicescore15PurchaseRequest12setURLBagKeyERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
-    return fn(obj,s);
-}
-void *_ZN17storeservicescore15PurchaseRequest16setBuyParametersERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(void *obj, union std_string *s) {
-    static void *(__attribute__((sysv_abi)) *fn)(void*,union std_string*) = NULL;
-    if (!fn) fn = sym("_ZN17storeservicescore15PurchaseRequest16setBuyParametersERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE");
-    return fn(obj,s);
-}
-void *_ZN17storeservicescore15PurchaseRequest3runEv(void *obj) {
-    static void *(__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZN17storeservicescore15PurchaseRequest3runEv");
-    return fn(obj);
-}
-struct shared_ptr *_ZNK17storeservicescore15PurchaseRequest8responseEv(void *obj) {
-    static struct shared_ptr *(__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore15PurchaseRequest8responseEv");
-    return fn(obj);
-}
-struct shared_ptr *_ZN17storeservicescore16PurchaseResponse5errorEv(void *obj) {
-    static struct shared_ptr *(__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZN17storeservicescore16PurchaseResponse5errorEv");
-    return fn(obj);
-}
-struct std_vector _ZNK17storeservicescore16PurchaseResponse5itemsEv(void *obj) {
-    static struct std_vector (__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore16PurchaseResponse5itemsEv");
-    return fn(obj);
-}
-struct std_vector _ZNK17storeservicescore12PurchaseItem6assetsEv(void *obj) {
-    static struct std_vector (__attribute__((sysv_abi)) *fn)(void*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore12PurchaseItem6assetsEv");
-    return fn(obj);
-}
-union std_string *_ZNK17storeservicescore13PurchaseAsset3URLEv(void *obj, void *out) {
-    static union std_string *(__attribute__((sysv_abi)) *fn)(void*,void*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore13PurchaseAsset3URLEv");
-    return fn(obj,out);
-}
-union std_string *_ZNK17storeservicescore13PurchaseAsset11downloadKeyEv(void *obj, void *out) {
-    static union std_string *(__attribute__((sysv_abi)) *fn)(void*,void*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore13PurchaseAsset11downloadKeyEv");
-    return fn(obj,out);
-}
 #ifdef _WIN32
 struct native_error_code *_ZNK17storeservicescore19StoreErrorCondition9errorCodeEv(void *obj) {
     static struct native_error_code *(__attribute__((sysv_abi)) *fn)(void *) = NULL;
@@ -1072,26 +909,3 @@ struct std_vector _ZN17storeservicescore8FairPlay21getSubscriptionStatusEv(void 
     return fn(obj);
 }
 
-/* itun FairPlay decryption */
-struct std_vector *_ZNK17storeservicescore13PlaybackAsset5sinfsEv(
-    struct std_vector *ret, void *playbackAsset) {
-    static struct std_vector *(__attribute__((sysv_abi)) *fn)(struct std_vector*,void*) = NULL;
-    if (!fn) fn = sym("_ZNK17storeservicescore13PlaybackAsset5sinfsEv");
-    return fn(ret,playbackAsset);
-}
-
-struct shared_ptr *_ZN18SVDecryptorFactory6createERKN11SVDecryptor15SVDecryptorTypeEPKhRKjS5_S7_RKNS0_20SVDecryptorTrackTypeERKbSC_(
-    struct shared_ptr *ret, int *protType, const uint8_t *keyData, uint32_t *keyLen,
-    const uint8_t *ivData, uint32_t *ivLen, int *trackType, uint8_t *b1, uint8_t *b2) {
-    static struct shared_ptr *(__attribute__((sysv_abi)) *fn)(struct shared_ptr*,int*,const uint8_t*,uint32_t*,
-                                    const uint8_t*,uint32_t*,int*,uint8_t*,uint8_t*) = NULL;
-    if (!fn) fn = sym("_ZN18SVDecryptorFactory6createERKN11SVDecryptor15SVDecryptorTypeEPKhRKjS5_S7_RKNS0_20SVDecryptorTrackTypeERKbSC_");
-    return fn(ret,protType,keyData,keyLen,ivData,ivLen,trackType,b1,b2);
-}
-
-void _ZN17SVPastisDecryptor13decryptSampleEPKhRKjPj(
-    void *decryptor, const uint8_t *data, const uint32_t *len, uint32_t *outLen) {
-    static void (__attribute__((sysv_abi)) *fn)(void*,const uint8_t*,const uint32_t*,uint32_t*) = NULL;
-    if (!fn) fn = sym("_ZN17SVPastisDecryptor13decryptSampleEPKhRKjPj");
-    fn(decryptor,data,len,outLen);
-}

@@ -89,11 +89,6 @@ extern void curl_easy_setopt(void *curl, int32_t option, ...);
 extern void *curl_easy_init();
 extern void *curl_easy_perform(void *);
 extern void curl_easy_cleanup(void *);
-
-extern void _ZN20androidstoreservices30SVSubscriptionStatusMgrFactory6createEv(struct shared_ptr *);
-extern void
-_ZN20androidstoreservices27SVSubscriptionStatusMgrImpl33checkSubscriptionStatusFromSourceERKNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEEERKNS_23SVSubscriptionStatusMgr26SVSubscriptionStatusSourceE(
-	struct shared_ptr *, void *, struct shared_ptr *, int *);
 extern void
 _ZN17storeservicescore14RequestContext24setFairPlayDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
 	void *, union std_string *);
@@ -203,7 +198,6 @@ extern void *_ZTVNSt6__ndk120__shared_ptr_emplaceIN17storeservicescore20RequestC
 
 // storeservicescore::RequestContextConfig::RequestContextConfig()
 extern void _ZN17storeservicescore20RequestContextConfigC2Ev(void *);
-extern void _ZN17storeservicescore20RequestContextConfig9setCPFlagEb(void *, uint8_t);
 extern void
 _ZN17storeservicescore20RequestContextConfig20setBaseDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
 	void *, union std_string *);
@@ -233,18 +227,12 @@ _ZN17storeservicescore20RequestContextConfig19setLocaleIdentifierERKNSt6__ndk112
 extern void
 _ZN17storeservicescore20RequestContextConfig21setLanguageIdentifierERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
 	void *, union std_string *);
-extern void
-_ZN17storeservicescore20RequestContextConfig24setFairPlayDirectoryPathERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(
-	void *, union std_string *);
 
 extern void
 _ZN17storeservicescore14RequestContext4initERKNSt6__ndk110shared_ptrINS_20RequestContextConfigEEE(void *, void *,
 																								  struct shared_ptr *);
 
 extern void *_ZN21SVFootHillSessionCtrl8instanceEv();
-extern void *_ZN21SVFootHillSessionCtrl7destroyEv();
-extern void _ZN21SVFootHillSessionCtrl9cleanKeysERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE(
-	void *, union std_string *);
 extern void
 _ZN21SVFootHillSessionCtrl16getPersistentKeyERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_S8_S8_S8_S8_S8_S8_(
 	struct shared_ptr *, void *, union std_string *, union std_string *, union std_string *, union std_string *,
@@ -252,30 +240,13 @@ _ZN21SVFootHillSessionCtrl16getPersistentKeyERKNSt6__ndk112basic_stringIcNS0_11c
 extern void
 _ZN21SVFootHillSessionCtrl14decryptContextERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEERKN11SVDecryptor15SVDecryptorTypeERKb(
 	struct shared_ptr *ret, void *sessCtrlInstance, union std_string *ckc);
-extern void _ZNSt6__ndk110shared_ptrI18SVFootHillPContextED2Ev(struct shared_ptr *);
 extern void **_ZNK18SVFootHillPContext9kdContextEv(void *);
 extern long NfcRKVnxuKZy04KWbdFu71Ou(void *, uint32_t, void *, void *, size_t);
-
-extern void _ZN8FootHillC2ERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_(void *,
-																									union std_string *,
-																									union std_string *);
-extern void _ZN8FootHill24defaultContextIdentifierEv(void *);
 
 // RequestContextManager::configure(std::__ndk1::shared_ptr<storeservicescore::RequestContext>
 // const&)
 extern void _ZN21RequestContextManager9configureERKNSt6__ndk110shared_ptrIN17storeservicescore14RequestContextEEE(
 	struct shared_ptr *);
-
-extern struct shared_ptr *_ZN22SVPlaybackLeaseManager12requestAssetERKmRKNSt6__ndk16vectorINS2_12basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEENS7_IS9_EEEERKb(
-	void *, void *, unsigned long *, struct std_vector *, uint8_t *
-);
-extern int _ZNK23SVPlaybackAssetResponse13hasValidAssetEv(void *);
-extern struct shared_ptr *_ZNK23SVPlaybackAssetResponse13playbackAssetEv(void *);
-extern int _ZNK23SVPlaybackAssetResponse9errorCodeEv(void *);
-extern union std_string *_ZNK23SVPlaybackAssetResponse12errorMessageEv(void *, void *);
-extern union std_string *_ZNK17storeservicescore13PlaybackAsset9URLStringEv(void *, uint8_t *);
-extern union std_string *_ZNK17storeservicescore13PlaybackAsset7flavorEv(void *, void *);
-extern union std_string *_ZNK17storeservicescore13PlaybackAsset11downloadKeyEv(void *, void *);
 
 extern union std_string *_ZNK17storeservicescore14RequestContext20storeFrontIdentifierERKNSt6__ndk110shared_ptrINS_6URLBagEEE(void *, void *, struct shared_ptr *);
 
@@ -296,18 +267,6 @@ extern void *_ZN17storeservicescore10URLRequest3runEv(void *);
 extern struct shared_ptr *_ZNK17storeservicescore10URLRequest5errorEv(void *);
 extern struct shared_ptr *_ZNK17storeservicescore10URLRequest8responseEv(void *);
 extern struct shared_ptr *_ZNK17storeservicescore11URLResponse18underlyingResponseEv(void *);
-
-extern void * _ZN17storeservicescore15PurchaseRequestC2ERKNSt6__ndk110shared_ptrINS_14RequestContextEEE(void *, struct shared_ptr *);
-extern void *_ZN17storeservicescore15PurchaseRequest23setProcessDialogActionsEb(void *, int);
-extern void *_ZN17storeservicescore15PurchaseRequest12setURLBagKeyERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(void *, union std_string *);
-extern void *_ZN17storeservicescore15PurchaseRequest16setBuyParametersERKNSt6__ndk112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE(void *, union std_string *);
-extern void *_ZN17storeservicescore15PurchaseRequest3runEv(void *);
-extern struct shared_ptr *_ZNK17storeservicescore15PurchaseRequest8responseEv(void *);
-extern struct shared_ptr *_ZN17storeservicescore16PurchaseResponse5errorEv(void *);
-extern struct std_vector _ZNK17storeservicescore16PurchaseResponse5itemsEv(void *);
-extern struct std_vector _ZNK17storeservicescore12PurchaseItem6assetsEv(void *);
-extern union std_string *_ZNK17storeservicescore13PurchaseAsset3URLEv(void *, void *);
-extern union std_string *_ZNK17storeservicescore13PurchaseAsset11downloadKeyEv(void *, void *);
 /* errorCode() returns a reference to the ErrorCode object inside the condition (its address is
  * this+0x20, see the library), not the code: reading it as an int gave the low half of a pointer. */
 struct native_error_code { int value; int padding; void *category; };
@@ -352,9 +311,6 @@ extern struct shared_ptr *_ZN18SVDecryptorFactory6createERKN11SVDecryptor15SVDec
     const uint8_t *ivData, uint32_t *ivLen, int *trackType, uint8_t *b1, uint8_t *b2);
 
 // SVPastisDecryptor::decryptSample(uint8_t const*, uint32_t const&, uint32_t*)
-// Decrypts in-place; outLen receives the output byte count
-extern void _ZN17SVPastisDecryptor13decryptSampleEPKhRKjPj(
-    void *decryptor, const uint8_t *data, const uint32_t *dataLen, uint32_t *outLen);
 
 
 #ifndef IMPORT_H_NO_DATA_DEFS

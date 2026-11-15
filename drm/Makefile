@@ -74,7 +74,6 @@ WINDOWS_TARGET = $(WINDOWS_BUILD_DIR)/libdrm_client.dll
 WINDOWS_OBJS = $(WINDOWS_BUILD_DIR)/drm_linux.o \
                $(WINDOWS_BUILD_DIR)/drm_hybris.o \
                $(WINDOWS_BUILD_DIR)/main.o \
-               $(WINDOWS_BUILD_DIR)/cmdline.o \
                $(WINDOWS_BUILD_DIR)/hybris_stubs.o \
                $(WINDOWS_BUILD_DIR)/drm_lib.o \
                $(WINDOWS_BUILD_DIR)/cJSON.o \
@@ -102,7 +101,7 @@ NATIVE_CFLAGS = -O2 -g -fPIC -Wall -Wno-unused-variable -Wno-unused-function \
                 -Wno-unused-but-set-variable -Wno-format-truncation -Wno-stringop-overflow \
                 -DMyRelease -D_GNU_SOURCE -DDRM_LIB_BUILD -include sys/time.h -I$(NATIVE_DIR)
 NATIVE_CXXFLAGS = -std=c++17 -O2 -g -fPIC -Wall -fexceptions -D_GNU_SOURCE -DDRM_LIB_BUILD -I$(NATIVE_DIR)
-NATIVE_C_OBJS = $(NATIVE_DIR)/main.o $(NATIVE_DIR)/cmdline.o $(NATIVE_DIR)/hybris_stubs.o \
+NATIVE_C_OBJS = $(NATIVE_DIR)/main.o $(NATIVE_DIR)/hybris_stubs.o \
                 $(NATIVE_DIR)/drm_lib.o $(NATIVE_DIR)/cJSON.o $(NATIVE_DIR)/android_shim.o
 NATIVE_CXX_OBJS = $(NATIVE_DIR)/main_cpp.o $(NATIVE_DIR)/guard_cpp.o
 NATIVE_OBJS = $(NATIVE_C_OBJS) $(NATIVE_CXX_OBJS)
@@ -263,10 +262,6 @@ $(WINDOWS_BUILD_DIR)/drm_hybris.o: drm_hybris.c drm_hybris.h prologue.h tlsver.h
 	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -Wno-pedantic -c -o $@ $<
 
 $(WINDOWS_BUILD_DIR)/main.o: native/main.c $(NATIVE_HEADERS)
-	@mkdir -p $(WINDOWS_BUILD_DIR)
-	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -c -o $@ $<
-
-$(WINDOWS_BUILD_DIR)/cmdline.o: native/cmdline.c $(NATIVE_HEADERS)
 	@mkdir -p $(WINDOWS_BUILD_DIR)
 	$(MINGW_CC) $(WINDOWS_NATIVE_CFLAGS) -c -o $@ $<
 

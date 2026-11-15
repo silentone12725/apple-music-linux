@@ -326,6 +326,28 @@ static int curl_setopt_intercept(void *handle, int option, void *param,
  * import curl via the bionic namespace. Those handles come from system
  * curl_easy_init (also via the hook), so forwarding to system curl is correct.
  */
+/* The system libcurl may hand a freed handle's address to the next curl_easy_init, so a watcher left behind would make the
+ * new handle's WRITEDATA look like it belongs to a shimmed callback and be withheld. Cleanup and reset drop it. */
+static void watcher_forget(void *handle)
+{
+    pthread_mutex_lock(&g_wp_lock);
+    watcher_t *w = wp_find(handle, 0);
+    if (w) *w = (watcher_t){0};
+    pthread_mutex_unlock(&g_wp_lock);
+}
+
+static void adam_curl_easy_cleanup_bionic(void *handle)
+{
+    watcher_forget(handle);
+    curl_easy_cleanup(handle);
+}
+
+static void adam_curl_easy_reset_bionic(void *handle)
+{
+    watcher_forget(handle);
+    curl_easy_reset(handle);
+}
+
 static int adam_curl_easy_setopt_bionic(void *handle, int option, ...)
 {
     va_list ap;
@@ -352,6 +374,25 @@ static int adam_curl_easy_setopt_elf(void *handle, int option, ...)
     void *param = va_arg(ap, void *);
     va_end(ap);
     return curl_setopt_intercept(handle, option, param, g_orig_android_setopt);
+}
+
+/* curl_easy_cleanup and curl_easy_reset of the same Android libcurl get the same treatment, only to drop the write-callback
+ * watcher of the handle: the allocator reuses a freed handle's address, and a stale watcher would swallow the new handle's
+ * WRITEDATA. Both shims call the ORIGINAL Android function (through its trampoline), so the handle never leaves Android
+ * libcurl; this is not the system-libcurl redirection the notes above warn against. */
+static void (*g_orig_android_cleanup)(void *) = NULL;
+static void (*g_orig_android_reset)(void *) = NULL;
+
+static void adam_curl_easy_cleanup_elf(void *handle)
+{
+    watcher_forget(handle);
+    g_orig_android_cleanup(handle);
+}
+
+static void adam_curl_easy_reset_elf(void *handle)
+{
+    watcher_forget(handle);
+    g_orig_android_reset(handle);
 }
 
 /* The prologue decoder and trampoline builder live in prologue.h so they can be unit tested on the real libcurl bytes. */
@@ -396,8 +437,8 @@ static void *hybris_libc_shim_hook(const char *symbol, const char *requester)
     if (strcmp(symbol, "curl_easy_setopt") == 0) return (void *)adam_curl_easy_setopt_bionic;
     if (strcmp(symbol, "curl_easy_init") == 0) return (void *)curl_easy_init;
     if (strcmp(symbol, "curl_easy_perform") == 0) return (void *)curl_easy_perform;
-    if (strcmp(symbol, "curl_easy_cleanup") == 0) return (void *)curl_easy_cleanup;
-    if (strcmp(symbol, "curl_easy_reset") == 0) return (void *)curl_easy_reset;
+    if (strcmp(symbol, "curl_easy_cleanup") == 0) return (void *)adam_curl_easy_cleanup_bionic;
+    if (strcmp(symbol, "curl_easy_reset") == 0) return (void *)adam_curl_easy_reset_bionic;
     if (strcmp(symbol, "curl_easy_getinfo") == 0) return (void *)curl_easy_getinfo;
     if (strcmp(symbol, "curl_easy_strerror") == 0) return (void *)curl_easy_strerror;
     if (strcmp(symbol, "curl_global_init") == 0) return (void *)curl_global_init;
@@ -430,6 +471,28 @@ static int patch_jmp64(void *from, void *to)
     return 1;
 }
 
+/* Hook one Android libcurl function (cleanup or reset) with a shim that calls the original through a trampoline. */
+static void hook_watcher_reset(const char *name, void *shim, void **orig)
+{
+    void *fn = embedded_dlsym(name);
+    if (!fn) {
+        fprintf(stderr, "[curl-hook] %s not found, handle-reuse guard skipped\n", name);
+        return;
+    }
+    void *tr = build_trampoline(fn, 12);
+    if (!tr) {
+        fprintf(stderr, "[curl-hook] %s prologue not relocatable, handle-reuse guard skipped\n", name);
+        return;
+    }
+    *orig = tr;
+    if (!patch_jmp64(fn, shim)) {
+        *orig = NULL;
+        fprintf(stderr, "[curl-hook] mprotect failed for %s, handle-reuse guard skipped\n", name);
+        return;
+    }
+    fprintf(stderr, "[curl-hook] patched %s -> ELF shim\n", name);
+}
+
 /* Hook the Android libcurl's curl_easy_setopt (see the ELF-namespace comment
  * above). Refuses, and leaves libcurl untouched, if the prologue cannot be
  * safely relocated; phone OTP then falls back to the "can't reach devices"
@@ -451,6 +514,10 @@ static void patch_android_curl(void)
         return;
     }
     fprintf(stderr, "[phone-patch] patched curl_easy_setopt -> ELF shim\n");
+
+    /* Best effort: without these two the only loss is the stale-watcher case described above. */
+    hook_watcher_reset("curl_easy_cleanup", (void *)adam_curl_easy_cleanup_elf, (void **)&g_orig_android_cleanup);
+    hook_watcher_reset("curl_easy_reset", (void *)adam_curl_easy_reset_elf, (void **)&g_orig_android_reset);
 }
 #else
 static void patch_android_curl(void)
