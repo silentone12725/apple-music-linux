@@ -1,0 +1,309 @@
+{
+  "deprecated": [],
+  "labels": [
+    {
+      "name": "bug",
+      "color": "d73a4a",
+      "description": "Something isn't working",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "enhancement",
+      "color": "a2eeef",
+      "description": "New feature or request",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "documentation",
+      "color": "0075ca",
+      "description": "Improvements or additions to documentation",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "question",
+      "color": "d876e3",
+      "description": "Further information is requested",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "duplicate",
+      "color": "cfd3d7",
+      "description": "This issue or pull request already exists",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "invalid",
+      "color": "e4e669",
+      "description": "This doesn't seem right",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "wontfix",
+      "color": "ffffff",
+      "description": "This will not be worked on",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "good first issue",
+      "color": "7057ff",
+      "description": "Good for newcomers",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "help wanted",
+      "color": "008672",
+      "description": "Extra attention is needed",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "confirmed",
+      "color": "0e8a16",
+      "description": "Reproduced by a maintainer",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "regression",
+      "color": "b60205",
+      "description": "Worked before, broken now",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "crash",
+      "color": "b60205",
+      "description": "Adam or the engine crashed",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "possible-duplicate",
+      "color": "cfd3d7",
+      "description": "May duplicate another issue; a maintainer decides",
+      "group": "classification",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "needs-triage",
+      "color": "fbca04",
+      "description": "Waiting for a maintainer to look at it",
+      "group": "state",
+      "owner": "tracking",
+      "exclusive": true
+    },
+    {
+      "name": "needs-info",
+      "color": "fef2c0",
+      "description": "Waiting for diagnostics or details from the reporter",
+      "group": "state",
+      "owner": "tracking",
+      "exclusive": true
+    },
+    {
+      "name": "in-progress",
+      "color": "1d76db",
+      "description": "A fix PR is open",
+      "group": "state",
+      "owner": "tracking",
+      "exclusive": true
+    },
+    {
+      "name": "fixed-in-nightly",
+      "color": "c2e0c6",
+      "description": "Fixed on nightly, not yet in a published release",
+      "group": "resolution",
+      "owner": "tracking",
+      "exclusive": true
+    },
+    {
+      "name": "fixed-in-release",
+      "color": "0e8a16",
+      "description": "Fixed in a published release",
+      "group": "resolution",
+      "owner": "tracking",
+      "exclusive": true
+    },
+    {
+      "name": "closed-by-tracking",
+      "color": "ededed",
+      "description": "Lifecycle evidence: the tracker closed this issue",
+      "group": "lifecycle",
+      "owner": "tracking",
+      "exclusive": false
+    },
+    {
+      "name": "reopened-needs-review",
+      "color": "e99695",
+      "description": "Reopened after the tracker closed it; a maintainer must review and remove this label",
+      "group": "lifecycle",
+      "owner": "tracking-adds-maintainers-remove",
+      "exclusive": false
+    },
+    {
+      "name": "blocked",
+      "color": "b60205",
+      "description": "Waiting on something outside the project",
+      "group": "lifecycle",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "keep-open",
+      "color": "bfdadc",
+      "description": "Do not auto-close this issue",
+      "group": "lifecycle",
+      "owner": "maintainers",
+      "exclusive": false
+    },
+    {
+      "name": "P0",
+      "color": "b60205",
+      "description": "Critical: data loss, crash on start, or no playback",
+      "group": "priority",
+      "owner": "maintainers",
+      "exclusive": true
+    },
+    {
+      "name": "P1",
+      "color": "d93f0b",
+      "description": "High",
+      "group": "priority",
+      "owner": "maintainers",
+      "exclusive": true
+    },
+    {
+      "name": "P2",
+      "color": "fbca04",
+      "description": "Medium",
+      "group": "priority",
+      "owner": "maintainers",
+      "exclusive": true
+    },
+    {
+      "name": "P3",
+      "color": "c5def5",
+      "description": "Low",
+      "group": "priority",
+      "owner": "maintainers",
+      "exclusive": true
+    },
+    {
+      "name": "comp:playback",
+      "color": "5319e7",
+      "description": "Playback (AAC)",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:lossless",
+      "color": "5319e7",
+      "description": "Lossless (ALAC)",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:atmos",
+      "color": "5319e7",
+      "description": "Atmos / spatial audio",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:video",
+      "color": "5319e7",
+      "description": "Music videos",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:downloads",
+      "color": "5319e7",
+      "description": "Downloads",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:drm-login",
+      "color": "5319e7",
+      "description": "Sign-in / DRM",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:ui-theme",
+      "color": "5319e7",
+      "description": "Theme / UI",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:mpris",
+      "color": "5319e7",
+      "description": "Media keys / MPRIS",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:scrobbling",
+      "color": "5319e7",
+      "description": "Scrobbling",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "comp:packaging",
+      "color": "5319e7",
+      "description": "Packaging / install",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "os:linux",
+      "color": "bfd4f2",
+      "description": "Linux",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    },
+    {
+      "name": "os:windows",
+      "color": "bfd4f2",
+      "description": "Windows",
+      "group": "scope",
+      "owner": "triage",
+      "exclusive": false
+    }
+  ]
+}

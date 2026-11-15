@@ -69,7 +69,7 @@ jobs:
         run: |
           npm run build:engine
           git diff --exit-code -- . ':!dist'
-      - run: node --test test/*.test.mjs test/engine/*.test.mjs
+      - run: node --test test/*.test.mjs test/engine/*.test.mjs test/github/*.test.mjs
 
   style:
     name: C format and shell syntax

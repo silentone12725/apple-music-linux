@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Chat and quick questions (Discord)
+    url: https://discord.gg/tY4v52KpVV
+    about: Questions, polls and general help. Bugs belong in an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/silentone12725/apple-music-linux/security/advisories/new
+    about: Please report security problems privately, not in a public issue.

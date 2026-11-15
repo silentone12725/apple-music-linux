@@ -1,0 +1,4 @@
+{
+  "_comment": "Vetted release tags and the commit each one is allowed to resolve to. Add an entry with scripts/record-release-tag.sh vX.Y.Z and review it in a PR. A release whose tag is missing here, or resolves elsewhere, is not trusted as evidence.",
+  "tags": {}
+}
