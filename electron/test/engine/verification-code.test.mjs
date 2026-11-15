@@ -56,3 +56,10 @@ test('promptAction: a cancelled sign-in (signed out, no failure) never reopens t
     assert.equal(promptAction(out, { open: true, view: 'signin' }), 'none');
     assert.equal(promptAction(out, { open: false, view: null }), 'none');
 });
+
+test('a new dialog challenge while one is shown re-renders; the same one does not', async () => {
+    const { promptAction } = await import('../../src/engine/verification-code.js');
+    const snap = (id) => ({ state: {}, challenge: { type: 'dialog_choice', id } });
+    assert.equal(promptAction(snap(2), { open: true, view: 'choice', challengeId: 1 }), 'choice');
+    assert.equal(promptAction(snap(1), { open: true, view: 'choice', challengeId: 1 }), 'none');
+});

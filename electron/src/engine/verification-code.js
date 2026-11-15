@@ -48,6 +48,8 @@ export function promptAction(snap, { open, view = null, submittedId = null, dism
     if (ch?.type === 'dialog_choice') {
         if (!open) return ch.id != null && ch.id === dismissedId ? 'none' : 'choice';
         if (view !== 'choice') return 'choice';
+        // Apple asked again (a new dialog, e.g. after Retry): show it instead of leaving the old buttons stuck.
+        if (challengeId != null && ch.id !== challengeId) return 'choice';
         return 'none';
     }
     if (st.authentication === 'failed' && open) return view === 'code' ? 'expired' : 'failed';

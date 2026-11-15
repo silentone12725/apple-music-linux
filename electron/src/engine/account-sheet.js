@@ -312,11 +312,16 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         // ok: stay busy — SSE will deliver the new challenge and onSnapshot will refresh
     }
 
+    // Apple's "Check the account information you entered" dialog: Cancel / Retry. Retrying with the password we already sent would only
+    // count as another wrong attempt at Apple (repeated ones lock the account), so Retry ends this attempt and asks for the password again.
+    const isWrongPasswordDialog = (labels) => labels.length === 2 && labels.some(l => /^retry$/i.test(l)) && labels.some(l => /^cancel$/i.test(l));
+
     function showChoice(buttonsStr, title = 'Recovery Options') {
         view = 'choice';
         busy = false;
         inputs = [];
         const btnLabels = (buttonsStr || '').split('\n').filter(Boolean);
+        const wrongPassword = isWrongPasswordDialog(btnLabels);
         const list = el(doc, 'div', { class: 'choice-list' });
         btnLabels.forEach((label, idx) => {
             const b = button(label, {
@@ -324,8 +329,22 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
                     if (busy) return;
                     setBusy(true, 'Sending…');
                     submittedId = challengeId;
-                    try { await submitCode(String(idx)); } catch { /* ignore */ }
-                    // engine will continue the sign-in flow; onSnapshot will drive next view
+                    const retry = wrongPassword && /^retry$/i.test(label);
+                    // Retry answers the dialog with its Cancel button; the new password goes through the sign-in form.
+                    const reply = retry ? btnLabels.findIndex(l => /^cancel$/i.test(l)) : idx;
+                    let ok = false;
+                    try { ok = await submitCode(String(reply)); } catch { ok = false; }
+                    if (view !== 'choice') return; // the engine already moved the sheet on
+                    if (!ok) { submittedId = null; setBusy(false); setMessage('Could not send. Try again.', true); return; }
+                    if (retry) {
+                        dismissedId = challengeId;
+                        let email = '';
+                        try { email = (await savedEmail()) || ''; } catch { /* the form simply starts empty */ }
+                        if (view === 'choice') showSignIn('Check your Apple Account and password, then try again.', { email });
+                    } else if (wrongPassword) {
+                        cancel();
+                    }
+                    // otherwise the engine continues the sign-in flow; onSnapshot drives the next view
                 },
             });
             list.appendChild(b);
@@ -334,7 +353,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         primary = null;
         render(
             [el(doc, 'h1', { id: 'adam-account-title' }, title),
-             el(doc, 'div', { class: 'sub' }, 'Choose how to receive your verification code.')],
+             el(doc, 'div', { class: 'sub' }, wrongPassword ? 'Your Apple Account or password was not accepted.' : 'Choose how to receive your verification code.')],
             [list, msg],
             [button('Cancel Sign-In', { onClick: cancel })],
         );

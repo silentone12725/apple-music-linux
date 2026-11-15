@@ -446,6 +446,7 @@
     if (ch?.type === "dialog_choice") {
       if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "choice";
       if (view !== "choice") return "choice";
+      if (challengeId != null && ch.id !== challengeId) return "choice";
       return "none";
     }
     if (st.authentication === "failed" && open) return view === "code" ? "expired" : "failed";
@@ -784,11 +785,13 @@
         setMessage("Could not send. Try again.", true);
       }
     }
+    const isWrongPasswordDialog = (labels) => labels.length === 2 && labels.some((l) => /^retry$/i.test(l)) && labels.some((l) => /^cancel$/i.test(l));
     function showChoice(buttonsStr, title = "Recovery Options") {
       view = "choice";
       busy = false;
       inputs = [];
       const btnLabels = (buttonsStr || "").split("\n").filter(Boolean);
+      const wrongPassword = isWrongPasswordDialog(btnLabels);
       const list = el(doc, "div", { class: "choice-list" });
       btnLabels.forEach((label, idx) => {
         const b = button(label, {
@@ -796,9 +799,31 @@
             if (busy) return;
             setBusy(true, "Sending\u2026");
             submittedId = challengeId;
+            const retry = wrongPassword && /^retry$/i.test(label);
+            const reply = retry ? btnLabels.findIndex((l) => /^cancel$/i.test(l)) : idx;
+            let ok = false;
             try {
-              await submitCode(String(idx));
+              ok = await submitCode(String(reply));
             } catch {
+              ok = false;
+            }
+            if (view !== "choice") return;
+            if (!ok) {
+              submittedId = null;
+              setBusy(false);
+              setMessage("Could not send. Try again.", true);
+              return;
+            }
+            if (retry) {
+              dismissedId = challengeId;
+              let email = "";
+              try {
+                email = await savedEmail() || "";
+              } catch {
+              }
+              if (view === "choice") showSignIn("Check your Apple Account and password, then try again.", { email });
+            } else if (wrongPassword) {
+              cancel();
             }
           }
         });
@@ -809,7 +834,7 @@
       render(
         [
           el(doc, "h1", { id: "adam-account-title" }, title),
-          el(doc, "div", { class: "sub" }, "Choose how to receive your verification code.")
+          el(doc, "div", { class: "sub" }, wrongPassword ? "Your Apple Account or password was not accepted." : "Choose how to receive your verification code.")
         ],
         [list, msg],
         [button("Cancel Sign-In", { onClick: cancel })]
