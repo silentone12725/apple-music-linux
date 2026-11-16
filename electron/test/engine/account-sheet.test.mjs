@@ -169,3 +169,41 @@ test('a failure after Retry shows Apple’s message on the form, then later snap
     assert.equal(dlg().open, true);
     assert.equal(inputs(dlg).length >= 2, true);
 });
+
+
+for (const label of ['Retry', 'Cancel']) {
+    test(`${label} completes when the failure event arrives before the POST`, async () => {
+        let release;
+        const calls = [];
+        const { sheet, dlg } = setup({
+            submitCode: () => new Promise(r => { release = r; }),
+            savedEmail: async () => 'me@example.com', onCancel: () => calls.push('cancel'),
+        });
+        sheet.onSnapshot(wrongPasswordSnap(7));
+        labelled(dlg, label).click();
+        sheet.onSnapshot({ state: { authentication: 'failed' } });
+        release(true);
+        await tick(); await tick();
+        if (label === 'Retry') {
+            assert.equal(inputs(dlg)[0].value, 'me@example.com');
+            sheet.onSnapshot(wrongPasswordSnap(7));
+            assert.match(dlg().textContent, /Sign-In Required/);
+        } else {
+            assert.equal(dlg().open, false);
+            assert.deepEqual(calls, ['cancel']);
+        }
+        sheet.close();
+    });
+}
+
+test('Cancel Sign-In while Retry waits for the account never reopens the sheet', async () => {
+    let release;
+    const { sheet, dlg } = setup({ savedEmail: () => new Promise(r => { release = r; }) });
+    sheet.onSnapshot(wrongPasswordSnap(8));
+    labelled(dlg, 'Retry').click();
+    await tick();
+    labelled(dlg, 'Cancel Sign-In').click();
+    release('me@example.com');
+    await tick();
+    assert.equal(dlg().open, false);
+});

@@ -36,6 +36,7 @@ export function promptAction(snap, { open, view = null, submittedId = null, dism
         return open ? 'close' : 'none';
     }
     const ch = snap?.challenge;
+    if (ch?.id != null && ch.id === dismissedId) return 'none';
     if (ch?.type === 'two_factor') {
         if (!open) return ch.id != null && ch.id === dismissedId ? 'none' : 'code';
         if (view !== 'code') return 'code';

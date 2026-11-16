@@ -436,6 +436,7 @@
       return open ? "close" : "none";
     }
     const ch = snap?.challenge;
+    if (ch?.id != null && ch.id === dismissedId) return "none";
     if (ch?.type === "two_factor") {
       if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "code";
       if (view !== "code") return "code";
@@ -547,6 +548,7 @@
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {
     };
+    let revision = 0;
     function ensureDialog() {
       if (dlg) return dlg;
       if (!doc.getElementById("adam-account-style")) {
@@ -605,6 +607,7 @@
       return b;
     }
     function showSignIn(error = "", { email: knownEmail = "", failure = null } = {}) {
+      revision++;
       view = "signin";
       busy = false;
       const email = el(doc, "input", { type: "email", placeholder: "Email or Phone Number", autocomplete: "username", spellcheck: false, value: knownEmail });
@@ -656,6 +659,7 @@
     }
     async function submitSignIn() {
       if (busy || !ready()) return;
+      const myRevision = revision;
       hidePassword();
       setMessage("");
       setBusy(true, "Signing In\u2026");
@@ -665,13 +669,14 @@
       } catch (e) {
         res = { ok: false, error: e?.message };
       }
-      if (view !== "signin") return;
+      if (revision !== myRevision) return;
       if (!res?.ok) {
         setBusy(false);
         setMessage(res?.error || "Could not sign in. Try again.", true);
       } else startPoll();
     }
     function showCode() {
+      revision++;
       view = "code";
       busy = false;
       const fields = el(doc, "div", { class: "digits" });
@@ -794,6 +799,7 @@
     }
     const isWrongPasswordDialog = (labels) => labels.length === 2 && labels.some((l) => /^retry$/i.test(l)) && labels.some((l) => /^cancel$/i.test(l));
     function showChoice(buttonsStr, title = "Recovery Options") {
+      revision++;
       view = "choice";
       busy = false;
       inputs = [];
@@ -804,6 +810,9 @@
         const b = button(label, {
           onClick: async () => {
             if (busy) return;
+            const myRevision = revision;
+            const answeredId = challengeId;
+            trace(`choice ${wrongPassword ? /^retry$/i.test(label) ? "retry" : "cancel" : idx}`);
             setBusy(true, "Sending\u2026");
             submittedId = challengeId;
             const retry = wrongPassword && /^retry$/i.test(label);
@@ -814,7 +823,7 @@
             } catch {
               ok = false;
             }
-            if (view !== "choice") return;
+            if (revision !== myRevision) return;
             if (!ok) {
               submittedId = null;
               setBusy(false);
@@ -822,13 +831,13 @@
               return;
             }
             if (retry) {
-              dismissedId = challengeId;
+              dismissedId = answeredId;
               let email = "";
               try {
                 email = await savedEmail() || "";
               } catch {
               }
-              if (view === "choice") showSignIn("Check your Apple Account and password, then try again.", { email });
+              if (revision === myRevision) showSignIn("Check your Apple Account and password, then try again.", { email });
             } else if (wrongPassword) {
               cancel();
             }
@@ -875,6 +884,7 @@
     }
     function close() {
       trace(`close from ${view} ${(new Error().stack ?? "").split("\n")[2]?.trim() ?? ""}`);
+      revision++;
       stopPoll();
       hidePassword();
       if (dlg?.open) dlg.close();
@@ -892,6 +902,7 @@
       if (running) onCancel();
     }
     function onSnapshot(snap) {
+      if (view === "choice" && busy && submittedId != null && snap?.state?.authentication === "failed") return;
       const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
       if (action !== "none") trace(`snapshot auth=${snap?.state?.authentication} challenge=${snap?.challenge?.type ?? "-"} \u2192 ${action}`);
       if (snap?.challenge?.type === "two_factor" || snap?.challenge?.type === "dialog_choice") {

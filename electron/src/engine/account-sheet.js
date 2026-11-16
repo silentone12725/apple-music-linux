@@ -110,6 +110,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
     let challengeId = null, submittedId = null, dismissedId = null;
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {};
+    let revision = 0;
 
     function ensureDialog() {
         if (dlg) return dlg;
@@ -170,6 +171,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
     }
 
     function showSignIn(error = '', { email: knownEmail = '', failure = null } = {}) {
+        revision++;
         view = 'signin';
         busy = false;
         const email = el(doc, 'input', { type: 'email', placeholder: 'Email or Phone Number', autocomplete: 'username', spellcheck: false, value: knownEmail });
@@ -215,19 +217,21 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
 
     async function submitSignIn() {
         if (busy || !ready()) return;
+        const myRevision = revision;
         hidePassword();
         setMessage('');
         setBusy(true, 'Signing In…');
         let res;
         try { res = await signIn(inputs[0].value.trim(), inputs[1].value, !!remember?.checked); }
         catch (e) { res = { ok: false, error: e?.message }; }
-        if (view !== 'signin') return; // moved on to the code meanwhile
+        if (revision !== myRevision) return; // closed or moved to another attempt
         if (!res?.ok) { setBusy(false); setMessage(res?.error || 'Could not sign in. Try again.', true); }
         // ok: stay busy until the engine asks for the code or reports FairPlay ready
         else startPoll();
     }
 
     function showCode() {
+        revision++;
         view = 'code';
         busy = false;
         const fields = el(doc, 'div', { class: 'digits' });
@@ -321,6 +325,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
     const isWrongPasswordDialog = (labels) => labels.length === 2 && labels.some(l => /^retry$/i.test(l)) && labels.some(l => /^cancel$/i.test(l));
 
     function showChoice(buttonsStr, title = 'Recovery Options') {
+        revision++;
         view = 'choice';
         busy = false;
         inputs = [];
@@ -331,6 +336,9 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
             const b = button(label, {
                 onClick: async () => {
                     if (busy) return;
+                    const myRevision = revision;
+                    const answeredId = challengeId;
+                    trace(`choice ${wrongPassword ? (/^retry$/i.test(label) ? 'retry' : 'cancel') : idx}`);
                     setBusy(true, 'Sending…');
                     submittedId = challengeId;
                     const retry = wrongPassword && /^retry$/i.test(label);
@@ -338,13 +346,13 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
                     const reply = retry ? btnLabels.findIndex(l => /^cancel$/i.test(l)) : idx;
                     let ok = false;
                     try { ok = await submitCode(String(reply)); } catch { ok = false; }
-                    if (view !== 'choice') return; // the engine already moved the sheet on
+                    if (revision !== myRevision) return; // closed or a newer challenge took over
                     if (!ok) { submittedId = null; setBusy(false); setMessage('Could not send. Try again.', true); return; }
                     if (retry) {
-                        dismissedId = challengeId;
+                        dismissedId = answeredId;
                         let email = '';
                         try { email = (await savedEmail()) || ''; } catch { /* the form simply starts empty */ }
-                        if (view === 'choice') showSignIn('Check your Apple Account and password, then try again.', { email });
+                        if (revision === myRevision) showSignIn('Check your Apple Account and password, then try again.', { email });
                     } else if (wrongPassword) {
                         cancel();
                     }
@@ -384,6 +392,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
 
     function close() {
         trace(`close from ${view} ${(new Error().stack ?? '').split('\n')[2]?.trim() ?? ''}`);
+        revision++;
         stopPoll();
         hidePassword();
         if (dlg?.open) dlg.close();
@@ -398,6 +407,8 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
     }
 
     function onSnapshot(snap) {
+        // The outcome of an answered choice can arrive before its POST response.
+        if (view === 'choice' && busy && submittedId != null && snap?.state?.authentication === 'failed') return;
         const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
         if (action !== 'none') trace(`snapshot auth=${snap?.state?.authentication} challenge=${snap?.challenge?.type ?? '-'} → ${action}`);
         if (snap?.challenge?.type === 'two_factor' || snap?.challenge?.type === 'dialog_choice') {
