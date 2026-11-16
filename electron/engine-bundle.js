@@ -124,7 +124,10 @@
   }
 
   // src/engine/catalog.js
-  var extractItemId = (item) => item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
+  var extractItemId = (item) => {
+    const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.relationships?.catalog?.data?.[0]?.id ?? item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
+    return typeof id === "string" ? id.replace(/^a\.(?=\d+$)/, "") : id;
+  };
   var isVideoType = (t) => t === "music-videos" || t === "musicVideo" || t === "library-music-videos";
   var extractItemType = (item) => item?.type ?? item?.attributes?.playParams?.kind ?? item?.playParams?.kind ?? null;
 
@@ -214,6 +217,21 @@
       accentActive: hsla(accent.h, accentS, accentL, 0.26),
       onAccent
     };
+  }
+
+  // src/engine/album-queue.js
+  async function resolveAlbumQueue(mk, albumId, startId, fetchAll) {
+    const res = await mk.api.music(`/v1/me/library/albums/${encodeURIComponent(albumId)}`, { include: "catalog" });
+    const album = res?.data?.data?.[0];
+    const catalogId = album?.relationships?.catalog?.data?.[0]?.id;
+    const path = catalogId ? `/v1/catalog/${mk.storefrontId || "us"}/albums/${encodeURIComponent(catalogId)}/tracks` : `/v1/me/library/albums/${encodeURIComponent(albumId)}/tracks`;
+    const items = await fetchAll(path);
+    const ids = items.map(extractItemId).filter((id) => /^\d+$/.test(id));
+    const libraryItem = album?.relationships?.tracks?.data?.find((i) => i.id === startId);
+    const target = extractItemId(libraryItem ?? { id: startId });
+    if (!ids.length) throw new Error("Album has no playable catalog tracks");
+    if (startId && !ids.includes(target)) throw new Error("Album start track could not be resolved");
+    return { ids, startId: target };
   }
 
   // src/engine/auth.js
@@ -340,7 +358,7 @@
       timer = setTimeout(() => res(false), timeoutMs);
     });
     try {
-      const ok = await Promise.race([Promise.resolve().then(stop).then(() => true), timeout]);
+      const ok = await Promise.race([Promise.resolve().then(stop).then((r) => r?.ok !== false), timeout]);
       return { stopped: true, ok };
     } catch (_) {
       return { stopped: true, ok: false };
@@ -4436,7 +4454,8 @@
         fetch(`${ENGINE}/api/v1/vlc/load`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: reloadMs })
+          body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: reloadMs }),
+          signal: _abortCtrl.signal
         }).then(() => {
           if (seekRevision !== _vlcSeekRevision) return;
           _vlcSeekFrozen = false;
@@ -4493,7 +4512,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId, assetId, startMs: posMs }),
-          signal: AbortSignal.timeout(15e3)
+          signal: AbortSignal.any([AbortSignal.timeout(15e3), _abortCtrl.signal])
         });
         if (response.status === 404) {
           _reopenCurrentTrack(posMs / 1e3);
@@ -4708,7 +4727,7 @@
     const pos = mk.queue?.position ?? -1;
     if (!items || pos < 0 || pos + 1 >= items.length) return;
     const nextItem = items[pos + 1];
-    const nextAdamId = nextItem?.playParams?.catalogId ?? nextItem?.attributes?.playParams?.catalogId ?? nextItem?.id ?? nextItem?.playParams?.id ?? nextItem?.attributes?.playParams?.id;
+    const nextAdamId = extractItemId(nextItem);
     if (!nextAdamId) return;
     if (nextItem?.type === "music-videos" || nextItem?.type === "musicVideo" || nextItem?.type === "library-music-videos") return;
     if (!_engineCaps.lossless || _streamingQuality === "high-quality") return;
@@ -4771,7 +4790,7 @@
     const pos = mk.queue?.position ?? -1;
     if (!items || pos < 0 || pos + 1 >= items.length) return;
     const nextItem = items[pos + 1];
-    const nextAdamId = nextItem?.playParams?.catalogId ?? nextItem?.attributes?.playParams?.catalogId ?? nextItem?.id ?? nextItem?.playParams?.id ?? nextItem?.attributes?.playParams?.id;
+    const nextAdamId = extractItemId(nextItem);
     if (!nextAdamId) return;
     if (nextItem?.type === "music-videos" || nextItem?.type === "musicVideo" || nextItem?.type === "library-music-videos") return;
     if (_engineCaps.lossless && _streamingQuality !== "high-quality") return;
@@ -4808,7 +4827,7 @@
     if (!items || pos < 0 || pos + 1 >= items.length) return;
     const nextItem = items[pos + 1];
     if (!isVideoType(nextItem?.type)) return;
-    const nextAdamId = nextItem?.playParams?.catalogId ?? nextItem?.attributes?.playParams?.catalogId ?? nextItem?.id ?? nextItem?.playParams?.id ?? nextItem?.attributes?.playParams?.id;
+    const nextAdamId = extractItemId(nextItem);
     if (!nextAdamId) return;
     const nextName = nextItem?.attributes?.name ?? nextAdamId;
     console.log(`[Adam Gapless MV] opening session for "${nextName}" (${nextAdamId})`);
@@ -5072,11 +5091,15 @@
     HTMLMediaElement.prototype.load.call(mkAudio);
     mkAudio.load = () => {
     };
-    await new Promise((resolve, reject) => {
-      ctrl.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-      ms.addEventListener("sourceopen", resolve, { once: true });
-    });
-    URL.revokeObjectURL(blobUrl);
+    try {
+      await new Promise((resolve, reject) => {
+        ctrl.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        ms.addEventListener("sourceopen", resolve, { once: true });
+      });
+    } finally {
+      URL.revokeObjectURL(blobUrl);
+    }
+    if (ctrl.signal.aborted) return;
     if (_durationSec > 0) {
       try {
         ms.duration = _durationSec;
@@ -5315,6 +5338,19 @@
       mkAudio.dispatchEvent(new Event("pause"));
       _startLyricsFreeze(mkAudio);
     };
+    ctrl.signal.addEventListener("abort", () => {
+      unbridgeDuration();
+      stopVLCPoll();
+      _stopLyricsFreeze();
+      _vlcLoading = false;
+      URL.revokeObjectURL(_silentUrl);
+      delete mkAudio.paused;
+      delete mkAudio.currentTime;
+      delete mkAudio.volume;
+      delete mkAudio.muted;
+      delete mkAudio.pause;
+      _vlcPaused = false;
+    }, { once: true });
     _vlcLoading = true;
     const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
       method: "POST",
@@ -5323,6 +5359,7 @@
       signal: ctrl.signal
     });
     if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
+    if (ctrl.signal.aborted) return;
     _postVlcVol(_vlcVolume);
     if (ctrl.signal.aborted) return;
     mkAudio.addEventListener("canplay", () => {
@@ -5337,23 +5374,24 @@
       const paused = _pendingVLCIntent;
       _pendingVLCIntent = null;
       await _requestVLCTransport(paused);
+      if (ctrl.signal.aborted) return;
       if (paused) mkAudio.dispatchEvent(new Event("pause"));
     }
+    const playerReady = new Promise((resolve) => {
+      const done = () => {
+        if (!ctrl.signal.aborted && _vlcLoading && !_vlcPaused) return;
+        mkAudio.removeEventListener("playing", done);
+        ctrl.signal.removeEventListener("abort", done);
+        resolve();
+      };
+      mkAudio.addEventListener("playing", done);
+      ctrl.signal.addEventListener("abort", done, { once: true });
+      if (_vlcPaused) done();
+    });
     startVLCPoll(mkAudio);
+    await playerReady;
+    if (ctrl.signal.aborted) return;
     console.log(`[Adam Engine] VLC playing +${((performance.now() - t0) / 1e3).toFixed(2)}s`);
-    ctrl.signal.addEventListener("abort", () => {
-      unbridgeDuration();
-      stopVLCPoll();
-      _stopLyricsFreeze();
-      _vlcLoading = false;
-      URL.revokeObjectURL(_silentUrl);
-      delete mkAudio.paused;
-      delete mkAudio.currentTime;
-      delete mkAudio.volume;
-      delete mkAudio.muted;
-      delete mkAudio.pause;
-      _vlcPaused = false;
-    }, { once: true });
   }
   async function _triggerDirectPlay(adamId, mk) {
     if (!adamId) return;
@@ -5406,11 +5444,19 @@
         if (_htcSkippedItem) {
           const pendingItem = _htcSkippedItem;
           _htcSkippedItem = null;
-          const pendingId = pendingItem?.playParams?.catalogId ?? pendingItem?.attributes?.playParams?.catalogId ?? pendingItem?.id;
-          if (pendingId === adamId) handleTrackChange(pendingItem);
+          const pendingId = extractItemId(pendingItem);
+          if (pendingId === adamId) handleTrackChange(mk);
         }
         return;
       }
+      const left = await leaveLossless({
+        live: _vlcLive,
+        nextMode: "aac",
+        stop: () => fetch(`${ENGINE}/api/v1/vlc/stop`, { method: "POST" })
+      });
+      if (genStale(myGen)) return;
+      if (!left.ok) throw new Error("Could not stop the previous lossless track");
+      if (left.stopped) _vlcLive = false;
       _sessionId = sess.sessionId;
       _directPlayAdamId = null;
       _durationSec = (sess.durationMs ?? 0) / 1e3;
@@ -5492,7 +5538,7 @@
       if (!item) return;
     }
     _closeCDNGate(mk);
-    const _htcAdamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
+    const _htcAdamId = extractItemId(item);
     if (_htcConfirmDirectPlay(_htcAdamId)) {
       _htcSkippedItem = item;
       return;
@@ -5503,7 +5549,7 @@
     const myGen = ++_generation;
     _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `htc:${_htcAdamId ?? "?"}`);
-    const adamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
+    const adamId = extractItemId(item);
     const sf = mk.storefrontId ?? "us";
     if (!adamId) {
       console.warn("[Adam Engine] No Adam ID");
@@ -5552,7 +5598,7 @@
         });
         if (left.stopped) {
           if (left.ok) _vlcLive = false;
-          else console.warn("[Adam Handoff] libvlc stop did not complete; continuing");
+          else throw new Error("Could not stop the previous lossless track");
           if (genStale(myGen)) return;
         }
       }
@@ -5589,6 +5635,7 @@
         await _setupVLCPath(mkAudio, sess, adamId, ctrl, t0);
       }
     } catch (err) {
+      if (genStale(myGen)) return;
       if (!_abortCtrl?.signal.aborted) {
         const mk2 = window.MusicKit?.getInstance?.();
         console.error(
@@ -5606,6 +5653,7 @@
           mk2?.nowPlayingItem?.id ?? "null"
         );
       }
+      _abortCtrl?.abort();
       if (mkAudio) delete mkAudio.load;
       setPlayState(PLAY_STATE.IDLE, "htc:error");
     }
@@ -5658,7 +5706,7 @@
       artworkUrl: _histArtUrl(item.attributes?.artwork),
       duration: _histFmtDur(item.attributes?.durationInMillis),
       id: item.id,
-      catalogId: item.playParams?.catalogId || item.attributes?.playParams?.catalogId || item.id,
+      catalogId: extractItemId(item),
       ts: Date.now()
     };
     if (!entry.name || _queueHistory[0]?.id === entry.id) return;
@@ -7004,6 +7052,10 @@
     });
     _syncVLCControls = transportControls.sync;
     let _adamAdvancing = false;
+    let _adamQueuedGoto = null;
+    let _adamNavRevision = 0;
+    let _adamCommandRevision = 0;
+    let _adamReadyRevision = 0;
     let _adamAdvancingTimer = null;
     let _adamGotoTarget = null;
     let _adamGotoTargetId = null;
@@ -7011,12 +7063,19 @@
       _adamAdvancing = false;
       clearTimeout(_adamAdvancingTimer);
       _adamAdvancingTimer = null;
+      queueMicrotask(() => {
+        if (_adamAdvancing || !_adamQueuedGoto) return;
+        const [ci, ii] = _adamQueuedGoto;
+        _adamQueuedGoto = null;
+        _adamGoto(ci, ii).catch((err) => console.warn("[Adam] queued navigation:", err.message));
+      });
     }
     async function _adamGoto(ci, ii) {
       if (_adamAdvancing) {
-        console.log("[Adam] _adamGoto busy, ignoring ci=", ci, "ii=", ii);
+        _adamQueuedGoto = [ci, ii];
         return;
       }
+      const navigationRevision = ++_adamNavRevision;
       _adamAdvancing = true;
       _adamTransitioning = true;
       _adamLastGotoMs = performance.now();
@@ -7132,14 +7191,17 @@
           });
         }
       }
-      _clearAdvancing();
+      if (navigationRevision !== _adamNavRevision) return;
+      _adamCommandRevision = navigationRevision;
+      if (_adamReadyRevision === navigationRevision) _clearAdvancing();
       _updateTransportButtons();
       const mkAudio = document.querySelector("audio");
       if (mkAudio && !_vlcMode) mkAudio.dispatchEvent(new Event("waiting"));
     }
     async function _adamNext(manual = false) {
+      if (!manual && _adamInGotoTransition) return;
       const repeat = mk.repeatMode ?? 0;
-      const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+      const [ci, ii] = _adamQueuedGoto ?? (_adamPendingCI >= 0 ? [_adamPendingCI, _adamPendingII] : [_sessionContainerIdx, _sessionItemIdx]);
       const cur = _sessionContainers[ci];
       if (repeat === 1 && !manual) {
         if (ci >= 0) await _adamGoto(ci, ii);
@@ -7165,7 +7227,7 @@
       }
     }
     async function _adamPrev() {
-      const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+      const [ci, ii] = _adamQueuedGoto ?? (_adamPendingCI >= 0 ? [_adamPendingCI, _adamPendingII] : [_sessionContainerIdx, _sessionItemIdx]);
       if (ci < 0) return;
       if (ii > 0) {
         await _adamGoto(ci, ii - 1);
@@ -7192,6 +7254,16 @@
       _allowCDNTransition = true;
       return _adamGoto(ci, ii).then(() => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} \u2192 owned change dispatched`)).catch((err) => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} \u2192 owned change failed:`, err?.message || err));
     }
+    async function _libraryAlbumGoto(desc, closeGate) {
+      const queue = await resolveAlbumQueue(
+        mk,
+        desc.albums[0],
+        desc.startWith?.id,
+        (path) => _mkFetchAll(mk, path, {}, () => {
+        })
+      );
+      return _ownedGoto(queue.ids, queue.startId, "album/catalog", closeGate);
+    }
     function _normalizeStartId(desc) {
       const raw = desc?.startWith?.id;
       if (!raw) return null;
@@ -7202,7 +7274,7 @@
         for (const it of qItems) {
           const lid = it?.id ?? it?.playParams?.id ?? it?.attributes?.playParams?.id;
           if (lid === raw || lid === stripped) {
-            const cid = it?.playParams?.catalogId ?? it?.attributes?.playParams?.catalogId;
+            const cid = extractItemId(it);
             if (cid && /^\d{6,}$/.test(String(cid))) return String(cid);
           }
         }
@@ -7398,7 +7470,7 @@
     mk.addEventListener("repeatModeDidChange", () => {
       window.adamBridge?.mprisUpdate?.({ repeat: mk.repeatMode ?? 0 });
     });
-    const _qId = (item) => item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
+    const _qId = extractItemId;
     function _prewarmLibraryPlaylist(playlistId) {
       return fetch(ENGINE + "/api/v1/library/playlists/" + encodeURIComponent(playlistId) + "/tracks").then((r) => r.ok ? r.json() : null).catch(() => null);
     }
@@ -7582,69 +7654,11 @@
               return p2;
             });
           }
-          if (desc?.albums?.length === 1 && typeof desc.albums[0] === "string" && desc.albums[0].startsWith("l.")) {
-            const albumId = desc.albums[0];
-            const startWithLid = desc.startWith?.id ?? null;
-            if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 querying local cache for " + albumId);
-            const fetchPromise = fetch(`${ENGINE}/api/v1/library/albums/${encodeURIComponent(albumId)}/tracks`).then((r) => r.ok ? r.json() : null).catch(() => null);
-            return Promise.race([fetchPromise, new Promise((res) => setTimeout(() => res(null), 3e3))]).then((result) => {
-              const tracks = result?.tracks || [];
-              const catalogIds = tracks.map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id));
-              if (catalogIds.length > 0) {
-                if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 local cache: " + catalogIds.length + " tracks");
-                const startCid = startWithLid ? (tracks.find((t) => t.lid === startWithLid) || {}).cid : _pendingExternalClickCatalogId || null;
-                return _aacOwnedGoto(catalogIds, startCid, "albums/local");
-              }
-              if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 cache cold, fetching tracks via MK REST");
-              if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
-              _externalPlayGateTimer = setTimeout(() => {
-                if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout)");
-                _aacCloseGate();
-              }, 2e4);
-              const mkInst = window.MusicKit?.getInstance?.();
-              const directFetch = mkInst ? mkInst.api.music(`/v1/me/library/albums/${encodeURIComponent(albumId)}/tracks`, { limit: 100 }).then((res) => res?.data?.data || []).catch(() => []) : Promise.resolve([]);
-              return directFetch.then((items) => {
-                const directIds = items.map((item) => {
-                  const pp = item?.attributes?.playParams;
-                  return pp?.catalogId || (pp?.isLibrary ? null : pp?.id) || null;
-                }).filter((id) => id && /^\d{6,}$/.test(id));
-                if (directIds.length > 0) {
-                  if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 REST fetch: " + directIds.length + " tracks (store for next time)");
-                  const cacheTracks = items.map((item) => ({
-                    id: item.id,
-                    attributes: item.attributes,
-                    relationships: item.relationships || {}
-                  }));
-                  fetch(`${ENGINE}/api/v1/library/ingest`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ songs: cacheTracks, albums: [], playlists: {}, playlistTracks: {} })
-                  }).catch(() => {
-                  });
-                  const startCid = startWithLid ? (() => {
-                    const match = items.find((item) => item.id === startWithLid);
-                    const pp = match?.attributes?.playParams;
-                    return pp?.catalogId || (pp?.isLibrary ? null : pp?.id) || null;
-                  })() : _pendingExternalClickCatalogId || null;
-                  return _aacOwnedGoto(directIds, startCid, "albums/REST");
-                }
-                const _coldTimeout = mk.playbackState === 2 ? 65e3 : 45e3;
-                if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 REST empty, last-resort Apple setQueue (timeout=" + _coldTimeout / 1e3 + "s)");
-                if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
-                _externalPlayGateTimer = setTimeout(() => {
-                  if (_ADAM_DEBUG) console.log("[Adam click] AAC CDN gate reset (safety timeout after setQueue)");
-                  _aacCloseGate();
-                }, _coldTimeout);
-                const p2 = _aacMkApiSaved.setQueue.apply(mk, a);
-                if (p2?.then) p2.then(
-                  () => _ADAM_DEBUG && console.log("[MK-DBG AAC] setQueue resolved"),
-                  (err) => {
-                    if (_ADAM_DEBUG) console.log("[MK-DBG AAC] setQueue rejected:", err?.message || err);
-                    _aacCloseGate();
-                  }
-                );
-                return p2;
-              });
+          if (desc?.albums?.length === 1 && desc.albums[0]?.startsWith("l.")) {
+            const original = _aacMkApiSaved.setQueue;
+            return _libraryAlbumGoto(desc, _aacCloseGate).catch((err) => {
+              console.warn("[Adam Album] queue resolution failed:", err.message);
+              return original.apply(mk, a);
             });
           }
           const startWithId = _normalizeStartId(desc);
@@ -7872,6 +7886,13 @@
         mk.setQueue = (...a) => {
           console.log("[VLC-MK] mk.setQueue() args=" + JSON.stringify(a).slice(0, 200));
           const desc = a[0];
+          if (desc?.albums?.length === 1 && desc.albums[0]?.startsWith("l.")) {
+            const original = _mkApiSaved.setQueue;
+            return _libraryAlbumGoto(desc, () => _closeCDNGate(mk)).catch((err) => {
+              console.warn("[Adam Album] queue resolution failed:", err.message);
+              return original.apply(mk, a);
+            });
+          }
           if (desc?.playlists && desc?.startWith?.id) {
             const targetId = desc.startWith.id;
             const isLibraryTrack = targetId.startsWith("a.") || targetId.startsWith("i.");
@@ -8118,7 +8139,12 @@
         _updateTransportButtons();
       }
     });
+    let trackEventRevision = 0;
+    let trackChangePending = Promise.resolve();
     mk.addEventListener("nowPlayingItemDidChange", async () => {
+      const eventRevision = ++trackEventRevision;
+      const navigationRevision = _adamNavRevision;
+      const externalPlay = _allowCDNTransition;
       console.log("[NPIDF] fired item=" + (mk.nowPlayingItem?.attributes?.name || "null") + " allowCDN=" + _allowCDNTransition + " adamGotoTarget=" + _adamGotoTarget);
       if (_adamGotoTarget !== null) {
         const item2 = mk.nowPlayingItem;
@@ -8154,14 +8180,12 @@
         _adamGotoTargetId = null;
         _adamInGotoTransition = false;
         _adamTransitioning = false;
-        clearTimeout(_adamAdvancingTimer);
-        _adamAdvancingTimer = null;
       }
-      _clearAdvancing();
       let item = mk.nowPlayingItem;
       if (!item) {
         for (let i = 0; i < 5; i++) {
           await new Promise((r) => setTimeout(r, 50));
+          if (eventRevision !== trackEventRevision) return;
           item = mk.nowPlayingItem;
           if (item) break;
         }
@@ -8256,7 +8280,11 @@
           }
         }
       }
-      handleTrackChange(mk);
+      if (wasInternal || externalPlay || extractItemId(item) !== _currentAssetId) trackChangePending = handleTrackChange(mk);
+      await trackChangePending;
+      if (eventRevision !== trackEventRevision) return;
+      _adamReadyRevision = navigationRevision;
+      if (_adamCommandRevision === navigationRevision) _clearAdvancing();
       _updateTransportButtons();
       window._adamSmartCache?.onTrackChange(mk);
       if (item) {
@@ -8275,7 +8303,7 @@
       if (mk.playbackState === PS?.loading || mk.playbackState === PS?.playing) {
         trackFallbackTimer = setTimeout(() => {
           const item = mk.nowPlayingItem;
-          const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id;
+          const id = extractItemId(item);
           if (!id || String(id) === String(_currentAssetId) || String(id) === String(_directPlayAdamId)) return;
           if (item === _htcSkippedItem) return;
           if (mk.playbackState !== PS?.loading && mk.playbackState !== PS?.playing) return;

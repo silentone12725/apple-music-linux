@@ -98,13 +98,22 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Err() != nil {
 			return errLoadAbandoned
 		}
+		var loadErr error
 		if src != nil {
 			vlog.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
-			return s.vlcPlayer.LoadSource(src)
+			loadErr = s.vlcPlayer.LoadSource(src)
+		} else {
+			url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
+			log.Printf("[vlc] load session=%s startMs=%d (no disk cache)", req.SessionID, req.StartMs)
+			loadErr = s.vlcPlayer.Load(url)
 		}
-		url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
-		log.Printf("[vlc] load url=%s startMs=%d (no disk cache)", url, req.StartMs)
-		return s.vlcPlayer.Load(url)
+		if loadErr == nil {
+			s.vlcGate.set(req.SessionID)
+			if req.StartMs > 0 {
+				s.vlcPlayer.SetTime(req.StartMs)
+			}
+		}
+		return loadErr
 	})
 	if !loaded || err == errLoadAbandoned {
 		if src != nil {
@@ -122,14 +131,6 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.vlcGate.set(req.SessionID)
-	// If a specific start position was requested, seek there after VLC reaches
-	// playing state. SetTime is async and polls until VLC is ready.
-	if req.StartMs > 0 {
-		s.vlcPlayer.SetTime(req.StartMs)
-		log.Printf("[vlc] SetTime startMs=%d queued after load", req.StartMs)
-	}
-
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -183,6 +184,8 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[vlc seek] API recv posMs=%d sessionId=%s", req.PosMs, req.SessionID)
+	s.vlcLoads.mu.Lock()
+	defer s.vlcLoads.mu.Unlock()
 	if !s.vlcGate.owns(req.SessionID) {
 		http.Error(w, "session does not own the player", http.StatusConflict)
 		return
@@ -203,8 +206,17 @@ func (s *APIServer) handleVLCStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
 		return
 	}
-	s.vlcGate.clear()
-	s.vlcPlayer.Stop()
+	// A stop supersedes sources still opening, and waits for an active load.
+	seq := s.vlcLoads.begin()
+	ran, _ := s.vlcLoads.runIfCurrent(seq, func() error {
+		s.vlcGate.clear()
+		s.vlcPlayer.Stop()
+		return nil
+	})
+	if !ran {
+		http.Error(w, "superseded by a newer load", http.StatusConflict)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 

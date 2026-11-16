@@ -31,7 +31,7 @@ export async function leaveLossless({ live, nextMode, stop, timeoutMs = 2000 }) 
     let timer;
     const timeout = new Promise(res => { timer = setTimeout(() => res(false), timeoutMs); });
     try {
-        const ok = await Promise.race([Promise.resolve().then(stop).then(() => true), timeout]);
+        const ok = await Promise.race([Promise.resolve().then(stop).then(r => r?.ok !== false), timeout]);
         return { stopped: true, ok };
     } catch (_) {
         return { stopped: true, ok: false };

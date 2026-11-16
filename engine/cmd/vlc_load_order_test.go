@@ -65,3 +65,20 @@ func TestLoadOrderNewestLoadsLast(t *testing.T) {
 		}
 	}
 }
+
+func TestStopSupersedesAnOpeningLoad(t *testing.T) {
+	var o loadOrder
+	load := o.begin()
+	stop := o.begin()
+	stopped, err := o.runIfCurrent(stop, func() error { return nil })
+	if !stopped || err != nil {
+		t.Fatal("stop did not run")
+	}
+	loaded, err := o.runIfCurrent(load, func() error {
+		t.Error("a source opened before stop restarted playback")
+		return nil
+	})
+	if loaded || err != nil {
+		t.Fatal("old load was not abandoned")
+	}
+}
