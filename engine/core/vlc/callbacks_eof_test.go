@@ -28,6 +28,9 @@ func TestCallbackMediaTellsDataEndFromReadFailure(t *testing.T) {
 	if n := cm.read(buf); n != 0 || !cm.eof.Load() {
 		t.Fatalf("read at the end = %d, eof=%v; want 0, true", n, cm.eof.Load())
 	}
+	if cm.failed.Load() {
+		t.Fatal("clean EOF marked as a source failure")
+	}
 	if cm.seekTo(0) != 0 || cm.eof.Load() {
 		t.Fatalf("a seek must clear eof (eof=%v)", cm.eof.Load())
 	}
@@ -37,7 +40,7 @@ func TestCallbackMediaTellsDataEndFromReadFailure(t *testing.T) {
 
 	bad := newCallbackMedia(errSource{memSource{bytes.NewReader(nil)}})
 	defer bad.release()
-	if n := bad.read(buf); n != -1 || bad.eof.Load() {
+	if n := bad.read(buf); n != -1 || bad.eof.Load() || !bad.failed.Load() {
 		t.Fatalf("failed read = %d, eof=%v; want -1, false", n, bad.eof.Load())
 	}
 }

@@ -65,3 +65,51 @@ func TestLoadOrderNewestLoadsLast(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadOrderHandoffSerializesState(t *testing.T) {
+	var o loadOrder
+	seq := o.begin()
+	entered, resume := make(chan struct{}), make(chan struct{})
+	done := make(chan struct{})
+	state := uint64(0)
+	go func() {
+		defer close(done)
+		o.runIfCurrent(seq, func() error {
+			if o.mu.TryLock() {
+				o.mu.Unlock()
+				t.Error("handoff is not protected")
+			}
+			close(entered)
+			<-resume
+			state = seq
+			return nil
+		})
+	}()
+	<-entered
+	newer := make(chan uint64, 1)
+	go func() {
+		next := o.begin()
+		o.runIfCurrent(next, func() error { state = next; return nil })
+		newer <- next
+	}()
+	close(resume)
+	<-done
+	if next := <-newer; state != next {
+		t.Fatal("older state replaced newer handoff")
+	}
+}
+
+func TestLoadOrderRejectsAllStaleSideEffects(t *testing.T) {
+	var o loadOrder
+	a, b := o.begin(), o.begin()
+	session, seek, foreground := uint64(0), uint64(0), uint64(0)
+	if ran, err := o.runIfCurrent(b, func() error { session, seek, foreground = b, 123, b; return nil }); !ran || err != nil {
+		t.Fatal("new handoff failed")
+	}
+	if ran, _ := o.runIfCurrent(a, func() error { session, seek, foreground = a, 999, a; return nil }); ran {
+		t.Fatal("old handoff accepted")
+	}
+	if session != b || seek != 123 || foreground != b {
+		t.Fatal("stale side effects replaced new state")
+	}
+}

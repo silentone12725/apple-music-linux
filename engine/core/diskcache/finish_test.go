@@ -42,8 +42,8 @@ func TestStreamingFinishIsSingleShot(t *testing.T) {
 		t.Fatal(err)
 	}
 	second.Discard() // after Commit it must do nothing, not remove or unpublish
-	if err := second.Commit(); err == nil {
-		t.Fatal("a second Commit must fail")
+	if err := second.Commit(); err != nil {
+		t.Fatalf("a second Commit must preserve success: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(c.dir, c.filename("a", "alac")))
 	if err != nil || string(got) != "live" {

@@ -18,12 +18,15 @@ func (memSource) Close()        {}
 // blockingSource never yields data until aborted — models VLC reading ahead
 // of an in-progress download.
 type blockingSource struct {
-	once   sync.Once
-	abort  chan struct{}
-	closed bool
+	once     sync.Once
+	readOnce sync.Once
+	abort    chan struct{}
+	entered  chan struct{}
+	closed   bool
 }
 
 func (b *blockingSource) Read([]byte) (int, error) {
+	b.readOnce.Do(func() { close(b.entered) })
 	<-b.abort
 	return 0, io.ErrUnexpectedEOF
 }
@@ -82,11 +85,15 @@ func TestLoadSourcePlaysFromCallbacks(t *testing.T) {
 func TestStopUnblocksPendingRead(t *testing.T) {
 	p := newTestPlayer(t)
 	defer p.Close()
-	src := &blockingSource{abort: make(chan struct{})}
+	src := &blockingSource{abort: make(chan struct{}), entered: make(chan struct{})}
 	if err := p.LoadSource(src); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond) // let the input thread block in Read
+	select {
+	case <-src.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("VLC never entered the source Read callback")
+	}
 	stopped := make(chan struct{})
 	go func() { p.Stop(); close(stopped) }()
 	select {
@@ -102,11 +109,15 @@ func TestStopUnblocksPendingRead(t *testing.T) {
 func TestLoadSourceReplacesPrevious(t *testing.T) {
 	p := newTestPlayer(t)
 	defer p.Close()
-	first := &blockingSource{abort: make(chan struct{})}
+	first := &blockingSource{abort: make(chan struct{}), entered: make(chan struct{})}
 	if err := p.LoadSource(first); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-first.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("VLC never entered the source Read callback")
+	}
 	done := make(chan error, 1)
 	go func() { done <- p.LoadSource(memSource{bytes.NewReader(silentWAV(1))}) }()
 	select {

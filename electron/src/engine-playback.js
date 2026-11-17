@@ -683,6 +683,7 @@ let _vlcSeekFrozen    = false; // true during scrub → poll won't overwrite _vl
 let _vlcSeekOffsetMs  = 0;    // song-position base of current VLC HTTP stream (ms)
 let _vlcOverrunLogged = false; // the 'audio is longer than reported' line is logged once per track
 let _vlcSourceEof     = false; // engine: the source ended cleanly, so an 'ended' state is the real end of the data
+let _vlcSourceFailed  = false;
 let _vlcRetryCount    = 0;    // premature-end retries for current track (reset on track change)
 let _vlcPrevState     = null; // last VLC state seen by the poll (null forces re-emit after seek)
 let _vlcLoading       = false; // true from VLC.Load until VLC first enters 'playing' state
@@ -3983,12 +3984,21 @@ function _vlcHandleEnded(posMs, mkAudio, reason = 'ended') {
     // reached EOF. A failed read is retried a bounded number of times; the real end of the data is not (see vlc-end.js),
     // which is what made a track whose length MusicKit overstated replay its last seconds 2-3 times.
     const trackEndMs = Math.round(_durationSec * 1000);
-    const end = classifyVlcEnd({ posMs, trackEndMs, reason, retryCount: _vlcRetryCount, sourceEof: _vlcSourceEof });
+    const end = classifyVlcEnd({ posMs, trackEndMs, reason, retryCount: _vlcRetryCount, sourceEof: _vlcSourceEof, sourceFailed: _vlcSourceFailed });
     if (end.action === 'retry') {
         _vlcRetryCount++;
         if (end.fromMs === 0) _vlcSeekOffsetMs = 0;
         console.warn(`[Adam VLC] ${end.fromMs === 0 ? 'premature end' : 'false end'} at ${posMs}ms (track=${trackEndMs}ms) — reloading to resume at ${end.fromMs}ms attempt ${_vlcRetryCount}`);
         _vlcRetryFrom(end.fromMs, mkAudio, end.delayMs);
+        return;
+    }
+    if (end.action === 'stop') {
+        _vlcPaused = true;
+        _vlcLoading = false;
+        mkAudio.dispatchEvent(new Event('pause'));
+        // VLC is already terminal. Its source is closed by the existing
+        // stop/reload lifecycle; do not enqueue a stop against a later track.
+        _adamToast('Playback failed. Select this track again to retry.');
         return;
     }
     if (end.shortOfReported) {
@@ -4050,10 +4060,11 @@ async function _vlcPollTick(mkAudio, mySession, generation = _vlcPollGeneration)
         if (!r.ok) throw new Error(`VLC status: HTTP ${r.status}`);
         if (_sessionId !== mySession || generation !== _vlcPollGeneration) return;
         _vlcErrCount = 0;
-        const { posMs, lengthMs, state, volume, muted, eof } = await r.json();
+        const { posMs, lengthMs, state, volume, muted, eof, failed } = await r.json();
         if (_sessionId !== mySession || generation !== _vlcPollGeneration || transportRevision !== _vlcTransport.revision || _vlcTransport.pending) return; // stale after command/skip
         _vlcSyncVolume?.(volume, muted);
         _vlcSourceEof = eof === true;
+        _vlcSourceFailed = failed === true;
         _vlcHandleLength(lengthMs);
         _vlcUpdatePosition(posMs, state, mkAudio);
         if (state === _vlcPrevState) return;
@@ -4082,6 +4093,7 @@ function startVLCPoll(mkAudio) {
     _vlcTickCount = 0;
     _vlcLengthSet = false;
     _vlcSourceEof = false;
+    _vlcSourceFailed = false;
     _vlcOverrunLogged = false;
     _vlcFetching  = false;
     const mySession = _sessionId; // capture — discard responses that arrive after a track skip

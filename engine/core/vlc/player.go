@@ -104,7 +104,11 @@ func (p *Player) LoadSource(src Source) error {
 	C.libvlc_media_player_set_media(p.mp, media)
 	p.cur = cm
 	p.lastURL = ""
-	return p.playLocked()
+	if err := p.playLocked(); err != nil {
+		p.detachLocked()
+		return err
+	}
+	return nil
 }
 
 // detachLocked stops playback and frees the current callback source, if any.
@@ -219,6 +223,13 @@ func (p *Player) SourceEnded() bool {
 	cm := p.cur
 	p.mu.Unlock()
 	return cm != nil && cm.eof.Load()
+}
+
+func (p *Player) SourceFailed() bool {
+	p.mu.Lock()
+	cm := p.cur
+	p.mu.Unlock()
+	return cm != nil && cm.failed.Load()
 }
 
 // Pause pauses playback.

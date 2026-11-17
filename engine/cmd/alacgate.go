@@ -5,6 +5,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"engine/core/diskcache"
 )
 
 // Foreground-first scheduling for ALAC cache downloads.
@@ -22,12 +24,13 @@ const (
 )
 
 type alacGate struct {
-	mu   sync.Mutex
-	fg   string        // session whose download the player is waiting on
-	held bool          // background writers park while true
-	wake chan struct{} // closed when held goes false; non-nil while held
-	seen int64         // bytes the foreground session has written since Foreground
-	gen  uint64        // invalidates the cap timer of a superseded Foreground call
+	mu     sync.Mutex
+	fg     string                        // session whose download the player is waiting on
+	source *diskcache.StreamingPutWriter // actual shared producer, once selected
+	held   bool                          // background writers park while true
+	wake   chan struct{}                 // closed when held goes false; non-nil while held
+	seen   int64                         // bytes the foreground session has written since Foreground
+	gen    uint64                        // invalidates the cap timer of a superseded Foreground call
 }
 
 func newALACGate() *alacGate { return &alacGate{} }
@@ -35,13 +38,14 @@ func newALACGate() *alacGate { return &alacGate{} }
 // Foreground marks id as the download the player is waiting on. With hold set, every
 // other session's writer parks until id has written alacStartBytes, ends, or alacHoldMax
 // elapses. A nil gate does nothing.
-func (g *alacGate) Foreground(id string, hold bool) {
+func (g *alacGate) Foreground(id string, hold bool) uint64 {
 	if g == nil {
-		return
+		return 0
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.fg, g.seen = id, 0
+	g.setHeldLocked(false) // wake parked writers so they recheck the new owner
+	g.fg, g.seen, g.source = id, 0, nil
 	g.gen++
 	g.setHeldLocked(hold)
 	if hold {
@@ -54,6 +58,42 @@ func (g *alacGate) Foreground(id string, hold bool) {
 			g.mu.Unlock()
 		})
 	}
+	return g.gen
+}
+
+// bindWriter promotes the producer actually supplying the selected reader.
+// An older load must not change a newer foreground selection. No writer lock
+// is taken under the gate lock; the caller checks progress after publication.
+func (g *alacGate) bindWriter(gen uint64, source *diskcache.StreamingPutWriter, hold bool) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.gen != gen {
+		return
+	}
+	g.setHeldLocked(false)
+	g.source = source
+	g.setHeldLocked(hold)
+}
+
+func (g *alacGate) release(gen uint64) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	if g.gen == gen {
+		g.setHeldLocked(false)
+	}
+	g.mu.Unlock()
+}
+
+func (g *alacGate) matches(id string, source *diskcache.StreamingPutWriter) bool {
+	if g.source != nil {
+		return source == g.source
+	}
+	return id == g.fg
 }
 
 func (g *alacGate) setHeldLocked(h bool) {
@@ -70,22 +110,26 @@ func (g *alacGate) setHeldLocked(h bool) {
 
 // done is called when id's download ends, successfully or not: a foreground that
 // finished or failed must not keep the others parked.
-func (g *alacGate) done(id string) {
+func (g *alacGate) done(id string, source ...*diskcache.StreamingPutWriter) {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
-	if id == g.fg {
+	var sw *diskcache.StreamingPutWriter
+	if len(source) != 0 {
+		sw = source[0]
+	}
+	if g.matches(id, sw) {
 		g.setHeldLocked(false)
 	}
 	g.mu.Unlock()
 }
 
 // wait blocks a non-foreground writer while the gate is held.
-func (g *alacGate) wait(ctx context.Context, id string) error {
+func (g *alacGate) wait(ctx context.Context, id string, source *diskcache.StreamingPutWriter) error {
 	for {
 		g.mu.Lock()
-		if !g.held || id == g.fg {
+		if !g.held || g.matches(id, source) {
 			g.mu.Unlock()
 			return nil
 		}
@@ -99,9 +143,9 @@ func (g *alacGate) wait(ctx context.Context, id string) error {
 	}
 }
 
-func (g *alacGate) wrote(id string, n int) {
+func (g *alacGate) wrote(id string, source *diskcache.StreamingPutWriter, n int) {
 	g.mu.Lock()
-	if id == g.fg && g.held {
+	if g.matches(id, source) && g.held {
 		g.seen += int64(n)
 		if g.seen >= alacStartBytes {
 			g.setHeldLocked(false)
@@ -115,23 +159,25 @@ func (g *alacGate) writer(ctx context.Context, id string, w io.Writer) io.Writer
 	if g == nil {
 		return w
 	}
-	return &gatedWriter{g: g, ctx: ctx, id: id, w: w}
+	source, _ := w.(*diskcache.StreamingPutWriter)
+	return &gatedWriter{g: g, ctx: ctx, id: id, w: w, source: source}
 }
 
 type gatedWriter struct {
-	g   *alacGate
-	ctx context.Context
-	id  string
-	w   io.Writer
+	g      *alacGate
+	ctx    context.Context
+	id     string
+	w      io.Writer
+	source *diskcache.StreamingPutWriter
 }
 
 func (gw *gatedWriter) Write(p []byte) (int, error) {
-	if err := gw.g.wait(gw.ctx, gw.id); err != nil {
+	if err := gw.g.wait(gw.ctx, gw.id, gw.source); err != nil {
 		return 0, err
 	}
 	n, err := gw.w.Write(p)
 	if n > 0 {
-		gw.g.wrote(gw.id, n)
+		gw.g.wrote(gw.id, gw.source, n)
 	}
 	return n, err
 }

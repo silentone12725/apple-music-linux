@@ -32,6 +32,7 @@ func (p *Player) Volume() (int, bool)          { return 0, false }
 func (p *Player) SetTime(int64)                {}
 func (p *Player) Time() (int64, int64, string) { return 0, 0, "stopped" }
 func (p *Player) SourceEnded() bool            { return false }
+func (p *Player) SourceFailed() bool           { return false }
 func (p *Player) Pause()                       {}
 func (p *Player) Resume()                      {}
 func (p *Player) SetVolume(int)                {}
