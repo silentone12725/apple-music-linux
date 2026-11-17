@@ -52,6 +52,27 @@ sheet.replaceSync(`
 
   html, body { background: transparent !important; }
 
+  /* Skip offscreen shelves and their artwork; the browser remembers measured heights on return. */
+  .scrollable-page [data-testid="shelf-component"] {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto 320px;
+  }
+  /* Small controls move with every shelf: a translucent fill avoids repeated backdrop passes. */
+  .scrollable-page .more-button,
+  .scrollable-page .more-button *,
+  .scrollable-page .shelf-grid-nav__arrow,
+  .scrollable-page .shelf-grid-nav__arrow * {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  .scrollable-page .more-button--material,
+  .scrollable-page .shelf-grid-nav__arrow { background-color: rgba(38,38,40,.85) !important; }
+
+  [data-testid="logo"] a { display: flex; align-items: center; gap: 1px; }
+  [data-testid="logo"] .adam-wordmark-icon { width: 23px !important; height: 27px !important; overflow: hidden; }
+  .adam-wordmark-title { font: 700 28px/1 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; letter-spacing: -1px; }
+
+
   /* ── Sidebar glass ──
      Confirmed stable selector. Svelte hash classes change on every deploy;
      nav.navigation (tag + base class) is stable across versions. */
@@ -570,6 +591,19 @@ function _findInNavStack(stack, cursor, href) {
         const nav = document.querySelector('nav.navigation');
         const header = _findNavHeader();
         if (!nav || !header) return;
+
+        const logo = header.querySelector('[data-testid="logo"] a');
+        const icon = logo?.querySelector('svg');
+        if (icon && !logo.querySelector('.adam-wordmark-title')) {
+            // Keep Apple's icon from the wordmark, with the requested capitalized label beside it.
+            icon.setAttribute('viewBox', '0 0 24 27');
+            icon.classList.add('adam-wordmark-icon');
+            const title = document.createElement('span');
+            title.className = 'adam-wordmark-title';
+            title.textContent = 'Music';
+            title.setAttribute('aria-hidden', 'true');
+            logo.appendChild(title);
+        }
 
         // Append to nav (position:relative), then align to header row via JS measurement
         nav.appendChild(wrap);
