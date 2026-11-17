@@ -1504,7 +1504,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
 })();
 
 function deleteSession(id) {
-    if (id) fetch(`${ENGINE}/api/v1/playback/${id}`, { method: 'DELETE' }).catch(() => {});
+    if (id) return fetch(`${ENGINE}/api/v1/playback/${id}`, { method: 'DELETE', signal: AbortSignal.timeout(5000) }).catch(() => {});
 }
 
 // ── MSE pipe + seek (AAC path) ────────────────────────────────────────────────
@@ -4434,6 +4434,8 @@ function _closeCDNGate(mk) {
     _pendingPlaylistFetch = null;
 }
 
+let _sessionReleasePending = Promise.resolve();
+
 function _resetPlaybackState() {
     setPlayState(PLAY_STATE.IDLE, 'reset');
     if (_pipeCtrl)  { _pipeCtrl.abort();  _pipeCtrl  = null; }
@@ -4465,13 +4467,15 @@ function _resetPlaybackState() {
     if (_vlcSeekTimer) { clearTimeout(_vlcSeekTimer); _vlcSeekTimer = null; }
     stopVLCPoll();
     unbridgeDuration();
-    deleteSession(_sessionId);
+    // Wait across superseded resets too: reopening the same song must not reuse a session being deleted.
+    _sessionReleasePending = Promise.all([_sessionReleasePending, deleteSession(_sessionId)]).then(() => {});
     _sessionId      = null;
     _currentAssetId = null;
     _durationSec = 0;
     // Do NOT reset _losslessWaitDone here — it's a one-shot per DRM state change,
     // not per track. Resetting it would re-enable the 2.5 s wait on every skip.
     showQualityBadge(null);
+    return _sessionReleasePending;
 }
 
 async function _resolveSession(item, adamId, sf, mk) {
@@ -4935,7 +4939,7 @@ async function _triggerDirectPlay(adamId, mk) {
     const myGen = ++_generation;
     _directPlayGen    = myGen;
     _directPlayAdamId = adamId;
-    _resetPlaybackState();
+    const released = _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `direct:${adamId}`);
 
     if (!mkAudio.paused && !mkAudio.ended) mkAudio.pause();
@@ -4952,7 +4956,7 @@ async function _triggerDirectPlay(adamId, mk) {
     const t0 = performance.now();
     console.log(`[Adam DirectPlay] → ${adamId} (pre-NPIDF fast path)`);
 
-    await waitForLossless(T().losslessWait);
+    await Promise.all([released, waitForLossless(T().losslessWait)]);
     if (genStale(myGen)) return;
     // CDN gate stays open here so MK's concurrent setQueue can set audio.src=CDN and fire NPIDF.
     // We close it below, just before _setupMSEPath takes over the audio element.
@@ -5102,7 +5106,7 @@ async function handleTrackChange(mk) {
     _directPlayGen    = 0;
 
     const myGen = ++_generation;
-    _resetPlaybackState();
+    const released = _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `htc:${_htcAdamId ?? '?'}`);
 
     // Library tracks have an `i.` prefixed id; the engine needs the catalog id.
@@ -5135,7 +5139,7 @@ async function handleTrackChange(mk) {
 
     // Wait for DRM to report lossless capability before opening the session.
     // Timeout scales with power mode: throttled CPUs need more time for DRM to report in.
-    await waitForLossless(T().losslessWait);
+    await Promise.all([released, waitForLossless(T().losslessWait)]);
     if (genStale(myGen)) return;
 
     try {
@@ -5229,6 +5233,10 @@ async function handleTrackChange(mk) {
         _abortCtrl?.abort();
         if (mkAudio) delete mkAudio.load;
         setPlayState(PLAY_STATE.IDLE, 'htc:error');
+        _adamToast(document.documentElement.lang.startsWith('it')
+            ? 'Impossibile riprodurre questo brano. Prova il successivo.'
+            : 'Unable to play this song. Try the next track.');
+        return false;
     }
 }
 
@@ -8271,8 +8279,16 @@ async function setup() {
         }
         // Duplicate notifications (including library/favorite refreshes) must not restart the decoder.
         if (wasInternal || externalPlay || _extractItemId(item) !== _currentAssetId) trackChangePending = handleTrackChange(mk);
-        await trackChangePending;
+        const ready = await trackChangePending;
         if (eventRevision !== trackEventRevision) return;
+        if (ready === false) {
+            // A failed target cannot settle MusicKit's command; release queued user skips now.
+            if (navigationRevision === _adamNavRevision) ++_adamNavRevision;
+            _clearAdvancing();
+            _updateTransportButtons();
+            sendMprisStatus('Stopped');
+            return;
+        }
         _adamReadyRevision = navigationRevision;
         if (_adamCommandRevision === navigationRevision) _clearAdvancing();
         _updateTransportButtons();

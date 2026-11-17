@@ -2177,7 +2177,7 @@
     window._syncNpBadge = _syncBadge;
   })();
   function deleteSession(id) {
-    if (id) fetch(`${ENGINE}/api/v1/playback/${id}`, { method: "DELETE" }).catch(() => {
+    if (id) return fetch(`${ENGINE}/api/v1/playback/${id}`, { method: "DELETE", signal: AbortSignal.timeout(5e3) }).catch(() => {
     });
   }
   function _sbWaitUpdate(sb, chunks) {
@@ -4931,6 +4931,7 @@
     _pendingExternalClickQueueIdx = -1;
     _pendingPlaylistFetch = null;
   }
+  var _sessionReleasePending = Promise.resolve();
   function _resetPlaybackState() {
     setPlayState(PLAY_STATE.IDLE, "reset");
     if (_pipeCtrl) {
@@ -4991,11 +4992,13 @@
     }
     stopVLCPoll();
     unbridgeDuration();
-    deleteSession(_sessionId);
+    _sessionReleasePending = Promise.all([_sessionReleasePending, deleteSession(_sessionId)]).then(() => {
+    });
     _sessionId = null;
     _currentAssetId = null;
     _durationSec = 0;
     showQualityBadge(null);
+    return _sessionReleasePending;
   }
   async function _resolveSession(item, adamId, sf, mk) {
     const isVideo = isVideoType(item.type);
@@ -5404,7 +5407,7 @@
     const myGen = ++_generation;
     _directPlayGen = myGen;
     _directPlayAdamId = adamId;
-    _resetPlaybackState();
+    const released = _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `direct:${adamId}`);
     if (!mkAudio.paused && !mkAudio.ended) mkAudio.pause();
     _msePaused = false;
@@ -5412,7 +5415,7 @@
     const sf = mk.storefrontId ?? "us";
     const t0 = performance.now();
     console.log(`[Adam DirectPlay] \u2192 ${adamId} (pre-NPIDF fast path)`);
-    await waitForLossless(T().losslessWait);
+    await Promise.all([released, waitForLossless(T().losslessWait)]);
     if (genStale(myGen)) return;
     try {
       const losslessWanted = _engineCaps.lossless && _streamingQuality !== "high-quality";
@@ -5547,7 +5550,7 @@
     _directPlayAdamId = null;
     _directPlayGen = 0;
     const myGen = ++_generation;
-    _resetPlaybackState();
+    const released = _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `htc:${_htcAdamId ?? "?"}`);
     const adamId = extractItemId(item);
     const sf = mk.storefrontId ?? "us";
@@ -5567,7 +5570,7 @@
       };
       installPlayProxy(mkAudio);
     }
-    await waitForLossless(T().losslessWait);
+    await Promise.all([released, waitForLossless(T().losslessWait)]);
     if (genStale(myGen)) return;
     try {
       const sess = await _resolveSession(item, adamId, sf, mk);
@@ -5656,6 +5659,8 @@
       _abortCtrl?.abort();
       if (mkAudio) delete mkAudio.load;
       setPlayState(PLAY_STATE.IDLE, "htc:error");
+      _adamToast(document.documentElement.lang.startsWith("it") ? "Impossibile riprodurre questo brano. Prova il successivo." : "Unable to play this song. Try the next track.");
+      return false;
     }
   }
   var _HIST_KEY = "adam_play_history";
@@ -8297,8 +8302,15 @@
         }
       }
       if (wasInternal || externalPlay || extractItemId(item) !== _currentAssetId) trackChangePending = handleTrackChange(mk);
-      await trackChangePending;
+      const ready = await trackChangePending;
       if (eventRevision !== trackEventRevision) return;
+      if (ready === false) {
+        if (navigationRevision === _adamNavRevision) ++_adamNavRevision;
+        _clearAdvancing();
+        _updateTransportButtons();
+        sendMprisStatus("Stopped");
+        return;
+      }
       _adamReadyRevision = navigationRevision;
       if (_adamCommandRevision === navigationRevision) _clearAdvancing();
       _updateTransportButtons();

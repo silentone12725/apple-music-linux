@@ -14,6 +14,7 @@ import (
 	"engine/core/media"
 	"engine/core/pipeline"
 	"engine/core/playback"
+	"engine/core/vlc"
 )
 
 // The session-open circuit breaker fails EVERY subsequent open (songs included)
@@ -246,5 +247,33 @@ func TestPlaybackTouchKeepsSessionAlive(t *testing.T) {
 	}
 	if got := touch("no-such-session"); got != http.StatusNotFound {
 		t.Fatalf("touch of an unknown session = %d, want 404", got)
+	}
+}
+
+func TestDeletePlaybackOnlyStopsTheOwningVLCSession(t *testing.T) {
+	for _, owner := range []string{"released", "newer", ""} {
+		t.Run("owner="+owner, func(t *testing.T) {
+			// An unloaded player cannot produce audio; this exercises the real DELETE handler.
+			s := &APIServer{pm: playback.NewWithProvider(nil), vlcPlayer: &vlc.Player{}, events: newTestBus()}
+			s.vlcGate.set(owner)
+			pending := s.vlcLoads.begin()
+			r := httptest.NewRequest(http.MethodDelete, "/playback/released", nil)
+			r.SetPathValue("id", "released")
+			w := httptest.NewRecorder()
+			s.handleDeletePlayback(w, r)
+			if w.Code != http.StatusNoContent {
+				t.Fatalf("status=%d", w.Code)
+			}
+			if s.vlcGate.owns("released") {
+				t.Fatal("released session still owns native playback")
+			}
+			if owner == "newer" && !s.vlcGate.owns("newer") {
+				t.Fatal("late DELETE cleared the newer player")
+			}
+			ran, err := s.vlcLoads.runIfCurrent(pending, func() error { return nil })
+			if !ran || err != nil {
+				t.Fatal("DELETE cancelled an unrelated pending load")
+			}
+		})
 	}
 }
