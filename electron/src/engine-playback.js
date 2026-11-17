@@ -6763,6 +6763,21 @@ async function setup() {
         });
     }
 
+    function _cancelNavigation() {
+        // An external Play replaces the queue, so the old target must no longer filter its events.
+        ++_adamNavRevision;
+        ++trackEventRevision;
+        _adamQueuedGoto = null;
+        _adamGotoTarget = null;
+        _adamGotoTargetId = null;
+        _adamInGotoTransition = false;
+        _adamTransitioning = false;
+        _adamNavInternal = false;
+        _adamPendingCI = -1;
+        _adamPendingII = -1;
+        _clearAdvancing();
+    }
+
     // Navigate to container ci, item ii within that container.
     async function _adamGoto(ci, ii) {
         if (_adamAdvancing) { _adamQueuedGoto = [ci, ii]; return; }
@@ -6814,12 +6829,8 @@ async function setup() {
         // track, which prevents MK's changeToMediaAtIndex from advancing the queue.
         _vlcMode = false;
 
-        // MPRIS pre-update: find target item in current MK queue by song ID.
+        // Publish metadata only after the target pipeline is ready in the item-change handler.
         const targetSongId = _sessionContainers[ci]?.items[ii];
-        const targetItem = targetSongId
-            ? (mk.queue?.items ?? []).find(it => _extractItemId(it) === targetSongId)
-            : null;
-        if (targetItem) sendMprisMetadata(targetItem);
 
         // Safety valve: if NPIDF never fires (ctmi failed silently), reset NPIDF state after 6s.
         // _adamAdvancing itself is released right after ctmi below, so this only cleans up
@@ -6887,12 +6898,14 @@ async function setup() {
                 _adamGotoTarget = 0;
                 _adamGotoTargetId = targetSongId ?? null;
                 await mk.setQueue(desc).catch(() => {});
+                if (navigationRevision !== _adamNavRevision) return;
                 await mk.changeToMediaAtIndex(0).catch(() => {});
             } else if (songIdx >= 0 && songIds.length !== allIds.length) {
                 console.log('[Adam] _adamGoto mixed session — songs only, idx=' + songIdx + ' of ' + songIds.length);
                 _adamGotoTarget = songIdx;
                 _adamGotoTargetId = targetSongId ?? null;
                 await mk.setQueue({ songs: songIds }).catch(() => {});
+                if (navigationRevision !== _adamNavRevision) return;
                 await mk.changeToMediaAtIndex(songIdx).catch(() => {});
             } else {
                 const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
@@ -6906,6 +6919,7 @@ async function setup() {
                     ? { songs: allIds, startWith: { id: targetSongId } }
                     : { songs: allIds };
                 await mk.setQueue(sqDesc).catch(() => {});
+                if (navigationRevision !== _adamNavRevision) return;
                 await mk.play().catch(() => {});
             }
         }
@@ -7326,6 +7340,7 @@ async function setup() {
             //      MK calls pause() (sets _msePaused=true) then play() during its track-change
             //      sequence; the proxy returns a never-resolving Promise → MK hangs forever.
             // Fixes mirror the VLC path: delete load/play overrides, clear _ourBlobUrl, open gate.
+            _cancelNavigation();
             if (_allowCDNTransition) return; // gate already open from a previous click
             const _aacMkAudio = getMKAudio();
             if (_aacMkAudio) {
@@ -7695,6 +7710,7 @@ async function setup() {
                 console.log('[Adam VLC-GATE] MV click-action — skipping interceptor, allowing navigation');
                 return;
             }
+            _cancelNavigation();
             if (_mkApiSaved) return;
             // MK's setQueue reuses the existing mkAudio element. It calls:
             //   mkAudio.src = ''  → fine
