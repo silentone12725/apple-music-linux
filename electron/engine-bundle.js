@@ -7070,6 +7070,19 @@
         _adamGoto(ci, ii).catch((err) => console.warn("[Adam] queued navigation:", err.message));
       });
     }
+    function _cancelNavigation() {
+      ++_adamNavRevision;
+      ++trackEventRevision;
+      _adamQueuedGoto = null;
+      _adamGotoTarget = null;
+      _adamGotoTargetId = null;
+      _adamInGotoTransition = false;
+      _adamTransitioning = false;
+      _adamNavInternal = false;
+      _adamPendingCI = -1;
+      _adamPendingII = -1;
+      _clearAdvancing();
+    }
     async function _adamGoto(ci, ii) {
       if (_adamAdvancing) {
         _adamQueuedGoto = [ci, ii];
@@ -7125,8 +7138,6 @@
       _proxyInstalled = false;
       _vlcMode = false;
       const targetSongId = _sessionContainers[ci]?.items[ii];
-      const targetItem = targetSongId ? (mk.queue?.items ?? []).find((it) => extractItemId(it) === targetSongId) : null;
-      if (targetItem) sendMprisMetadata(targetItem);
       _adamAdvancingTimer = setTimeout(() => {
         _adamGotoTarget = null;
         _adamGotoTargetId = null;
@@ -7170,6 +7181,7 @@
           _adamGotoTargetId = targetSongId ?? null;
           await mk.setQueue(desc).catch(() => {
           });
+          if (navigationRevision !== _adamNavRevision) return;
           await mk.changeToMediaAtIndex(0).catch(() => {
           });
         } else if (songIdx >= 0 && songIds.length !== allIds.length) {
@@ -7178,6 +7190,7 @@
           _adamGotoTargetId = targetSongId ?? null;
           await mk.setQueue({ songs: songIds }).catch(() => {
           });
+          if (navigationRevision !== _adamNavRevision) return;
           await mk.changeToMediaAtIndex(songIdx).catch(() => {
           });
         } else {
@@ -7187,6 +7200,7 @@
           const sqDesc = targetSongId ? { songs: allIds, startWith: { id: targetSongId } } : { songs: allIds };
           await mk.setQueue(sqDesc).catch(() => {
           });
+          if (navigationRevision !== _adamNavRevision) return;
           await mk.play().catch(() => {
           });
         }
@@ -7487,6 +7501,7 @@
           console.log("[Adam AAC-GATE] MV click-action \u2014 skipping interceptor, allowing navigation");
           return;
         }
+        _cancelNavigation();
         if (_allowCDNTransition) return;
         const _aacMkAudio = getMKAudio();
         if (_aacMkAudio) {
@@ -7792,6 +7807,7 @@
           console.log("[Adam VLC-GATE] MV click-action \u2014 skipping interceptor, allowing navigation");
           return;
         }
+        _cancelNavigation();
         if (_mkApiSaved) return;
         const mkAudioEl = getMKAudio();
         if (mkAudioEl) {
