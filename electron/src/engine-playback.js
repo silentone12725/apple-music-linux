@@ -5166,8 +5166,8 @@ async function handleTrackChange(mk) {
         _audioAnalysis  = null; // reset; async fetch below may populate it
         console.log(`[Adam Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now()-t0)/1000).toFixed(2)}s`);
 
-        // Leaving the lossless path: releasing the session does not stop libvlc, so stop it and
-        // wait for the engine to confirm before the next path starts. _vlcLive survives a
+        // Confirm native playback has stopped before another player starts, including when
+        // session release failed or timed out. _vlcLive survives a
         // superseded track change, so the stop is never lost.
         {
             const left = await leaveLossless({
