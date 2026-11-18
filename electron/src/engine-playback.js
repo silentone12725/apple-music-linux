@@ -21,7 +21,9 @@ import { mp4FirstDecodeSeconds } from './engine/mp4base.js';
 import { GLASS, cleanBlur, sidebarOpacityControl, navColorWithAlphaVar } from './engine/sidebar-glass.js';
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
-import { accountSignedIn } from './engine/auth.js';
+import { menuAction as _menuAction } from './engine/menu-action.js';
+import { t as _t } from './engine/i18n.js';
+import { accountSignedIn, losslessReady as _losslessReady, downloadQuality as _downloadQuality } from './engine/auth.js';
 import { createTransportController } from './engine/transport.js';
 import { installTransportControls } from './engine/transport-controls.js';
 import { playbackMode, leaveLossless } from './engine/handoff.js';
@@ -6464,7 +6466,8 @@ async function setup() {
         if (p['streaming-quality']) _streamingQuality = p['streaming-quality'];
         // lossless-enabled=false overrides streaming-quality → force AAC regardless.
         if (p['lossless-enabled'] === false) _streamingQuality = 'high-quality';
-        if (p['downloads-quality']) _downloadsQuality  = p['downloads-quality'];
+        // The Downloads dropdown saves 'dl-quality'; 'downloads-quality' is what older builds read.
+        if (p['dl-quality'] || p['downloads-quality']) _downloadsQuality = p['dl-quality'] || p['downloads-quality'];
         window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
 
         const body = {};
@@ -9035,12 +9038,10 @@ window.adamGetQueueInfo = function () {
         const drmState = drm?.state ?? drm ?? {};
         const managerOk = drmState?.manager === 'ready';
         const processOk = drmState?.process === 'running';
-        const fairplayOk = drmState?.fairplay === 'ready';
-        const cbcsOk = drm?.capabilities?.cbcs === true;
         // "Signed in" means the user completed the engine login (email+password) and
         // FairPlay/ALAC is ready. A web-session MUT alone gives AAC but is not an
         // explicit engine login — don't show "Signed in" for that.
-        const isSignedIn = cbcsOk || fairplayOk;
+        const isSignedIn = _losslessReady(drm);
 
         function renderState() {
             body.innerHTML = '';
@@ -9274,6 +9275,7 @@ window.adamGetQueueInfo = function () {
             if (save) {
                 window.adamBridge?.setTweak(prefKey, value);
                 if (prefKey === 'streaming-quality') _streamingQuality = value;
+                if (prefKey === 'dl-quality') _downloadsQuality = value;
                 onChange?.(value);
             }
         }
@@ -9742,7 +9744,7 @@ window.adamGetQueueInfo = function () {
                 const d = await fetchDRM().catch(() => null);
                 if (!d) return;
                 renderStatusRows(d).forEach((row, i) => applyStatusRow(valEls[i].el, row));
-                if (accountSignedIn(d) !== accountSignedIn(drm)) { clearInterval(poll); openSettings(); return; }
+                if (accountSignedIn(d) !== accountSignedIn(drm) || _losslessReady(d) !== _losslessReady(drm)) { clearInterval(poll); openSettings(); return; }
                 if (isResolved(d)) clearInterval(poll);
             }, 2000);
         }
@@ -10930,8 +10932,9 @@ window.adamGetQueueInfo = function () {
         _warmSettingsCache(); // refresh in background while sections render
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
 
-        // DRM signed in = CBCS decryption is live (required for lossless/hi-res).
-        const drmSignedIn = accountSignedIn(drm); // one definition, shared with the status poll below
+        // Lossless and hi-res are offered only while FairPlay is live. A saved account that has not (yet) brought
+        // FairPlay up counts as signed in for the account row's poll below, but not for any lossless control.
+        const drmSignedIn = _losslessReady(drm);
         // False for a build with no DRM layer: the session can never become ready, so lossless is not merely "later".
         // An older engine does not say, and counts as available.
         const drmAvailable = drm?.available !== false;
@@ -11152,36 +11155,56 @@ window.adamGetQueueInfo = function () {
         // suffix only attaches it to the last item, making earlier items match
         // the bare li and get the rule applied to the entire row.
         const li = t => `li.contextual-menu-item:has(button[title='${t}'])`;
-        const con = t => `${li(t)} .contextual-menu-item__icon-container`;
-        const svg = t => `${con(t)} > svg`;
+        const con = sel => `${sel} .contextual-menu-item__icon-container`;
+        const svg = sel => `${con(sel)} > svg`;
 
         const PIN_TITLES   = ['Pin Album','Unpin Album','Pin Music Video','Unpin Music Video','Pin Song','Unpin Song','Pin Playlist','Unpin Playlist'];
         const TRASH_TITLES = ['Delete from Library','Remove from Library'];
         const EMBED_TITLE  = 'Copy Embed Code';
+        // Apple titles its items in the page language, so the embed item is also found through the
+        // marker on the icon span we inject into it (see injectMenuIcons), never through its title.
+        const EMBED_BY_ACTION = `li.contextual-menu-item:has([data-adam-action="embed"])`;
 
-        const ALL_CON = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(con).join(',\n');
-        const ALL_SVG = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(svg).join(',\n');
-        const EMBED_LI  = li(EMBED_TITLE);
+        const SELECTORS = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(li).concat(EMBED_BY_ACTION);
+        const ALL_CON = SELECTORS.map(con).join(',\n');
+        const ALL_SVG = SELECTORS.map(svg).join(',\n');
+        const EMBED_LIS = [li(EMBED_TITLE), EMBED_BY_ACTION];
+        // One rule per selector: appending the descendant to a joined list only reaches the last one.
+        const embedRules = label => EMBED_LIS.map(sel => `
+${sel} .contextual-menu-item__option-text { font-size:0 !important; }
+${sel} .contextual-menu-item__option-text::before { content:${JSON.stringify(label)}; font-size:13px !important; }`).join('');
 
         const s = document.createElement('style');
         s.id = 'adam-ctx-icons';
-        s.textContent = `
+        // The label follows the page language, which can change without a reload (storefront switch).
+        const render = () => {
+            s.textContent = `
 /* position:relative so our absolute span is clipped to the container */
 ${ALL_CON} { position:relative !important; }
 
 /* hide Apple's SVG via CSS — never touch inline styles on Glimmer elements */
 ${ALL_SVG} { opacity:0 !important; }
 
-/* rename "Copy Embed Code" → "Download" purely via CSS */
-${EMBED_LI} .contextual-menu-item__option-text { font-size:0 !important; }
-${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; font-size:13px !important; }`;
+/* rename Apple's "Copy Embed Code" item to "Download", in the page language, purely via CSS */${embedRules(_t('download'))}`;
+        };
+        render();
         document.head.appendChild(s);
+        new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
     })();
 
     // Inject our SVG into one icon container and set up a guard observer that
     // re-injects the moment Glimmer replaces the container's children.
     // We NEVER mutate Apple's existing elements — CSS handles hiding the native SVG.
-    function _armContainer(container, svgHtml) {
+    // What a menu item does, from its icon rather than its title (Apple titles items in the page
+    // language). Apple's own glyph is the direct <svg> child of the icon container; ours sits in a span.
+    function _itemAction(li) {
+        const glyph = li.querySelector('.contextual-menu-item__icon-container > svg path')?.getAttribute('d') ?? '';
+        const btn = li.querySelector('button');
+        const title = btn?.title || btn?.querySelector('.contextual-menu-item__option-text')?.textContent?.trim() || '';
+        return _menuAction(glyph, title);
+    }
+
+    function _armContainer(container, svgHtml, action = null) {
         if (container._adamArmed) return;
         container._adamArmed = true;
 
@@ -11189,6 +11212,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             if (container.querySelector('[data-adam]')) return;
             const span = document.createElement('span');
             span.setAttribute('data-adam', '1');
+            // Marks the item for the stylesheet (see injectContextMenuCSS) without touching Apple's elements.
+            if (action) span.setAttribute('data-adam-action', action);
             span.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;';
             span.innerHTML = svgHtml;
             container.appendChild(span);
@@ -11212,12 +11237,15 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             const title = btn.title
                 || btn.querySelector('.contextual-menu-item__option-text')?.textContent?.trim()
                 || '';
-            const svgHtml = ICON_SVG[title];
+            const li = btn.closest('li');
+            const action = li ? _itemAction(li) : null;
+            // The embed item is found by its glyph; the pin and delete items still by title (English only).
+            const svgHtml = (action === 'embed' ? ICON_SVG['Copy Embed Code'] : null) ?? ICON_SVG[title];
             if (!svgHtml) return;
             // Container may be inside the button OR elsewhere in the same li.
             const container = btn.querySelector('.contextual-menu-item__icon-container')
-                || btn.closest('li')?.querySelector('.contextual-menu-item__icon-container');
-            if (container) _armContainer(container, svgHtml);
+                || li?.querySelector('.contextual-menu-item__icon-container');
+            if (container) _armContainer(container, svgHtml, action === 'embed' ? action : null);
         });
     }
 
@@ -11264,11 +11292,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     // exactly which item was right-clicked, regardless of whether the row has an <a> tag.
     function _resolveViaMenuLink(menuNode) {
         return new Promise(resolve => {
-            const copyBtn = Array.from(menuNode.querySelectorAll('button')).find(b => {
-                const t = b.querySelector('.contextual-menu-item__option-text')?.textContent?.trim()
-                    || b.title || b.getAttribute('aria-label') || '';
-                return t === 'Copy Link';
-            });
+            const copyBtn = Array.from(menuNode.querySelectorAll('li.contextual-menu-item'))
+                .find(li => _itemAction(li) === 'copy-link')?.querySelector('button');
             if (!copyBtn) return resolve(null);
 
             const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
@@ -11370,8 +11395,10 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         if (!info) { console.warn('[Adam] startDownload: no track info'); return; }
         const mk = window.MusicKit?.getInstance?.();
         const prefs = await window.adamBridge?.getPrefs().catch(() => ({})) || {};
-        const qual = prefs['downloads-quality'] || _downloadsQuality || 'lossless';
-        const isLossless = qual !== 'high-quality';
+        // The Downloads quality setting, held to the global Lossless toggle and to what FairPlay allows right now.
+        const { lossless: isLossless, hiRes: isHiRes } = _downloadQuality({
+            prefs, fallback: _downloadsQuality, ready: _engineCaps.lossless,
+        });
         const hint = await prefetchHintMeta(info);
 
         const _af = prefs['download-album-folder'] || '{album_artist}/{album}';
@@ -11385,6 +11412,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             Language:         navigator.language || 'en-US',
             Capabilities: {
                 Lossless:        isLossless,
+                HiRes:           isHiRes,
                 Atmos:           false,
                 Video:           info.type === 'video',
                 Playlist:        info.type === 'playlist',
@@ -11486,8 +11514,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 node.addEventListener('click', async e => {
                     const btn = e.target.closest('button');
                     if (!btn) return;
-                    const title = btn.title || btn.querySelector('.contextual-menu-item__option-text')?.textContent?.trim() || '';
-                    if (title !== 'Download' && title !== 'Copy Embed Code' && !title.includes('Embed Code')) return;
+                    const li = btn.closest('li.contextual-menu-item');
+                    if (!li || _itemAction(li) !== 'embed') return;
                     e.stopPropagation();
                     e.preventDefault();
 
