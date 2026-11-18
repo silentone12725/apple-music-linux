@@ -14,7 +14,8 @@ type loadOrder struct {
 	applied uint64
 }
 
-// Lock order: loadOrder, then the session owner gate, then Player.
+// The load-order mutex is outermost. Session manager and owner-gate calls
+// release their own locks before we enter Player.
 func (o *loadOrder) withPlayer(fn func()) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -44,6 +45,9 @@ func (o *loadOrder) runIfCurrent(seq uint64, fn func() error) (bool, error) {
 	if o.seq.Load() != seq {
 		return false, nil
 	}
+	if err := fn(); err != nil {
+		return true, err
+	}
 	o.applied = seq
-	return true, fn()
+	return true, nil
 }

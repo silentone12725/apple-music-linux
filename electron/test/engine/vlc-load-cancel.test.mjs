@@ -7,12 +7,12 @@ const source = readFileSync(new URL('../../src/engine-playback.js', import.meta.
 const start = source.indexOf('async function _setupVLCPath(');
 const body = source.slice(start, source.indexOf('\n}\n', start) + 2);
 
-function setup() {
+function setup(timers = { setTimeout, clearTimeout }) {
     let finishLoad;
     const requests = [], revoked = [], polls = [];
     const audio = new EventTarget();
     const context = vm.createContext({
-        console, performance, Event, AbortSignal, setTimeout, clearTimeout, MediaSource: class {},
+        console, performance, Event, AbortSignal, ...timers, MediaSource: class {},
         URL: { createObjectURL: () => 'blob:old', revokeObjectURL: u => revoked.push(u) },
         HTMLMediaElement: { prototype: { load() {} } },
         window: {}, ENGINE: 'https://engine', _sessionId: 'old',
@@ -62,5 +62,21 @@ test('queued navigation waits for decoded playback, not merely the load response
     s.audio.dispatchEvent(new Event('playing'));
     await s.loading;
     assert.equal(ready, true);
+    s.ctrl.abort();
+});
+
+
+test('a decoder that never becomes ready fails with a bounded wait', async () => {
+    let expire, cleared = false;
+    const s = setup({
+        setTimeout: fn => { expire = fn; return 1; },
+        clearTimeout: id => { cleared = id === 1; },
+    });
+    s.finishLoad({ ok: true });
+    await new Promise(r => setImmediate(r));
+    const rejected = assert.rejects(s.loading, /Timed out waiting for native audio/);
+    expire();
+    await rejected;
+    assert.equal(cleared, true);
     s.ctrl.abort();
 });
