@@ -19,13 +19,25 @@ historical evidence and are not counted as independent-port playback validation.
 
 ## Product change and PR #9 independence
 
-`playback01-candidate-c.patch` is the unchanged validated Candidate C, SHA256
-`b39a6ceae73f1941d3ba4b0b7fcc301919d6fa0c3a864aca960f93ac3cacf5dc`.
-It changes one `DemuxMoof()` exhausted-fragment block: valid selected tracks with
+`playback01-candidate-c.patch` is Candidate C with a bounded catch-up, SHA256
+`9eac960942eba7d147c662811c0a48013d797151eb16d9210c56edff18f3bb09` (three hunks;
+`build-vlc-mp4.py` requires each hunk's context to match exactly once and the
+regenerated diff to equal the reviewed file byte for byte).
+It changes the `DemuxMoof()` exhausted-fragment block: valid selected tracks with
 runs bound presentation cursor/PCR advancement to the usual 250ms demux quantum;
 retain the fragment until that bound is reached. Otherwise the decoder can finish
 while the cursor lags, and final `DemuxFrag()` EOF PCR handling does not repair it.
+The catch-up target never exceeds the cursor at the fragment's first exhaustion plus
+`DEMUX_INCREMENT + DEMUX_TRACK_MAX_PRELOAD` (15.25s), the most seekable input can
+queue ahead of the clock. The bound is fixed once per fragment in
+`demux_sys_t.context` and cleared by `FragResetContext()` (new fragment and seek),
+so a corrupt final sample duration cannot hold EndReached; beyond the bound the
+stock EOF handling applies. The original block only considered invalid (`!b_ok`)
+tracks, whose time never advances; non-seekable input selects every valid track
+in `DemuxFrag()`, so dropping its `!b_selected && !b_seekable` clause is equivalent.
 There is no fixed position offset, duration, decoder or audio-output change.
+The earlier unbounded Candidate C (SHA256 `b39a6cea…`) is what the historical and
+first independent real-playback results below measured.
 
 Existing upstream call chain:
 
@@ -170,7 +182,12 @@ python3 scripts/validate-vlc-mp4.py \
 If the bundled minimal FFmpeg lacks generation features, provide a suitable public
 synthetic fixture instead. Do not use protected audio. The script compiles
 `scripts/tests/vlc_native_probe.c` and checks natural EndReached/tail position,
-Seek, failure and three-generation Pause/Resume/Stop/Replace. Every case verifies
+Seek, failure and three-generation Pause/Resume/Stop/Replace, then `nonseek` (no seek
+callback: neither seekable nor pace-controlled; no length, so no residual check, and
+the first late buffers stock VLC also drops are tolerated) and `future`: a copy of the
+fixture whose final sample duration is 0xFFFFFFFF (`scripts/mp4_fixture.py`; the
+final trun must carry per-sample durations) must reach EndReached within media length
++ 15.25s + 5s. Every case verifies
 actual loaded libraries and writes new JSON/summary output. Every PASS condition is an
 explicit check raising `ValidationError` (non-zero exit), so `python3 -O` cannot skip
 it; malformed or incomplete probe JSON fails too. Raw PCR is explicitly

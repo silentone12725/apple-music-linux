@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""USER RUN: four short synthetic checks of the newly staged production plugin."""
+"""USER RUN: short synthetic checks of the newly staged production plugin."""
 import argparse
 import importlib.util
 import json
@@ -11,7 +11,11 @@ import tempfile
 import time
 
 REPO = Path(__file__).resolve().parents[1]
+from mp4_fixture import set_final_duration
 from vlc_runtime import expected_paths, vlc_paths
+
+# DEMUX_INCREMENT + DEMUX_TRACK_MAX_PRELOAD: the most the EOS clock may run past the media.
+EOS_BOUND_MS = 250 + 15000
 
 
 class ValidationError(Exception):
@@ -24,14 +28,14 @@ def require(condition, message):
         raise ValidationError(message)
 
 
-def validate(data, mode):
+def validate(data, mode, end_limit_ms=None):
     try:
-        check_probe_output(data, mode)
+        check_probe_output(data, mode, end_limit_ms)
     except (KeyError, TypeError, IndexError) as error:
         raise ValidationError(f'{mode}: malformed probe output: {error!r}') from error
 
 
-def check_probe_output(data, mode):
+def check_probe_output(data, mode, end_limit_ms=None):
     require(data['ok'] is True, f'{mode}: probe reported ok=false')
     require(data['events'], f'{mode}: no events recorded')
     require(not data['dropped'], f'{mode}: {data["dropped"]} events dropped')
@@ -46,6 +50,13 @@ def check_probe_output(data, mode):
         require(10007 in ids, 'failure: injected read failure not recorded')
         require(any(e['failed'] for e in rows), 'failure: no failed state recorded')
         require(265 in ids or 266 in ids, 'failure: neither EndReached nor EncounteredError')
+    elif mode == 'future':
+        # Corrupt final sample duration: playback must still end, within the EOS bound.
+        require(end_limit_ms is not None, 'future: no end limit supplied')
+        require(266 not in ids, 'future: EncounteredError reported')
+        require(265 in ids, 'future: EndReached missing; EOS clock not bounded')
+        end = next(e['atMs'] for e in rows if e['eventType'] == 265)
+        require(end <= end_limit_ms, f'future: EndReached at {end:.0f} ms, limit {end_limit_ms} ms')
     else:
         require(265 in ids, f'{mode}: EndReached missing')
         require(266 not in ids, f'{mode}: EncounteredError reported')
@@ -54,15 +65,19 @@ def check_probe_output(data, mode):
         stats = data['stats']
         require(stats and stats[0]['valid'], f'{mode}: playback statistics missing or invalid')
         require(stats[0]['decodedAudio'] > 0 and stats[0]['playedAudioBuffers'] > 0, f'{mode}: no audio decoded/played')
-        require(stats[0]['lostAudioBuffers'] == 0, f'{mode}: lost audio buffers')
+        # Stock VLC 3.0.24 drops the first late buffers of non-pace-controlled input too.
+        require(stats[0]['lostAudioBuffers'] == 0 or mode == 'nonseek', f'{mode}: lost audio buffers')
         require(stats[0]['demuxCorrupted'] == 0, f'{mode}: demux corruption reported')
         if mode == 'seek':
             require(10005 in ids, 'seek: seek request not recorded')
         else:
-            positions = [e for e in rows if e['eventType'] == 10000 and e['mediaTimeMs'] > 0 and e['lengthMs'] > 0]
+            # Non-seekable input reports no length; its time is buffering-adjusted, so no residual.
+            positions = [e for e in rows if e['eventType'] == 10000 and e['mediaTimeMs'] > 0
+                         and (e['lengthMs'] > 0 or mode == 'nonseek')]
             require(positions, f'{mode}: no position samples')
-            residual = positions[-1]['lengthMs'] - positions[-1]['mediaTimeMs']
-            require(0 <= residual <= 500, f'{mode}: final residual {residual} ms outside 0..500')
+            if mode != 'nonseek':
+                residual = positions[-1]['lengthMs'] - positions[-1]['mediaTimeMs']
+                require(0 <= residual <= 500, f'{mode}: final residual {residual} ms outside 0..500')
             require(all(b['mediaTimeMs'] >= a['mediaTimeMs'] for a, b in zip(positions, positions[1:])),
                     f'{mode}: media time went backwards')
     # Public media time is not an independent PCR measurement.
@@ -100,13 +115,18 @@ def main():
     env = dict(os.environ, PLAYBACK01_NATIVE_PROBE='1', LD_LIBRARY_PATH=str(runtime) + os.pathsep + str(args.ffmpeg_libdir.resolve()),
                VLC_PLUGIN_PATH=str(runtime / 'plugins'))
     env.pop('LD_PRELOAD', None)
-    summary = {}
-    for mode in ['natural', 'seek', 'failure', 'lifecycle']:
-        argv = [str(out / 'probe'), str(args.fixture.resolve()), '15'] + ([] if mode == 'natural' else [mode])
+    future = out / ('future' + args.fixture.suffix)
+    future.write_bytes(set_final_duration(args.fixture.read_bytes(), 0xFFFFFFFF))
+    summary, end_limit_ms = {}, None
+    for mode in ['natural', 'seek', 'failure', 'lifecycle', 'nonseek', 'future']:
+        fixture, timeout = args.fixture.resolve(), 15
+        if mode == 'future':
+            fixture, timeout = future, end_limit_ms // 1000 + 5
+        argv = [str(out / 'probe'), str(fixture), str(timeout)] + ([] if mode in ('natural', 'future') else [mode])
         paths = set()
         with (out / f'{mode}.json').open('x') as stdout, (out / f'{mode}.log').open('x') as stderr:
             proc = subprocess.Popen(argv, env=env, stdout=stdout, stderr=stderr)
-            deadline = time.monotonic() + 50
+            deadline = time.monotonic() + timeout + 35
             try:
                 while proc.poll() is None:
                     paths.update(vlc_paths(proc.pid))
@@ -120,10 +140,14 @@ def main():
         loader = {'valid': paths == expected_paths(runtime), 'paths': sorted(paths), 'exitCode': proc.returncode}
         (out / f'{mode}-loader.json').write_text(json.dumps(loader, indent=2))
         check_run(loader, mode)
-        validate(json.loads((out / f'{mode}.json').read_text()), mode)
+        data = json.loads((out / f'{mode}.json').read_text())
+        validate(data, mode, end_limit_ms)
+        if mode == 'natural':
+            # Media length plus the EOS bound, with 5 s for start-up and output drain.
+            end_limit_ms = max(e['lengthMs'] for e in data['events']) + EOS_BOUND_MS + 5000
         summary[mode] = 'PASS'
     (out / 'summary.json').write_text(json.dumps(summary, indent=2))
-    print(f'Four development integration cases PASS: {out}\nRaw PCR: NOT_MEASURED (production plugin).')
+    print(f'{len(summary)} development integration cases PASS: {out}\nRaw PCR: NOT_MEASURED (production plugin).')
 
 
 if __name__ == '__main__':

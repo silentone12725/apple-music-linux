@@ -71,11 +71,13 @@ int main(int argc,char **argv) {
         libvlc_MediaPlayerLengthChanged,libvlc_MediaPlayerBuffering};
     int lifecycle=argc>3 && !strcmp(argv[3],"lifecycle"), ok=1;
     int seek_mode=argc>3 && !strcmp(argv[3],"seek"), failure_mode=argc>3 && !strcmp(argv[3],"failure");
+    // No seek callback: imem reports neither seekable nor pace-controllable.
+    int nonseek=argc>3 && !strcmp(argv[3],"nonseek");
     libvlc_media_stats_t stats[3]={0}; int stats_valid[3]={0};
     struct source sources[3]={0};
     for(unsigned gen=0;gen<(lifecycle?3u:1u);gen++) {
         struct source *s=&sources[gen]; s->data=bytes;s->size=(size_t)size;s->generation=gen+1;s->failure=failure_mode;
-        libvlc_media_t *media=libvlc_media_new_callbacks(instance,open_cb,read_cb,seek_cb,close_cb,s);
+        libvlc_media_t *media=libvlc_media_new_callbacks(instance,open_cb,read_cb,nonseek?NULL:seek_cb,close_cb,s);
         if(!media){ok=0;break;}
         libvlc_media_player_set_media(player,media);
         unsigned attached=0;

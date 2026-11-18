@@ -2,12 +2,14 @@
 import copy
 import importlib.util
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import unittest
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
+import mp4_fixture as fixture  # noqa: E402
 spec = importlib.util.spec_from_file_location('validator', SCRIPTS / 'validate-vlc-mp4.py')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
@@ -43,7 +45,62 @@ LOADERS = {'loader path mismatch': {'valid': False, 'exitCode': 0},
            'probe exit non-zero': {'valid': True, 'exitCode': 2}}
 
 
+def future(end_ms):
+    rows = [{'eventType': 260, 'generation': 1, 'failed': False, 'atMs': 10, 'mediaTimeMs': -1, 'lengthMs': -1}]
+    if end_ms is not None:
+        rows.append({'eventType': 265, 'generation': 1, 'failed': False, 'atMs': end_ms, 'mediaTimeMs': -1, 'lengthMs': -1})
+    return {'ok': True, 'events': rows, 'dropped': 0, 'stats': []}
+
+
+def box(kind, body):
+    return struct.pack('>I4s', 8 + len(body), kind) + body
+
+
+def fragment(flags, durations):
+    entries = b''.join(struct.pack('>II', d, 100) for d in durations)  # duration + size
+    trun = box(b'trun', struct.pack('>I', flags) + struct.pack('>Ii', len(durations), 0) + entries)
+    return box(b'moof', box(b'traf', box(b'tfhd', bytes(8)) + trun)) + box(b'mdat', b'x')
+
+
+class FixtureTests(unittest.TestCase):
+    def test_only_the_final_sample_duration_changes(self):
+        data = box(b'ftyp', b'isom') + fragment(0x301, [4096, 4096]) + fragment(0x301, [4096, 1275])
+        changed = fixture.set_final_duration(data, 0xFFFFFFFF)
+        diff = [i for i, (a, b) in enumerate(zip(data, changed)) if a != b]
+        self.assertEqual(len(changed), len(data))
+        self.assertEqual(len(diff), 4)
+        self.assertEqual(struct.unpack_from('>I', changed, diff[0])[0], 0xFFFFFFFF)
+        self.assertEqual(data[:diff[0]].count(b'\x00\x00\x04\xfb'), 0)  # the 1275 entry itself
+
+    def test_unsupported_fixtures_are_rejected(self):
+        for data in [box(b'ftyp', b'isom'), fragment(0x201, [4096]), b'\x00\x00\x00\x10moof']:
+            with self.subTest(data=data[:12]), self.assertRaises(ValueError):
+                fixture.set_final_duration(data, 1)
+
+
 class ValidatorTests(unittest.TestCase):
+    def test_future_mode_requires_bounded_end(self):
+        m.validate(future(20000), 'future', 26500)
+        for data, limit in [(future(None), 26500), (future(40000), 26500), (future(20000), None)]:
+            with self.subTest(limit=limit), self.assertRaises(m.ValidationError):
+                m.validate(data, 'future', limit)
+
+    def test_nonseek_accepts_unknown_length_but_not_backwards_time(self):
+        data = natural()
+        for e in data['events']:
+            e['lengthMs'] = 0 if e['eventType'] == 10000 else e['lengthMs']
+        data['stats'][0]['lostAudioBuffers'] = 3
+        m.validate(data, 'nonseek')
+        with self.assertRaises(m.ValidationError):
+            m.validate(data, 'natural')
+        data['stats'][0]['demuxCorrupted'] = 1
+        with self.assertRaises(m.ValidationError):
+            m.validate(data, 'nonseek')
+        data['stats'][0]['demuxCorrupted'] = 0
+        data['events'][-2]['mediaTimeMs'] = 4950
+        with self.assertRaises(m.ValidationError):
+            m.validate(data, 'nonseek')
+
     def test_valid_natural_run_passes(self):
         m.validate(natural(), 'natural')
         m.check_run({'valid': True, 'exitCode': 0}, 'natural')

@@ -1,12 +1,32 @@
 --- baseline/mp4.c
 +++ candidate/mp4.c
-@@ -4637,22 +4637,25 @@
+@@ -104,6 +104,8 @@
+         MP4_Box_t      *p_fragment_atom;
+         uint64_t        i_post_mdat_offset;
+         uint32_t        i_lastseqnumber;
++        bool            b_exhausted_bound; /* i_exhausted_bound set for this fragment */
++        vlc_tick_t      i_exhausted_bound;
+     } context;
+ 
+     /* */
+@@ -4440,6 +4442,7 @@
+         p_sys->context.p_fragment_atom = NULL;
+     }
+     p_sys->context.i_current_box_type = 0;
++    p_sys->context.b_exhausted_bound = false;
+ 
+     for ( uint32_t i=0; i<p_sys->i_tracks; i++ )
+     {
+@@ -4637,22 +4640,39 @@
      }
      else
      {
 -        vlc_tick_t i_segment_end = INT64_MAX;
 +        /* Exhausted runs contain queued samples, not the current output time.
-+         * Pace to their selected-stream bound using the usual demux quantum. */
++         * Pace to their selected-stream bound using the usual demux quantum.
++         * Only valid tracks carry demuxed data. Non-seekable input selects every
++         * valid track (DemuxFrag), so !b_selected only skips seekable tracks that
++         * are not demuxed at all. */
 +        vlc_tick_t i_segment_end = p_sys->i_nztime;
          for( unsigned i = 0; i < p_sys->i_tracks; i++ )
          {
@@ -27,6 +47,17 @@
 +            const vlc_tick_t i_track_end = MP4_rescale_mtime( tk->i_time, tk->i_timescale );
 +            i_segment_end = __MAX( i_segment_end, i_track_end );
 +        }
++        /* Seekable input queues at most DEMUX_INCREMENT + DEMUX_TRACK_MAX_PRELOAD
++         * past the clock. Fix that bound once per fragment, so a corrupt final
++         * sample duration cannot hold EOS; beyond it, EOF handling applies. */
++        if( !p_sys->context.b_exhausted_bound )
++        {
++            const vlc_tick_t i_lead = DEMUX_INCREMENT + DEMUX_TRACK_MAX_PRELOAD;
++            p_sys->context.i_exhausted_bound = ( p_sys->i_nztime < INT64_MAX - i_lead ) ?
++                                               p_sys->i_nztime + i_lead : INT64_MAX;
++            p_sys->context.b_exhausted_bound = true;
++        }
++        i_segment_end = __MIN( i_segment_end, p_sys->context.i_exhausted_bound );
 +        if( i_segment_end > p_sys->i_nztime )
 +        {
 +            p_sys->i_nztime += __MIN( DEMUX_INCREMENT, i_segment_end - p_sys->i_nztime );

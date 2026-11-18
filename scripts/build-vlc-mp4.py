@@ -24,13 +24,23 @@ def digest(path):
 
 def apply_candidate(original, patch):
     lines = patch.splitlines(True)
-    if len(lines) < 4 or sum(line.startswith('@@ ') for line in lines) != 1:
-        raise ValueError('expected the reviewed single-hunk Candidate C patch')
-    old = ''.join(line[1:] for line in lines[3:] if line.startswith((' ', '-')))
-    new = ''.join(line[1:] for line in lines[3:] if line.startswith((' ', '+')))
-    if not old or original.count(old) != 1:
-        raise ValueError('source is modified, instrumented, already patched or incompatible')
-    candidate = original.replace(old, new, 1)
+    if len(lines) < 4 or not lines[0].startswith('--- ') or not lines[1].startswith('+++ ') \
+            or not lines[2].startswith('@@ '):
+        raise ValueError('expected the reviewed Candidate C unified diff')
+    hunks = []
+    for line in lines[2:]:
+        if line.startswith('@@ '):
+            hunks.append([])
+        else:
+            hunks[-1].append(line)
+    candidate = original
+    for hunk in hunks:
+        old = ''.join(line[1:] for line in hunk if line.startswith((' ', '-')))
+        new = ''.join(line[1:] for line in hunk if line.startswith((' ', '+')))
+        # Every hunk's context must match exactly once: no fuzz, offsets or reapplication.
+        if not old or candidate.count(old) != 1:
+            raise ValueError('source is modified, instrumented, already patched or incompatible')
+        candidate = candidate.replace(old, new, 1)
     actual = ''.join(difflib.unified_diff(original.splitlines(True), candidate.splitlines(True),
                                         fromfile='baseline/mp4.c', tofile='candidate/mp4.c'))
     if actual != patch:

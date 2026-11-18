@@ -18,18 +18,27 @@ class CandidateTests(unittest.TestCase):
     def test_reviewed_patch_is_byte_identical(self):
         patch = ROOT / 'patches/vlc/3.0.24/playback01-candidate-c.patch'
         self.assertEqual(hashlib.sha256(patch.read_bytes()).hexdigest(),
-                         'b39a6ceae73f1941d3ba4b0b7fcc301919d6fa0c3a864aca960f93ac3cacf5dc')
+                         '9eac960942eba7d147c662811c0a48013d797151eb16d9210c56edff18f3bb09')
         ref = json.loads((patch.parent / 'runtime-abi.json').read_text())
         self.assertEqual(hashlib.sha256(patch.read_bytes()).hexdigest(), ref['patchSHA256'])
 
-    def test_single_hunk_is_applied_exactly_once(self):
-        before, after = 'header\nold\nfooter\n', 'header\nnew\nfooter\n'
+    def test_hunks_are_applied_exactly_once(self):
+        filler = ''.join(f'line {i}\n' for i in range(20))
+        before = 'header\nold1\n' + filler + 'old2\nfooter\n'
+        after = 'header\nnew1\n' + filler + 'new2\nfooter\n'
         patch = ''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True), fromfile='baseline/mp4.c', tofile='candidate/mp4.c'))
+        self.assertEqual(sum(line.startswith('@@ ') for line in patch.splitlines()), 2)
         self.assertEqual(m.apply_candidate(before, patch), after)
-        with self.assertRaises(ValueError):
-            m.apply_candidate(after, patch)
-        with self.assertRaises(ValueError):
-            m.apply_candidate('foreign source\n', patch)
+        for source in [after, 'foreign source\n', before.replace('old2', 'other'),
+                       before.replace('old1', 'new1'), before + before]:
+            with self.assertRaises(ValueError):
+                m.apply_candidate(source, patch)
+
+    def test_reviewed_patch_applies_to_the_pinned_source_shape(self):
+        patch = (ROOT / 'patches/vlc/3.0.24/playback01-candidate-c.patch').read_text()
+        self.assertEqual(sum(line.startswith('@@ ') for line in patch.splitlines()), 3)
+        for needle in ['b_exhausted_bound = false;', 'i_exhausted_bound );', 'DEMUX_TRACK_MAX_PRELOAD']:
+            self.assertIn(needle, patch)
 
 
     def test_runtime_verification_rejects_foreign_plugin_and_core(self):
