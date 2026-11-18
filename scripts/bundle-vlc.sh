@@ -137,9 +137,10 @@ for plug in "$P/codec/libavcodec_plugin.so" "$P/demux/libavformat_plugin.so" "$P
 done
 [ "$bad" = 0 ] || exit 1
 
-# Nothing bundled may need a newer glibc than the other packaged binaries (2.38 by default; release builds
-# on Ubuntu 22.04 set ADAM_MAX_GLIBC=2.35): a library copied from a rolling distro can require symbols that
-# older systems and the Flatpak runtime lack.
+# Nothing bundled may need a newer glibc than the other packaged binaries (the 2.38 release target): a
+# library copied from a rolling distro can require symbols that older systems and the Flatpak runtime lack.
+# ADAM_MAX_GLIBC above 2.38 is a development-only target; build-installer.sh re-audits at 2.38 regardless.
+# A cached bundle is re-audited on every run, so a development bundle cannot pass a release build.
 python3 "$REPO/scripts/check-vlc-glibc.py" --runtime "$DEST" \
     --library-dir "$FFLIB" --max "${ADAM_MAX_GLIBC:-2.38}" --closure
 

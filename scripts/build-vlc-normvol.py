@@ -24,7 +24,9 @@ def main():
     if (source / 'src/revision.txt').read_text().strip() != reference['sourceRevision']:
         raise ValueError('matching VLC 3.0.24 source required')
     core = runtime / 'libvlccore.so.9.0.1'
-    out = REPO / 'electron/dist/vlc-normvol-glibc238'
+    limit = glibc.target_limit()
+    # The directory names the glibc target, so a development build never replaces the release one.
+    out = REPO / f'electron/dist/vlc-normvol-glibc{limit.replace(".", "")}'
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out) as work:
         plugin = Path(work) / 'libnormvol_plugin.so'
@@ -35,7 +37,7 @@ def main():
                    '-I' + str(source / 'include'), str(source / 'modules/audio_filter/normvol.c'),
                    str(core), '-lm', '-Wl,-soname,libnormvol_plugin.so', '-o', str(plugin)]
         subprocess.run(command, check=True)
-        report = glibc.audit(Path(work), '2.38')
+        report = glibc.audit(Path(work), limit)
         if report['errors'] or any(p['overLimit'] for p in report['bundled']):
             raise ValueError(report)
         dynamic = glibc.readelf('-d', str(plugin))

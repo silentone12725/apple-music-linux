@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 
 def version(value):
@@ -47,10 +48,32 @@ def checked_maximum(path, errors, label):
         return None
 
 
-def check_build_env():
+# Release packages must run on glibc 2.38 systems (and the Flatpak runtime).
+RELEASE_CEILING = '2.38'
+
+
+def target_limit():
+    # ADAM_MAX_GLIBC above the release ceiling selects a development-only target.
+    return os.environ.get('ADAM_MAX_GLIBC') or RELEASE_CEILING
+
+
+def is_development(limit):
+    return version(limit) > version(RELEASE_CEILING)
+
+
+def check_build_env(limit=None):
+    # A host newer than the target links symbols the target lacks; the artifact audit
+    # would reject the result, so stop before compiling.
+    limit = limit or target_limit()
     value = subprocess.check_output(['getconf', 'GNU_LIBC_VERSION'], text=True).strip()
-    if not value.startswith('glibc ') or version(value.split()[1]) > (2, 38):
-        raise ValueError(f'build requires glibc <= 2.38, found {value}; use the compatibility container')
+    if not value.startswith('glibc '):
+        raise ValueError(f'cannot read the build host glibc version: {value!r}')
+    host = value.split()[1]
+    if version(host) > version(limit):
+        raise ValueError(f'build host has {value}, newer than the glibc {limit} target. Release: use the '
+                         f'compatibility container. Development only: ADAM_MAX_GLIBC={host}')
+    if is_development(limit):
+        print(f'WARNING: development glibc {limit} target, not release compatible', file=sys.stderr)
     print(value)
 
 
@@ -95,19 +118,24 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--library-dir', type=Path, action='append', default=[])
-    parser.add_argument('--max', default='2.38')
+    parser.add_argument('--max', default=target_limit(),
+                        help=f'GLIBC ceiling (default ADAM_MAX_GLIBC or the {RELEASE_CEILING} release target)')
     parser.add_argument('--closure', action='store_true', help='also resolve every ELF transitive dependency using ldd')
     parser.add_argument('--check-build-env', action='store_true')
     args = parser.parse_args()
-    if version(args.max) > (2, 38):
-        parser.error('the GLIBC ceiling cannot exceed 2.38')
+    if not re.fullmatch(r'\d+\.\d+', args.max):
+        parser.error(f'invalid GLIBC ceiling {args.max!r}')
     if args.check_build_env:
-        check_build_env()
+        check_build_env(args.max)
     else:
         if not args.runtime:
             parser.error('--runtime required')
         report = audit(args.runtime.resolve(), args.max, [p.resolve() for p in args.library_dir], args.closure)
+        report['target'] = 'development' if is_development(args.max) else 'release'
         print(json.dumps(report, indent=2))
+        if report['target'] == 'development':
+            print(f'WARNING: audited against development glibc {args.max}; '
+                  f'NOT a release ({RELEASE_CEILING}) compatibility PASS', file=sys.stderr)
         raise SystemExit(int(bool(report['errors'] or any(p['overLimit'] for p in report['bundled']))))
 
 

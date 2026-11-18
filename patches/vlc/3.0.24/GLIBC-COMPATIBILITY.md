@@ -81,7 +81,19 @@ python3 scripts/check-vlc-glibc.py --runtime electron/dist/vlc-normvol-glibc238
 exit
 ```
 
-Both builders reject build GLIBC >2.38. FFmpeg preflight still strictly checks
+The release target is glibc 2.38 (`RELEASE_CEILING` in `check-vlc-glibc.py`). Both
+builders reject a build host newer than the target, since its objects would need
+that host's symbols. On a newer distribution (Fedora, Arch, Ubuntu 24.04+), a
+development-only build sets `ADAM_MAX_GLIBC` to the host version: the builders and
+`bundle-vlc.sh` then audit against that ceiling, label the report
+`"target": "development"` and warn that it is not a release compatibility PASS.
+The scanner itself always runs. `build-vlc-normvol.py` writes to
+`electron/dist/vlc-normvol-glibc<target>` so a development build never replaces
+the release one. A cached bundle is re-audited on every `bundle-vlc.sh` run (about
+2 s for this runtime: 107 `readelf` and 69 `ldd` calls, measured), so a development
+bundle fails the default 2.38 run; `build-installer.sh` also re-audits the packaged
+`resources/vlc` at 2.38 whatever `ADAM_MAX_GLIBC` is. No audit result is cached.
+FFmpeg preflight still strictly checks
 source major ABIs 62/62/60 against the staged plugins; it checks produced SONAMEs
 and every output ELF's GLIBC requirements before copying. `check-vlc-glibc.py` runs
 `readelf` in the C locale whatever the user's locale, and fails closed: a `readelf`

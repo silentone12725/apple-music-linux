@@ -42,12 +42,59 @@ class GlibcTests(unittest.TestCase):
         self.assertLess(m.version('2.9'), m.version('2.38'))
         self.assertGreater(m.version('2.43'), m.version('2.38'))
 
-    def test_build_host_ceiling(self):
-        with patch.object(m.subprocess, 'check_output', return_value='glibc 2.35\n'):
-            m.check_build_env()
-        with patch.object(m.subprocess, 'check_output', return_value='glibc 2.43\n'):
-            with self.assertRaises(ValueError):
+    def test_build_host_is_checked_against_the_target_not_a_fixed_version(self):
+        with patch.dict(os.environ), patch('builtins.print'):
+            os.environ.pop('ADAM_MAX_GLIBC', None)
+            with patch.object(m.subprocess, 'check_output', return_value='glibc 2.35\n'):
                 m.check_build_env()
+            with patch.object(m.subprocess, 'check_output', return_value='glibc 2.43\n'):
+                with self.assertRaisesRegex(ValueError, 'ADAM_MAX_GLIBC=2.43'):
+                    m.check_build_env()
+                m.check_build_env('2.43')  # explicit development target
+                os.environ['ADAM_MAX_GLIBC'] = '2.44'
+                m.check_build_env()
+            with patch.object(m.subprocess, 'check_output', return_value='musl\n'), self.assertRaises(ValueError):
+                m.check_build_env()
+
+    def test_target_defaults_to_release_ceiling_and_env_selects_development(self):
+        with patch.dict(os.environ):
+            os.environ.pop('ADAM_MAX_GLIBC', None)
+            self.assertEqual(m.target_limit(), '2.38')
+            self.assertFalse(m.is_development(m.target_limit()))
+            os.environ['ADAM_MAX_GLIBC'] = '2.43'
+            self.assertEqual(m.target_limit(), '2.43')
+            self.assertTrue(m.is_development('2.43'))
+            self.assertFalse(m.is_development('2.35'))
+
+    def run_main(self, directory, *args):
+        with patch.object(m.subprocess, 'check_output', return_value=DYNAMIC + NEEDS_C.replace('2.38', '2.40')), \
+             patch.object(sys, 'argv', ['check-vlc-glibc.py', '--runtime', directory, *args]), \
+             patch('builtins.print') as output:
+            self.fake_runtime(directory)
+            with self.assertRaises(SystemExit) as exit_:
+                m.main()
+        text = '\n'.join(str(c.args[0]) for c in output.call_args_list)
+        return exit_.exception.code, text
+
+    def test_development_ceiling_passes_but_is_labelled(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ):
+            os.environ.pop('ADAM_MAX_GLIBC', None)
+            code, text = self.run_main(d)
+            self.assertEqual(code, 1)  # 2.40 requirement fails the release ceiling
+            self.assertIn('"target": "release"', text)
+            code, text = self.run_main(d, '--max', '2.43')
+            self.assertEqual(code, 0)
+            self.assertIn('"target": "development"', text)
+            self.assertIn('NOT a release', text)
+            os.environ['ADAM_MAX_GLIBC'] = '2.43'
+            code, _ = self.run_main(d, '--max', '2.38')  # an explicit release audit ignores the env
+            self.assertEqual(code, 1)
+
+    def test_invalid_ceiling_is_rejected(self):
+        with patch.object(sys, 'argv', ['check-vlc-glibc.py', '--max', '2.x', '--check-build-env']), \
+             patch('sys.stderr'), self.assertRaises(SystemExit) as exit_:
+            m.main()
+        self.assertEqual(exit_.exception.code, 2)
 
     def test_readelf_runs_in_c_locale_whatever_the_user_locale(self):
         for locale in ['C', *LOCALIZED]:

@@ -129,6 +129,9 @@ for f in engine libdrm_client.so \
 done
 [ ! -e "$RES/libdrm-native.so" ] || die "stale resources/libdrm-native.so is packaged (old wrapper library)"
 [ ! -e "$RES/libhybris-core.so" ] || die "stale resources/libhybris-core.so is packaged (it is embedded in libdrm_client.so)"
+# The release glibc target is fixed here, whatever ADAM_MAX_GLIBC the bundle step used.
+ADAM_MAX_GLIBC= python3 "$REPO/scripts/check-vlc-glibc.py" --runtime "$RES/vlc" --max 2.38 >/dev/null \
+    || die "resources/vlc needs a newer glibc than the 2.38 release target (development bundle?)"
 [ ! -e "$RES/rootfs" ] || die "resources/rootfs is packaged: Apple's libraries must not ship, they are downloaded at install time"
 # Candidate C (patches/vlc/3.0.24) is a development opt-in; release packages ship stock VLC.
 [ ! -e "$RES/vlc/playback01-candidate-c.json" ] || die "resources/vlc is a Candidate C development runtime; rebuild stock with scripts/bundle-vlc.sh --force"
