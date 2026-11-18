@@ -261,6 +261,10 @@ Sign in on first launch the same way you would at music.apple.com. This covers A
 
 This authenticates the FairPlay layer. Without it, playback falls back to AAC 256 kbps.
 
+After a new web sign-in, the app can offer to set up lossless audio. You can choose
+**Not Now** or enter your credentials in the separate lossless account form.
+Apple may ask for another verification code.
+
 1. Click the **Settings** cog wheel next to your account button
 2. Open **Account → Sign In…**, enter your Apple Account email and password, then the six-digit verification code Apple sends you
 

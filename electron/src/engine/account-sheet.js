@@ -169,7 +169,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         return b;
     }
 
-    function showSignIn(error = '', { email: knownEmail = '', failure = null } = {}) {
+    function showSignIn(error = '', { email: knownEmail = '', failure = null, optionalLossless = false } = {}) {
         view = 'signin';
         busy = false;
         const email = el(doc, 'input', { type: 'email', placeholder: 'Email or Phone Number', autocomplete: 'username', spellcheck: false, value: knownEmail });
@@ -194,15 +194,17 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         const rememberRow = el(doc, 'label', { class: 'remember', htmlFor: 'adam-account-remember' }, remember, ' Remember password on this computer');
         primary = button('Sign In', { isPrimary: true, onClick: submitSignIn });
         render(
-            [el(doc, 'h1', { id: 'adam-account-title' }, knownEmail ? 'Sign-In Required' : 'Sign in with your Apple Account'),
-             el(doc, 'div', { class: 'sub' }, knownEmail
+            [el(doc, 'h1', { id: 'adam-account-title' }, optionalLossless ? 'Set Up Lossless Audio' : knownEmail ? 'Sign-In Required' : 'Sign in with your Apple Account'),
+             el(doc, 'div', { class: 'sub' }, optionalLossless
+                 ? 'Lossless audio requires a separate sign-in. Apple may ask for a new verification code.'
+                 : knownEmail
                  ? `Enter the password for your Apple Account ${knownEmail}.`
                  : "Lossless and Hi-Res Lossless use Apple’s FairPlay, which needs its own sign-in.")],
             [el(doc, 'div', { class: 'group' }, email, el(doc, 'div', { class: 'pw' }, pass, eye)),
              rememberRow,
              el(doc, 'div', { class: 'note' }, 'Your password is sent only to Apple. Unless you tick the box, it is not kept on this computer.'),
              msg],
-            [button('Cancel', { onClick: cancel }), primary],
+            [button(optionalLossless ? 'Not Now' : 'Cancel', { onClick: cancel }), primary],
         );
         for (const i of inputs) {
             i.addEventListener('input', () => { primary.disabled = busy || !ready(); setMessage(''); });
@@ -425,10 +427,11 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         }
     }
 
-    async function openSignIn() {
+    async function openSignIn({ optionalLossless = false, shouldOpen = () => true } = {}) {
         let email = '';
         try { email = (await savedEmail()) || ''; } catch { /* no saved account: plain form */ }
-        showSignIn('', { email });
+        if (!shouldOpen() || (optionalLossless && view !== null)) return;
+        showSignIn('', { email, optionalLossless });
     }
 
     return { openSignIn, onSnapshot, close, isOpen: () => view !== null };

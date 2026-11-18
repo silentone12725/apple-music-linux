@@ -169,3 +169,25 @@ test('a failure after Retry shows Apple’s message on the form, then later snap
     assert.equal(dlg().open, true);
     assert.equal(inputs(dlg).length >= 2, true);
 });
+
+test('optional lossless setup waits for an explicit native sign-in submission', async () => {
+    const { sheet, calls, dlg } = setup({ savedEmail: async () => 'me@example.com' });
+    await sheet.openSignIn({ optionalLossless: true });
+    assert.match(dlg().textContent, /Set Up Lossless Audio/);
+    assert.equal(inputs(dlg)[1].value, '');
+    assert.deepEqual(calls, []);
+    dlg().find(e => e.dataset.label === 'Not Now')[0].click();
+    assert.equal(dlg().open, false);
+    assert.deepEqual(calls, []);
+});
+
+test('a sign-out during the optional account lookup cancels the offer', async () => {
+    let resolve;
+    const { sheet, dlg } = setup({ savedEmail: () => new Promise(r => { resolve = r; }) });
+    let signedIn = true;
+    const pending = sheet.openSignIn({ optionalLossless: true, shouldOpen: () => signedIn });
+    signedIn = false;
+    resolve('me@example.com');
+    await pending;
+    assert.equal(dlg(), undefined);
+});

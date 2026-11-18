@@ -815,7 +815,7 @@
       b.addEventListener("click", onClick);
       return b;
     }
-    function showSignIn(error = "", { email: knownEmail = "", failure = null } = {}) {
+    function showSignIn(error = "", { email: knownEmail = "", failure = null, optionalLossless = false } = {}) {
       view = "signin";
       busy = false;
       const email = el(doc, "input", { type: "email", placeholder: "Email or Phone Number", autocomplete: "username", spellcheck: false, value: knownEmail });
@@ -841,8 +841,8 @@
       primary = button("Sign In", { isPrimary: true, onClick: submitSignIn });
       render(
         [
-          el(doc, "h1", { id: "adam-account-title" }, knownEmail ? "Sign-In Required" : "Sign in with your Apple Account"),
-          el(doc, "div", { class: "sub" }, knownEmail ? `Enter the password for your Apple Account ${knownEmail}.` : "Lossless and Hi-Res Lossless use Apple\u2019s FairPlay, which needs its own sign-in.")
+          el(doc, "h1", { id: "adam-account-title" }, optionalLossless ? "Set Up Lossless Audio" : knownEmail ? "Sign-In Required" : "Sign in with your Apple Account"),
+          el(doc, "div", { class: "sub" }, optionalLossless ? "Lossless audio requires a separate sign-in. Apple may ask for a new verification code." : knownEmail ? `Enter the password for your Apple Account ${knownEmail}.` : "Lossless and Hi-Res Lossless use Apple\u2019s FairPlay, which needs its own sign-in.")
         ],
         [
           el(doc, "div", { class: "group" }, email, el(doc, "div", { class: "pw" }, pass, eye)),
@@ -850,7 +850,7 @@
           el(doc, "div", { class: "note" }, "Your password is sent only to Apple. Unless you tick the box, it is not kept on this computer."),
           msg
         ],
-        [button("Cancel", { onClick: cancel }), primary]
+        [button(optionalLossless ? "Not Now" : "Cancel", { onClick: cancel }), primary]
       );
       for (const i of inputs) {
         i.addEventListener("input", () => {
@@ -1136,13 +1136,14 @@
           break;
       }
     }
-    async function openSignIn() {
+    async function openSignIn({ optionalLossless = false, shouldOpen = () => true } = {}) {
       let email = "";
       try {
         email = await savedEmail() || "";
       } catch {
       }
-      showSignIn("", { email });
+      if (!shouldOpen() || optionalLossless && view !== null) return;
+      showSignIn("", { email, optionalLossless });
     }
     return { openSignIn, onSnapshot, close, isOpen: () => view !== null };
   }
@@ -7072,6 +7073,28 @@
     _pushLibraryTokens();
     window._adamEngine?.on("sse.open", _pushLibraryTokens);
     mk.addEventListener("authorizationStatusDidChange", _pushLibraryTokens);
+    let webSignedIn = mk.authorizationStatus === 3;
+    let webAuthRevision = 0;
+    mk.addEventListener("authorizationStatusDidChange", async () => {
+      const authorized = mk.authorizationStatus === 3;
+      if (webSignedIn === authorized) return;
+      webSignedIn = authorized;
+      const revision = ++webAuthRevision;
+      if (!authorized || _accountSheet().isOpen()) return;
+      try {
+        const r = await fetch(`${ENGINE}/api/v1/drm/status`, { signal: AbortSignal.timeout(4e3) });
+        if (!r.ok) return;
+        const status = await r.json();
+        if (revision !== webAuthRevision || !webSignedIn || _accountSheet().isOpen()) return;
+        const auth = status?.state?.authentication;
+        if (!status?.state || accountSignedIn(status) || status.challenge && status.challenge.type !== "credentials" || ["logging_in", "challenging"].includes(auth)) return;
+        await _accountSheet().openSignIn({
+          optionalLossless: true,
+          shouldOpen: () => revision === webAuthRevision && webSignedIn
+        });
+      } catch (_) {
+      }
+    });
     async function _mkFetchAll(mkInst, basePath, extraParams, onProgress) {
       const items = [];
       const [pathOnly, qs] = basePath.split("?");

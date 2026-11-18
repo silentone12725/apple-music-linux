@@ -6539,6 +6539,28 @@ async function setup() {
     window._adamEngine?.on('sse.open', _pushLibraryTokens);
     mk.addEventListener('authorizationStatusDidChange', _pushLibraryTokens);
 
+    // Web sign-in may offer lossless setup, but the separate form owns all credentials.
+    let webSignedIn = mk.authorizationStatus === 3;
+    let webAuthRevision = 0;
+    mk.addEventListener('authorizationStatusDidChange', async () => {
+        const authorized = mk.authorizationStatus === 3;
+        if (webSignedIn === authorized) return;
+        webSignedIn = authorized;
+        const revision = ++webAuthRevision;
+        if (!authorized || _accountSheet().isOpen()) return;
+        try {
+            const r = await fetch(`${ENGINE}/api/v1/drm/status`, { signal: AbortSignal.timeout(4000) });
+            if (!r.ok) return;
+            const status = await r.json();
+            if (revision !== webAuthRevision || !webSignedIn || _accountSheet().isOpen()) return;
+            const auth = status?.state?.authentication;
+            if (!status?.state || accountSignedIn(status) || status.challenge && status.challenge.type !== 'credentials' ||
+                ['logging_in', 'challenging'].includes(auth)) return;
+            await _accountSheet().openSignIn({ optionalLossless: true,
+                shouldOpen: () => revision === webAuthRevision && webSignedIn });
+        } catch (_) { /* Account settings remain available when the engine is offline. */ }
+    });
+
     // _mkFetchAll paginates a MusicKit library endpoint until exhausted.
     // Extracted from _syncLibraryViaJS so its CC stays independent.
     async function _mkFetchAll(mkInst, basePath, extraParams, onProgress) {
