@@ -52,6 +52,17 @@ sheet.replaceSync(`
 
   html, body { background: transparent !important; }
 
+  /* Home and New are long pages of shelves. Apple's artwork onload handler reads getComputedStyle() for every
+     image, which forces a style recalculation over the whole page each time, so a signed-in Home (about 6,500
+     nodes, a hundred images) kept the main thread busy for seconds after a click: a click on New could sit
+     unhandled while Home was still settling, and look like it had opened Home. Shelves off screen now skip
+     style and layout until they scroll near, and keep their measured height meanwhile. Measured on that page:
+     style recalculation of a Home/New click cycle fell from about 17 s to 3.5 s, clicks about twice as fast. */
+  main [data-testid="shelf-component"] {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto 320px;
+  }
+
   /* ── Sidebar glass ──
      Confirmed stable selector. Svelte hash classes change on every deploy;
      nav.navigation (tag + base class) is stable across versions. */
@@ -624,7 +635,7 @@ function _findInNavStack(stack, cursor, href) {
         #adam-nav-activity svg { display: block; width: 100%; height: 100%;
             animation: adam-nav-spin 1s steps(12) infinite; }
         #adam-nav-skel { position: fixed; z-index: 5; pointer-events: none; box-sizing: border-box;
-            padding: 0 40px; overflow: hidden; color: var(--adam-nav-text, #fff); }
+            padding: 0 var(--bodyGutter, 40px); overflow: hidden; color: var(--adam-nav-text, #fff); }
         /* No background of its own: the old page is hidden instead, so whatever the theme paints behind
            the page (palette colour, blurred wallpaper, compositor blur, plain black) shows through. */
         html.adam-nav-loading main { visibility: hidden !important; }
@@ -672,11 +683,15 @@ function _findInNavStack(stack, cursor, href) {
         : /\/new\/?$/.test(path) ? 'new'
         : 'shelves';
     const bar = (w, h, extra = '') => `<div class="sk" style="width:${w};height:${h}px;${extra}"></div>`;
-    const buildSkel = (kind, w, h) => {
+    // g: the page gutter (Apple's --bodyGutter: 40px from a 1000px window up, 25px below).
+    const buildSkel = (kind, w, h, g = 40) => {
         const need = (px, pitch) => Math.max(2, Math.ceil(px / pitch) + 1); // rows to fill the window height
-        const inner = Math.max(300, w - 80);
+        const inner = Math.max(300, w - 2 * g);
         const cols = (tile) => Math.max(2, Math.round((inner + 20) / (tile + 20) - 0.2));
         const head = (t) => bar(`${t}px`, 17, 'margin:30px 0 12px');
+        // Declared up here: the 'new' layout uses it above the Home layout, and a const read before its
+        // declaration throws, which left the New page with no skeleton of its own.
+        const shead = (t, top, bottom) => bar(`${t}px`, 17, `margin:${top}px 0 ${bottom}px`);
         if (kind === 'search') {
             return bar('100%', 36, 'border-radius:18px;margin:12px 0 28px;max-width:372px;margin-left:auto;margin-right:auto') +
                 head(160) + `<div style="height:70px;width:269px;margin-bottom:28px;border-radius:7px" class="sk"></div>` + head(170) +
@@ -712,23 +727,30 @@ function _findInNavStack(stack, cursor, href) {
                 `<div><div class="sk art" style="aspect-ratio:1"></div>${bar('70%', 12, 'margin-top:8px')}${bar('45%', 12, 'margin-top:3px')}</div>`).join('')}</div>`;
         }
         if (kind === 'new') {
-            // Wide editorial cards (eyebrow, two-line title, artwork), then a square shelf and a song list.
-            const hero = Math.round(inner * 0.4965), sqn = Math.round(inner * 0.2364);
-            const row = (w, h, body) => `<div style="display:flex;gap:20px;margin-right:-40px">` + Array.from({ length: Math.ceil((inner + 40) / (w + 20)) + 1 }, () => `<div style="flex:none;width:${w}px">${body(h)}</div>`).join('') + '</div>';
-            const songs = Array.from({ length: 3 }, () => `<div style="display:flex;align-items:center;gap:12px;height:55px">${bar('40px', 40, 'flex:none')}<div style="flex:1">${bar('36%', 12)}${bar('20%', 10, 'margin-top:6px')}</div></div>`).join('');
+            // The New page as measured live: the title; wide editorial cards (eyebrow, two-line title, artwork);
+            // the top songs as columns of four 55px rows; then shelves of square tiles. From a 1000px window up
+            // the blocks scale with the content width (cards 320, 370 and 460px at 1000, 1100 and 1280px); below
+            // it Apple uses fixed sizes and a 10px gap (298px cards, 270px song columns, 144px tiles).
+            const narrow = g < 40, gap = narrow ? 10 : 20;
+            const hero = narrow ? 298 : Math.round(inner * 0.4965), heroArt = narrow ? 171 : Math.round(hero * 0.5723);
+            const songW = narrow ? 270 : hero, sqn = narrow ? 144 : Math.round(inner * 0.2332);
+            const row = (cw, body) => `<div style="display:flex;gap:${gap}px;margin-right:-${g}px">` + Array.from({ length: Math.ceil((inner + g) / (cw + gap)) + 1 }, () => `<div style="flex:none;width:${cw}px">${body()}</div>`).join('') + '</div>';
+            const titleWidths = ['46%', '30%', '56%', '38%'];
+            const song = (i) => `<div style="display:flex;align-items:center;gap:16px;height:55px">${bar('40px', 40, 'flex:none;border-radius:4px')}<div style="flex:1">${bar(titleWidths[i], 14)}${bar('26%', 10, 'margin-top:5px')}</div></div>`;
+            const tile = () => `<div class="sk art" style="height:${sqn}px"></div>` + bar('72%', 12, 'margin-top:6px') + bar('48%', 12, 'margin-top:3px');
             return bar('90px', 30, 'margin:37px 0 0') +
-                row(hero, 241, (h) => bar('30%', 10, 'margin-top:35px') + bar('72%', 17, 'margin-top:8px') + bar('44%', 17, 'margin-top:6px') + `<div class="sk art" style="height:${h}px;margin-top:19px"></div>`) +
-                bar('126px', 17, 'margin:46px 0 16px') +
-                row(sqn, sqn, (h) => `<div class="sk art" style="height:${h}px"></div>` + bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px')) +
-                bar('155px', 17, 'margin:50px 0 14px') + songs +
-                Array.from({ length: Math.max(0, Math.ceil((h - 1000) / 300)) }, () => shead(150, 40, 15) + row(sqn, sqn, (hh) => `<div class="sk art" style="height:${hh}px"></div>` + bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px'))).join('');
+                row(hero, () => bar('30%', 10, 'margin-top:35px') + bar('72%', 17, 'margin-top:8px') + bar('44%', 17, 'margin-top:6px') + `<div class="sk art" style="height:${heroArt}px;margin-top:16px"></div>`) +
+                bar('170px', 17, 'margin:46px 0 16px') +
+                row(songW, () => [0, 1, 2, 3].map(song).join('')) +
+                bar('230px', 17, 'margin:46px 0 16px') +
+                row(sqn, tile) +
+                Array.from({ length: Math.max(0, Math.ceil((h - 1000) / 285)) }, () => shead(150, 40, 15) + row(sqn, tile)).join('');
         }
         // Home-style shelves scroll sideways, so the last tile runs off the right edge instead of ending at the padding.
-        const shelf = (w, h, lines) => `<div style="display:flex;gap:20px;margin-right:-40px">` +
-            Array.from({ length: Math.ceil((inner + 40) / (w + 20)) + 1 }, () =>
+        const shelf = (w, h, lines) => `<div style="display:flex;gap:20px;margin-right:-${g}px">` +
+            Array.from({ length: Math.ceil((inner + g) / (w + 20)) + 1 }, () =>
                 `<div style="flex:none;width:${w}px"><div class="sk art" style="height:${h}px"></div>${lines ? bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px') : ''}</div>`).join('') + '</div>';
         const big = Math.round(inner * 0.3227), sq = Math.round(inner * 0.2364);
-        const shead = (t, top, bottom) => bar(`${t}px`, 17, `margin:${top}px 0 ${bottom}px`);
         return bar('120px', 30, 'margin:36px 0 0') + shead(150, 48, 12) + shelf(big, Math.round(big * 1.333), false) +
             shead(160, 54, 15) + shelf(sq, sq, true) +
             Array.from({ length: Math.max(0, Math.ceil((h - 860) / 300)) }, () => shead(150, 40, 15) + shelf(sq, sq, true)).join('');
@@ -738,10 +760,13 @@ function _findInNavStack(stack, cursor, href) {
     let skelKey = '';
     const renderSkel = () => {
         const w = skel.clientWidth || 926, h = skel.clientHeight || innerHeight;
-        const key = `${to}|${w}x${h}`;
+        const gutter = parseFloat(getComputedStyle(skel).paddingLeft) || 40;
+        const key = `${to}|${w}x${h}|${gutter}`;
         if (key === skelKey) return;
         skelKey = key;
-        skel.innerHTML = buildSkel(kindOf(to), w, h);
+        // A layout that fails to build must not leave the previous page's blocks over this page.
+        try { skel.innerHTML = buildSkel(kindOf(to), w, h, gutter); }
+        catch (e) { skel.innerHTML = ''; console.warn('[Adam] skeleton layout failed:', e?.message); }
     };
     const mainEl = () => document.querySelector('main') || document.querySelector('[role=main]');
     const placeSkel = () => {
