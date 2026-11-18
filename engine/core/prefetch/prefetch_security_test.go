@@ -88,7 +88,7 @@ func TestTakePreWarmed_ExpiredReturnsNotFound(t *testing.T) {
 		expiresAt: time.Now().Add(-time.Hour), // already expired
 	}
 
-	id, ok := s.TakePreWarmed("asset1", false)
+	id, ok := s.TakePreWarmed("asset1", false, false)
 	if ok {
 		t.Errorf("expected ok=false for expired entry, got sessionID=%q", id)
 	}
@@ -109,7 +109,7 @@ func TestTakePreWarmed_ValidReturnsSession(t *testing.T) {
 		expiresAt: time.Now().Add(time.Hour),
 	}
 
-	id, ok := s.TakePreWarmed("asset2", false)
+	id, ok := s.TakePreWarmed("asset2", false, false)
 	if !ok {
 		t.Fatal("expected ok=true for valid entry")
 	}
@@ -117,7 +117,7 @@ func TestTakePreWarmed_ValidReturnsSession(t *testing.T) {
 		t.Errorf("expected sessionID %q, got %q", "sess-2", id)
 	}
 	// Must be consumed on first successful take.
-	_, ok2 := s.TakePreWarmed("asset2", false)
+	_, ok2 := s.TakePreWarmed("asset2", false, false)
 	if ok2 {
 		t.Error("TakePreWarmed must consume the entry — second call must return ok=false")
 	}
@@ -141,7 +141,7 @@ func TestTakePreWarmed_QualityMismatchRejected(t *testing.T) {
 	}
 
 	// Requesting lossless must not receive the AAC session.
-	if id, ok := s.TakePreWarmed("asset3", true); ok {
+	if id, ok := s.TakePreWarmed("asset3", true, false); ok {
 		t.Errorf("expected ok=false on quality mismatch, got sessionID=%q", id)
 	}
 	// The mismatched entry is released, not left behind for a later caller to hit.
@@ -155,7 +155,7 @@ func TestTakePreWarmed_QualityMismatchRejected(t *testing.T) {
 		expiresAt: time.Now().Add(time.Hour),
 		lossless:  true,
 	}
-	id, ok := s.TakePreWarmed("asset4", true)
+	id, ok := s.TakePreWarmed("asset4", true, false)
 	if !ok || id != "sess-4" {
 		t.Errorf("expected sess-4 on quality match, got %q ok=%v", id, ok)
 	}
@@ -168,8 +168,36 @@ func TestTakePreWarmed_MissingReturnsNotFound(t *testing.T) {
 		latencies:  ring.New(10),
 		queueWaits: ring.New(10),
 	}
-	_, ok := s.TakePreWarmed("nonexistent", false)
+	_, ok := s.TakePreWarmed("nonexistent", false, false)
 	if ok {
 		t.Error("TakePreWarmed must return ok=false for missing asset")
+	}
+}
+
+// Hi-res is a tier of lossless: a session warmed for the capped tier must not serve a hi-res request, nor the
+// other way round, or the chosen tier in Settings is silently ignored for the next track.
+func TestTakePreWarmed_HiResTierMismatchRejected(t *testing.T) {
+	newSched := func() *Scheduler {
+		return &Scheduler{preWarmed: map[string]preWarmedEntry{}, wq: newWorkQueue(), latencies: ring.New(10), queueWaits: ring.New(10)}
+	}
+	cases := []struct {
+		name             string
+		warmedHi, wantHi bool
+		warmedLossless   bool
+		wantLossless     bool
+		wantOK           bool
+	}{
+		{"capped entry, hi-res request", false, true, true, true, false},
+		{"hi-res entry, capped request", true, false, true, true, false},
+		{"hi-res entry, hi-res request", true, true, true, true, true},
+		{"capped entry, capped request", false, false, true, true, true},
+		{"hiRes flag without lossless is ignored", false, true, false, false, true},
+	}
+	for _, tc := range cases {
+		s := newSched()
+		s.preWarmed["a"] = preWarmedEntry{sessionID: "s", expiresAt: time.Now().Add(time.Hour), lossless: tc.warmedLossless, hiRes: tc.warmedHi}
+		if _, ok := s.TakePreWarmed("a", tc.wantLossless, tc.wantHi); ok != tc.wantOK {
+			t.Errorf("%s: ok=%v, want %v", tc.name, ok, tc.wantOK)
+		}
 	}
 }

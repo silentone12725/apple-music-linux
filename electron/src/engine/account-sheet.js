@@ -322,6 +322,8 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
 
     // Apple's "Check the account information you entered" dialog: Cancel / Retry. Retrying with the password we already sent would only
     // count as another wrong attempt at Apple (repeated ones lock the account), so Retry ends this attempt and asks for the password again.
+    // The dialog comes from Apple's library, which the engine pins to en-US (deviceInfoPrefix in
+    // engine/core/drm/deviceid.go): its button labels are English whatever language the page is in.
     const isWrongPasswordDialog = (labels) => labels.length === 2 && labels.some(l => /^retry$/i.test(l)) && labels.some(l => /^cancel$/i.test(l));
 
     function showChoice(buttonsStr, title = 'Recovery Options') {

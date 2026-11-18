@@ -2,6 +2,24 @@
 
 Unreleased changes, one entry per nightly build, newest first. Each entry is also posted on its own in the nightly channel on Discord, separate from the download announcement. Add the new entry at the top before publishing a nightly.
 
+# Nightly: unreleased changes (2026-11-18)
+
+### Sign-in
+- **Wrong password no longer locks you into a stuck dialog.** Apple's "Check the account information you entered" dialog now answers properly: Retry shows the sign-in form again with your email filled in (it no longer resubmits the same wrong password, which can lock the account), and Cancel closes the sheet.
+- **Saved-credential sign-in never asks for a code when the app opens.** If Apple wants a code, the form opens as "Sign-In Required" with your email already filled in, and you are asked when you click.
+- A failed sign-in no longer closes the account sheet by mistake; lossless is reported as signed in only once FairPlay is actually up.
+- The phone-number sign-in option works on more builds of Apple's libraries, and every sign-in connection now requires TLS 1.3.
+
+### Playback
+- Fixed a track that could be cut short or left truncated in the cache after a crash or a quick track change; loads that finish out of order no longer replace what is playing.
+- The media-key status (MPRIS) recovers from a stale "Stopped" while VLC is still playing.
+
+### Under the hood
+- The standalone wrapper code was removed from the DRM library (about 3,000 lines), along with several memory leaks.
+- Credit to ATAC-Helicopter for the contributions, now listed in `CONTRIBUTORS.md`.
+
+---
+
 # Nightly: unreleased changes (2026-11-11b)
 
 ### Speed

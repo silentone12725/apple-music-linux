@@ -125,7 +125,7 @@
 
   // src/engine/catalog.js
   var extractItemId = (item) => item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
-  var isVideoType = (t) => t === "music-videos" || t === "musicVideo" || t === "library-music-videos";
+  var isVideoType = (t2) => t2 === "music-videos" || t2 === "musicVideo" || t2 === "library-music-videos";
   var extractItemType = (item) => item?.type ?? item?.attributes?.playParams?.kind ?? item?.playParams?.kind ?? null;
 
   // src/engine/artpalette.js
@@ -216,11 +216,222 @@
     };
   }
 
+  // src/engine/menu-titles.js
+  var MENU_TITLES = {
+    "pin": ["afixar lista de reprodu\xE7\xE3o", "afixar m\xFAsica", "afixar videoclipe", "afixar \xE1lbum", "album anpinnen", "album r\xF6gz\xEDt\xE9se", "alb\xFCm\xFC i\u0307\u011Fnele", "dal r\xF6gz\xEDt\xE9se", "destacar canci\xF3n", "destacar playlist", "destacar video musical", "destacar \xE1lbum", "fastg\xF8r album", "fastg\xF8r musikvideo", "fastg\xF8r playliste", "fastg\xF8r sang", "fest album", "fest musikkvideo", "fest sang", "fest spilleliste", "fijar canci\xF3n", "fijar playlist", "fijar videoclip", "fijar \xE1lbum", "fixa el videoclip", "fixa la can\xE7\xF3", "fixa la llista", "fixa l\u2019\xE0lbum", "fixar m\xFAsica", "fixar playlist", "fixar videoclipe", "fixar \xE1lbum", "fixa\u021Bi albumul", "fixa\u021Bi clipul muzical", "fixa\u021Bi lista de redare", "fixa\u021Bi melodia", "f\xE4st album", "f\xE4st l\xE5t", "f\xE4st musikvideo", "f\xE4st spellista", "ghim album", "ghim b\xE0i h\xE1t", "ghim playlist", "ghim video nh\u1EA1c", "kiinnit\xE4 albumi", "kiinnit\xE4 kappale", "kiinnit\xE4 musiikkivideo", "kiinnit\xE4 soittolista", "lej\xE1tsz\xE1si lista r\xF6gz\xEDt\xE9se", "listeyi i\u0307\u011Fnele", "maak afspeellijst vast", "maak album vast", "maak muziekvideo vast", "maak nummer vast", "metti album in evidenza", "metti brano in evidenza", "metti playlist in evidenza", "metti video musicale in evidenza", "musikvideo anpinnen", "par\xE7ay\u0131 i\u0307\u011Fnele", "pin album", "pin daftar putar", "pin lagu", "pin music video", "pin playlist", "pin song", "pin video musik", "pinkan album", "pinkan lagu", "pinkan senarai main", "pinkan video muzik", "playlist anpinnen", "pripni album", "pripni glasbeni video", "pripni seznam predvajanja", "pripni skladbo", "pri\u0161pendli\u0165 album", "pri\u0161pendli\u0165 hudobn\xE9 video", "pri\u0161pendli\u0165 playlist", "pri\u0161pendli\u0165 skladbu", "przypnij album", "przypnij playlist\u0119", "przypnij teledysk", "przypnij utw\xF3r", "p\u0159i\u0161pendlit album", "p\u0159i\u0161pendlit hudebn\xED video", "p\u0159i\u0161pendlit playlist", "p\u0159i\u0161pendlit skladbu", "titel anpinnen", "video klibi i\u0307\u011Fnele", "zakva\u010Di album", "zakva\u010Di glazbeni spot", "zakva\u010Di listu", "zakva\u010Di pjesmu", "zenei vide\xF3 r\xF6gz\xEDt\xE9se", "\xE9pingler la chanson", "\xE9pingler la liste de lecture", "\xE9pingler la playlist", "\xE9pingler le clip vid\xE9o", "\xE9pingler le morceau", "\xE9pingler le vid\xE9oclip", "\xE9pingler l\u2019album", "\u03BA\u03B1\u03C1\u03C6\u03AF\u03C4\u03C3\u03C9\u03BC\u03B1 \u03AC\u03BB\u03BC\u03C0\u03BF\u03C5\u03BC", "\u03BA\u03B1\u03C1\u03C6\u03AF\u03C4\u03C3\u03C9\u03BC\u03B1 \u03BB\u03AF\u03C3\u03C4\u03B1\u03C2 \u03B1\u03BD\u03B1\u03C0\u03B1\u03C1\u03B1\u03B3\u03C9\u03B3\u03AE\u03C2", "\u03BA\u03B1\u03C1\u03C6\u03AF\u03C4\u03C3\u03C9\u03BC\u03B1 \u03BC\u03BF\u03C5\u03C3\u03B9\u03BA\u03BF\u03CD \u03B2\u03AF\u03BD\u03C4\u03B5\u03BF", "\u03BA\u03B1\u03C1\u03C6\u03AF\u03C4\u03C3\u03C9\u03BC\u03B1 \u03C4\u03C1\u03B1\u03B3\u03BF\u03C5\u03B4\u03B9\u03BF\u03CD", "\u0437\u0430\u043A\u0440\u0435\u043F\u0438\u0442\u044C \u0430\u043B\u044C\u0431\u043E\u043C", "\u0437\u0430\u043A\u0440\u0435\u043F\u0438\u0442\u044C \u0432\u0438\u0434\u0435\u043E\u043A\u043B\u0438\u043F", "\u0437\u0430\u043A\u0440\u0435\u043F\u0438\u0442\u044C \u043F\u0435\u0441\u043D\u044E", "\u0437\u0430\u043A\u0440\u0435\u043F\u0438\u0442\u044C \u043F\u043B\u0435\u0439\u043B\u0438\u0441\u0442", "\u0437\u0430\u043A\u0440\u0456\u043F\u0438\u0442\u0438 \u0430\u043B\u044C\u0431\u043E\u043C", "\u0437\u0430\u043A\u0440\u0456\u043F\u0438\u0442\u0438 \u0432\u0456\u0434\u0435\u043E\u043A\u043B\u0456\u043F", "\u0437\u0430\u043A\u0440\u0456\u043F\u0438\u0442\u0438 \u043F\u0456\u0434\u0431\u0456\u0440\u043A\u0443", "\u0437\u0430\u043A\u0440\u0456\u043F\u0438\u0442\u0438 \u043F\u0456\u0441\u043D\u044E", "\u05D4\u05E6\u05DE\u05D3\u05EA \u05D4\u05D0\u05DC\u05D1\u05D5\u05DD", "\u05D4\u05E6\u05DE\u05D3\u05EA \u05D4\u05E4\u05DC\u05D9\u05D9\u05DC\u05D9\u05E1\u05D8", "\u05D4\u05E6\u05DE\u05D3\u05EA \u05D4\u05E7\u05DC\u05D9\u05E4", "\u05D4\u05E6\u05DE\u05D3\u05EA \u05D4\u05E9\u05D9\u05E8", "\u0627\u0644\u0628\u0645 \u06A9\u0648 \u067E\u0646 \u06A9\u0631\u06CC\u06BA", "\u062A\u062B\u0628\u064A\u062A \u0627\u0644\u0623\u063A\u0646\u064A\u0629", "\u062A\u062B\u0628\u064A\u062A \u0627\u0644\u0623\u0644\u0628\u0648\u0645", "\u062A\u062B\u0628\u064A\u062A \u0627\u0644\u0641\u064A\u062F\u064A\u0648 \u0627\u0644\u0645\u0648\u0633\u064A\u0642\u064A", "\u062A\u062B\u0628\u064A\u062A \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u062A\u0634\u063A\u064A\u0644", "\u0645\u0648\u0633\u06CC\u0642\u06CC \u0648\u06CC\u0688\u06CC\u0648 \u06A9\u0648 \u067E\u0646 \u06A9\u0631\u06CC\u06BA", "\u067E\u0644\u06D2 \u0644\u0633\u0679 \u06A9\u0648 \u067E\u0646 \u06A9\u0631\u06CC\u06BA", "\u06AF\u0627\u0646\u06D2 \u06A9\u0648 \u067E\u0646 \u06A9\u0631\u06CC\u06BA", "\u0905\u0932\u094D\u092C\u092E \u092A\u093F\u0928 \u0915\u0930\u093E", "\u0910\u0932\u094D\u092C\u092E \u092A\u093F\u0928 \u0915\u0930\u0947\u0902", "\u0917\u093E\u0923\u0947 \u092A\u093F\u0928 \u0915\u0930\u093E", "\u0917\u0940\u0924 \u092A\u093F\u0928 \u0915\u0930\u0947\u0902", "\u092A\u094D\u0932\u0947\u0932\u093F\u0938\u094D\u091F \u092A\u093F\u0928 \u0915\u0930\u093E", "\u092A\u094D\u0932\u0947\u0932\u093F\u0938\u094D\u091F \u092A\u093F\u0928 \u0915\u0930\u0947\u0902", "\u0938\u0902\u0917\u0940\u0924 \u0935\u0940\u0921\u093F\u092F\u094B \u092A\u093F\u0928 \u0915\u0930\u0947\u0902", "\u0938\u0902\u0917\u0940\u0924 \u0935\u094D\u0939\u093F\u0921\u093F\u0913 \u092A\u093F\u0928 \u0915\u0930\u093E", "\u0985\u09CD\u09AF\u09BE\u09B2\u09AC\u09BE\u09AE \u09AA\u09BF\u09A8 \u0995\u09B0\u09C1\u09A8", "\u0997\u09BE\u09A8 \u09AA\u09BF\u09A8 \u0995\u09B0\u09C1\u09A8", "\u09AA\u09CD\u09B2\u09C7\u09B2\u09BF\u09B8\u09CD\u099F \u09AA\u09BF\u09A8 \u0995\u09B0\u09C1\u09A8", "\u09B8\u0999\u09CD\u0997\u09C0\u09A4 \u09AD\u09BF\u09A1\u09BF\u0993 \u09AA\u09BF\u09A8 \u0995\u09B0\u09C1\u09A8", "\u0A10\u0A32\u0A2C\u0A2E \u0A2A\u0A3F\u0A70\u0A28 \u0A15\u0A30\u0A4B", "\u0A17\u0A40\u0A24 \u0A2A\u0A3F\u0A70\u0A28 \u0A15\u0A30\u0A4B", "\u0A2A\u0A32\u0A47\u0A32\u0A3F\u0A38\u0A1F \u0A2A\u0A3F\u0A70\u0A28 \u0A15\u0A30\u0A4B", "\u0A38\u0A70\u0A17\u0A40\u0A24 \u0A35\u0A40\u0A21\u0A40\u0A13 \u0A2A\u0A3F\u0A70\u0A28 \u0A15\u0A30\u0A4B", "\u0A8D\u0AB2\u0ACD\u0AAC\u0AAE \u0AAA\u0ABF\u0AA8 \u0A95\u0AB0\u0ACB", "\u0A97\u0AC0\u0AA4 \u0AAA\u0ABF\u0AA8 \u0A95\u0AB0\u0ACB", "\u0AAA\u0ACD\u0AB2\u0AC7\u0AB2\u0ABF\u0AB8\u0ACD\u0A9F \u0AAA\u0ABF\u0AA8 \u0A95\u0AB0\u0ACB", "\u0AAE\u0ACD\u0AAF\u0AC2\u0A9D\u0ABF\u0A95 \u0AB5\u0AC0\u0AA1\u0ABF\u0AAF\u0ACB \u0AAA\u0ABF\u0AA8 \u0A95\u0AB0\u0ACB", "\u0B06\u0B32\u0B4D\u200C\u0B2C\u0B2E\u0B4D\u200D \u0B2A\u0B3F\u0B28\u0B4D\u200D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0B17\u0B40\u0B24 \u0B2A\u0B3F\u0B28\u0B4D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0B2A\u0B4D\u0B32\u0B47\u0B32\u0B3F\u0B37\u0B4D\u0B1F\u0B4D \u0B2A\u0B3F\u0B28\u0B4D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0B2E\u200D\u0B4D\u0B5F\u0B42\u0B1C\u0B3F\u0B15\u0B4D \u0B2D\u0B3F\u0B21\u0B3F\u0B13 \u0B2A\u0B3F\u0B28\u0B4D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0B86\u0BB2\u0BCD\u0BAA\u0BA4\u0BCD\u0BA4\u0BC8\u0BAA\u0BCD \u0BAA\u0BBF\u0BA9\u0BCD \u0B9A\u0BC6\u0BAF\u0BCD\u0BA4\u0BB2\u0BCD", "\u0B87\u0B9A\u0BC8 \u0BB5\u0BC0\u0B9F\u0BBF\u0BAF\u0BCB\u0BB5\u0BC8\u0BAA\u0BCD \u2018\u0BAA\u0BBF\u0BA9\u0BCD\u2019 \u0BAE\u0BC2\u0BB2\u0BAE\u0BCD \u0B95\u0BC1\u0BB1\u0BBF\u0BAF\u0BBF\u0B9F\u0BB5\u0BC1\u0BAE\u0BCD", "\u0BAA\u0BBE\u0B9F\u0BB2\u0BC8\u0BAA\u0BCD \u0BAA\u0BBF\u0BA9\u0BCD \u0B9A\u0BC6\u0BAF\u0BCD", "\u0BAA\u0BBF\u0BB3\u0BC7\u0BB2\u0BBF\u0BB8\u0BCD\u0B9F\u0BCD\u0B9F\u0BC8 \u0BAA\u0BBF\u0BA9\u0BCD \u0B9A\u0BC6\u0BAF\u0BCD\u0BA4\u0BB2\u0BCD", "\u0C06\u0C32\u0C4D\u0C2C\u0C2E\u0C4D\u200C\u0C28\u0C41 \u0C2A\u0C3F\u0C28\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0C2A\u0C3E\u0C1F\u0C28\u0C41 \u0C2A\u0C3F\u0C28\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0C2A\u0C4D\u0C32\u0C47\u0C32\u0C3F\u0C38\u0C4D\u0C1F\u0C4D\u200C\u0C28\u0C41 \u0C2A\u0C3F\u0C28\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0C38\u0C02\u0C17\u0C40\u0C24 \u0C35\u0C40\u0C21\u0C3F\u0C2F\u0C4B\u0C28\u0C41 \u0C2A\u0C3F\u0C28\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0C86\u0CB2\u0CCD\u0CAC\u0CAE\u0CCD \u0C85\u0CA8\u0CCD\u0CA8\u0CC1 \u0CAA\u0CBF\u0CA8\u0CCD \u0CAE\u0CBE\u0CA1\u0CBF", "\u0CAA\u0CCD\u0CB2\u0CC7\u0CB2\u0CBF\u0CB8\u0CCD\u0C9F\u0CCD \u0C85\u0CA8\u0CCD\u0CA8\u0CC1 \u0CAA\u0CBF\u0CA8\u0CCD \u0CAE\u0CBE\u0CA1\u0CBF", "\u0CB8\u0C82\u0C97\u0CC0\u0CA4\u0CA6 \u0CB5\u0CC0\u0CA1\u0CBF\u0CAF\u0CCA \u0CAA\u0CBF\u0CA8\u0CCD \u0CAE\u0CBE\u0CA1\u0CBF", "\u0CB9\u0CBE\u0CA1\u0CA8\u0CCD\u0CA8\u0CC1 \u0CAA\u0CBF\u0CA8\u0CCD \u0CAE\u0CBE\u0CA1\u0CBF", "\u0D06\u0D7D\u0D2C\u0D02 \u0D2A\u0D3F\u0D7B \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0D2A\u0D3E\u0D1F\u0D4D\u0D1F\u0D4D \u0D2A\u0D3F\u0D7B \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0D2A\u0D4D\u0D32\u0D47\u0D32\u0D3F\u0D38\u0D4D\u0D31\u0D4D\u0D31\u0D4D \u0D2A\u0D3F\u0D7B \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0D38\u0D02\u0D17\u0D40\u0D24 \u0D35\u0D40\u0D21\u0D3F\u0D2F\u0D4B \u0D2A\u0D3F\u0D7B \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0E1B\u0E31\u0E01\u0E2B\u0E21\u0E38\u0E14\u0E21\u0E34\u0E27\u0E2A\u0E34\u0E04\u0E27\u0E34\u0E14\u0E35\u0E42\u0E2D", "\u0E1B\u0E31\u0E01\u0E2B\u0E21\u0E38\u0E14\u0E2D\u0E31\u0E25\u0E1A\u0E31\u0E49\u0E21", "\u0E1B\u0E31\u0E01\u0E2B\u0E21\u0E38\u0E14\u0E40\u0E1E\u0E25\u0E07", "\u0E1B\u0E31\u0E01\u0E2B\u0E21\u0E38\u0E14\u0E40\u0E1E\u0E25\u0E22\u0E4C\u0E25\u0E34\u0E2A\u0E15\u0E4C", "\u30A2\u30EB\u30D0\u30E0\u3092\u30D4\u30F3\u7559\u3081", "\u30D7\u30EC\u30A4\u30EA\u30B9\u30C8\u3092\u30D4\u30F3\u7559\u3081", "\u30DF\u30E5\u30FC\u30B8\u30C3\u30AF\u30D3\u30C7\u30AA\u3092\u30D4\u30F3\u7559\u3081", "\u66F2\u3092\u30D4\u30F3\u7559\u3081", "\u7F6E\u9876\u4E13\u8F91", "\u7F6E\u9876\u64AD\u653E\u5217\u8868", "\u7F6E\u9876\u6B4C\u66F2", "\u7F6E\u9876\u97F3\u4E50\u89C6\u9891", "\u91D8\u9078mv", "\u91D8\u9078\u5C08\u8F2F", "\u91D8\u9078\u64AD\u653E\u5217\u8868", "\u91D8\u9078\u64AD\u653E\u6E05\u55AE", "\u91D8\u9078\u6B4C\u66F2", "\u91D8\u9078\u97F3\u6A02\u5F71\u7247", "\uB178\uB798 \uACE0\uC815", "\uBBA4\uC9C1\uBE44\uB514\uC624 \uACE0\uC815", "\uC568\uBC94 \uACE0\uC815", "\uD50C\uB808\uC774\uB9AC\uC2A4\uD2B8 \uACE0\uC815"],
+    "unpin": ["album losl\xF6sen", "album non in evidenza", "album r\xF6gz\xEDt\xE9s\xE9nek megsz\xFCntet\xE9se", "alb\xFCm\xFCn i\u0307\u011Fnesini kald\u0131r", "brano non in evidenza", "b\u1ECF ghim album", "b\u1ECF ghim b\xE0i h\xE1t", "b\u1ECF ghim playlist", "b\u1ECF ghim video nh\u1EA1c", "dal r\xF6gz\xEDt\xE9s\xE9nek megsz\xFCntet\xE9se", "deixa de fixar el videoclip", "deixa de fixar la can\xE7\xF3", "deixa de fixar la llista", "deixa de fixar l\u2019\xE0lbum", "dejar de destacar canci\xF3n", "dejar de destacar playlist", "dejar de destacar video musical", "dejar de destacar \xE1lbum", "desafixar lista de reprodu\xE7\xE3o", "desafixar m\xFAsica", "desafixar playlist", "desafixar videoclipe", "desafixar \xE1lbum", "desfijar canci\xF3n", "desfijar playlist", "desfijar videoclip", "desfijar \xE1lbum", "deta\u0219a\u021Bi albumul", "deta\u0219a\u021Bi clipul muzical", "deta\u0219a\u021Bi lista de redare", "deta\u0219a\u021Bi melodia", "d\xE9s\xE9pingler la chanson", "d\xE9s\xE9pingler la liste de lecture", "d\xE9s\xE9pingler le vid\xE9oclip", "d\xE9s\xE9pingler l\u2019album", "d\xE9tacher la playlist", "d\xE9tacher le clip vid\xE9o", "d\xE9tacher le morceau", "d\xE9tacher l\u2019album", "frig\xF8r album", "frig\xF8r musikvideo", "frig\xF8r playliste", "frig\xF8r sang", "irrota albumi", "irrota kappale", "irrota musiikkivideo", "irrota soittolista", "lej\xE1tsz\xE1si lista r\xF6gz\xEDt\xE9s\xE9nek megsz\xFCntet\xE9se", "lepas pin album", "lepas pin daftar putar", "lepas pin lagu", "lepas pin video musik", "listenin i\u0307\u011Fnesini kald\u0131r", "lossa album", "lossa l\xE5t", "lossa musikvideo", "lossa spellista", "l\xF8sne album", "l\xF8sne musikkvideo", "l\xF8sne sang", "l\xF8sne spilleliste", "maak afspeellijst los", "maak album los", "maak muziekvideo los", "maak nummer los", "musikvideo losl\xF6sen", "nyahpin album", "nyahpin lagu", "nyahpin senarai main", "nyahpin video muzik", "odepnij album", "odepnij playlist\u0119", "odepnij teledysk", "odepnij utw\xF3r", "odpni album", "odpni glasbeni video", "odpni seznam predvajanja", "odpni skladbo", "od\u0161pendlit album", "od\u0161pendlit hudebn\xED video", "od\u0161pendlit playlist", "od\u0161pendlit skladbu", "od\u0161pendli\u0165 album", "od\u0161pendli\u0165 hudobn\xE9 video", "od\u0161pendli\u0165 playlist", "od\u0161pendli\u0165 skladbu", "otkva\u010Di album", "otkva\u010Di glazbeni spot", "otkva\u010Di listu", "otkva\u010Di pjesmu", "par\xE7an\u0131n i\u0307\u011Fnesini kald\u0131r", "playlist losl\xF6sen", "playlist non in evidenza", "titel losl\xF6sen", "unpin album", "unpin music video", "unpin playlist", "unpin song", "video klibin i\u0307\u011Fnesini kald\u0131r", "video musicale non in evidenza", "zenei vide\xF3 r\xF6gz\xEDt\xE9s\xE9nek megsz\xFCntet\xE9se", "\u03BE\u03B5\u03BA\u03B1\u03C1\u03C6\u03AF\u03C4\u03C3\u03C9\u03BC\u03B1 \u03AC\u03BB\u03BC\u03C0\u03BF\u03C5\u03BC", "\u03BE\u03B5\u03BA\u03B1\u03C1\u03C6\u03AF\u03C4\u03C3\u03C9\u03BC\u03B1 \u03BB\u03AF\u03C3\u03C4\u03B1\u03C2 \u03B1\u03BD\u03B1\u03C0\u03B1\u03C1\u03B1\u03B3\u03C9\u03B3\u03AE\u03C2", "\u03BE\u03B5\u03BA\u03B1\u03C1\u03C6\u03AF\u03C4\u03C3\u03C9\u03BC\u03B1 \u03BC\u03BF\u03C5\u03C3\u03B9\u03BA\u03BF\u03CD \u03B2\u03AF\u03BD\u03C4\u03B5\u03BF", "\u03BE\u03B5\u03BA\u03B1\u03C1\u03C6\u03AF\u03C4\u03C3\u03C9\u03BC\u03B1 \u03C4\u03C1\u03B1\u03B3\u03BF\u03C5\u03B4\u03B9\u03BF\u03CD", "\u0432\u0456\u0434\u043A\u0440\u0456\u043F\u0438\u0442\u0438 \u0430\u043B\u044C\u0431\u043E\u043C", "\u0432\u0456\u0434\u043A\u0440\u0456\u043F\u0438\u0442\u0438 \u0432\u0456\u0434\u0435\u043E\u043A\u043B\u0456\u043F", "\u0432\u0456\u0434\u043A\u0440\u0456\u043F\u0438\u0442\u0438 \u043F\u0456\u0434\u0431\u0456\u0440\u043A\u0443", "\u0432\u0456\u0434\u043A\u0440\u0456\u043F\u0438\u0442\u0438 \u043F\u0456\u0441\u043D\u044E", "\u043E\u0442\u043A\u0440\u0435\u043F\u0438\u0442\u044C \u0430\u043B\u044C\u0431\u043E\u043C", "\u043E\u0442\u043A\u0440\u0435\u043F\u0438\u0442\u044C \u0432\u0438\u0434\u0435\u043E\u043A\u043B\u0438\u043F", "\u043E\u0442\u043A\u0440\u0435\u043F\u0438\u0442\u044C \u043F\u0435\u0441\u043D\u044E", "\u043E\u0442\u043A\u0440\u0435\u043F\u0438\u0442\u044C \u043F\u043B\u0435\u0439\u043B\u0438\u0441\u0442", "\u05D1\u05D9\u05D8\u05D5\u05DC \u05D4\u05E6\u05DE\u05D3\u05EA \u05D4\u05D0\u05DC\u05D1\u05D5\u05DD", "\u05D1\u05D9\u05D8\u05D5\u05DC \u05D4\u05E6\u05DE\u05D3\u05EA \u05D4\u05E4\u05DC\u05D9\u05D9\u05DC\u05D9\u05E1\u05D8", "\u05D1\u05D9\u05D8\u05D5\u05DC \u05D4\u05E6\u05DE\u05D3\u05EA \u05D4\u05E7\u05DC\u05D9\u05E4", "\u05D1\u05D9\u05D8\u05D5\u05DC \u05D4\u05E6\u05DE\u05D3\u05EA \u05D4\u05E9\u05D9\u05E8", "\u0625\u0644\u063A\u0627\u0621 \u062A\u062B\u0628\u064A\u062A \u0627\u0644\u0623\u063A\u0646\u064A\u0629", "\u0625\u0644\u063A\u0627\u0621 \u062A\u062B\u0628\u064A\u062A \u0627\u0644\u0623\u0644\u0628\u0648\u0645", "\u0625\u0644\u063A\u0627\u0621 \u062A\u062B\u0628\u064A\u062A \u0627\u0644\u0641\u064A\u062F\u064A\u0648 \u0627\u0644\u0645\u0648\u0633\u064A\u0642\u064A", "\u0625\u0644\u063A\u0627\u0621 \u062A\u062B\u0628\u064A\u062A \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u062A\u0634\u063A\u064A\u0644", "\u0627\u0644\u0628\u0645 \u06A9\u0648 \u0627\u0646 \u067E\u0646 \u06A9\u0631\u06CC\u06BA", "\u0645\u0648\u0633\u06CC\u0642\u06CC \u0648\u06CC\u0688\u06CC\u0648 \u06A9\u0627 \u067E\u0646 \u06C1\u0679\u0627\u0626\u06CC\u06BA", "\u067E\u0644\u06D2 \u0644\u0633\u0679 \u06A9\u0648 \u0627\u0646 \u067E\u0646 \u06A9\u0631\u06CC\u06BA", "\u06AF\u0627\u0646\u06D2 \u06A9\u0648 \u0627\u0646 \u067E\u0646 \u06A9\u0631\u06CC\u06BA", "\u0905\u0932\u094D\u092C\u092E \u0905\u0928\u092A\u093F\u0928 \u0915\u0930\u093E", "\u0910\u0932\u094D\u092C\u092E \u0905\u0928\u092A\u093F\u0928 \u0915\u0930\u0947\u0902", "\u0917\u093E\u0923\u0947 \u0905\u0928\u092A\u093F\u0928 \u0915\u0930\u093E", "\u0917\u0940\u0924 \u0905\u0928\u092A\u093F\u0928 \u0915\u0930\u0947\u0902", "\u092A\u094D\u0932\u0947\u0932\u093F\u0938\u094D\u091F \u0905\u0928\u092A\u093F\u0928 \u0915\u0930\u093E", "\u092A\u094D\u0932\u0947\u0932\u093F\u0938\u094D\u091F \u0905\u0928\u092A\u093F\u0928 \u0915\u0930\u0947\u0902", "\u0938\u0902\u0917\u0940\u0924 \u0935\u0940\u0921\u093F\u092F\u094B \u0905\u0928\u092A\u093F\u0928 \u0915\u0930\u0947\u0902", "\u0938\u0902\u0917\u0940\u0924 \u0935\u094D\u0939\u093F\u0921\u093F\u0913 \u0905\u0928\u092A\u093F\u0928 \u0915\u0930\u093E", "\u0985\u09CD\u09AF\u09BE\u09B2\u09AC\u09BE\u09AE \u0986\u09A8\u09AA\u09BF\u09A8 \u0995\u09B0\u09C1\u09A8", "\u0997\u09BE\u09A8 \u0986\u09A8\u09AA\u09BF\u09A8 \u0995\u09B0\u09C1\u09A8", "\u09AA\u09CD\u09B2\u09C7\u09B2\u09BF\u09B8\u09CD\u099F \u0986\u09A8\u09AA\u09BF\u09A8 \u0995\u09B0\u09C1\u09A8", "\u09B8\u0999\u09CD\u0997\u09C0\u09A4 \u09AD\u09BF\u09A1\u09BF\u0993 \u0986\u09A8\u09AA\u09BF\u09A8 \u0995\u09B0\u09C1\u09A8", "\u0A10\u0A32\u0A2C\u0A2E \u0A05\u0A28\u0A2A\u0A3F\u0A70\u0A28 \u0A15\u0A30\u0A4B", "\u0A17\u0A40\u0A24 \u0A28\u0A42\u0A70 \u0A05\u0A28\u0A2A\u0A3F\u0A70\u0A28 \u0A15\u0A30\u0A4B", "\u0A2A\u0A32\u0A47\u0A32\u0A3F\u0A38\u0A1F \u0A28\u0A42\u0A70 \u0A05\u0A28\u0A2A\u0A3F\u0A70\u0A28 \u0A15\u0A30\u0A4B", "\u0A38\u0A70\u0A17\u0A40\u0A24 \u0A35\u0A40\u0A21\u0A40\u0A13 \u0A05\u0A28\u0A2A\u0A3F\u0A70\u0A28 \u0A15\u0A30\u0A4B", "\u0A8D\u0AB2\u0ACD\u0AAC\u0AAE \u0A85\u0AA8\u0AAA\u0ABF\u0AA8 \u0A95\u0AB0\u0ACB", "\u0A97\u0AC0\u0AA4 \u0A85\u0AA8\u0AAA\u0ABF\u0AA8 \u0A95\u0AB0\u0ACB", "\u0AAA\u0ACD\u0AB2\u0AC7\u0AB2\u0ABF\u0AB8\u0ACD\u0A9F \u0A85\u0AA8\u0AAA\u0ABF\u0AA8 \u0A95\u0AB0\u0ACB", "\u0AAE\u0ACD\u0AAF\u0AC2\u0A9D\u0ABF\u0A95 \u0AB5\u0AC0\u0AA1\u0ABF\u0AAF\u0ACB \u0A85\u0AA8\u0AAA\u0ABF\u0AA8 \u0A95\u0AB0\u0ACB", "\u0B06\u0B32\u0B4D\u200D\u0B2C\u0B2E\u0B4D\u200D \u0B05\u0B28\u0B4D\u200D\u0B2A\u0B3F\u0B28\u0B4D\u200D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0B17\u0B40\u0B24 \u0B05\u0B28\u0B4D\u200D\u0B2A\u0B3F\u0B28\u0B4D\u200D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0B2A\u0B4D\u0B32\u0B47\u0B32\u0B3F\u0B37\u0B4D\u0B1F\u0B4D \u0B05\u0B28\u0B4D\u200D\u0B2A\u0B3F\u0B28\u0B4D\u200D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0B2E\u200D\u0B4D\u0B5F\u0B42\u0B1C\u0B3F\u0B15\u0B4D \u0B2D\u0B3F\u0B21\u0B3F\u0B13 \u0B05\u0B28\u0B4D\u200C\u0B2A\u0B3F\u0B28\u0B4D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0B86\u0BB2\u0BCD\u0BAA\u0BA4\u0BCD\u0BA4\u0BBF\u0BA9\u0BCD \u0BAA\u0BBF\u0BA9\u0BCD\u0BA9\u0BC8 \u0B85\u0B95\u0BB1\u0BCD\u0BB1\u0BC1\u0BA4\u0BB2\u0BCD", "\u0B87\u0B9A\u0BC8 \u0BB5\u0BC0\u0B9F\u0BBF\u0BAF\u0BCB\u0BB5\u0BBF\u0BB2\u0BCD \u0B89\u0BB3\u0BCD\u0BB3 \u2018\u0BAA\u0BBF\u0BA9\u0BCD\u2019 \u0B95\u0BC1\u0BB1\u0BBF\u0BAF\u0BC0\u0B9F\u0BCD\u0B9F\u0BC8 \u0BA8\u0BC0\u0B95\u0BCD\u0B95\u0BB5\u0BC1\u0BAE\u0BCD", "\u0BAA\u0BBE\u0B9F\u0BB2\u0BBF\u0BA9\u0BCD \u0BAA\u0BBF\u0BA9\u0BCD\u0BA9\u0BC8 \u0B85\u0B95\u0BB1\u0BCD\u0BB1\u0BC1\u0BA4\u0BB2\u0BCD", "\u0BAA\u0BBF\u0BB3\u0BC7\u0BB2\u0BBF\u0BB8\u0BCD\u0B9F\u0BCD\u0B9F\u0BBF\u0BA9\u0BCD \u0BAA\u0BBF\u0BA9\u0BCD\u0BA9\u0BC8 \u0B85\u0B95\u0BB1\u0BCD\u0BB1\u0BC1", "\u0C06\u0C32\u0C4D\u0C2C\u0C2E\u0C4D\u200C\u0C28\u0C41 \u0C05\u0C28\u0C4D\u200C\u0C2A\u0C3F\u0C28\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0C2A\u0C3E\u0C1F\u0C28\u0C41 \u0C05\u0C28\u0C4D\u200C\u0C2A\u0C3F\u0C28\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0C2A\u0C4D\u0C32\u0C47\u0C32\u0C3F\u0C38\u0C4D\u0C1F\u0C4D\u200C\u0C28\u0C41 \u0C05\u0C28\u0C4D\u200C\u0C2A\u0C3F\u0C28\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0C38\u0C02\u0C17\u0C40\u0C24 \u0C35\u0C40\u0C21\u0C3F\u0C2F\u0C4B\u0C28\u0C41 \u0C05\u0C28\u0C4D\u200C\u0C2A\u0C3F\u0C28\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0C86\u0CB2\u0CCD\u0CAC\u0CAE\u0CCD \u0C85\u0CA8\u0CCD\u0CA8\u0CC1 \u0C85\u0CA8\u0CCD\u200C\u0CAA\u0CBF\u0CA8\u0CCD \u0CAE\u0CBE\u0CA1\u0CBF", "\u0CAA\u0CCD\u0CB2\u0CC7\u0CB2\u0CBF\u0CB8\u0CCD\u0C9F\u0CCD \u0C85\u0CA8\u0CCD\u0CA8\u0CC1 \u0C85\u0CA8\u0CCD\u200C\u0CAA\u0CBF\u0CA8\u0CCD \u0CAE\u0CBE\u0CA1\u0CBF", "\u0CB8\u0C82\u0C97\u0CC0\u0CA4\u0CA6 \u0CB5\u0CC0\u0CA1\u0CBF\u0CAF\u0CCA \u0CAA\u0CBF\u0CA8\u0CCD \u0CA4\u0CC6\u0C97\u0CC6\u0CAF\u0CBF\u0CB0\u0CBF", "\u0CB9\u0CBE\u0CA1\u0CA8\u0CCD\u0CA8\u0CC1 \u0C85\u0CA8\u0CCD\u200C\u0CAA\u0CBF\u0CA8\u0CCD \u0CAE\u0CBE\u0CA1\u0CBF", "\u0D06\u0D7D\u0D2C\u0D02 \u0D05\u0D7A\u0D2A\u0D3F\u0D7B \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0D2A\u0D3E\u0D1F\u0D4D\u0D1F\u0D4D \u0D05\u0D7A\u0D2A\u0D3F\u0D7B \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0D2A\u0D4D\u0D32\u0D47\u0D32\u0D3F\u0D38\u0D4D\u0D31\u0D4D\u0D31\u0D4D \u0D05\u0D7A\u0D2A\u0D3F\u0D7B \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0D38\u0D02\u0D17\u0D40\u0D24 \u0D35\u0D40\u0D21\u0D3F\u0D2F\u0D4B \u0D05\u0D7A\u0D2A\u0D3F\u0D7B \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0E1B\u0E25\u0E14\u0E2B\u0E21\u0E38\u0E14\u0E21\u0E34\u0E27\u0E2A\u0E34\u0E04\u0E27\u0E34\u0E14\u0E35\u0E42\u0E2D", "\u0E1B\u0E25\u0E14\u0E2B\u0E21\u0E38\u0E14\u0E2D\u0E31\u0E25\u0E1A\u0E31\u0E49\u0E21", "\u0E1B\u0E25\u0E14\u0E2B\u0E21\u0E38\u0E14\u0E40\u0E1E\u0E25\u0E07", "\u0E1B\u0E25\u0E14\u0E2B\u0E21\u0E38\u0E14\u0E40\u0E1E\u0E25\u0E22\u0E4C\u0E25\u0E34\u0E2A\u0E15\u0E4C", "\u30A2\u30EB\u30D0\u30E0\u306E\u30D4\u30F3\u7559\u3081\u3092\u89E3\u9664", "\u30D7\u30EC\u30A4\u30EA\u30B9\u30C8\u306E\u30D4\u30F3\u7559\u3081\u3092\u89E3\u9664", "\u30DF\u30E5\u30FC\u30B8\u30C3\u30AF\u30D3\u30C7\u30AA\u306E\u30D4\u30F3\u7559\u3081\u3092\u89E3\u9664", "\u53D6\u6D88\u7F6E\u9876\u4E13\u8F91", "\u53D6\u6D88\u7F6E\u9876\u64AD\u653E\u5217\u8868", "\u53D6\u6D88\u7F6E\u9876\u6B4C\u66F2", "\u53D6\u6D88\u7F6E\u9876\u97F3\u4E50\u89C6\u9891", "\u53D6\u6D88\u91D8\u9078mv", "\u53D6\u6D88\u91D8\u9078\u5C08\u8F2F", "\u53D6\u6D88\u91D8\u9078\u64AD\u653E\u5217\u8868", "\u53D6\u6D88\u91D8\u9078\u64AD\u653E\u6E05\u55AE", "\u53D6\u6D88\u91D8\u9078\u6B4C\u66F2", "\u53D6\u6D88\u91D8\u9078\u97F3\u6A02\u5F71\u7247", "\u66F2\u306E\u30D4\u30F3\u7559\u3081\u3092\u89E3\u9664", "\uB178\uB798 \uACE0\uC815 \uD574\uC81C", "\uBBA4\uC9C1\uBE44\uB514\uC624 \uACE0\uC815 \uD574\uC81C", "\uC568\uBC94 \uACE0\uC815 \uD574\uC81C", "\uD50C\uB808\uC774\uB9AC\uC2A4\uD2B8 \uACE0\uC815 \uD574\uC81C"],
+    "delete-from-library": ["apagar da biblioteca", "ar\u015Fiv\u2019den sil", "aus mediathek l\xF6schen", "delete from library", "elimina dalla libreria", "eliminar de la biblioteca", "hapus dari perpustakaan", "izbri\u0161i iz knji\u017Enice", "izbri\u0161i iz medijateke", "padam daripada pustaka", "poista kirjastosta", "radera fr\xE5n biblioteket", "slet fra biblioteket", "slett fra biblioteket", "smazat z knihovny", "supprimer de la biblioth\xE8que", "t\xF6rl\xE9s a k\xF6nyvt\xE1rb\xF3l", "usu\u0144 z biblioteki", "verwijder uit bibliotheek", "vymaza\u0165 z kni\u017Enice", "x\xF3a kh\u1ECFi th\u01B0 vi\u1EC7n", "\u0219terge\u021Bi din bibliotec\u0103", "\u03B4\u03B9\u03B1\u03B3\u03C1\u03B1\u03C6\u03AE \u03B1\u03C0\u03CC \u03C4\u03B7 \u03B2\u03B9\u03B2\u03BB\u03B9\u03BF\u03B8\u03AE\u03BA\u03B7", "\u0432\u0438\u0434\u0430\u043B\u0438\u0442\u0438 \u0437 \u043C\u0435\u0434\u0456\u0430\u0442\u0435\u043A\u0438", "\u0443\u0434\u0430\u043B\u0438\u0442\u044C \u0438\u0437 \u043C\u0435\u0434\u0438\u0430\u0442\u0435\u043A\u0438", "\u05DE\u05D7\u05D9\u05E7\u05D4 \u05DE\u05D4\u05E1\u05E4\u05E8\u05D9\u05D4", "\u062D\u0630\u0641 \u0645\u0646 \u0627\u0644\u0645\u0643\u062A\u0628\u0629", "\u0644\u0627\u0626\u0628\u0631\u06CC\u0631\u06CC \u0633\u06D2 \u062D\u0630\u0641 \u06A9\u0631\u06CC\u06BA", "\u0932\u093E\u0907\u092C\u094D\u0930\u0947\u0930\u0940 \u0938\u0947 \u0939\u091F\u093E\u090F\u0901", "\u0932\u093E\u092F\u092C\u094D\u0930\u0930\u0940\u092E\u0927\u0942\u0928 \u0939\u091F\u0935\u093E", "\u09B2\u09BE\u0987\u09AC\u09CD\u09B0\u09C7\u09B0\u09BF \u09A5\u09C7\u0995\u09C7 \u09A1\u09BF\u09B2\u09BF\u099F \u0995\u09B0\u09C1\u09A8", "\u0A32\u0A3E\u0A07\u0A2C\u0A4D\u0A30\u0A47\u0A30\u0A40 \u0A24\u0A4B\u0A02 \u0A21\u0A3F\u0A32\u0A40\u0A1F \u0A15\u0A30\u0A4B", "\u0AB2\u0ABE\u0A87\u0AAC\u0ACD\u0AB0\u0AC7\u0AB0\u0AC0\u0AAE\u0ABE\u0A82\u0AA5\u0AC0 \u0AA1\u0ABF\u0AB2\u0AC0\u0A9F \u0A95\u0AB0\u0ACB", "\u0B32\u0B3E\u0B07\u0B2C\u0B4D\u0B30\u0B47\u0B30\u0B3F\u0B30\u0B41 \u0B21\u0B3F\u0B32\u0B3F\u0B1F\u0B4D \u0B15\u0B30\u0B28\u0B4D\u0B24\u0B41", "\u0BB2\u0BC8\u0BAA\u0BCD\u0BB0\u0BB0\u0BBF\u0BAF\u0BBF\u0BB2\u0BBF\u0BB0\u0BC1\u0BA8\u0BCD\u0BA4\u0BC1 \u0BA8\u0BC0\u0B95\u0BCD\u0B95\u0BC1", "\u0C32\u0C48\u0C2C\u0C4D\u0C30\u0C30\u0C40 \u0C28\u0C41\u0C02\u0C21\u0C3F \u0C21\u0C3F\u0C32\u0C40\u0C1F\u0C4D \u0C1A\u0C47\u0C2F\u0C02\u0C21\u0C3F", "\u0CB2\u0CC8\u0CAC\u0CCD\u0CB0\u0CB0\u0CBF\u0CAF\u0CBF\u0C82\u0CA6 \u0CA1\u0CBF\u0CB2\u0CC0\u0C9F\u0CCD \u0CAE\u0CBE\u0CA1\u0CBF", "\u0D32\u0D48\u0D2C\u0D4D\u0D30\u0D31\u0D3F\u0D2F\u0D3F\u0D7D \u0D28\u0D3F\u0D28\u0D4D\u0D28\u0D4D \u0D21\u0D3F\u0D32\u0D40\u0D31\u0D4D\u0D31\u0D4D \u0D1A\u0D46\u0D2F\u0D4D\u0D2F\u0D42", "\u0E25\u0E1A\u0E2D\u0E2D\u0E01\u0E08\u0E32\u0E01\u0E04\u0E25\u0E31\u0E07", "\u30E9\u30A4\u30D6\u30E9\u30EA\u304B\u3089\u524A\u9664", "\u4ECE\u8D44\u6599\u5E93\u4E2D\u5220\u9664", "\u5F9E\u8CC7\u6599\u5EAB\u4E2D\u522A\u9664", "\uBCF4\uAD00\uD568\uC5D0\uC11C \uC0AD\uC81C"],
+    "add-to-playlist": ["add to playlist", "adicionar \xE0 lista de reprodu\xE7\xE3o", "adicionar \xE0 playlist", "ad\u0103uga\u021Bi \xEEn lista de redare", "afegir a la llista de reproducci\xF3", "aggiungi alla playlist", "agregar a una playlist", "ajouter \xE0 la liste de lecture", "ajouter \xE0 la playlist", "a\xF1adir a la playlist", "dodaj do playlisty", "dodaj na playlistu", "dodaj na seznam predvajanja", "f\xF8j til playliste", "hozz\xE1ad\xE1s a lej\xE1tsz\xE1si list\xE1hoz", "legg til i spilleliste", "listeye ekle", "lis\xE4\xE4 soittolistalle", "l\xE4gg till i spellista", "prida\u0165 do playlistu", "p\u0159idat do playlistu", "tambah ke senarai main", "tambahkan ke daftar putar", "th\xEAm v\xE0o playlist", "voeg toe aan afspeellijst", "zur playlist hinzuf\xFCgen", "\u03C0\u03C1\u03BF\u03C3\u03B8\u03AE\u03BA\u03B7 \u03C3\u03B5 \u03BB\u03AF\u03C3\u03C4\u03B1 \u03B1\u03BD\u03B1\u03C0\u03B1\u03C1\u03B1\u03B3\u03C9\u03B3\u03AE\u03C2", "\u0434\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0432 \u043F\u043B\u0435\u0439\u043B\u0438\u0441\u0442", "\u0434\u043E\u0434\u0430\u0442\u0438 \u0434\u043E \u043F\u0456\u0434\u0431\u0456\u0440\u043A\u0438", "\u05D4\u05D5\u05E1\u05E4\u05D4 \u05DC\u05E4\u05DC\u05D9\u05D9\u05DC\u05D9\u05E1\u05D8", "\u0625\u0636\u0627\u0641\u0629 \u0625\u0644\u0649 \u0642\u0627\u0626\u0645\u0629 \u062A\u0634\u063A\u064A\u0644", "\u067E\u0644\u06D2 \u0644\u0633\u0679 \u0645\u06CC\u06BA \u0634\u0627\u0645\u0644 \u06A9\u0631\u06CC\u06BA", "\u092A\u094D\u0932\u0947\u0932\u093F\u0938\u094D\u091F \u092E\u0947\u0902 \u091C\u094B\u0921\u093C\u0947\u0902", "\u092A\u094D\u0932\u0947\u0932\u093F\u0938\u094D\u091F\u092E\u0927\u094D\u092F\u0947 \u0938\u092E\u093E\u0935\u093F\u0937\u094D\u091F \u0915\u0930\u093E", "\u09AA\u09CD\u09B2\u09C7\u09B2\u09BF\u09B8\u09CD\u099F\u09C7 \u09AF\u09CB\u0997 \u0995\u09B0\u09C1\u09A8", "\u0A2A\u0A32\u0A47\u0A32\u0A3F\u0A38\u0A1F \u0A35\u0A3F\u0A71\u0A1A \u0A1C\u0A4B\u0A5C\u0A4B", "\u0AAA\u0ACD\u0AB2\u0AC7\u0AB2\u0ABF\u0AB8\u0ACD\u0A9F\u0AAE\u0ABE\u0A82 \u0A89\u0AAE\u0AC7\u0AB0\u0ACB", "\u0B2A\u0B4D\u0B32\u0B47\u0B32\u0B3F\u0B37\u0B4D\u0B1F\u0B4D\u200C\u0B30\u0B47 \u0B2F\u0B4B\u0B21\u0B3C\u0B28\u0B4D\u0B24\u0B41", "\u0BAA\u0BBF\u0BB3\u0BC7\u0BB2\u0BBF\u0BB8\u0BCD\u0B9F\u0BCD\u0B9F\u0BBF\u0BB2\u0BCD \u0B9A\u0BC7\u0BB0\u0BCD", "\u0C2A\u0C4D\u0C32\u0C47\u0C32\u0C3F\u0C38\u0C4D\u0C1F\u0C4D\u200C\u0C15\u0C3F \u0C1C\u0C4B\u0C21\u0C3F\u0C02\u0C1A\u0C02\u0C21\u0C3F", "\u0CAA\u0CCD\u0CB2\u0CC7\u0CB2\u0CBF\u0CB8\u0CCD\u0C9F\u0CCD\u200C\u0C97\u0CC6 \u0CB8\u0CC7\u0CB0\u0CBF\u0CB8\u0CBF", "\u0D2A\u0D4D\u0D32\u0D47\u0D32\u0D3F\u0D38\u0D4D\u0D31\u0D4D\u0D31\u0D3F\u0D32\u0D47\u0D15\u0D4D\u0D15\u0D4D \u0D1A\u0D47\u0D7C\u0D15\u0D4D\u0D15\u0D42", "\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E44\u0E1B\u0E22\u0E31\u0E07\u0E40\u0E1E\u0E25\u0E22\u0E4C\u0E25\u0E34\u0E2A\u0E15\u0E4C", "\u30D7\u30EC\u30A4\u30EA\u30B9\u30C8\u306B\u8FFD\u52A0", "\u52A0\u5165\u64AD\u653E\u5217\u8868", "\u52A0\u5165\u64AD\u653E\u6E05\u55AE", "\u6DFB\u52A0\u5230\u6B4C\u5355", "\uD50C\uB808\uC774\uB9AC\uC2A4\uD2B8\uC5D0 \uCD94\uAC00"]
+  };
+
+  // src/engine/menu-action.js
+  function fnv1a(text) {
+    let h = 2166136261;
+    for (let i = 0; i < text.length; i++) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h.toString(16);
+  }
+  var GLYPH_ACTIONS = {
+    "72557939": "add-to-library",
+    "2ddfd2ba": "add-to-playlist",
+    "c45f9389": "add-to-calendar",
+    "3f03920": "calendar",
+    "fc91e6a": "create-station",
+    "c472d89c": "credits",
+    "d0fdaec1": "embed",
+    "535086c5": "favorite",
+    "d6b3f193": "folder",
+    "aa2cdf75": "copy-link",
+    "d590f040": "play-later",
+    "ce078b17": "play-next",
+    "b439c1b5": "remove-from-playlist",
+    "f02b5d3d": "share",
+    "c5d19254": "show-album",
+    "3c79e931": "suggest-less",
+    "7ce46d0c": "unfavorite",
+    "3e19e401": "show-translation",
+    "7c52d55c": "show-pronunciation",
+    "77ac3a49": "hide-translation",
+    "c6f747d4": "hide-pronunciation"
+  };
+  var ENGLISH_TITLE_ACTIONS = {
+    "Copy Embed Code": "embed",
+    "Download": "embed",
+    "Copy Link": "copy-link",
+    "Add to Playlist": "add-to-playlist"
+  };
+  function normalizeTitle(title) {
+    return String(title ?? "").replace(/\u00ad/g, "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+  var TRANSLATED_TITLE_ACTIONS = (() => {
+    const map = {};
+    for (const [action, titles] of Object.entries(MENU_TITLES)) for (const t2 of titles) map[t2] ??= action;
+    map["remove from library"] ??= "delete-from-library";
+    return map;
+  })();
+  function createMenuActionResolver(glyphActions = GLYPH_ACTIONS, titleActions = ENGLISH_TITLE_ACTIONS, translated = TRANSLATED_TITLE_ACTIONS) {
+    return (glyphPath, title) => {
+      if (glyphPath) {
+        const byGlyph = glyphActions[fnv1a(glyphPath)];
+        if (byGlyph) return byGlyph;
+      }
+      return titleActions[title] ?? translated[normalizeTitle(title)] ?? null;
+    };
+  }
+  var menuAction = createMenuActionResolver();
+
+  // src/engine/transport-skip.js
+  var SKIP_SELECTOR = '[data-testid="playback-control-item-skip"], amp-playback-controls-skip';
+  function skipDirection(el2) {
+    if (el2?.localName === "amp-playback-controls-skip") {
+      const direction = el2.getAttribute("direction");
+      return direction === "back" ? "previous" : direction === "forward" ? "next" : null;
+    }
+    if (el2?.classList?.contains("previous")) return "previous";
+    if (el2?.classList?.contains("next")) return "next";
+    return null;
+  }
+  function footerAction(cls, closest) {
+    const direction = closest("amp-playback-controls-skip")?.getAttribute("direction") ?? /button--(back|forward)/.exec(cls)?.[1] ?? null;
+    if (closest("amp-playback-controls-play") || cls.includes("play") || cls.includes("pause")) return { action: "play" };
+    if (direction || cls.includes("skip")) return { action: "skip", delta: direction === "back" ? -10 : 10 };
+    if (closest("amp-playback-controls-full-screen") || cls.includes("full-screen") || cls.includes("fullscreen")) return { action: "fullscreen" };
+    return null;
+  }
+
+  // src/engine/i18n.js
+  var LANGUAGES = [
+    "ar",
+    "ca",
+    "cs",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "es-mx",
+    "fi",
+    "fr",
+    "fr-ca",
+    "he",
+    "hi",
+    "hr",
+    "hu",
+    "id",
+    "it",
+    "ja",
+    "ko",
+    "ms",
+    "nb",
+    "nl",
+    "pl",
+    "pt-br",
+    "pt-pt",
+    "ro",
+    "ru",
+    "sk",
+    "sv",
+    "th",
+    "tr",
+    "uk",
+    "vi",
+    "zh-hans",
+    "zh-hant",
+    "zh-hk"
+  ];
+  var STRINGS = {
+    // The context-menu item that downloads a song (replaces Apple's "Copy Embed Code").
+    download: {
+      "ar": "\u062A\u0646\u0632\u064A\u0644",
+      "ca": "Descarrega",
+      "cs": "St\xE1hnout",
+      "da": "Hent",
+      "de": "Herunterladen",
+      "el": "\u039B\u03AE\u03C8\u03B7",
+      "en": "Download",
+      "es": "Descargar",
+      "es-mx": "Descargar",
+      "fi": "Lataa",
+      "fr": "T\xE9l\xE9charger",
+      "fr-ca": "T\xE9l\xE9charger",
+      "he": "\u05D4\u05D5\u05E8\u05D3\u05D4",
+      "hi": "\u0921\u093E\u0909\u0928\u0932\u094B\u0921 \u0915\u0930\u0947\u0902",
+      "hr": "Preuzmi",
+      "hu": "Let\xF6lt\xE9s",
+      "id": "Unduh",
+      "it": "Scarica",
+      "ja": "\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9",
+      "ko": "\uB2E4\uC6B4\uB85C\uB4DC",
+      "ms": "Muat Turun",
+      "nb": "Last ned",
+      "nl": "Download",
+      "pl": "Pobierz",
+      "pt-br": "Baixar",
+      "pt-pt": "Transferir",
+      "ro": "Descarc\u0103",
+      "ru": "\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044C",
+      "sk": "Stiahnu\u0165",
+      "sv": "H\xE4mta",
+      "th": "\u0E14\u0E32\u0E27\u0E19\u0E4C\u0E42\u0E2B\u0E25\u0E14",
+      "tr": "\u0130ndir",
+      "uk": "\u0417\u0430\u0432\u0430\u043D\u0442\u0430\u0436\u0438\u0442\u0438",
+      "vi": "T\u1EA3i v\u1EC1",
+      "zh-hans": "\u4E0B\u8F7D",
+      "zh-hant": "\u4E0B\u8F09",
+      "zh-hk": "\u4E0B\u8F09"
+    }
+  };
+  var ALIASES = {
+    "no": "nb",
+    "nn": "nb",
+    "iw": "he",
+    "in": "id",
+    "zh": "zh-hans",
+    "zh-cn": "zh-hans",
+    "zh-sg": "zh-hans",
+    "zh-tw": "zh-hant",
+    "zh-mo": "zh-hk",
+    "pt": "pt-br",
+    // Spanish: Spain is the base language, every other Spanish storefront reads as Latin American.
+    "es-es": "es",
+    "es-419": "es-mx",
+    "es-us": "es-mx",
+    "es-ar": "es-mx",
+    "es-co": "es-mx",
+    "es-cl": "es-mx"
+  };
+  function resolveLanguage(tag) {
+    let t2 = String(tag ?? "").trim().toLowerCase().replace(/_/g, "-");
+    while (t2) {
+      const key = ALIASES[t2] ?? t2;
+      if (LANGUAGES.includes(key)) return key;
+      const cut = t2.lastIndexOf("-");
+      if (cut < 0) break;
+      t2 = t2.slice(0, cut);
+    }
+    return "en";
+  }
+  function t(key, tag = globalThis.document?.documentElement?.lang) {
+    const strings = STRINGS[key];
+    if (!strings) return key;
+    return strings[resolveLanguage(tag)] ?? strings.en;
+  }
+
   // src/engine/auth.js
   function accountSignedIn(status) {
     const state = status?.state ?? {};
     if (state.authentication === "failed" || state.session === "expired") return false;
     return status?.capabilities?.cbcs === true || state.fairplay === "ready" || state.authentication === "logged_in" || state.session === "valid";
+  }
+  function losslessReady(status) {
+    return status?.capabilities?.cbcs === true || status?.state?.fairplay === "ready";
+  }
+  function downloadQuality({ prefs = {}, fallback = "lossless", ready = false }) {
+    const wanted = prefs["dl-quality"] || prefs["downloads-quality"] || fallback;
+    const lossless = ready && prefs["lossless-enabled"] !== false && wanted !== "high-quality";
+    return { lossless, hiRes: lossless && wanted === "hi-res-lossless" };
   }
 
   // src/engine/transport.js
@@ -1282,8 +1493,8 @@
     for (const it of mkItems ?? []) {
       const id = extractItemId(it);
       if (!id) continue;
-      const t = extractItemType(it);
-      if (t) _itemTypes.set(id, isVideoType(t) ? "music-videos" : "songs");
+      const t2 = extractItemType(it);
+      if (t2) _itemTypes.set(id, isVideoType(t2) ? "music-videos" : "songs");
     }
   }
   var _isVideoId = (id) => _itemTypes.get(id) === "music-videos";
@@ -1317,12 +1528,12 @@
   var _slWordEls = [];
   var _slCurLine = -1;
   var _slActive = false;
-  function _ttmlMs(t) {
-    if (!t) return 0;
-    const p = t.split(":").map(Number);
+  function _ttmlMs(t2) {
+    if (!t2) return 0;
+    const p = t2.split(":").map(Number);
     if (p.length === 3) return Math.round((p[0] * 3600 + p[1] * 60 + p[2]) * 1e3);
     if (p.length === 2) return Math.round((p[0] * 60 + p[1]) * 1e3);
-    return Math.round(parseFloat(t) * 1e3);
+    return Math.round(parseFloat(t2) * 1e3);
   }
   function _parseTTML(ttml) {
     const doc = new DOMParser().parseFromString(ttml, "text/xml");
@@ -1510,10 +1721,10 @@
         const r = await fetch(`${ENGINE}/api/v1/lyrics/${id}?sf=${sf}&format=ttml&type=${type}`);
         if (_slGen !== gen) return;
         if (!r.ok) continue;
-        const t = await r.text();
+        const t2 = await r.text();
         if (_slGen !== gen) return;
-        if (t && t.includes("<tt")) {
-          ttml = t;
+        if (t2 && t2.includes("<tt")) {
+          ttml = t2;
           break;
         }
       }
@@ -3133,10 +3344,10 @@
         _userScrubbing = true;
       }, true);
       rangeInput.addEventListener("input", () => {
-        const t = parseFloat(rangeInput.value);
-        if (!isNaN(t)) {
-          myVid.currentTime = t;
-          mkAudio.currentTime = t;
+        const t2 = parseFloat(rangeInput.value);
+        if (!isNaN(t2)) {
+          myVid.currentTime = t2;
+          mkAudio.currentTime = t2;
           _updateProgress();
         }
         _showControls();
@@ -3144,10 +3355,10 @@
       let _lastCommit = -1;
       const _commitScrub = () => {
         _userScrubbing = false;
-        const t = parseFloat(rangeInput.value);
-        if (isNaN(t)) return;
-        if (Math.abs(t - _lastCommit) < 0.25) return;
-        _lastCommit = t;
+        const t2 = parseFloat(rangeInput.value);
+        if (isNaN(t2)) return;
+        if (Math.abs(t2 - _lastCommit) < 0.25) return;
+        _lastCommit = t2;
       };
       const _cancelScrub = () => {
         _userScrubbing = false;
@@ -3211,7 +3422,7 @@
       myVid.currentTime = Math.max(0, Math.min(dur, sec));
       mkAudio.currentTime = myVid.currentTime;
     };
-    const _skipFwd = avp?.querySelector("amp-playback-controls-skip-forward") ?? avp?.querySelector('[aria-label*="forward" i]') ?? avp?.querySelector('[aria-label*="10" i]');
+    const _skipFwd = avp?.querySelector('amp-playback-controls-skip[direction="forward"]');
     const _insertTarget = playCtrl ?? _skipFwd;
     if (_insertTarget?.parentNode) {
       _insertTarget.parentNode.insertBefore(_mvPlayBtn, _insertTarget);
@@ -3321,26 +3532,24 @@
     const onFooterClick = (e) => {
       const btn = e.target.closest("button");
       if (!btn || btn === _qualityBtn) return;
-      const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-      const cls = btn.className.toLowerCase();
-      if (label.includes("play") || label.includes("pause") || cls.includes("play") || cls.includes("pause")) {
+      const act = footerAction(btn.className.toLowerCase(), (sel) => btn.closest(sel));
+      if (act?.action === "play") {
         e.stopImmediatePropagation();
         togglePlayPause();
         _showControls();
-      } else if (label.includes("10") || label.includes("skip") || label.includes("forward") || label.includes("back") || label.includes("rewind") || cls.includes("skip")) {
+      } else if (act?.action === "skip") {
         e.stopImmediatePropagation();
-        const delta = label.includes("back") || label.includes("rewind") || cls.includes("back") ? -10 : 10;
-        _mvSeekTo(_mvCurTime() + delta);
+        _mvSeekTo(_mvCurTime() + act.delta);
         _showControls();
-      } else if (label.includes("fullscreen") || label.includes("screen") || cls.includes("full-screen") || cls.includes("fullscreen")) {
+      } else if (act?.action === "fullscreen") {
         e.stopImmediatePropagation();
         toggleFullscreen();
       }
     };
     scrimFooter?.addEventListener("click", onFooterClick, true);
     const _fmtTime = (s) => {
-      const t = Math.max(0, Math.floor(s));
-      const m = Math.floor(t / 60), sec = t % 60;
+      const t2 = Math.max(0, Math.floor(s));
+      const m = Math.floor(t2 / 60), sec = t2 % 60;
       return `${m}:${String(sec).padStart(2, "0")}`;
     };
     const progShadow = scrubberEl?.shadowRoot;
@@ -3370,10 +3579,10 @@
     const _updateProgress = () => {
       if (!rangeInput) return;
       if (_userScrubbing) return;
-      const t = myVid.currentTime;
+      const t2 = myVid.currentTime;
       const max = parseFloat(rangeInput.max) || parseFloat(rangeInput.getAttribute("max")) || 1;
-      rangeInput.value = String(t);
-      const frac = max > 0 ? Math.min(1, Math.max(0, t / max)) : 0;
+      rangeInput.value = String(t2);
+      const frac = max > 0 ? Math.min(1, Math.max(0, t2 / max)) : 0;
       const pct2 = _fillPct(frac).toFixed(2) + "%";
       rangeInput.style.setProperty("--progress", pct2);
       rangeInput.style.setProperty("--width", pct2);
@@ -3383,8 +3592,8 @@
           bFrac = Math.min(1, Math.max(0, _vsegSb.buffered.end(_vsegSb.buffered.length - 1) / max));
         rangeInput.style.setProperty("--adam-buffer", _fillPct(bFrac).toFixed(2) + "%");
       }
-      if (timeElapsed) timeElapsed.textContent = _fmtTime(t);
-      if (timeRemain) timeRemain.textContent = "-" + _fmtTime(max - t);
+      if (timeElapsed) timeElapsed.textContent = _fmtTime(t2);
+      if (timeRemain) timeRemain.textContent = "-" + _fmtTime(max - t2);
     };
     const _resetScrubberToLoading = () => {
       if (!rangeInput) return;
@@ -5907,8 +6116,8 @@
     }
     let keep = false;
     try {
-      const t = Number(await window.adamBridge?.storeRead("adam_mem_reload"));
-      keep = t > 0 && Date.now() - t < 12 * 3600 * 1e3;
+      const t2 = Number(await window.adamBridge?.storeRead("adam_mem_reload"));
+      keep = t2 > 0 && Date.now() - t2 < 12 * 3600 * 1e3;
     } catch (_) {
     }
     _resumeShowChip(mk, saved, keep);
@@ -6117,7 +6326,7 @@
     let p = start;
     while (p + 8 <= end) {
       let size = dv.getUint32(p);
-      const t = String.fromCharCode(dv.getUint8(p + 4), dv.getUint8(p + 5), dv.getUint8(p + 6), dv.getUint8(p + 7));
+      const t2 = String.fromCharCode(dv.getUint8(p + 4), dv.getUint8(p + 5), dv.getUint8(p + 6), dv.getUint8(p + 7));
       let hdr = 8;
       if (size === 1) {
         if (p + 16 > end) break;
@@ -6125,7 +6334,7 @@
         hdr = 16;
       }
       if (size < hdr || p + size > end) break;
-      if (t === type) return { start: p + hdr, end: p + size };
+      if (t2 === type) return { start: p + hdr, end: p + size };
       p += size;
     }
     return null;
@@ -6516,10 +6725,10 @@
     }
     return null;
   }
-  function _hotkeyTypingTarget(t) {
-    if (!t) return false;
-    const tag = t.tagName;
-    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
+  function _hotkeyTypingTarget(t2) {
+    if (!t2) return false;
+    const tag = t2.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t2.isContentEditable;
   }
   function _hotkeyAdjustVolume(delta) {
     const a = getMKAudio();
@@ -6822,7 +7031,7 @@
     window.adamBridge?.getPrefs().then((p) => {
       if (p["streaming-quality"]) _streamingQuality = p["streaming-quality"];
       if (p["lossless-enabled"] === false) _streamingQuality = "high-quality";
-      if (p["downloads-quality"]) _downloadsQuality = p["downloads-quality"];
+      if (p["dl-quality"] || p["downloads-quality"]) _downloadsQuality = p["dl-quality"] || p["downloads-quality"];
       window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
       const body = {};
       if (p.prewarmLimitMB != null) body.prewarmLimitMB = p.prewarmLimitMB;
@@ -7226,7 +7435,7 @@
         _pendingPlaylistFetch,
         new Promise((res) => setTimeout(() => res(null), 3e3))
       ]).then(
-        (result) => (result?.tracks || []).map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id))
+        (result) => (result?.tracks || []).map((t2) => t2.cid).filter((id) => id && /^\d{6,}$/.test(id))
       ).catch(() => []);
     }
     function _updateTransportButtons() {
@@ -7235,34 +7444,12 @@
       const repeat = mk.repeatMode ?? 0;
       const hasPrev = ci > 0 || ii > 0;
       const hasNext = repeat !== 0 || cur && (ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length);
-      const allBtns = document.querySelectorAll(
-        '[data-testid*="skip-back"], [data-testid*="skip-forward"], [data-testid*="skip-previous"], [data-testid*="skip-next"], [data-testid*="transport-previous"], [data-testid*="transport-next"]'
-      );
-      for (const btn of allBtns) {
-        const tid = (btn.getAttribute("data-testid") || "").toLowerCase();
-        const isPrev = tid.includes("previous") || tid.includes("skip-back");
-        const isNext = tid.includes("next") || tid.includes("skip-forward");
-        if (isPrev) {
-          btn.style.opacity = hasPrev ? "" : "0.35";
-          btn.style.pointerEvents = hasPrev ? "" : "none";
-        } else if (isNext) {
-          btn.style.opacity = hasNext ? "" : "0.35";
-          btn.style.pointerEvents = hasNext ? "" : "none";
-        }
-      }
-      const labelBtns = document.querySelectorAll('[aria-label*="skip" i], [aria-label*="previous track" i], [aria-label*="next track" i]');
-      for (const btn of labelBtns) {
-        const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-        if (label.includes("up next")) continue;
-        const isPrev = label.includes("previous") || label.includes("back");
-        const isNext = label.includes("next") || label.includes("forward");
-        if (isPrev) {
-          btn.style.opacity = hasPrev ? "" : "0.35";
-          btn.style.pointerEvents = hasPrev ? "" : "none";
-        } else if (isNext) {
-          btn.style.opacity = hasNext ? "" : "0.35";
-          btn.style.pointerEvents = hasNext ? "" : "none";
-        }
+      for (const el2 of document.querySelectorAll(SKIP_SELECTOR)) {
+        const direction = skipDirection(el2);
+        if (!direction) continue;
+        const enabled = direction === "previous" ? hasPrev : hasNext;
+        el2.style.opacity = enabled ? "" : "0.35";
+        el2.style.pointerEvents = enabled ? "" : "none";
       }
     }
     function mprisTrackId(item) {
@@ -7565,12 +7752,12 @@
             const fetchResult = _pendingPlaylistFetch ? Promise.race([_pendingPlaylistFetch, new Promise((res) => setTimeout(() => res(null), 3e3))]) : Promise.resolve(null);
             return fetchResult.then((result) => {
               const tracks = result?.tracks || [];
-              const catalogIds = tracks.map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id));
+              const catalogIds = tracks.map((t2) => t2.cid).filter((id) => id && /^\d{6,}$/.test(id));
               if (catalogIds.length > 1) {
                 const _lidNumeric = startWithLid?.startsWith("a.") ? startWithLid.slice(2) : startWithLid;
                 let startCid = _pendingExternalClickCatalogId || (/^\d{6,}$/.test(_lidNumeric) ? _lidNumeric : null);
                 if (!startCid && startWithLid) {
-                  const match = tracks.find((t) => t.lid === startWithLid || t.lid === startWithLid.replace(/^[a-z]\./, ""));
+                  const match = tracks.find((t2) => t2.lid === startWithLid || t2.lid === startWithLid.replace(/^[a-z]\./, ""));
                   startCid = match?.cid ?? null;
                 }
                 if (_ADAM_DEBUG) console.log("[MK-DBG AAC] playlists \u2192 " + catalogIds.length + " tracks, startCid=" + startCid);
@@ -7600,10 +7787,10 @@
             const fetchPromise = fetch(`${ENGINE}/api/v1/library/albums/${encodeURIComponent(albumId)}/tracks`).then((r) => r.ok ? r.json() : null).catch(() => null);
             return Promise.race([fetchPromise, new Promise((res) => setTimeout(() => res(null), 3e3))]).then((result) => {
               const tracks = result?.tracks || [];
-              const catalogIds = tracks.map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id));
+              const catalogIds = tracks.map((t2) => t2.cid).filter((id) => id && /^\d{6,}$/.test(id));
               if (catalogIds.length > 0) {
                 if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 local cache: " + catalogIds.length + " tracks");
-                const startCid = startWithLid ? (tracks.find((t) => t.lid === startWithLid) || {}).cid : _pendingExternalClickCatalogId || null;
+                const startCid = startWithLid ? (tracks.find((t2) => t2.lid === startWithLid) || {}).cid : _pendingExternalClickCatalogId || null;
                 return _aacOwnedGoto(catalogIds, startCid, "albums/local");
               }
               if (_ADAM_DEBUG) console.log("[MK-DBG AAC] albums \u2192 cache cold, fetching tracks via MK REST");
@@ -7762,11 +7949,11 @@
           const el2 = _aacGateAudioEl;
           if (_ADAM_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el2?.paused + " readyState=" + el2?.readyState + " src=" + (el2?.src || "").slice(0, 60));
         };
-        if (_aacGateAudioEl) _aacGateEvts.forEach((t) => _aacGateAudioEl.addEventListener(t, _aacGateEvtHandler));
+        if (_aacGateAudioEl) _aacGateEvts.forEach((t2) => _aacGateAudioEl.addEventListener(t2, _aacGateEvtHandler));
         const _aacGateStateListener = () => _ADAM_DEBUG && console.log("[MK-DBG] playbackStateDidChange \u2192 " + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null"));
         mk.addEventListener("playbackStateDidChange", _aacGateStateListener);
         const _aacGateTracingCleanup = () => {
-          if (_aacGateAudioEl) _aacGateEvts.forEach((t) => _aacGateAudioEl.removeEventListener(t, _aacGateEvtHandler));
+          if (_aacGateAudioEl) _aacGateEvts.forEach((t2) => _aacGateAudioEl.removeEventListener(t2, _aacGateEvtHandler));
           mk.removeEventListener("playbackStateDidChange", _aacGateStateListener);
         };
         if (typeof _savedGateTracingCleanup === "function") _savedGateTracingCleanup();
@@ -7893,11 +8080,11 @@
               const fetchPromise = _pendingPlaylistFetch ? Promise.race([_pendingPlaylistFetch, new Promise((res) => setTimeout(() => res(null), 3e3))]) : Promise.resolve(null);
               return fetchPromise.then((result) => {
                 const tracks = result?.tracks || [];
-                const catalogIds = tracks.map((t) => t.cid).filter((id) => id && /^\d{6,}$/.test(id));
+                const catalogIds = tracks.map((t2) => t2.cid).filter((id) => id && /^\d{6,}$/.test(id));
                 if (catalogIds.length > 1) {
                   let catalogId = domCatalogId;
                   if (!catalogId && startWithLid) {
-                    const match = tracks.find((t) => t.lid === startWithLid || t.lid === startWithLid.replace(/^[a-z]\./, ""));
+                    const match = tracks.find((t2) => t2.lid === startWithLid || t2.lid === startWithLid.replace(/^[a-z]\./, ""));
                     catalogId = match?.cid ?? null;
                   }
                   if (_ADAM_DEBUG) console.log("[MK-DBG] setQueue \u2192 local cache: " + catalogIds.length + " tracks, startWith=" + catalogId);
@@ -8022,11 +8209,11 @@
           const el2 = _gateAudioEl;
           if (_ADAM_DEBUG) console.log("[AUDIO-EVT] " + ev.type + " paused=" + el2?.paused + " readyState=" + el2?.readyState + " src=" + (el2?.src || "").slice(0, 60));
         };
-        if (_gateAudioEl) _gateEvts.forEach((t) => _gateAudioEl.addEventListener(t, _gateEvtHandler));
+        if (_gateAudioEl) _gateEvts.forEach((t2) => _gateAudioEl.addEventListener(t2, _gateEvtHandler));
         const _gateStateListener = () => _ADAM_DEBUG && console.log("[MK-DBG] playbackStateDidChange \u2192 " + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null"));
         mk.addEventListener("playbackStateDidChange", _gateStateListener);
         const _gateTracingCleanup = () => {
-          if (_gateAudioEl) _gateEvts.forEach((t) => _gateAudioEl.removeEventListener(t, _gateEvtHandler));
+          if (_gateAudioEl) _gateEvts.forEach((t2) => _gateAudioEl.removeEventListener(t2, _gateEvtHandler));
           mk.removeEventListener("playbackStateDidChange", _gateStateListener);
         };
         if (typeof _savedGateTracingCleanup === "function") _savedGateTracingCleanup();
@@ -8385,8 +8572,8 @@
       function startPoll() {
         if (tryScan()) return;
         let attempts = 0;
-        const t = setInterval(() => {
-          if (tryScan() || ++attempts >= 20) clearInterval(t);
+        const t2 = setInterval(() => {
+          if (tryScan() || ++attempts >= 20) clearInterval(t2);
         }, 30);
       }
       input.addEventListener("input", startPoll);
@@ -8751,13 +8938,13 @@
         return;
       }
       document.addEventListener("musickitloaded", hookMusicKit, { once: true });
-      const t = setInterval(() => {
+      const t2 = setInterval(() => {
         if (window.MusicKit?.getInstance?.()) {
           hookMusicKit();
-          clearInterval(t);
+          clearInterval(t2);
         }
       }, 500);
-      setTimeout(() => clearInterval(t), 2e4);
+      setTimeout(() => clearInterval(t2), 2e4);
     })();
   })();
   window.addEventListener("unhandledrejection", (e) => {
@@ -8929,9 +9116,7 @@
       const drmState = drm?.state ?? drm ?? {};
       const managerOk = drmState?.manager === "ready";
       const processOk = drmState?.process === "running";
-      const fairplayOk = drmState?.fairplay === "ready";
-      const cbcsOk = drm?.capabilities?.cbcs === true;
-      const isSignedIn = cbcsOk || fairplayOk;
+      const isSignedIn = losslessReady(drm);
       function renderState() {
         body.innerHTML = "";
         const row = document.createElement("div");
@@ -9155,6 +9340,7 @@
         if (save) {
           window.adamBridge?.setTweak(prefKey, value);
           if (prefKey === "streaming-quality") _streamingQuality = value;
+          if (prefKey === "dl-quality") _downloadsQuality = value;
           onChange?.(value);
         }
       }
@@ -9705,7 +9891,7 @@
           const d = await fetchDRM().catch(() => null);
           if (!d) return;
           renderStatusRows(d).forEach((row, i) => applyStatusRow(valEls[i].el, row));
-          if (accountSignedIn(d) !== accountSignedIn(drm)) {
+          if (accountSignedIn(d) !== accountSignedIn(drm) || losslessReady(d) !== losslessReady(drm)) {
             clearInterval(poll);
             openSettings();
             return;
@@ -10444,8 +10630,8 @@
       let ffmpegCheck = 0;
       function recheckFfmpeg(customPath) {
         const mine = ++ffmpegCheck;
-        fetch(`${ENGINE}/api/v1/tools?ffmpegPath=${encodeURIComponent(customPath || "")}`).then((r) => r.json()).then((t) => {
-          if (mine === ffmpegCheck) applyFfmpeg(t?.ffmpeg);
+        fetch(`${ENGINE}/api/v1/tools?ffmpegPath=${encodeURIComponent(customPath || "")}`).then((r) => r.json()).then((t2) => {
+          if (mine === ffmpegCheck) applyFfmpeg(t2?.ffmpeg);
         }).catch(() => {
         });
       }
@@ -10990,7 +11176,7 @@
         _restoreProxy();
         return;
       }
-      const drmSignedIn = accountSignedIn(drm);
+      const drmSignedIn = losslessReady(drm);
       const drmAvailable = drm?.available !== false;
       const [themeWrap, cacheWrap, { wrap: playbackWrap }, scrobbleWrap, historyWrap, libraryWrap] = await Promise.all([
         _buildThemeSection(prefs),
@@ -11027,7 +11213,7 @@
     function findAccountRow() {
       const nav = document.querySelector("nav.navigation") || document.querySelector("nav");
       if (!nav) return null;
-      return nav.querySelector('[class*="account-menu"]') || nav.querySelector('[class*="account"]') || nav.querySelector('[class*="Account"]') || nav.querySelector('[aria-haspopup="true"]') || nav.querySelector('[aria-haspopup="menu"]') || nav.querySelector('[aria-label*="ccount"]') || // Last-resort: bottom-most li containing an img (profile photo)
+      return nav.querySelector('[data-testid="account-menu"]') || nav.querySelector('[class*="account-menu"]') || nav.querySelector('[class*="account"]') || nav.querySelector('[class*="Account"]') || nav.querySelector('[aria-haspopup="true"]') || nav.querySelector('[aria-haspopup="menu"]') || // Last-resort: bottom-most li containing an img (profile photo)
       [...nav.querySelectorAll("li")].reverse().find((li) => li.querySelector("img")) || null;
     }
     const _szN = 28;
@@ -11163,39 +11349,56 @@
       "Remove from Library": _TRASH,
       "Copy Embed Code": mkSvg(DL_PATH, "")
     };
+    const ACTION_ICON = { "embed": ICON_SVG["Copy Embed Code"], "pin": _PIN, "unpin": _PIN, "delete-from-library": _TRASH };
+    const ACTION_MARKED = ["embed", "pin", "unpin", "delete-from-library"];
     ;
     (function injectContextMenuCSS() {
       if (document.getElementById("adam-ctx-icons")) return;
-      const li = (t) => `li.contextual-menu-item:has(button[title='${t}'])`;
-      const con = (t) => `${li(t)} .contextual-menu-item__icon-container`;
-      const svg = (t) => `${con(t)} > svg`;
+      const li = (t2) => `li.contextual-menu-item:has(button[title='${t2}'])`;
+      const con = (sel) => `${sel} .contextual-menu-item__icon-container`;
+      const svg = (sel) => `${con(sel)} > svg`;
       const PIN_TITLES = ["Pin Album", "Unpin Album", "Pin Music Video", "Unpin Music Video", "Pin Song", "Unpin Song", "Pin Playlist", "Unpin Playlist"];
       const TRASH_TITLES = ["Delete from Library", "Remove from Library"];
       const EMBED_TITLE = "Copy Embed Code";
-      const ALL_CON = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(con).join(",\n");
-      const ALL_SVG = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(svg).join(",\n");
-      const EMBED_LI = li(EMBED_TITLE);
+      const EMBED_BY_ACTION = `li.contextual-menu-item:has([data-adam-action="embed"])`;
+      const MARKED = ACTION_MARKED.map((a) => `li.contextual-menu-item:has([data-adam-action="${a}"])`);
+      const SELECTORS = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(li).concat(MARKED);
+      const ALL_CON = SELECTORS.map(con).join(",\n");
+      const ALL_SVG = SELECTORS.map(svg).join(",\n");
+      const EMBED_LIS = [li(EMBED_TITLE), EMBED_BY_ACTION];
+      const embedRules = (label) => EMBED_LIS.map((sel) => `
+${sel} .contextual-menu-item__option-text { font-size:0 !important; }
+${sel} .contextual-menu-item__option-text::before { content:${JSON.stringify(label)}; font-size:13px !important; }`).join("");
       const s = document.createElement("style");
       s.id = "adam-ctx-icons";
-      s.textContent = `
+      const render = () => {
+        s.textContent = `
 /* position:relative so our absolute span is clipped to the container */
 ${ALL_CON} { position:relative !important; }
 
 /* hide Apple's SVG via CSS \u2014 never touch inline styles on Glimmer elements */
 ${ALL_SVG} { opacity:0 !important; }
 
-/* rename "Copy Embed Code" \u2192 "Download" purely via CSS */
-${EMBED_LI} .contextual-menu-item__option-text { font-size:0 !important; }
-${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; font-size:13px !important; }`;
+/* rename Apple's "Copy Embed Code" item to "Download", in the page language, purely via CSS */${embedRules(t("download"))}`;
+      };
+      render();
       document.head.appendChild(s);
+      new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
     })();
-    function _armContainer(container, svgHtml) {
+    function _itemAction(li) {
+      const glyph = li.querySelector(".contextual-menu-item__icon-container > svg path")?.getAttribute("d") ?? "";
+      const btn = li.querySelector("button");
+      const title = btn?.title || btn?.querySelector(".contextual-menu-item__option-text")?.textContent?.trim() || "";
+      return menuAction(glyph, title);
+    }
+    function _armContainer(container, svgHtml, action = null) {
       if (container._adamArmed) return;
       container._adamArmed = true;
       const inject = () => {
         if (container.querySelector("[data-adam]")) return;
         const span = document.createElement("span");
         span.setAttribute("data-adam", "1");
+        if (action) span.setAttribute("data-adam-action", action);
         span.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;";
         span.innerHTML = svgHtml;
         container.appendChild(span);
@@ -11212,10 +11415,12 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       if (!menu) return;
       menu.querySelectorAll("button").forEach((btn) => {
         const title = btn.title || btn.querySelector(".contextual-menu-item__option-text")?.textContent?.trim() || "";
-        const svgHtml = ICON_SVG[title];
+        const li = btn.closest("li");
+        const action = li ? _itemAction(li) : null;
+        const svgHtml = ACTION_ICON[action] ?? ICON_SVG[title];
         if (!svgHtml) return;
-        const container = btn.querySelector(".contextual-menu-item__icon-container") || btn.closest("li")?.querySelector(".contextual-menu-item__icon-container");
-        if (container) _armContainer(container, svgHtml);
+        const container = btn.querySelector(".contextual-menu-item__icon-container") || li?.querySelector(".contextual-menu-item__icon-container");
+        if (container) _armContainer(container, svgHtml, ACTION_ICON[action] ? action : null);
       });
     }
     let _ctxTarget = null;
@@ -11245,10 +11450,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     }
     function _resolveViaMenuLink(menuNode) {
       return new Promise((resolve) => {
-        const copyBtn = Array.from(menuNode.querySelectorAll("button")).find((b) => {
-          const t = b.querySelector(".contextual-menu-item__option-text")?.textContent?.trim() || b.title || b.getAttribute("aria-label") || "";
-          return t === "Copy Link";
-        });
+        const copyBtn = Array.from(menuNode.querySelectorAll("li.contextual-menu-item")).find((li) => _itemAction(li) === "copy-link")?.querySelector("button");
         if (!copyBtn) return resolve(null);
         const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
         const timer = setTimeout(() => {
@@ -11338,8 +11540,11 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       }
       const mk = window.MusicKit?.getInstance?.();
       const prefs = await window.adamBridge?.getPrefs().catch(() => ({})) || {};
-      const qual = prefs["downloads-quality"] || _downloadsQuality || "lossless";
-      const isLossless = qual !== "high-quality";
+      const { lossless: isLossless, hiRes: isHiRes } = downloadQuality({
+        prefs,
+        fallback: _downloadsQuality,
+        ready: _engineCaps.lossless
+      });
       const hint = await prefetchHintMeta(info);
       const _af = prefs["download-album-folder"] || "{album_artist}/{album}";
       const _sf = prefs["download-song-file"] || "{track_number:02d} - {title}";
@@ -11351,6 +11556,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         Language: navigator.language || "en-US",
         Capabilities: {
           Lossless: isLossless,
+          HiRes: isHiRes,
           Atmos: false,
           Video: info.type === "video",
           Playlist: info.type === "playlist",
@@ -11397,7 +11603,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     }
     function setupSubmenuHover(menuRoot) {
       if (!menuRoot || menuRoot._adamSubmenuWired) return;
-      const li = menuRoot.querySelector("li.contextual-menu-item:has(button[title='Add to Playlist'])");
+      const li = [...menuRoot.querySelectorAll("li.contextual-menu-item")].find((l) => _itemAction(l) === "add-to-playlist");
       if (!li) return;
       const subs = () => Array.from(menuRoot.querySelectorAll(
         "div.contextual-menu.contextual-menu--nested, div.contextual-menu.contextual-menu--in-submenu"
@@ -11432,8 +11638,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
           node.addEventListener("click", async (e) => {
             const btn = e.target.closest("button");
             if (!btn) return;
-            const title = btn.title || btn.querySelector(".contextual-menu-item__option-text")?.textContent?.trim() || "";
-            if (title !== "Download" && title !== "Copy Embed Code" && !title.includes("Embed Code")) return;
+            const li = btn.closest("li.contextual-menu-item");
+            if (!li || _itemAction(li) !== "embed") return;
             e.stopPropagation();
             e.preventDefault();
             let trackInfo = null;
@@ -11581,11 +11787,11 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
       if (job.phase === "failed" && retryEnabled) {
         if (!_failedAt.has(job.jobId)) {
           const deadline = Date.now() + retryDelay;
-          const t = setTimeout(() => {
+          const t2 = setTimeout(() => {
             _failedAt.delete(job.jobId);
             retryJob(job.jobId);
           }, retryDelay);
-          _failedAt.set(job.jobId, { timer: t, deadline });
+          _failedAt.set(job.jobId, { timer: t2, deadline });
         }
       } else {
         const entry = _failedAt.get(job.jobId);
