@@ -484,7 +484,7 @@ function _findNavHeader() {
             const nav = document.querySelector('nav.navigation');
             if (!nav) return null;
             for (const child of nav.children) {
-                if (child.querySelector('img[src*="apple"], [aria-label*="Music"], .logo, [class*="brand"]'))
+                if (child.querySelector('img[src*="apple"], [data-testid="logo"], .logo, [class*="brand"]'))
                     return child;
             }
             return nav.firstElementChild || null;

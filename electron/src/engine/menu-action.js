@@ -15,10 +15,37 @@ export function fnv1a(text) {
     return h.toString(16);
 }
 
-// Hashes of the icon path data of Apple's own glyphs, checked on the it and en-US storefronts.
-const GLYPH_ACTIONS = { d0fdaec1: 'embed', aa2cdf75: 'copy-link' };
+// Hashes of the first path's data of Apple's own menu icons. They come from the icon map in Apple's
+// script (music.apple.com/assets/index~*.js: AddToLibraryIcon ... HidePronunciationIcon); embed, copy link
+// and credits were also checked against the live menu on the it and en-US storefronts, and matched.
+// Pin and delete have no icon in that map, so they are not here.
+export const GLYPH_ACTIONS = {
+    '72557939': 'add-to-library',
+    '2ddfd2ba': 'add-to-playlist',
+    'c45f9389': 'add-to-calendar',
+    '3f03920': 'calendar',
+    'fc91e6a': 'create-station',
+    'c472d89c': 'credits',
+    'd0fdaec1': 'embed',
+    '535086c5': 'favorite',
+    'd6b3f193': 'folder',
+    'aa2cdf75': 'copy-link',
+    'd590f040': 'play-later',
+    'ce078b17': 'play-next',
+    'b439c1b5': 'remove-from-playlist',
+    'f02b5d3d': 'share',
+    'c5d19254': 'show-album',
+    '3c79e931': 'suggest-less',
+    '7ce46d0c': 'unfavorite',
+    '3e19e401': 'show-translation',
+    '7c52d55c': 'show-pronunciation',
+    '77ac3a49': 'hide-translation',
+    'c6f747d4': 'hide-pronunciation',
+};
 // 'Download' is what the page shows once Adam has renamed the embed item.
-const ENGLISH_TITLE_ACTIONS = { 'Copy Embed Code': 'embed', 'Download': 'embed', 'Copy Link': 'copy-link' };
+const ENGLISH_TITLE_ACTIONS = {
+    'Copy Embed Code': 'embed', 'Download': 'embed', 'Copy Link': 'copy-link', 'Add to Playlist': 'add-to-playlist',
+};
 
 export function createMenuActionResolver(glyphActions = GLYPH_ACTIONS, titleActions = ENGLISH_TITLE_ACTIONS) {
     // glyphPath: the `d` attribute of the item's own icon path (empty when it has none); title: the item's title.

@@ -28,3 +28,23 @@ test('the glyph beats a title that says something else', () => {
     const resolve = createMenuActionResolver({ [fnv1a('G')]: 'copy-link' }, { 'Copy Embed Code': 'embed' });
     assert.equal(resolve('G', 'Copy Embed Code'), 'copy-link');
 });
+
+test("the icon table covers Apple's menu icons and is well-formed", async () => {
+    const { GLYPH_ACTIONS } = await import('../../src/engine/menu-action.js');
+    const hashes = Object.keys(GLYPH_ACTIONS), names = Object.values(GLYPH_ACTIONS);
+    assert.equal(new Set(hashes).size, hashes.length, 'no hash twice');
+    assert.equal(new Set(names).size, names.length, 'no action twice');
+    for (const h of hashes) assert.match(h, /^[0-9a-f]{1,8}$/, `${h} is a 32-bit hex hash`);
+    for (const wanted of ['embed', 'copy-link', 'credits', 'add-to-playlist', 'add-to-library', 'play-next', 'play-later']) {
+        assert.ok(names.includes(wanted), `${wanted} is in the table`);
+    }
+    // These three were checked against the live menu (it and en-US storefronts).
+    assert.equal(GLYPH_ACTIONS.d0fdaec1, 'embed');
+    assert.equal(GLYPH_ACTIONS.aa2cdf75, 'copy-link');
+    assert.equal(GLYPH_ACTIONS.c472d89c, 'credits');
+});
+
+test('Add to Playlist is found by title on English pages, and by its icon in any language', () => {
+    assert.equal(menuAction('', 'Add to Playlist'), 'add-to-playlist');
+    assert.equal(menuAction('', 'Aggiungi a playlist'), null, 'a translated title alone is not enough');
+});

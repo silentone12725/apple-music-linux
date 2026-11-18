@@ -22,6 +22,7 @@ import { GLASS, cleanBlur, sidebarOpacityControl, navColorWithAlphaVar } from '.
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
 import { menuAction as _menuAction } from './engine/menu-action.js';
+import { SKIP_SELECTOR as _SKIP_SELECTOR, skipDirection as _skipDirection, footerAction as _footerAction } from './engine/transport-skip.js';
 import { t as _t } from './engine/i18n.js';
 import { accountSignedIn, losslessReady as _losslessReady, downloadQuality as _downloadQuality } from './engine/auth.js';
 import { createTransportController } from './engine/transport.js';
@@ -2652,9 +2653,7 @@ async function startMVPipeline() {
     };
 
     // Inject between the skip-back and skip-forward controls, or after playCtrl.
-    const _skipFwd = avp?.querySelector('amp-playback-controls-skip-forward')
-                  ?? avp?.querySelector('[aria-label*="forward" i]')
-                  ?? avp?.querySelector('[aria-label*="10" i]');
+    const _skipFwd = avp?.querySelector('amp-playback-controls-skip[direction="forward"]');
     const _insertTarget = playCtrl ?? _skipFwd;
     if (_insertTarget?.parentNode) {
         _insertTarget.parentNode.insertBefore(_mvPlayBtn, _insertTarget);
@@ -2748,18 +2747,16 @@ async function startMVPipeline() {
         const btn = e.target.closest('button');
         // Skip our own quality button — it handles its own clicks.
         if (!btn || btn === _qualityBtn) return;
-        const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-        const cls   = btn.className.toLowerCase();
-        // Use aria-label for semantic matching; fall back to class only (not textContent,
-        // which would match "1080p" as containing "10" for the skip-seconds buttons).
-        if (label.includes('play') || label.includes('pause') || cls.includes('play') || cls.includes('pause')) {
+        // What a control does comes from its element and its direction attribute, never from its translated
+        // label (see footerAction in transport-skip.js).
+        const act = _footerAction(btn.className.toLowerCase(), (sel) => btn.closest(sel));
+        if (act?.action === 'play') {
             e.stopImmediatePropagation();
             togglePlayPause(); _showControls();
-        } else if (label.includes('10') || label.includes('skip') || label.includes('forward') || label.includes('back') || label.includes('rewind') || cls.includes('skip')) {
+        } else if (act?.action === 'skip') {
             e.stopImmediatePropagation();
-            const delta = (label.includes('back') || label.includes('rewind') || cls.includes('back')) ? -10 : 10;
-            _mvSeekTo(_mvCurTime() + delta); _showControls();
-        } else if (label.includes('fullscreen') || label.includes('screen') || cls.includes('full-screen') || cls.includes('fullscreen')) {
+            _mvSeekTo(_mvCurTime() + act.delta); _showControls();
+        } else if (act?.action === 'fullscreen') {
             e.stopImmediatePropagation();
             toggleFullscreen();
         }
@@ -7041,7 +7038,6 @@ async function setup() {
     }
 
     // Grey out next/previous transport buttons when no track to go to.
-    // Uses aria-label heuristics covering both old and new Apple Music DOM shapes.
     function _updateTransportButtons() {
         const ci = _sessionContainerIdx, ii = _sessionItemIdx;
         const cur = _sessionContainers[ci];
@@ -7050,39 +7046,14 @@ async function setup() {
         const hasPrev = ci > 0 || ii > 0;
         const hasNext = repeat !== 0 || (cur && (ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length));
 
-        // Only target the transport skip buttons — not queue/up-next/menu buttons.
-        // Match: "skip to previous", "skip to next", "previous track", "next track", etc.
-        // Exclude: "up next" (queue panel), anything without "skip" or "track" in the label.
-        const allBtns = document.querySelectorAll(
-            '[data-testid*="skip-back"], [data-testid*="skip-forward"], [data-testid*="skip-previous"], [data-testid*="skip-next"], [data-testid*="transport-previous"], [data-testid*="transport-next"]'
-        );
-        for (const btn of allBtns) {
-            const tid = (btn.getAttribute('data-testid') || '').toLowerCase();
-            const isPrev = tid.includes('previous') || tid.includes('skip-back');
-            const isNext = tid.includes('next') || tid.includes('skip-forward');
-            if (isPrev) {
-                btn.style.opacity       = hasPrev ? '' : '0.35';
-                btn.style.pointerEvents = hasPrev ? '' : 'none';
-            } else if (isNext) {
-                btn.style.opacity       = hasNext ? '' : '0.35';
-                btn.style.pointerEvents = hasNext ? '' : 'none';
-            }
-        }
-
-        // Also match by aria-label but require "skip" to avoid hitting queue/up-next buttons.
-        const labelBtns = document.querySelectorAll('[aria-label*="skip" i], [aria-label*="previous track" i], [aria-label*="next track" i]');
-        for (const btn of labelBtns) {
-            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-            if (label.includes('up next')) continue; // queue panel — skip
-            const isPrev = label.includes('previous') || label.includes('back');
-            const isNext = label.includes('next') || label.includes('forward');
-            if (isPrev) {
-                btn.style.opacity       = hasPrev ? '' : '0.35';
-                btn.style.pointerEvents = hasPrev ? '' : 'none';
-            } else if (isNext) {
-                btn.style.opacity       = hasNext ? '' : '0.35';
-                btn.style.pointerEvents = hasNext ? '' : 'none';
-            }
+        // The transport skip controls, found by element and not by their translated labels (see transport-skip.js).
+        // Queue and menu buttons are neither, so they are left alone.
+        for (const el of document.querySelectorAll(_SKIP_SELECTOR)) {
+            const direction = _skipDirection(el);
+            if (!direction) continue;
+            const enabled = direction === 'previous' ? hasPrev : hasNext;
+            el.style.opacity       = enabled ? '' : '0.35';
+            el.style.pointerEvents = enabled ? '' : 'none';
         }
     }
 
@@ -10981,12 +10952,12 @@ window.adamGetQueueInfo = function () {
         const nav = document.querySelector('nav.navigation') || document.querySelector('nav');
         if (!nav) return null;
         return (
+            nav.querySelector('[data-testid="account-menu"]') ||
             nav.querySelector('[class*="account-menu"]') ||
             nav.querySelector('[class*="account"]') ||
             nav.querySelector('[class*="Account"]') ||
             nav.querySelector('[aria-haspopup="true"]') ||
             nav.querySelector('[aria-haspopup="menu"]') ||
-            nav.querySelector('[aria-label*="ccount"]') ||
             // Last-resort: bottom-most li containing an img (profile photo)
             [...nav.querySelectorAll('li')].reverse().find(li => li.querySelector('img')) ||
             null
@@ -11470,7 +11441,8 @@ ${ALL_SVG} { opacity:0 !important; }
     // Hide playlist submenu by default; show it only while hovering "Add to Playlist".
     function setupSubmenuHover(menuRoot) {
         if (!menuRoot || menuRoot._adamSubmenuWired) return;
-        const li = menuRoot.querySelector("li.contextual-menu-item:has(button[title='Add to Playlist'])");
+        // The item that opens the playlist submenu, found by its icon, not by its translated title.
+        const li = [...menuRoot.querySelectorAll('li.contextual-menu-item')].find(l => _itemAction(l) === 'add-to-playlist');
         if (!li) return;
         const subs = () => Array.from(menuRoot.querySelectorAll(
             'div.contextual-menu.contextual-menu--nested, div.contextual-menu.contextual-menu--in-submenu'

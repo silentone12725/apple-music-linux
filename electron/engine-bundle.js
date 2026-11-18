@@ -225,8 +225,35 @@
     }
     return h.toString(16);
   }
-  var GLYPH_ACTIONS = { d0fdaec1: "embed", aa2cdf75: "copy-link" };
-  var ENGLISH_TITLE_ACTIONS = { "Copy Embed Code": "embed", "Download": "embed", "Copy Link": "copy-link" };
+  var GLYPH_ACTIONS = {
+    "72557939": "add-to-library",
+    "2ddfd2ba": "add-to-playlist",
+    "c45f9389": "add-to-calendar",
+    "3f03920": "calendar",
+    "fc91e6a": "create-station",
+    "c472d89c": "credits",
+    "d0fdaec1": "embed",
+    "535086c5": "favorite",
+    "d6b3f193": "folder",
+    "aa2cdf75": "copy-link",
+    "d590f040": "play-later",
+    "ce078b17": "play-next",
+    "b439c1b5": "remove-from-playlist",
+    "f02b5d3d": "share",
+    "c5d19254": "show-album",
+    "3c79e931": "suggest-less",
+    "7ce46d0c": "unfavorite",
+    "3e19e401": "show-translation",
+    "7c52d55c": "show-pronunciation",
+    "77ac3a49": "hide-translation",
+    "c6f747d4": "hide-pronunciation"
+  };
+  var ENGLISH_TITLE_ACTIONS = {
+    "Copy Embed Code": "embed",
+    "Download": "embed",
+    "Copy Link": "copy-link",
+    "Add to Playlist": "add-to-playlist"
+  };
   function createMenuActionResolver(glyphActions = GLYPH_ACTIONS, titleActions = ENGLISH_TITLE_ACTIONS) {
     return (glyphPath, title) => {
       if (glyphPath) {
@@ -237,6 +264,25 @@
     };
   }
   var menuAction = createMenuActionResolver();
+
+  // src/engine/transport-skip.js
+  var SKIP_SELECTOR = '[data-testid="playback-control-item-skip"], amp-playback-controls-skip';
+  function skipDirection(el2) {
+    if (el2?.localName === "amp-playback-controls-skip") {
+      const direction = el2.getAttribute("direction");
+      return direction === "back" ? "previous" : direction === "forward" ? "next" : null;
+    }
+    if (el2?.classList?.contains("previous")) return "previous";
+    if (el2?.classList?.contains("next")) return "next";
+    return null;
+  }
+  function footerAction(cls, closest) {
+    const direction = closest("amp-playback-controls-skip")?.getAttribute("direction") ?? /button--(back|forward)/.exec(cls)?.[1] ?? null;
+    if (closest("amp-playback-controls-play") || cls.includes("play") || cls.includes("pause")) return { action: "play" };
+    if (direction || cls.includes("skip")) return { action: "skip", delta: direction === "back" ? -10 : 10 };
+    if (closest("amp-playback-controls-full-screen") || cls.includes("full-screen") || cls.includes("fullscreen")) return { action: "fullscreen" };
+    return null;
+  }
 
   // src/engine/i18n.js
   var LANGUAGES = [
@@ -3348,7 +3394,7 @@
       myVid.currentTime = Math.max(0, Math.min(dur, sec));
       mkAudio.currentTime = myVid.currentTime;
     };
-    const _skipFwd = avp?.querySelector("amp-playback-controls-skip-forward") ?? avp?.querySelector('[aria-label*="forward" i]') ?? avp?.querySelector('[aria-label*="10" i]');
+    const _skipFwd = avp?.querySelector('amp-playback-controls-skip[direction="forward"]');
     const _insertTarget = playCtrl ?? _skipFwd;
     if (_insertTarget?.parentNode) {
       _insertTarget.parentNode.insertBefore(_mvPlayBtn, _insertTarget);
@@ -3458,18 +3504,16 @@
     const onFooterClick = (e) => {
       const btn = e.target.closest("button");
       if (!btn || btn === _qualityBtn) return;
-      const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-      const cls = btn.className.toLowerCase();
-      if (label.includes("play") || label.includes("pause") || cls.includes("play") || cls.includes("pause")) {
+      const act = footerAction(btn.className.toLowerCase(), (sel) => btn.closest(sel));
+      if (act?.action === "play") {
         e.stopImmediatePropagation();
         togglePlayPause();
         _showControls();
-      } else if (label.includes("10") || label.includes("skip") || label.includes("forward") || label.includes("back") || label.includes("rewind") || cls.includes("skip")) {
+      } else if (act?.action === "skip") {
         e.stopImmediatePropagation();
-        const delta = label.includes("back") || label.includes("rewind") || cls.includes("back") ? -10 : 10;
-        _mvSeekTo(_mvCurTime() + delta);
+        _mvSeekTo(_mvCurTime() + act.delta);
         _showControls();
-      } else if (label.includes("fullscreen") || label.includes("screen") || cls.includes("full-screen") || cls.includes("fullscreen")) {
+      } else if (act?.action === "fullscreen") {
         e.stopImmediatePropagation();
         toggleFullscreen();
       }
@@ -7372,34 +7416,12 @@
       const repeat = mk.repeatMode ?? 0;
       const hasPrev = ci > 0 || ii > 0;
       const hasNext = repeat !== 0 || cur && (ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length);
-      const allBtns = document.querySelectorAll(
-        '[data-testid*="skip-back"], [data-testid*="skip-forward"], [data-testid*="skip-previous"], [data-testid*="skip-next"], [data-testid*="transport-previous"], [data-testid*="transport-next"]'
-      );
-      for (const btn of allBtns) {
-        const tid = (btn.getAttribute("data-testid") || "").toLowerCase();
-        const isPrev = tid.includes("previous") || tid.includes("skip-back");
-        const isNext = tid.includes("next") || tid.includes("skip-forward");
-        if (isPrev) {
-          btn.style.opacity = hasPrev ? "" : "0.35";
-          btn.style.pointerEvents = hasPrev ? "" : "none";
-        } else if (isNext) {
-          btn.style.opacity = hasNext ? "" : "0.35";
-          btn.style.pointerEvents = hasNext ? "" : "none";
-        }
-      }
-      const labelBtns = document.querySelectorAll('[aria-label*="skip" i], [aria-label*="previous track" i], [aria-label*="next track" i]');
-      for (const btn of labelBtns) {
-        const label = (btn.getAttribute("aria-label") || "").toLowerCase();
-        if (label.includes("up next")) continue;
-        const isPrev = label.includes("previous") || label.includes("back");
-        const isNext = label.includes("next") || label.includes("forward");
-        if (isPrev) {
-          btn.style.opacity = hasPrev ? "" : "0.35";
-          btn.style.pointerEvents = hasPrev ? "" : "none";
-        } else if (isNext) {
-          btn.style.opacity = hasNext ? "" : "0.35";
-          btn.style.pointerEvents = hasNext ? "" : "none";
-        }
+      for (const el2 of document.querySelectorAll(SKIP_SELECTOR)) {
+        const direction = skipDirection(el2);
+        if (!direction) continue;
+        const enabled = direction === "previous" ? hasPrev : hasNext;
+        el2.style.opacity = enabled ? "" : "0.35";
+        el2.style.pointerEvents = enabled ? "" : "none";
       }
     }
     function mprisTrackId(item) {
@@ -11163,7 +11185,7 @@
     function findAccountRow() {
       const nav = document.querySelector("nav.navigation") || document.querySelector("nav");
       if (!nav) return null;
-      return nav.querySelector('[class*="account-menu"]') || nav.querySelector('[class*="account"]') || nav.querySelector('[class*="Account"]') || nav.querySelector('[aria-haspopup="true"]') || nav.querySelector('[aria-haspopup="menu"]') || nav.querySelector('[aria-label*="ccount"]') || // Last-resort: bottom-most li containing an img (profile photo)
+      return nav.querySelector('[data-testid="account-menu"]') || nav.querySelector('[class*="account-menu"]') || nav.querySelector('[class*="account"]') || nav.querySelector('[class*="Account"]') || nav.querySelector('[aria-haspopup="true"]') || nav.querySelector('[aria-haspopup="menu"]') || // Last-resort: bottom-most li containing an img (profile photo)
       [...nav.querySelectorAll("li")].reverse().find((li) => li.querySelector("img")) || null;
     }
     const _szN = 28;
@@ -11550,7 +11572,7 @@ ${ALL_SVG} { opacity:0 !important; }
     }
     function setupSubmenuHover(menuRoot) {
       if (!menuRoot || menuRoot._adamSubmenuWired) return;
-      const li = menuRoot.querySelector("li.contextual-menu-item:has(button[title='Add to Playlist'])");
+      const li = [...menuRoot.querySelectorAll("li.contextual-menu-item")].find((l) => _itemAction(l) === "add-to-playlist");
       if (!li) return;
       const subs = () => Array.from(menuRoot.querySelectorAll(
         "div.contextual-menu.contextual-menu--nested, div.contextual-menu.contextual-menu--in-submenu"
