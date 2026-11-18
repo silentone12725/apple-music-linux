@@ -15,6 +15,17 @@ export const LANGUAGES = [
 ];
 
 export const STRINGS = {
+    // The context-menu item that downloads a song (replaces Apple's "Copy Embed Code").
+    download: {
+        'ar': 'تنزيل', 'ca': 'Descarrega', 'cs': 'Stáhnout', 'da': 'Hent', 'de': 'Herunterladen',
+        'el': 'Λήψη', 'en': 'Download', 'es': 'Descargar', 'es-mx': 'Descargar', 'fi': 'Lataa',
+        'fr': 'Télécharger', 'fr-ca': 'Télécharger', 'he': 'הורדה', 'hi': 'डाउनलोड करें', 'hr': 'Preuzmi',
+        'hu': 'Letöltés', 'id': 'Unduh', 'it': 'Scarica', 'ja': 'ダウンロード', 'ko': '다운로드',
+        'ms': 'Muat Turun', 'nb': 'Last ned', 'nl': 'Download', 'pl': 'Pobierz', 'pt-br': 'Baixar',
+        'pt-pt': 'Transferir', 'ro': 'Descarcă', 'ru': 'Загрузить', 'sk': 'Stiahnuť', 'sv': 'Hämta',
+        'th': 'ดาวน์โหลด', 'tr': 'İndir', 'uk': 'Завантажити', 'vi': 'Tải về', 'zh-hans': '下载',
+        'zh-hant': '下載', 'zh-hk': '下載',
+    },
     playbackFailed: {
         "ar": "تعذّر تشغيل هذه الأغنية.",
         "ca": "No es pot reproduir aquesta cançó.",
@@ -53,17 +64,6 @@ export const STRINGS = {
         "zh-hans": "无法播放这首歌曲。",
         "zh-hant": "無法播放這首歌曲。",
         "zh-hk": "無法播放這首歌曲。",
-    },
-    // The context-menu item that downloads a song (replaces Apple's "Copy Embed Code").
-    download: {
-        'ar': 'تنزيل', 'ca': 'Descarrega', 'cs': 'Stáhnout', 'da': 'Hent', 'de': 'Herunterladen',
-        'el': 'Λήψη', 'en': 'Download', 'es': 'Descargar', 'es-mx': 'Descargar', 'fi': 'Lataa',
-        'fr': 'Télécharger', 'fr-ca': 'Télécharger', 'he': 'הורדה', 'hi': 'डाउनलोड करें', 'hr': 'Preuzmi',
-        'hu': 'Letöltés', 'id': 'Unduh', 'it': 'Scarica', 'ja': 'ダウンロード', 'ko': '다운로드',
-        'ms': 'Muat Turun', 'nb': 'Last ned', 'nl': 'Download', 'pl': 'Pobierz', 'pt-br': 'Baixar',
-        'pt-pt': 'Transferir', 'ro': 'Descarcă', 'ru': 'Загрузить', 'sk': 'Stiahnuť', 'sv': 'Hämta',
-        'th': 'ดาวน์โหลด', 'tr': 'İndir', 'uk': 'Завантажити', 'vi': 'Tải về', 'zh-hans': '下载',
-        'zh-hant': '下載', 'zh-hk': '下載',
     },
 };
 
