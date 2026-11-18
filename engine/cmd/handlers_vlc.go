@@ -17,7 +17,7 @@ import (
 // alacCacheVersion is bumped whenever a bug fix changes which bytes are written
 // to the ALAC disk cache. On mismatch, all *-alac.m4a files are deleted so VLC
 // never replays a fragment-0 that was written by the old, broken key path.
-const alacCacheVersion = "cbcs-fairplay-upstream-v9"
+const alacCacheVersion = "cbcs-fairplay-upstream-v10"
 
 // invalidateALACCacheIfStale deletes every committed ALAC cache file when the
 // on-disk version marker does not match alacCacheVersion. This is a one-time
@@ -33,7 +33,7 @@ func invalidateALACCacheIfStale(cacheDir string) {
 	}
 	deleted := 0
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), "-alac.m4a") {
+		if !e.IsDir() && (strings.HasSuffix(e.Name(), "-alac.m4a") || strings.HasSuffix(e.Name(), "-alac"+hiResQualifierSuffix+".m4a")) {
 			if removeErr := os.Remove(filepath.Join(cacheDir, e.Name())); removeErr == nil {
 				deleted++
 			}
@@ -72,18 +72,19 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	loadSeq := s.vlcLoads.begin()
+	qualifier := playbackCacheQualifier(sess.Codec, sess.SampleRate)
 	// The player is about to wait on this session's bytes: let its download go first.
 	// Nothing to protect when the file is cached or the download is already well ahead.
 	hold := true
 	if s.diskCache != nil {
-		if _, cached := s.diskCache.Path(sess.AssetID, sess.Codec); cached {
+		if _, cached := s.diskCache.Path(sess.AssetID, qualifier); cached {
 			hold = false
-		} else if spw := s.diskCache.GetStreaming(sess.AssetID, sess.Codec); spw != nil && spw.Written() >= alacStartBytes {
+		} else if spw := s.diskCache.GetStreaming(sess.AssetID, qualifier); spw != nil && spw.Written() >= alacStartBytes {
 			hold = false
 		}
 	}
 	s.alac.Foreground(req.SessionID, hold)
-	src, err := s.openVLCSource(req.SessionID, sess.AssetID, sess.Codec)
+	src, err := s.openVLCSource(req.SessionID, sess.AssetID, qualifier)
 	if err != nil {
 		s.alac.done(req.SessionID)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

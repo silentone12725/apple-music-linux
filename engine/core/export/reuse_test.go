@@ -151,6 +151,9 @@ func TestExportAudioQualifier(t *testing.T) {
 	}{
 		{ExportCapabilities{}, pipeline.CodecAAC},
 		{ExportCapabilities{Lossless: true}, pipeline.CodecALAC},
+		// The Hi-Res tier is a different cached file from the capped one.
+		{ExportCapabilities{Lossless: true, HiRes: true}, pipeline.CodecALAC + "-hires"},
+		{ExportCapabilities{HiRes: true}, pipeline.CodecAAC}, // hi-res is a tier of lossless
 		{ExportCapabilities{Atmos: true}, pipeline.CodecAtmos},
 		// Atmos wins over lossless, matching the provider's selection order.
 		{ExportCapabilities{Atmos: true, Lossless: true}, pipeline.CodecAtmos},
