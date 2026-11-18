@@ -31,8 +31,8 @@ normvol is byte-for-byte identical (cmp) to the existing adam-vlc-dev container'
 `vlc-plugins-base-3.0.24-1.fc44.x86_64`. Its NEEDED libraries are libvlccore.so.9,
 libm.so.6 and libc.so.6; its SONAME is libnormvol_plugin.so. Keep the filter and
 rebuild its unchanged VLC 3.0.24 source against the existing core ABI. Do not
-substitute Ubuntu's older VLC headers/core. The helper uses the retained matching
-source copy referenced by the Candidate C marker. That source must still exist.
+substitute Ubuntu's older VLC headers/core. The helper takes the unmodified VLC
+3.0.24 source tree with `--source` and checks its revision against `runtime-abi.json`.
 
 External host-provider outliers (not copied into the VLC runtime):
 
@@ -75,7 +75,7 @@ python3 scripts/check-vlc-glibc.py --check-build-env
 FFMPEG_SRC="$PWD/electron/dist/ffmpeg-source/ffmpeg-8.0.3" \
 ADAM_VLC_PLUGINS="$PWD/electron/dist/resources/vlc/plugins" \
 bash scripts/build-vlc-ffmpeg.sh "$PWD/electron/dist/vlc-ffmpeg-62-glibc238"
-python3 scripts/build-vlc-normvol.py
+python3 scripts/build-vlc-normvol.py --source <unmodified VLC 3.0.24 source tree>
 python3 scripts/check-vlc-glibc.py --runtime electron/dist/vlc-ffmpeg-62-glibc238
 python3 scripts/check-vlc-glibc.py --runtime electron/dist/vlc-normvol-glibc238
 exit

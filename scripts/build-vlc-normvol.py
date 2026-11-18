@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """USER RUN: rebuild the existing VLC 3.0.24 normvol module with older glibc."""
+import argparse
 import importlib.util
 import json
 from pathlib import Path
@@ -14,11 +15,13 @@ spec.loader.exec_module(glibc)
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source', type=Path, required=True, help='unmodified VLC 3.0.24 source tree')
+    source = parser.parse_args().source.resolve()
     glibc.check_build_env()
     runtime = REPO / 'electron/dist/resources/vlc'
-    marker = json.loads((runtime / 'playback01-candidate-c.json').read_text())
-    source = Path(marker['buildDirectory']) / 'source'
-    if (source / 'src/revision.txt').read_text().strip() != '3.0.24-rc1-0-g6de05adcba':
+    reference = json.loads((REPO / 'patches/vlc/3.0.24/runtime-abi.json').read_text())
+    if (source / 'src/revision.txt').read_text().strip() != reference['sourceRevision']:
         raise ValueError('matching VLC 3.0.24 source required')
     core = runtime / 'libvlccore.so.9.0.1'
     out = REPO / 'electron/dist/vlc-normvol-glibc238'

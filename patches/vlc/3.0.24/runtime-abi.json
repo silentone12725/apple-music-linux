@@ -9,6 +9,29 @@
     "modules/demux/mp4/meta.c": "764d2fe28f6300a8979a976f7611b9b08ea203b8ef2b7bc0527ee14ab915195a",
     "modules/demux/asf/asfpacket.c": "afe2545dfb3dfc3902eccc9d85bbcb759fc493ec1f1ebafc71d198b2f1c09121"
   },
+  "headerHashes": {
+    "include/vlc_codecs.h": "2434807ee1aea805a972aff706f87c79a5440c3cfe9cff5d9bb7e72524a6a68a",
+    "include/vlc_memory.h": "5c3f186c9948c077a92efa46ec6a3e34cbe3be996f2727d6b8153e3218b4684a",
+    "modules/codec/cc.h": "e5dfb8b9ddb880ade29fd71d65df15ba7e23b0b974b3dfcf756c0f91693cd967",
+    "modules/demux/asf/asfpacket.h": "fd4f0e5a30f5a28e03a2e6871932e7d72ed8049a9c6d49e43791ae86e2cba9e1",
+    "modules/demux/asf/libasf.h": "390298db0a61b74c4617112e8f1988c1367e436fe77076c7149d714e5fe4cacc",
+    "modules/demux/asf/libasf_guid.h": "21db304f0e8636ab1c088a4badfcc3257cbfd5a00900801822cec947c06bdb3b",
+    "modules/demux/av1_unpack.h": "3d072a4c28067c6854413e84a3882ca455c03ae478aa5a053b24ac8c5d30dd6e",
+    "modules/demux/mp4/avci.h": "2e615e57aba064328be9b6a85b4da0e8f40f0880074710167c8e6989fb8958fa",
+    "modules/demux/mp4/fragments.h": "2d034f9a9936a04d42df19b13978ef8e84bc1fe6bc7fe3c6d361cc6f23ad64b5",
+    "modules/demux/mp4/languages.h": "a8cfa59935620e452817a68347be78232315cd061b0e35f299a30c95065af986",
+    "modules/demux/mp4/libmp4.h": "1b4fbed954ba23cdf732f6a4c204520f975ab63a77bc6586bb388caa817ad120",
+    "modules/demux/mp4/mp4.h": "ea4f5c992c0b8591ea0eb7da4d4da388933dc7ce951a89c755d1bc5babfa1fbf",
+    "modules/demux/mp4/mpeg4.h": "b9f544bf86321abfc1803ff55a83e738cdb14cce7dba9e5bbb4b506751b095c5",
+    "modules/demux/xiph.h": "1f18fa51fdbae71d53634d60c8af69662568f817680b8abb2dcfb5fa0e72348c",
+    "modules/meta_engine/ID3Genres.h": "9223d1a1c675e2df8caac4c4319aaa0e629674bc8bb33de225da6de83737671a",
+    "modules/meta_engine/ID3Meta.h": "d8c2861891419208a3776469ad3b084f6a4176753377dc17d897fbdb98575886",
+    "modules/meta_engine/ID3Tag.h": "be83ea3e2493f1b360e84a225d826719af327dcd8a22bc6f2db9897ed457f71d",
+    "modules/meta_engine/ID3Text.h": "794329bcceae53c9fa7f56cc2a38d08f9712d37afc50ee077dd67fecc5b8a094",
+    "modules/packetizer/av1_obu.h": "ad14dbd76a5d524bd32ea0bb312527b51432241a87f248c00a30b452a9422667",
+    "modules/packetizer/dts_header.h": "b6c04522a704af407928c73a8707bc21223311c3e5b00ac7419e0fa19795f1c2",
+    "modules/packetizer/iso_color_tables.h": "683e0b26909b2ce2f54c13717066deae6a0f46c12140b4e9277273067bc95aed"
+  },
   "runtimeHashes": {
     "libvlc.so.5.6.1": "2948f0fd8f01942a9661edd929478939f235b9b4f7f7184951def77e25c0e10b",
     "libvlccore.so.9.0.1": "e948905079b434b584edb983b482606f800386e8dfb1eec1a839c48f8c3d7e92"

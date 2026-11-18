@@ -56,11 +56,30 @@ Native Observer is optional evidence tooling: this PR adds no observer API,
 Go/C bridge, renderer tracing or authentication code. Its separate synthetic C
 probe uses public libVLC APIs only and is never linked into Adam.
 
-`runtime-abi.json` deliberately pins six source units, the SRPM's internal revision,
-VLC 3.0.24 SDK and exact validated libVLC/core hashes. A different distro binary
+`runtime-abi.json` deliberately pins six source units, the 21 source-tree headers
+they include (`headerHashes`; the `vlc_*.h` SDK headers come from the version-checked
+`vlc-plugin` package), the SRPM's internal revision, VLC 3.0.24 SDK and exact
+validated libVLC/core hashes. A different distro binary
 or source is rejected, not assumed compatible from its soname. This third-party
 SDK/runtime eligibility constraint is not a dependency on PR #9. Stock packaging
 remains default; Candidate C requires explicit opt-in even for a cached bundle.
+
+`build-vlc-mp4.py` re-hashes the copied source snapshot it actually compiles, then
+patches that copy. The plugin is built like the distro's stock one: zlib
+(`HAVE_ZLIB_H`, compressed `cmov` headers), `-fstack-protector-strong`,
+`-fstack-clash-protection`, `-fcf-protection`, `_FORTIFY_SOURCE=2`, full RELRO
+(`-z relro -z now`), non-executable stack and `-fvisibility=hidden` (only
+`vlc_entry__3_0_0f` is exported, which is all the VLC loader looks up). The build
+fails unless `readelf` confirms each of these. Debug info carries no local paths.
+Installation is ordered so a crash never leaves an unmarked patched plugin: copy the
+plugin next to the target and check it against the build hash, drop `plugins.dat`,
+write `playback01-candidate-c.json` atomically, then rename the plugin into place.
+A marker that does not verify (interrupted install, older patch or format) makes
+the next opt-in run rebuild; without opt-in, `bundle-vlc.sh` refuses any runtime
+with a marker. The marker holds only verification hashes; the compiler, command
+line and paths stay in the build directory's `build-info.json`.
+`build-installer.sh` refuses to package a runtime holding the marker or an
+interrupted staging file.
 
 For the already-staged runtime GLIBC correction, follow [GLIBC-COMPATIBILITY.md](GLIBC-COMPATIBILITY.md). Its concrete build/stage commands supersede the older environment examples below.
 

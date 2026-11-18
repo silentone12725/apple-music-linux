@@ -130,6 +130,9 @@ done
 [ ! -e "$RES/libdrm-native.so" ] || die "stale resources/libdrm-native.so is packaged (old wrapper library)"
 [ ! -e "$RES/libhybris-core.so" ] || die "stale resources/libhybris-core.so is packaged (it is embedded in libdrm_client.so)"
 [ ! -e "$RES/rootfs" ] || die "resources/rootfs is packaged: Apple's libraries must not ship, they are downloaded at install time"
+# Candidate C (patches/vlc/3.0.24) is a development opt-in; release packages ship stock VLC.
+[ ! -e "$RES/vlc/playback01-candidate-c.json" ] || die "resources/vlc is a Candidate C development runtime; rebuild stock with scripts/bundle-vlc.sh --force"
+[ -z "$(find "$RES/vlc" -name '*.so.new' -o -name '*.json.tmp')" ] || die "resources/vlc holds an interrupted Candidate C staging file"
 
 same() { cmp -s "$1" "$2" || die "$3 in the package differs from the fresh build — stale copy"; }
 same "$RES_SRC/engine"           "$RES/engine"             "resources/engine"
