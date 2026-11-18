@@ -21,7 +21,10 @@ import { mp4FirstDecodeSeconds } from './engine/mp4base.js';
 import { GLASS, cleanBlur, sidebarOpacityControl, navColorWithAlphaVar } from './engine/sidebar-glass.js';
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
-import { accountSignedIn } from './engine/auth.js';
+import { menuAction as _menuAction } from './engine/menu-action.js';
+import { SKIP_SELECTOR as _SKIP_SELECTOR, skipDirection as _skipDirection, footerAction as _footerAction } from './engine/transport-skip.js';
+import { t as _t } from './engine/i18n.js';
+import { accountSignedIn, losslessReady as _losslessReady, downloadQuality as _downloadQuality } from './engine/auth.js';
 import { createTransportController } from './engine/transport.js';
 import { installTransportControls } from './engine/transport-controls.js';
 import { playbackMode, leaveLossless } from './engine/handoff.js';
@@ -1272,7 +1275,7 @@ function _showQualityPopup(anchorEl) {
         title  = 'Spatial Audio';
         detail = 'Dolby Atmos · Binaural';
     } else if (codec === 'alac') {
-        const hiRes = sampleRate > 48000 || bitDepth > 16;
+        const hiRes = sampleRate > 48000;
         const khz   = sampleRate ? `${(sampleRate / 1000).toFixed(sampleRate % 1000 ? 1 : 0)} kHz` : '';
         const bits  = bitDepth && bitDepth > 16 ? `${bitDepth}-bit ` : '';
         title  = hiRes ? 'Lossless' : 'Lossless';
@@ -1320,7 +1323,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
         label    = 'SPATIAL AUDIO';
         isSpatial = true;
     } else if (codec === 'alac') {
-        isHiRes  = sampleRate > 48000 || bitDepth > 16;
+        isHiRes  = sampleRate > 48000; // Apple: 48 kHz/24-bit is Lossless, Hi-Res is above 48 kHz
         color    = '#30d158';
         label    = isHiRes ? 'HI-RES' : '';
     } else {
@@ -1402,11 +1405,11 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
     let _npBadgeLast = ''; // last rendered content key — skip DOM write when unchanged
 
     function _npContent() {
-        const { codec, sampleRate, bitDepth, spatialAudio } = _qualityBadgeInfo;
+        const { codec, sampleRate, spatialAudio } = _qualityBadgeInfo;
         if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural')
             return { show: true, label: 'Spatial Audio', icon: false };
         if (codec === 'alac') {
-            const hi = sampleRate > 48000 || bitDepth > 16;
+            const hi = sampleRate > 48000;
             return { show: true, label: hi ? 'Hi-Res Lossless' : 'Lossless', icon: true };
         }
         return { show: false };
@@ -1677,6 +1680,7 @@ async function _mseCacheReInjectBody(sb, ms, audio, cacheSnap, pipeCtrl, mySC, w
     try {
         await waitIdle();
         if (pipeCtrl.signal.aborted || ms.readyState !== 'open') return;
+        try { sb.abort(); } catch (_) {}
         if (sb.buffered.length > 0) sb.remove(0, Infinity);
         await waitIdle();
         // Discard decoded frames before seekSec so playback starts sample-
@@ -1766,7 +1770,7 @@ async function _mseNetworkSeek(sb, audio, ms, seekSec) {
         sb.addEventListener('error',     fail, { once: true });
     });
 
-    try { await waitSBIdle(); if (ms.readyState === 'open') sb.remove(0, Infinity); await waitSBIdle(); } catch (_) {}
+    try { await waitSBIdle(); if (ms.readyState === 'open') { sb.abort(); sb.remove(0, Infinity); } await waitSBIdle(); } catch (_) {}
 
     // Strip decoded frames before seekSec — the engine's sub-segment trimming
     // (PassthroughStreaming) already drops fMP4 fragments ending before seekSec,
@@ -1814,8 +1818,10 @@ async function mseSeekToTime(seekSec, audio, sb, ms) {
         }
     }
 
-    // Cache re-inject path (backward seeks outside buffer).
-    if (_chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
+    // Cache re-inject path: only for backward seeks, which the cache (a prefix of the stream) covers.
+    // A seek past the buffered end (resume while the track is still downloading) needs the network.
+    const bufEnd = sb.buffered.length > 0 ? sb.buffered.end(sb.buffered.length - 1) : 0;
+    if (seekSec < bufEnd && _chunkCache && _chunkCache.sessionId === _sessionId && _chunkCache.chunks.length > 0) {
         _mseCacheSeek(sb, audio, ms, seekSec);
         return;
     }
@@ -2647,9 +2653,7 @@ async function startMVPipeline() {
     };
 
     // Inject between the skip-back and skip-forward controls, or after playCtrl.
-    const _skipFwd = avp?.querySelector('amp-playback-controls-skip-forward')
-                  ?? avp?.querySelector('[aria-label*="forward" i]')
-                  ?? avp?.querySelector('[aria-label*="10" i]');
+    const _skipFwd = avp?.querySelector('amp-playback-controls-skip[direction="forward"]');
     const _insertTarget = playCtrl ?? _skipFwd;
     if (_insertTarget?.parentNode) {
         _insertTarget.parentNode.insertBefore(_mvPlayBtn, _insertTarget);
@@ -2743,18 +2747,16 @@ async function startMVPipeline() {
         const btn = e.target.closest('button');
         // Skip our own quality button — it handles its own clicks.
         if (!btn || btn === _qualityBtn) return;
-        const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-        const cls   = btn.className.toLowerCase();
-        // Use aria-label for semantic matching; fall back to class only (not textContent,
-        // which would match "1080p" as containing "10" for the skip-seconds buttons).
-        if (label.includes('play') || label.includes('pause') || cls.includes('play') || cls.includes('pause')) {
+        // What a control does comes from its element and its direction attribute, never from its translated
+        // label (see footerAction in transport-skip.js).
+        const act = _footerAction(btn.className.toLowerCase(), (sel) => btn.closest(sel));
+        if (act?.action === 'play') {
             e.stopImmediatePropagation();
             togglePlayPause(); _showControls();
-        } else if (label.includes('10') || label.includes('skip') || label.includes('forward') || label.includes('back') || label.includes('rewind') || cls.includes('skip')) {
+        } else if (act?.action === 'skip') {
             e.stopImmediatePropagation();
-            const delta = (label.includes('back') || label.includes('rewind') || cls.includes('back')) ? -10 : 10;
-            _mvSeekTo(_mvCurTime() + delta); _showControls();
-        } else if (label.includes('fullscreen') || label.includes('screen') || cls.includes('full-screen') || cls.includes('fullscreen')) {
+            _mvSeekTo(_mvCurTime() + act.delta); _showControls();
+        } else if (act?.action === 'fullscreen') {
             e.stopImmediatePropagation();
             toggleFullscreen();
         }
@@ -5345,15 +5347,22 @@ function _resumeClear() {
     window.adamBridge?.storeDelete(_RESUME_KEY).catch(() => {});
 }
 
-function _resumeShowChip(mk, saved) {
+// `keep` is set after a memory-maintenance reload (main.mjs): the page reloaded while nobody was
+// looking, so the chip waits for the user instead of vanishing after 20 s.
+function _resumeShowChip(mk, saved, keep = false) {
     if (document.getElementById('adam-resume-chip')) return;
     const FF = 'font-family:-apple-system,SF Pro Text,system-ui,sans-serif;';
     const chip = document.createElement('div');
     chip.id = 'adam-resume-chip';
+    if (keep) chip.dataset.keep = '1';
     chip.style.cssText = 'position:fixed;bottom:110px;right:22px;z-index:99997;display:flex;align-items:center;gap:12px;' +
-        'max-width:360px;padding:12px 14px;border-radius:14px;background:rgba(30,30,32,0.92);' +
-        'border:0.5px solid rgba(255,255,255,0.14);box-shadow:0 10px 40px rgba(0,0,0,0.55);' +
-        'backdrop-filter:blur(28px) saturate(1.8);-webkit-backdrop-filter:blur(28px) saturate(1.8);' +
+        // Apple-style material: translucent, so the blur (the same one the rest of the glass UI uses,
+        // including its Settings value) shows what is behind; a hairline and a top highlight define the edge.
+        'max-width:360px;padding:12px 14px;border-radius:16px;background:rgba(48,48,52,0.5);' +
+        'border:0.5px solid rgba(255,255,255,0.16);' +
+        'box-shadow:0 8px 32px rgba(0,0,0,0.38),inset 0 0.5px 0 rgba(255,255,255,0.18);' +
+        'backdrop-filter:blur(var(--adam-glass-blur,28px)) saturate(1.8);' +
+        '-webkit-backdrop-filter:blur(var(--adam-glass-blur,28px)) saturate(1.8);' +
         'transform:translateY(20px);opacity:0;transition:transform 0.3s,opacity 0.3s;' + FF;
     if (saved.artworkUrl) {
         const art = document.createElement('img');
@@ -5373,20 +5382,33 @@ function _resumeShowChip(mk, saved) {
     chip.appendChild(txt);
     const playBtn = document.createElement('button');
     playBtn.innerHTML = _svgPlaySm;
+    // A neutral glass button, not the brand red: the chip should not outshine what is being played.
+    const _playBg = 'rgba(255,255,255,0.16)', _playBgHover = 'rgba(255,255,255,0.26)';
     playBtn.style.cssText = 'width:36px;height:36px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;' +
-        'background:#fc3c44;color:#fff;display:flex;align-items:center;justify-content:center;';
+        `background:${_playBg};color:#fff;display:flex;align-items:center;justify-content:center;transition:background 0.15s;`;
+    playBtn.onmouseenter = () => { playBtn.style.background = _playBgHover; };
+    playBtn.onmouseleave = () => { playBtn.style.background = _playBg; };
+    playBtn.setAttribute('aria-label', 'Resume playback');
     const dismiss = document.createElement('button');
     dismiss.innerHTML = _svgClose;
     dismiss.style.cssText = 'width:24px;height:24px;flex-shrink:0;border-radius:50%;border:none;cursor:pointer;' +
-        'background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.6);display:flex;align-items:center;justify-content:center;';
-    const close = () => { chip.style.opacity = '0'; chip.style.transform = 'translateY(20px)'; setTimeout(() => chip.remove(), 300); };
+        'background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.6);display:flex;align-items:center;justify-content:center;';
+    dismiss.setAttribute('aria-label', 'Dismiss');
+    const onPlayback = () => { if (mk.isPlaying) close(); };
+    const close = () => {
+        chip.style.opacity = '0'; chip.style.transform = 'translateY(20px)'; setTimeout(() => chip.remove(), 300);
+        try { mk.removeEventListener('playbackStateDidChange', onPlayback); } catch (_) {}
+        window.adamBridge?.storeDelete('adam_mem_reload').catch(() => {});
+    };
+    // Starting anything else makes the old session moot.
+    if (keep) { try { mk.addEventListener('playbackStateDidChange', onPlayback); } catch (_) {} }
     dismiss.onclick = close;
     playBtn.onclick = () => { close(); _resumePlay(mk, saved); };
     chip.append(playBtn, dismiss);
     document.body.appendChild(chip);
     requestAnimationFrame(() => { chip.style.opacity = '1'; chip.style.transform = 'translateY(0)'; });
     // Auto-dismiss after 20s if untouched.
-    setTimeout(() => { if (document.getElementById('adam-resume-chip')) close(); }, 20000);
+    if (!keep) setTimeout(() => { if (document.getElementById('adam-resume-chip')) close(); }, 20000);
 }
 
 // Seek to the saved position once the target track is actually playing —
@@ -5396,10 +5418,15 @@ function _resumeSeekWhenReady(mk, saved) {
     let tries = 0;
     const iv = setInterval(() => {
         tries++;
-        if (_currentAssetId === saved.adamId && _durationSec > 0) {
+        const ready = _currentAssetId === saved.adamId && _durationSec > 0;
+        // Seek inside the buffer when the download has reached the position (a native seek, no refetch);
+        // seeking into data that is still arriving races the stream that is filling it.
+        const sb = _activeSb;
+        const buffered = !!sb && sb.buffered.length > 0 && sb.buffered.end(sb.buffered.length - 1) > saved.positionSec + 2;
+        if (ready && (buffered || _streamComplete || tries > 120)) { // ~30s, then seek over the network
             clearInterval(iv);
             try { mk.seekToTime(Math.min(saved.positionSec, _durationSec - 1)); } catch (_) {}
-        } else if (tries > 40) { // ~10s give-up
+        } else if (tries > 160) {
             clearInterval(iv);
         }
     }, 250);
@@ -5466,8 +5493,10 @@ async function _resumeSetup(mk) {
     // barely started, where "resume" adds nothing.
     const queueLen = (saved.containers || []).reduce((n, c) => n + (c.items?.length || 0), 0);
     const midTrack = saved.positionSec >= 5 && !(saved.durationSec && saved.positionSec > saved.durationSec - 5);
-    if (queueLen <= 1 && !midTrack) return;
-    _resumeShowChip(mk, saved);
+    if (queueLen <= 1 && !midTrack) { window.adamBridge?.storeDelete('adam_mem_reload').catch(() => {}); return; }
+    let keep = false;
+    try { const t = Number(await window.adamBridge?.storeRead('adam_mem_reload')); keep = t > 0 && Date.now() - t < 12 * 3600 * 1000; } catch (_) {}
+    _resumeShowChip(mk, saved, keep);
 }
 
 // ── Discord Rich Presence (renderer side) ─────────────────────────────────────
@@ -6434,7 +6463,8 @@ async function setup() {
         if (p['streaming-quality']) _streamingQuality = p['streaming-quality'];
         // lossless-enabled=false overrides streaming-quality → force AAC regardless.
         if (p['lossless-enabled'] === false) _streamingQuality = 'high-quality';
-        if (p['downloads-quality']) _downloadsQuality  = p['downloads-quality'];
+        // The Downloads dropdown saves 'dl-quality'; 'downloads-quality' is what older builds read.
+        if (p['dl-quality'] || p['downloads-quality']) _downloadsQuality = p['dl-quality'] || p['downloads-quality'];
         window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
 
         const body = {};
@@ -7008,7 +7038,6 @@ async function setup() {
     }
 
     // Grey out next/previous transport buttons when no track to go to.
-    // Uses aria-label heuristics covering both old and new Apple Music DOM shapes.
     function _updateTransportButtons() {
         const ci = _sessionContainerIdx, ii = _sessionItemIdx;
         const cur = _sessionContainers[ci];
@@ -7017,39 +7046,14 @@ async function setup() {
         const hasPrev = ci > 0 || ii > 0;
         const hasNext = repeat !== 0 || (cur && (ii + 1 < cur.items.length || ci + 1 < _sessionContainers.length));
 
-        // Only target the transport skip buttons — not queue/up-next/menu buttons.
-        // Match: "skip to previous", "skip to next", "previous track", "next track", etc.
-        // Exclude: "up next" (queue panel), anything without "skip" or "track" in the label.
-        const allBtns = document.querySelectorAll(
-            '[data-testid*="skip-back"], [data-testid*="skip-forward"], [data-testid*="skip-previous"], [data-testid*="skip-next"], [data-testid*="transport-previous"], [data-testid*="transport-next"]'
-        );
-        for (const btn of allBtns) {
-            const tid = (btn.getAttribute('data-testid') || '').toLowerCase();
-            const isPrev = tid.includes('previous') || tid.includes('skip-back');
-            const isNext = tid.includes('next') || tid.includes('skip-forward');
-            if (isPrev) {
-                btn.style.opacity       = hasPrev ? '' : '0.35';
-                btn.style.pointerEvents = hasPrev ? '' : 'none';
-            } else if (isNext) {
-                btn.style.opacity       = hasNext ? '' : '0.35';
-                btn.style.pointerEvents = hasNext ? '' : 'none';
-            }
-        }
-
-        // Also match by aria-label but require "skip" to avoid hitting queue/up-next buttons.
-        const labelBtns = document.querySelectorAll('[aria-label*="skip" i], [aria-label*="previous track" i], [aria-label*="next track" i]');
-        for (const btn of labelBtns) {
-            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-            if (label.includes('up next')) continue; // queue panel — skip
-            const isPrev = label.includes('previous') || label.includes('back');
-            const isNext = label.includes('next') || label.includes('forward');
-            if (isPrev) {
-                btn.style.opacity       = hasPrev ? '' : '0.35';
-                btn.style.pointerEvents = hasPrev ? '' : 'none';
-            } else if (isNext) {
-                btn.style.opacity       = hasNext ? '' : '0.35';
-                btn.style.pointerEvents = hasNext ? '' : 'none';
-            }
+        // The transport skip controls, found by element and not by their translated labels (see transport-skip.js).
+        // Queue and menu buttons are neither, so they are left alone.
+        for (const el of document.querySelectorAll(_SKIP_SELECTOR)) {
+            const direction = _skipDirection(el);
+            if (!direction) continue;
+            const enabled = direction === 'previous' ? hasPrev : hasNext;
+            el.style.opacity       = enabled ? '' : '0.35';
+            el.style.pointerEvents = enabled ? '' : 'none';
         }
     }
 
@@ -7169,6 +7173,13 @@ async function setup() {
                 _toggleLove().then(() => _pushMiniState());
             }
             return;
+        }
+        // After a memory-maintenance reload the queue is gone until the Resume chip is used: let a
+        // media key or the tray's Play do that, so the reload never costs a keystroke.
+        const _wantsPlay = cmd === 'play' || (cmd === 'playpause' && mk.playbackState !== window.MusicKit?.PlaybackStates?.playing);
+        if (_wantsPlay) {
+            const chip = document.getElementById('adam-resume-chip');
+            if (chip?.dataset.keep === '1') { chip.querySelector('button')?.click(); return; }
         }
         switch (cmd) {
             case 'play':      mk.play().catch(() => {}); break;
@@ -8344,7 +8355,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
     let portaled = null;
 
     function positionPortal(el) {
-        const bar = document.querySelector('[class*="search-input-wrapper"]');
+        const bar = document.querySelector('.search-input-wrapper');
         if (!bar) return;
         const r = bar.getBoundingClientRect();
         el.style.setProperty('position', 'fixed', 'important');
@@ -8365,7 +8376,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
     // Try to portal whatever suggestions exist inside the wrapper right now.
     // Returns true if portaled, false if not found yet.
     function tryScan() {
-        const bar = document.querySelector('[class*="search-input-wrapper"]');
+        const bar = document.querySelector('.search-input-wrapper');
         if (!bar) return false;
         const sugg = bar.querySelector('[class*="search-suggestions"]');
         if (!sugg) return false;
@@ -8380,7 +8391,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
                 if (node.nodeType !== 1) continue;
                 const sugg = node.matches('[class*="search-suggestions"]') ? node
                     : node.querySelector('[class*="search-suggestions"]');
-                if (sugg && sugg.closest('[class*="search-input-wrapper"]')) {
+                if (sugg && sugg.closest('.search-input-wrapper')) {
                     doPortal(sugg);
                     return;
                 }
@@ -8417,7 +8428,7 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
     // Attach to the search field now, and re-attach after SPA navigations
     function attachToSearchInput() {
         wireSearchInput(document.querySelector(
-            '#search-input__text-field, [class*="search-input__text-field"]'
+            '#search-input__text-field, .search-input__text-field'
         ));
     }
 
@@ -8684,8 +8695,13 @@ setup().catch(e => console.error('[Adam Engine] setup:', e));
     // the viewport that is not a card, shelf, header cover or player art.
     function markPageArt() {
         const vw = innerWidth, vh = innerHeight;
-        for (const el of document.querySelectorAll('.artwork-component:not([data-adam-page-art])')) {
-            if (el.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) continue;
+        // Runs on every frame the page changes; a grid page has hundreds of artworks. Ones
+        // inside a lockup, shelf, nav or player never qualify, so mark them once and skip them.
+        for (const el of document.querySelectorAll('.artwork-component:not([data-adam-page-art]):not([data-adam-art-skip])')) {
+            if (el.closest('[class*="lockup"], [class*="shelf"], nav, [class*="player"], [class*="lcd"], [class*="artwork__main"], [class*="artist-header"]')) {
+                el.setAttribute('data-adam-art-skip', '');
+                continue;
+            }
             const r = el.getBoundingClientRect();
             if (r.width >= vw * 0.6 && r.height >= vh * 0.6) el.setAttribute('data-adam-page-art', '');
         }
@@ -8993,12 +9009,10 @@ window.adamGetQueueInfo = function () {
         const drmState = drm?.state ?? drm ?? {};
         const managerOk = drmState?.manager === 'ready';
         const processOk = drmState?.process === 'running';
-        const fairplayOk = drmState?.fairplay === 'ready';
-        const cbcsOk = drm?.capabilities?.cbcs === true;
         // "Signed in" means the user completed the engine login (email+password) and
         // FairPlay/ALAC is ready. A web-session MUT alone gives AAC but is not an
         // explicit engine login — don't show "Signed in" for that.
-        const isSignedIn = cbcsOk || fairplayOk;
+        const isSignedIn = _losslessReady(drm);
 
         function renderState() {
             body.innerHTML = '';
@@ -9232,6 +9246,7 @@ window.adamGetQueueInfo = function () {
             if (save) {
                 window.adamBridge?.setTweak(prefKey, value);
                 if (prefKey === 'streaming-quality') _streamingQuality = value;
+                if (prefKey === 'dl-quality') _downloadsQuality = value;
                 onChange?.(value);
             }
         }
@@ -9700,7 +9715,7 @@ window.adamGetQueueInfo = function () {
                 const d = await fetchDRM().catch(() => null);
                 if (!d) return;
                 renderStatusRows(d).forEach((row, i) => applyStatusRow(valEls[i].el, row));
-                if (accountSignedIn(d) !== accountSignedIn(drm)) { clearInterval(poll); openSettings(); return; }
+                if (accountSignedIn(d) !== accountSignedIn(drm) || _losslessReady(d) !== _losslessReady(drm)) { clearInterval(poll); openSettings(); return; }
                 if (isResolved(d)) clearInterval(poll);
             }, 2000);
         }
@@ -10888,8 +10903,9 @@ window.adamGetQueueInfo = function () {
         _warmSettingsCache(); // refresh in background while sections render
         if (myGen !== _settingsGen) { _restoreProxy(); return; }
 
-        // DRM signed in = CBCS decryption is live (required for lossless/hi-res).
-        const drmSignedIn = accountSignedIn(drm); // one definition, shared with the status poll below
+        // Lossless and hi-res are offered only while FairPlay is live. A saved account that has not (yet) brought
+        // FairPlay up counts as signed in for the account row's poll below, but not for any lossless control.
+        const drmSignedIn = _losslessReady(drm);
         // False for a build with no DRM layer: the session can never become ready, so lossless is not merely "later".
         // An older engine does not say, and counts as available.
         const drmAvailable = drm?.available !== false;
@@ -10936,12 +10952,12 @@ window.adamGetQueueInfo = function () {
         const nav = document.querySelector('nav.navigation') || document.querySelector('nav');
         if (!nav) return null;
         return (
+            nav.querySelector('[data-testid="account-menu"]') ||
             nav.querySelector('[class*="account-menu"]') ||
             nav.querySelector('[class*="account"]') ||
             nav.querySelector('[class*="Account"]') ||
             nav.querySelector('[aria-haspopup="true"]') ||
             nav.querySelector('[aria-haspopup="menu"]') ||
-            nav.querySelector('[aria-label*="ccount"]') ||
             // Last-resort: bottom-most li containing an img (profile photo)
             [...nav.querySelectorAll('li')].reverse().find(li => li.querySelector('img')) ||
             null
@@ -10952,6 +10968,7 @@ window.adamGetQueueInfo = function () {
     // so they're never clipped by account-menu's own overflow/stacking context.
     const _szN = 28;
     let _cogResizeObs = null;
+    let _cogRow = null; // account row the cog buttons were last placed against
 
     function mountSettingsCog() {
         const accountRow = findAccountRow();
@@ -10991,6 +11008,7 @@ window.adamGetQueueInfo = function () {
             nav.appendChild(miniBtn);
         }
         _positionCogButtons(nav, accountRow, cog, dlBtn, miniBtn);
+        _cogRow = accountRow;
 
         if (!_cogResizeObs) {
             _cogResizeObs = new ResizeObserver(() => {
@@ -11001,8 +11019,10 @@ window.adamGetQueueInfo = function () {
                 const m   = document.getElementById('adam-miniplayer-btn');
                 if (row && n && c && d && m) _positionCogButtons(n, row, c, d, m);
             });
-            _cogResizeObs.observe(nav);
         }
+        // Observing an element twice is a no-op; a re-mounted sidebar brings new elements.
+        _cogResizeObs.observe(nav);
+        _cogResizeObs.observe(accountRow);
     }
 
     function _styleNavBtn(btn) {
@@ -11045,7 +11065,14 @@ window.adamGetQueueInfo = function () {
 
     // Watch the entire document so the cog re-mounts after SPA navigation
     // replaces the sidebar (observing only parent misses parent-level removals).
+    // Runs on every frame the page changes, so stay cheap while the buttons are in place:
+    // remounting re-runs the account-row search and two forced layouts (getBoundingClientRect).
+    // The ResizeObserver above repositions them when the sidebar or the row changes size.
     watchDomSettled(() => {
+        if (_cogRow?.isConnected &&
+            document.getElementById('adam-settings-cog')?.isConnected &&
+            document.getElementById('adam-downloads-btn')?.isConnected &&
+            document.getElementById('adam-miniplayer-btn')?.isConnected) return;
         if (findAccountRow()) mountSettingsCog();
     });
 
@@ -11088,6 +11115,10 @@ window.adamGetQueueInfo = function () {
         'Copy Embed Code':       mkSvg(DL_PATH, ''),
     };
 
+    // What each recognised action draws, whatever language its title is in.
+    const ACTION_ICON = { 'embed': ICON_SVG['Copy Embed Code'], 'pin': _PIN, 'unpin': _PIN, 'delete-from-library': _TRASH };
+    const ACTION_MARKED = ['embed', 'pin', 'unpin', 'delete-from-library'];
+
     // One-time CSS: hides Apple's native SVGs and renames "Copy Embed Code".
     // All hiding is CSS-only so we never touch Glimmer-managed element styles
     // (inline style mutations on Glimmer nodes trigger its reconciler and can
@@ -11099,36 +11130,58 @@ window.adamGetQueueInfo = function () {
         // suffix only attaches it to the last item, making earlier items match
         // the bare li and get the rule applied to the entire row.
         const li = t => `li.contextual-menu-item:has(button[title='${t}'])`;
-        const con = t => `${li(t)} .contextual-menu-item__icon-container`;
-        const svg = t => `${con(t)} > svg`;
+        const con = sel => `${sel} .contextual-menu-item__icon-container`;
+        const svg = sel => `${con(sel)} > svg`;
 
         const PIN_TITLES   = ['Pin Album','Unpin Album','Pin Music Video','Unpin Music Video','Pin Song','Unpin Song','Pin Playlist','Unpin Playlist'];
         const TRASH_TITLES = ['Delete from Library','Remove from Library'];
         const EMBED_TITLE  = 'Copy Embed Code';
+        // Apple titles its items in the page language, so the embed item is also found through the
+        // marker on the icon span we inject into it (see injectMenuIcons), never through its title.
+        const EMBED_BY_ACTION = `li.contextual-menu-item:has([data-adam-action="embed"])`;
 
-        const ALL_CON = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(con).join(',\n');
-        const ALL_SVG = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(svg).join(',\n');
-        const EMBED_LI  = li(EMBED_TITLE);
+        // Pin, unpin and delete are found the same way, through the marker on the span we inject.
+        const MARKED = ACTION_MARKED.map(a => `li.contextual-menu-item:has([data-adam-action="${a}"])`);
+        const SELECTORS = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(li).concat(MARKED);
+        const ALL_CON = SELECTORS.map(con).join(',\n');
+        const ALL_SVG = SELECTORS.map(svg).join(',\n');
+        const EMBED_LIS = [li(EMBED_TITLE), EMBED_BY_ACTION];
+        // One rule per selector: appending the descendant to a joined list only reaches the last one.
+        const embedRules = label => EMBED_LIS.map(sel => `
+${sel} .contextual-menu-item__option-text { font-size:0 !important; }
+${sel} .contextual-menu-item__option-text::before { content:${JSON.stringify(label)}; font-size:13px !important; }`).join('');
 
         const s = document.createElement('style');
         s.id = 'adam-ctx-icons';
-        s.textContent = `
+        // The label follows the page language, which can change without a reload (storefront switch).
+        const render = () => {
+            s.textContent = `
 /* position:relative so our absolute span is clipped to the container */
 ${ALL_CON} { position:relative !important; }
 
 /* hide Apple's SVG via CSS — never touch inline styles on Glimmer elements */
 ${ALL_SVG} { opacity:0 !important; }
 
-/* rename "Copy Embed Code" → "Download" purely via CSS */
-${EMBED_LI} .contextual-menu-item__option-text { font-size:0 !important; }
-${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; font-size:13px !important; }`;
+/* rename Apple's "Copy Embed Code" item to "Download", in the page language, purely via CSS */${embedRules(_t('download'))}`;
+        };
+        render();
         document.head.appendChild(s);
+        new MutationObserver(render).observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
     })();
 
     // Inject our SVG into one icon container and set up a guard observer that
     // re-injects the moment Glimmer replaces the container's children.
     // We NEVER mutate Apple's existing elements — CSS handles hiding the native SVG.
-    function _armContainer(container, svgHtml) {
+    // What a menu item does, from its icon rather than its title (Apple titles items in the page
+    // language). Apple's own glyph is the direct <svg> child of the icon container; ours sits in a span.
+    function _itemAction(li) {
+        const glyph = li.querySelector('.contextual-menu-item__icon-container > svg path')?.getAttribute('d') ?? '';
+        const btn = li.querySelector('button');
+        const title = btn?.title || btn?.querySelector('.contextual-menu-item__option-text')?.textContent?.trim() || '';
+        return _menuAction(glyph, title);
+    }
+
+    function _armContainer(container, svgHtml, action = null) {
         if (container._adamArmed) return;
         container._adamArmed = true;
 
@@ -11136,6 +11189,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             if (container.querySelector('[data-adam]')) return;
             const span = document.createElement('span');
             span.setAttribute('data-adam', '1');
+            // Marks the item for the stylesheet (see injectContextMenuCSS) without touching Apple's elements.
+            if (action) span.setAttribute('data-adam-action', action);
             span.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;';
             span.innerHTML = svgHtml;
             container.appendChild(span);
@@ -11159,12 +11214,15 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             const title = btn.title
                 || btn.querySelector('.contextual-menu-item__option-text')?.textContent?.trim()
                 || '';
-            const svgHtml = ICON_SVG[title];
+            const li = btn.closest('li');
+            const action = li ? _itemAction(li) : null;
+            // Embed is found by its glyph; pin, unpin and delete by their title in any of Apple's languages.
+            const svgHtml = ACTION_ICON[action] ?? ICON_SVG[title];
             if (!svgHtml) return;
             // Container may be inside the button OR elsewhere in the same li.
             const container = btn.querySelector('.contextual-menu-item__icon-container')
-                || btn.closest('li')?.querySelector('.contextual-menu-item__icon-container');
-            if (container) _armContainer(container, svgHtml);
+                || li?.querySelector('.contextual-menu-item__icon-container');
+            if (container) _armContainer(container, svgHtml, ACTION_ICON[action] ? action : null);
         });
     }
 
@@ -11211,11 +11269,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     // exactly which item was right-clicked, regardless of whether the row has an <a> tag.
     function _resolveViaMenuLink(menuNode) {
         return new Promise(resolve => {
-            const copyBtn = Array.from(menuNode.querySelectorAll('button')).find(b => {
-                const t = b.querySelector('.contextual-menu-item__option-text')?.textContent?.trim()
-                    || b.title || b.getAttribute('aria-label') || '';
-                return t === 'Copy Link';
-            });
+            const copyBtn = Array.from(menuNode.querySelectorAll('li.contextual-menu-item'))
+                .find(li => _itemAction(li) === 'copy-link')?.querySelector('button');
             if (!copyBtn) return resolve(null);
 
             const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
@@ -11317,8 +11372,10 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
         if (!info) { console.warn('[Adam] startDownload: no track info'); return; }
         const mk = window.MusicKit?.getInstance?.();
         const prefs = await window.adamBridge?.getPrefs().catch(() => ({})) || {};
-        const qual = prefs['downloads-quality'] || _downloadsQuality || 'lossless';
-        const isLossless = qual !== 'high-quality';
+        // The Downloads quality setting, held to the global Lossless toggle and to what FairPlay allows right now.
+        const { lossless: isLossless, hiRes: isHiRes } = _downloadQuality({
+            prefs, fallback: _downloadsQuality, ready: _engineCaps.lossless,
+        });
         const hint = await prefetchHintMeta(info);
 
         const _af = prefs['download-album-folder'] || '{album_artist}/{album}';
@@ -11332,6 +11389,7 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
             Language:         navigator.language || 'en-US',
             Capabilities: {
                 Lossless:        isLossless,
+                HiRes:           isHiRes,
                 Atmos:           false,
                 Video:           info.type === 'video',
                 Playlist:        info.type === 'playlist',
@@ -11389,7 +11447,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
     // Hide playlist submenu by default; show it only while hovering "Add to Playlist".
     function setupSubmenuHover(menuRoot) {
         if (!menuRoot || menuRoot._adamSubmenuWired) return;
-        const li = menuRoot.querySelector("li.contextual-menu-item:has(button[title='Add to Playlist'])");
+        // The item that opens the playlist submenu, found by its icon, not by its translated title.
+        const li = [...menuRoot.querySelectorAll('li.contextual-menu-item')].find(l => _itemAction(l) === 'add-to-playlist');
         if (!li) return;
         const subs = () => Array.from(menuRoot.querySelectorAll(
             'div.contextual-menu.contextual-menu--nested, div.contextual-menu.contextual-menu--in-submenu'
@@ -11433,8 +11492,8 @@ ${EMBED_LI} .contextual-menu-item__option-text::before { content:'Download'; fon
                 node.addEventListener('click', async e => {
                     const btn = e.target.closest('button');
                     if (!btn) return;
-                    const title = btn.title || btn.querySelector('.contextual-menu-item__option-text')?.textContent?.trim() || '';
-                    if (title !== 'Download' && title !== 'Copy Embed Code' && !title.includes('Embed Code')) return;
+                    const li = btn.closest('li.contextual-menu-item');
+                    if (!li || _itemAction(li) !== 'embed') return;
                     e.stopPropagation();
                     e.preventDefault();
 

@@ -223,13 +223,16 @@ func CBCSSource(adamID string, dialer CBCSDialer, fileURL string, keyURIs []stri
 	}
 }
 
-// upstreamKeyURIs preserves every key transition from the playlist. The shared
-// prefetch key can cover more than one segment: some tracks switch to their
-// content key on segment 2 (about 30 seconds), rather than segment 1.
-// Returns a copy so the shared playlist is never mutated.
+// Keep the prefetch key until the first content key, regardless of where the
+// transition occurs. Later tags can refer to keys the server will not open.
 func upstreamKeyURIs(keyURIs []string) []string {
 	out := make([]string, len(keyURIs))
-	copy(out, keyURIs)
+	for i, key := range keyURIs {
+		out[i] = key
+		if key != "" && !isSentinelKeyURI(key) {
+			break
+		}
+	}
 	return out
 }
 

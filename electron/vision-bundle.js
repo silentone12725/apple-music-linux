@@ -13,25 +13,10 @@
     if (typeof window.adamReady !== 'function') return;
     if (window._adamReadyFired) return;
 
-    // Poll the engine's DRM status until FairPlay (or Widevine) reports ready.
-    // Returns true as soon as either is ready, false after exhausting retries.
-    const waitForDRM = async (maxMs = 10000) => {
-        const engine = window._adamEngineURL || 'https://127.0.0.1:20025';
-        const deadline = Date.now() + maxMs;
-        while (Date.now() < deadline) {
-            try {
-                const d = await fetch(`${engine}/api/v1/drm/status`).then(r => r.json());
-                const s = d?.state ?? d ?? {};
-                if (s.fairplay === 'ready' || s.widevine === 'ready') return true;
-            } catch { /* engine not up yet — keep polling */ }
-            await new Promise(r => setTimeout(r, 400));
-        }
-        return false; // timed out — let the 12 s main-process fallback handle it
-    };
-
-    const fire = async () => {
-        if (window._adamReadyFired) return;
-        await waitForDRM(10000);
+    // Show as soon as the sidebar and player bar are rendered. This used to wait up to
+    // 10 s for FairPlay as well, which kept a ready UI hidden (~2.7 s on a normal start,
+    // the full 7 s fallback with no DRM session); playback waits for FairPlay itself.
+    const fire = () => {
         if (window._adamReadyFired) return;
         window._adamReadyFired = true;
         window.adamReady();
@@ -66,6 +51,17 @@ sheet.replaceSync(`
   }
 
   html, body { background: transparent !important; }
+
+  /* Home and New are long pages of shelves. Apple's artwork onload handler reads getComputedStyle() for every
+     image, which forces a style recalculation over the whole page each time, so a signed-in Home (about 6,500
+     nodes, a hundred images) kept the main thread busy for seconds after a click: a click on New could sit
+     unhandled while Home was still settling, and look like it had opened Home. Shelves off screen now skip
+     style and layout until they scroll near, and keep their measured height meanwhile. Measured on that page:
+     style recalculation of a Home/New click cycle fell from about 17 s to 3.5 s, clicks about twice as fast. */
+  main [data-testid="shelf-component"] {
+    content-visibility: auto;
+    contain-intrinsic-block-size: auto 320px;
+  }
 
   /* ── Sidebar glass ──
      Confirmed stable selector. Svelte hash classes change on every deploy;
@@ -113,14 +109,14 @@ sheet.replaceSync(`
   footer > * { display: none !important; }
 
   /* ── Songs library column header bar — glass-themed instead of solid dark ── */
-  [class*="library-track--header"] {
+  .library-track--header {
     background: rgba(255,255,255,0.05) !important;
     backdrop-filter: blur(20px) saturate(1.8) !important;
     -webkit-backdrop-filter: blur(20px) saturate(1.8) !important;
     border-bottom: 0.5px solid rgba(255,255,255,0.10) !important;
     color: rgba(255,255,255,0.45) !important;
   }
-  [class*="library-track--header"] * {
+  .library-track--header * {
     color: rgba(255,255,255,0.45) !important;
     font-size: 11px !important;
     letter-spacing: 0.04em !important;
@@ -128,7 +124,7 @@ sheet.replaceSync(`
   }
 
   /* ── Strip alternating row zebra striping in virtual lists ── */
-  [class*="row-zebra-striping"] [class*="virtual-row"],
+  .row-zebra-striping [class*="virtual-row"],
   [class*="songs-list__item--alternate"],
   [class*="songs-list__item--odd"],
   [class*="songs-list__item--even"] { background: transparent !important; }
@@ -163,7 +159,7 @@ sheet.replaceSync(`
     transition: background 0.18s ease !important;
   }
   /* White glass pill overlay via ::before — unaffected by Apple's background rules */
-  [class*="pill-container"] [class*="pill-option--selected"]::before {
+  [class*="pill-container"] .search-scope-bar__pill-option--selected::before {
     content: '' !important;
     display: block !important;
     position: absolute !important;
@@ -177,24 +173,24 @@ sheet.replaceSync(`
     z-index: 0 !important;
   }
   /* Keep label text above the overlay */
-  [class*="pill-container"] [class*="pill-option"] [class*="pill-label"] {
+  [class*="pill-container"] [class*="pill-option"] .search-scope-bar__pill-label {
     position: relative !important;
     z-index: 1 !important;
   }
-  [class*="pill-container"] [class*="pill-option"] [class*="pill-label"] {
+  [class*="pill-container"] [class*="pill-option"] .search-scope-bar__pill-label {
     color: rgba(255,255,255,0.45) !important;
     transition: color 0.15s !important;
   }
-  [class*="pill-container"] [class*="pill-option--selected"] [class*="pill-label"] {
+  [class*="pill-container"] .search-scope-bar__pill-option--selected .search-scope-bar__pill-label {
     color: rgba(255,255,255,0.95) !important;
     font-weight: 600 !important;
   }
 
   /* ── Accessory button select (Playlist Type, Sort dropdowns) — strip dark background ──
      Apple: .select.svelte-XXXX = specificity 0,2,0. Use 3 attr selectors (0,3,0) to win. */
-  [class*="accessory-button"] [class*="select"][class*="svelte"],
-  [class*="accessory-button"] [class*="select-text"][class*="svelte"],
-  [class*="accessory-button"] [class*="select-chevron"][class*="svelte"] {
+  .accessory-button [class*="select"][class*="svelte"],
+  .accessory-button [class*="select-text"][class*="svelte"],
+  .accessory-button [class*="select-chevron"][class*="svelte"] {
     background: transparent !important;
     background-color: transparent !important;
   }
@@ -203,12 +199,12 @@ sheet.replaceSync(`
      Apple sets scrollbar-width:thin on the nav container, which suppresses
      ::-webkit-scrollbar pseudo-elements entirely in Chrome 121+. Force auto
      to restore webkit control, then apply custom styles. */
-  [class*="navigation__scrollable"][class*="svelte"] { scrollbar-width: auto !important; }
-  [class*="navigation__scrollable"]::-webkit-scrollbar       { width: 3px !important; }
-  [class*="navigation__scrollable"]::-webkit-scrollbar-track { background: transparent !important; box-shadow: none !important; }
-  [class*="navigation__scrollable"]::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.28) !important; border-radius: 9999px !important; border: none !important; }
-  [class*="navigation__scrollable"]::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.55) !important; }
-  [class*="navigation__scrollable"]:hover::-webkit-scrollbar { width: 7px !important; }
+  .navigation__scrollable-container[class*="svelte"] { scrollbar-width: auto !important; }
+  .navigation__scrollable-container::-webkit-scrollbar       { width: 3px !important; }
+  .navigation__scrollable-container::-webkit-scrollbar-track { background: transparent !important; box-shadow: none !important; }
+  .navigation__scrollable-container::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.28) !important; border-radius: 9999px !important; border: none !important; }
+  .navigation__scrollable-container::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.55) !important; }
+  .navigation__scrollable-container:hover::-webkit-scrollbar { width: 7px !important; }
 
   /* ── Account button — strip pill, keep context menu ──
      Apple: .account-menu.svelte-XXXX.account-menu--expanded = 3 classes (0,3,0).
@@ -230,7 +226,7 @@ sheet.replaceSync(`
      .search-suggestions to <body> when Svelte mounts it, so the wrapper's
      compositing layer no longer traps the dropdown's backdrop-filter.
      Both can now blur independently and always-on. */
-  [class*="search-input-wrapper"] {
+  .search-input-wrapper {
     background: rgba(255,255,255,0.11) !important;
     backdrop-filter: blur(24px) saturate(1.8) !important;
     -webkit-backdrop-filter: blur(24px) saturate(1.8) !important;
@@ -239,7 +235,7 @@ sheet.replaceSync(`
     box-shadow: none !important;
   }
   /* Strip the inner input's own background so it doesn't double-layer */
-  [class*="search-input__text-field"],
+  .search-input__text-field,
   [id="search-input__text-field"] {
     background: transparent !important;
     backdrop-filter: none !important;
@@ -488,7 +484,7 @@ function _findNavHeader() {
             const nav = document.querySelector('nav.navigation');
             if (!nav) return null;
             for (const child of nav.children) {
-                if (child.querySelector('img[src*="apple"], [aria-label*="Music"], [class*="logo"], [class*="brand"]'))
+                if (child.querySelector('img[src*="apple"], [data-testid="logo"], .logo, [class*="brand"]'))
                     return child;
             }
             return nav.firstElementChild || null;
@@ -617,4 +613,199 @@ function _findInNavStack(stack, cursor, href) {
     new MutationObserver(() => {
         if (!document.getElementById('adam-nav-buttons') && _findNavHeader()) attach();
     }).observe(document.documentElement, { childList: true, subtree: true });
+})();
+
+// ── Sidebar navigation feedback ───────────────────────────────────────────────
+// Apple's router changes the URL only after the next page's data has loaded, which can take
+// seconds on a first visit (Search: 1–5 s). Until then a click looks like it did nothing.
+// Following Apple's Human Interface Guidelines for progress indicators: the wait cannot be
+// measured, so this is an indeterminate activity indicator (a spinner, not a bar that pretends
+// to know how far along it is); it sits beside the control that was clicked, is unlabelled, is
+// transient (only while the wait lasts), and is hidden for waits too short to notice.
+(function navActivity() {
+    if (document.getElementById('adam-nav-activity')) return;
+    const SHOW_AFTER_MS = 250;   // quicker navigations finish before a spinner would only flash
+    const GIVE_UP_MS    = 20000; // a stalled load: stop animating rather than spin forever
+    const css = document.createElement('style');
+    css.id = 'adam-nav-activity-css';
+    css.textContent = `
+        #adam-nav-activity { position: fixed; width: 16px; height: 16px; z-index: 2147483647;
+            pointer-events: none; color: rgba(235, 235, 245, 0.6); }
+        #adam-nav-activity[hidden] { display: none; }
+        #adam-nav-activity svg { display: block; width: 100%; height: 100%;
+            animation: adam-nav-spin 1s steps(12) infinite; }
+        #adam-nav-skel { position: fixed; z-index: 5; pointer-events: none; box-sizing: border-box;
+            padding: 0 var(--bodyGutter, 40px); overflow: hidden; color: var(--adam-nav-text, #fff); }
+        /* No background of its own: the old page is hidden instead, so whatever the theme paints behind
+           the page (palette colour, blurred wallpaper, compositor blur, plain black) shows through. */
+        html.adam-nav-loading main { visibility: hidden !important; }
+        #adam-nav-skel[hidden] { display: none; }
+        #adam-nav-skel .sk { background: color-mix(in srgb, currentColor 10%, transparent); border-radius: 4px; position: relative; overflow: hidden; }
+        #adam-nav-skel .sk::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+            background: linear-gradient(90deg, transparent, color-mix(in srgb, currentColor 8%, transparent), transparent);
+            animation: adam-nav-sheen 1.3s infinite; }
+        #adam-nav-skel .row { display: grid; gap: 20px; }
+        #adam-nav-skel .art { border-radius: 10px; }
+        @keyframes adam-nav-sheen { to { transform: translateX(100%); } }
+        @keyframes adam-nav-spin { to { transform: rotate(360deg); } }
+        @keyframes adam-nav-pulse { 50% { opacity: 0.35; } }
+        @media (prefers-reduced-motion: reduce) {
+            #adam-nav-activity svg { animation: adam-nav-pulse 1.4s ease-in-out infinite; }
+            #adam-nav-skel .sk::after { animation: none; }
+        }`;
+    document.documentElement.appendChild(css);
+    const el = document.createElement('div');
+    el.id = 'adam-nav-activity';
+    el.hidden = true;
+    el.setAttribute('role', 'progressbar'); // indeterminate: no aria-valuenow
+    el.setAttribute('aria-busy', 'true');
+    let ticks = '';
+    for (let i = 0; i < 12; i++) {
+        ticks += `<line x1="8" y1="1.8" x2="8" y2="4.8" transform="rotate(${i * 30} 8 8)" opacity="${(0.18 + 0.82 * (i / 11)).toFixed(2)}"/>`;
+    }
+    el.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">${ticks}</svg>`;
+    document.documentElement.appendChild(el);
+
+    // Placeholder over the content area while the next page's tiles are still on their way.
+    const skel = document.createElement('div');
+    skel.id = 'adam-nav-skel';
+    skel.hidden = true;
+    skel.setAttribute('aria-hidden', 'true');
+    // Mirrors the page's own geometry (measured on the live DOM): 40px side padding, 20px gaps, 17px/700
+    // shelf headings, 10px-radius artwork, 12px/15px lockup lines. The kind of page comes from the target path.
+    const kindOf = (path) =>
+        /\/search/.test(path) ? 'search'
+        : /\/library\/artists\/?$/.test(path) ? 'artists'
+        : /\/library\/music-videos\/?$/.test(path) ? 'videos'
+        : /\/(library\/playlist|playlist|album)\/[^/]+/.test(path) ? 'detail'
+        : /\/(library\/songs|station)\b/.test(path) ? 'rows'
+        : /\/library\//.test(path) ? 'grid'
+        : /\/new\/?$/.test(path) ? 'new'
+        : 'shelves';
+    const bar = (w, h, extra = '') => `<div class="sk" style="width:${w};height:${h}px;${extra}"></div>`;
+    // g: the page gutter (Apple's --bodyGutter: 40px from a 1000px window up, 25px below).
+    const buildSkel = (kind, w, h, g = 40) => {
+        const need = (px, pitch) => Math.max(2, Math.ceil(px / pitch) + 1); // rows to fill the window height
+        const inner = Math.max(300, w - 2 * g);
+        const cols = (tile) => Math.max(2, Math.round((inner + 20) / (tile + 20) - 0.2));
+        const head = (t) => bar(`${t}px`, 17, 'margin:30px 0 12px');
+        // Declared up here: the 'new' layout uses it above the Home layout, and a const read before its
+        // declaration throws, which left the New page with no skeleton of its own.
+        const shead = (t, top, bottom) => bar(`${t}px`, 17, `margin:${top}px 0 ${bottom}px`);
+        if (kind === 'search') {
+            return bar('100%', 36, 'border-radius:18px;margin:12px 0 28px;max-width:372px;margin-left:auto;margin-right:auto') +
+                head(160) + `<div style="height:70px;width:269px;margin-bottom:28px;border-radius:7px" class="sk"></div>` + head(170) +
+                `<div class="row" style="grid-template-columns:repeat(${cols(269)},1fr)">${Array.from({ length: cols(269) * need(h - 250, 171) }, () => '<div class="sk art" style="height:151px"></div>').join('')}</div>`;
+        }
+        // Absolutely placed blocks, offsets measured on the live pages (content box starts at the 40px padding).
+        const at = (l, t, w, h, extra = '') => `<div class="sk" style="position:absolute;left:${l};top:${t}px;width:${w};height:${h}px;${extra}"></div>`;
+        const titleBand = () => bar('110px', 15, 'margin:9px auto 14px');
+        if (kind === 'videos') {
+            return titleBand() + `<div class="row" style="grid-template-columns:repeat(${cols(197)},1fr);row-gap:34px">${Array.from({ length: cols(197) * need(h - 38, 180) }, () =>
+                `<div><div class="sk art" style="aspect-ratio:16/9;border-radius:7px"></div>${bar('70%', 12, 'margin-top:8px')}${bar('45%', 12, 'margin-top:3px')}</div>`).join('')}</div>`;
+        }
+        if (kind === 'artists') {
+            // Two panes: the artist list (240px, 54px rows with round avatars) and the selected artist's albums.
+            const list = Array.from({ length: need(h - 38, 54) }, (_, i) => `<div style="display:flex;align-items:center;gap:12px;height:54px;padding:0 10px;border-bottom:1px solid color-mix(in srgb, currentColor 7%, transparent);${i === 0 ? 'background:color-mix(in srgb, currentColor 10%, transparent)' : ''}"><div class="sk" style="width:36px;height:36px;border-radius:50%;flex:none"></div>${bar(`${50 + (i * 17) % 35}%`, 12)}</div>`).join('');
+            return `<div style="position:absolute;inset:0"><div style="position:absolute;left:0;right:0;top:0">${bar('110px', 15, 'margin:9px auto 14px')}</div>
+                <div style="position:absolute;left:0;top:38px;width:240px">${list}</div>
+                <div style="position:absolute;left:280px;top:0;right:40px;bottom:0">${bar('90px', 26, 'position:absolute;left:0;top:48px')}${bar('300px', 300, 'position:absolute;left:0;top:118px;border-radius:7px')}${bar('240px', 12, 'position:absolute;left:0;top:428px')}${bar('60px', 12, 'position:absolute;left:0;top:446px')}</div></div>`;
+        }
+        if (kind === 'detail') {
+            const rows = Array.from({ length: need(h - 386, 54) }, (_, i) => { const y = 386 + i * 54;
+                return at('7px', y + 7, '40px', 40, 'border-radius:5px') + at('59px', y + 20, `${28 + (i * 13) % 22}%`, 12) + at('50%', y + 20, '17%', 12) + at('calc(100% - 68px)', y + 20, '36px', 12); }).join('');
+            return `<div style="position:relative;height:100%">${at('0', 44, '270px', 270, 'border-radius:10px')}${at('304px', 121, '48%', 30)}${at('304px', 160, '22%', 24)}${at('304px', 190, '16%', 12)}
+                ${at('304px', 278, '36px', 36, 'border-radius:50%')}${at('352px', 278, '130px', 36, 'border-radius:18px')}${at('494px', 278, '36px', 36, 'border-radius:50%')}
+                ${at('7px', 363, '40px', 12)}${at('50%', 363, '48px', 12)}${at('calc(100% - 68px)', 363, '36px', 12)}${rows}</div>`;
+        }
+        if (kind === 'rows') {
+            return bar('34%', 28, 'margin:36px 0 24px') + Array.from({ length: need(h - 90, 56) }, () =>
+                `<div style="display:flex;align-items:center;gap:12px;height:56px;border-top:1px solid color-mix(in srgb, currentColor 7%, transparent)">${bar('40px', 40, 'flex:none')}<div style="flex:1">${bar('38%', 12)}${bar('22%', 10, 'margin-top:6px')}</div></div>`).join('');
+        }
+        if (kind === 'grid') {
+            return bar('220px', 28, 'margin:36px 0 22px') + `<div class="row" style="grid-template-columns:repeat(${cols(180)},1fr);row-gap:24px">${Array.from({ length: cols(180) * need(h - 80, 230) }, () =>
+                `<div><div class="sk art" style="aspect-ratio:1"></div>${bar('70%', 12, 'margin-top:8px')}${bar('45%', 12, 'margin-top:3px')}</div>`).join('')}</div>`;
+        }
+        if (kind === 'new') {
+            // The New page as measured live: the title; wide editorial cards (eyebrow, two-line title, artwork);
+            // the top songs as columns of four 55px rows; then shelves of square tiles. From a 1000px window up
+            // the blocks scale with the content width (cards 320, 370 and 460px at 1000, 1100 and 1280px); below
+            // it Apple uses fixed sizes and a 10px gap (298px cards, 270px song columns, 144px tiles).
+            const narrow = g < 40, gap = narrow ? 10 : 20;
+            const hero = narrow ? 298 : Math.round(inner * 0.4965), heroArt = narrow ? 171 : Math.round(hero * 0.5723);
+            const songW = narrow ? 270 : hero, sqn = narrow ? 144 : Math.round(inner * 0.2332);
+            const row = (cw, body) => `<div style="display:flex;gap:${gap}px;margin-right:-${g}px">` + Array.from({ length: Math.ceil((inner + g) / (cw + gap)) + 1 }, () => `<div style="flex:none;width:${cw}px">${body()}</div>`).join('') + '</div>';
+            const titleWidths = ['46%', '30%', '56%', '38%'];
+            const song = (i) => `<div style="display:flex;align-items:center;gap:16px;height:55px">${bar('40px', 40, 'flex:none;border-radius:4px')}<div style="flex:1">${bar(titleWidths[i], 14)}${bar('26%', 10, 'margin-top:5px')}</div></div>`;
+            const tile = () => `<div class="sk art" style="height:${sqn}px"></div>` + bar('72%', 12, 'margin-top:6px') + bar('48%', 12, 'margin-top:3px');
+            return bar('90px', 30, 'margin:37px 0 0') +
+                row(hero, () => bar('30%', 10, 'margin-top:35px') + bar('72%', 17, 'margin-top:8px') + bar('44%', 17, 'margin-top:6px') + `<div class="sk art" style="height:${heroArt}px;margin-top:16px"></div>`) +
+                bar('170px', 17, 'margin:46px 0 16px') +
+                row(songW, () => [0, 1, 2, 3].map(song).join('')) +
+                bar('230px', 17, 'margin:46px 0 16px') +
+                row(sqn, tile) +
+                Array.from({ length: Math.max(0, Math.ceil((h - 1000) / 285)) }, () => shead(150, 40, 15) + row(sqn, tile)).join('');
+        }
+        // Home-style shelves scroll sideways, so the last tile runs off the right edge instead of ending at the padding.
+        const shelf = (w, h, lines) => `<div style="display:flex;gap:20px;margin-right:-${g}px">` +
+            Array.from({ length: Math.ceil((inner + g) / (w + 20)) + 1 }, () =>
+                `<div style="flex:none;width:${w}px"><div class="sk art" style="height:${h}px"></div>${lines ? bar('72%', 12, 'margin-top:8px') + bar('48%', 12, 'margin-top:3px') : ''}</div>`).join('') + '</div>';
+        const big = Math.round(inner * 0.3227), sq = Math.round(inner * 0.2364);
+        return bar('120px', 30, 'margin:36px 0 0') + shead(150, 48, 12) + shelf(big, Math.round(big * 1.333), false) +
+            shead(160, 54, 15) + shelf(sq, sq, true) +
+            Array.from({ length: Math.max(0, Math.ceil((h - 860) / 300)) }, () => shead(150, 40, 15) + shelf(sq, sq, true)).join('');
+    };
+    document.documentElement.appendChild(skel);
+    // Rebuilt whenever the window changes size, so the placeholders always fill what is on screen.
+    let skelKey = '';
+    const renderSkel = () => {
+        const w = skel.clientWidth || 926, h = skel.clientHeight || innerHeight;
+        const gutter = parseFloat(getComputedStyle(skel).paddingLeft) || 40;
+        const key = `${to}|${w}x${h}|${gutter}`;
+        if (key === skelKey) return;
+        skelKey = key;
+        // A layout that fails to build must not leave the previous page's blocks over this page.
+        try { skel.innerHTML = buildSkel(kindOf(to), w, h, gutter); }
+        catch (e) { skel.innerHTML = ''; console.warn('[Adam] skeleton layout failed:', e?.message); }
+    };
+    const mainEl = () => document.querySelector('main') || document.querySelector('[role=main]');
+    const placeSkel = () => {
+        const m = mainEl();
+        if (!m) return false;
+        const r = m.getBoundingClientRect();
+        Object.assign(skel.style, { left: `${Math.round(r.left)}px`, top: `${Math.round(r.top)}px`,
+            width: `${Math.round(r.width)}px`, height: `${Math.round(innerHeight - r.top)}px` });
+        return true;
+    };
+    // The new page has real content once its artwork or list rows are in the content area.
+    const pageReady = () => !!mainEl()?.querySelector('[data-testid="artwork-component"], [data-testid="track-list-item"], .songs-list-row');
+
+    let link = null, from = '', to = '', showTimer = null, poll = null;
+    window.addEventListener('resize', () => { if (!skel.hidden) { placeSkel(); renderSkel(); } });
+    const place = () => {
+        const r = link.getBoundingClientRect();
+        el.style.left = `${Math.round(r.right - 30)}px`;
+        el.style.top  = `${Math.round(r.top + r.height / 2 - 8)}px`;
+    };
+    const stop = () => {
+        clearTimeout(showTimer); clearInterval(poll);
+        showTimer = poll = null; link = null; el.hidden = true; skel.hidden = true; document.documentElement.classList.remove('adam-nav-loading');
+    };
+    window.addEventListener('click', (e) => {
+        if (!e.isTrusted || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        const a = e.target?.closest?.('nav a[href]');
+        if (!a) return;
+        let path;
+        try { path = new URL(a.href, location.href).pathname; } catch { return; }
+        if (path === location.pathname) return;
+        stop();
+        link = a; from = location.pathname; to = path;
+        el.setAttribute('aria-label', `Loading ${(a.textContent || '').trim()}`);
+        const started = Date.now();
+        showTimer = setTimeout(() => { if (link) { place(); el.hidden = false; if (placeSkel()) { skel.hidden = false; skelKey = ''; renderSkel(); document.documentElement.classList.add('adam-nav-loading'); } } }, SHOW_AFTER_MS);
+        poll = setInterval(() => {
+            if (Date.now() - started > GIVE_UP_MS || (location.pathname !== from && pageReady())) stop();
+            else if (!el.hidden) { place(); placeSkel(); if (!skel.hidden) renderSkel(); }
+        }, 100);
+    }, true);
 })();

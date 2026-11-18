@@ -37,6 +37,7 @@ func AcquireSessionLock(dir string) (*SessionLock, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("session lock: mkdir %s: %w", dir, err)
 	}
+	_ = os.Chmod(dir, 0o700) // MkdirAll leaves an existing, looser directory as it was
 	path := filepath.Join(dir, "engine-session.lock")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

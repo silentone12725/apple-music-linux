@@ -2,6 +2,7 @@ import * as electronMain from 'electron/main';
 const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, net: electronNet } = electronMain;
 import { spawn, execFileSync, execFile } from 'child_process';
 import { createEngineLifecycle, recoverOrphanEngine, isPortFree } from './engine-lifecycle.mjs';
+import { createMemoryMaintenance, readConfigFromEnv, toMb } from './memory-maintenance.mjs';
 
 // Suppress EPIPE so a closed terminal pipe doesn't crash the main process.
 // A terminal that goes away (closed window, SSH drop) surfaces as EPIPE or EIO.
@@ -33,7 +34,6 @@ import { gnomeWallpaperPath } from './wallpaper.mjs';
 import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS } from './acrylic.mjs';
 import https from 'https';
 import { autoAuthenticate } from './drm-autoauth.mjs';
-import { UnifiedLogin, isAppleLoginOrigin, captureSubmittedAppleLogin } from './unified-login.mjs';
 import { fetchFairPlayLibs } from './fairplay-fetch.mjs';
 import { setCompositionBackdrop, setNativeCaptionDrag, removeCompositionBackdrop } from './composition-backdrop.mjs';
 import { cleanBlur, cleanGlassOpacity, sidebarOpacityControl, artNavAlpha } from './src/engine/sidebar-glass.js';
@@ -322,8 +322,6 @@ function ensureEngineConfig() {
             'storefront: us',
             'media-user-token: ""',
             'authorization-token: ""',
-            'decrypt-m3u8-port: 127.0.0.1:10020',
-            'get-m3u8-port: 127.0.0.1:20020',
             'get-m3u8-from-device: true',
             'get-m3u8-mode: hires',
             'aac-type: aac-lc',
@@ -649,6 +647,19 @@ function _withAlpha(color, alpha) {
     return color;
 }
 
+// Apple's web player tints its sidebar icons and controls from these tokens (--keyAccentColor is the
+// current cyan-blue #5ac8f5, --systemBlue the older #0a84ff).
+const SYSTEM_BLUE_VARS = ['--keyAccentColor', '--systemCyan', '--systemBlue', '--systemBlue-vibrant', '--systemBlue-default_IC', '--systemBlue-vibrant_IC',
+    '--systemBlue-rollover', '--systemBlue-pressed', '--systemBlue-deepPressed', '--keyColor-focus-color'];
+
+// Script text that (re)writes the stylesheet recolouring Apple's blue tokens. A stylesheet rather than inline
+// custom properties: Apple's router rewrites <html>'s style on some pages (playlists), which dropped the inline ones.
+const _tintScript = (tint) => `(function(){
+        let st = document.getElementById('_adamTint');
+        if (!st) { st = document.createElement('style'); st.id = '_adamTint'; (document.head || document.documentElement).appendChild(st); }
+        st.textContent = ':root{' + ${JSON.stringify(SYSTEM_BLUE_VARS)}.map(n => n + ':${tint} !important').join(';') + '}';
+    })();`;
+
 function _applyThemeVars(palette) {
     if (!win || !palette) return;
     const p = sanitizePalette(palette) ?? defaultPalette(); // a poisoned saved palette must not break startup
@@ -657,6 +668,9 @@ function _applyThemeVars(palette) {
     const bg = JSON.stringify(p.bgColor || (isLight ? 'hsl(0,0%,96%)' : 'hsl(0,0%,10%)'));
     const navText = JSON.stringify(isLight ? 'rgba(0,0,0,0.85)' : '');
     const navTextSec = JSON.stringify(isLight ? 'rgba(0,0,0,0.5)' : '');
+    // A palette saved before presets had a tint (or hand-edited to the Apple Music accent) gets that preset's tint.
+    const dflt = defaultPalette();
+    const tint = p.tint || (p.accent === dflt.accent ? dflt.tint : p.accent) || '';
     const prefs = loadPrefs();
     const navAlpha = prefs.themeNavBgAlpha ?? 0.72;
     const navBg = JSON.stringify(_withAlpha(p.navBg || '', navAlpha) || p.navBg || '');
@@ -677,6 +691,7 @@ function _applyThemeVars(palette) {
         setVar('--adam-nav-text', ${navText});
         setVar('--adam-nav-text-sec', ${navTextSec});
         setVar('--adam-bg-color', ${bg});
+        ${_tintScript(tint)}
         let bd = document.getElementById('_adamAccentBg');
         if (!bd) {
             bd = document.createElement('div');
@@ -697,6 +712,7 @@ function _clearThemeVars() {
             .forEach(v => r.style.removeProperty(v));
         document.getElementById('_adamAccentBg')?.remove();
         document.getElementById('_adamCustomBg')?.remove();
+        ${_tintScript(defaultPalette().tint)}
     })()`).catch(() => {});
 }
 
@@ -913,9 +929,10 @@ function createWindow() {
     //   3. Fade the window in once the actual UI is rendered.
     // Fallback: force-show after 12 s so a slow network never hangs forever.
     let shown = false;
-    const showWindow = () => {
+    const showWindow = (reason) => {
         if (shown) return;
         shown = true;
+        console.log(`[Adam] Window shown (${reason}) ${Math.round(performance.now())} ms after start`);
         if (_startHidden) return; // launched at login: stay in the tray until asked
         win.setOpacity(0);
         win.show();
@@ -941,7 +958,7 @@ function createWindow() {
         clearTimeout(_bgTimer);
         _bgTimer = setTimeout(refreshBlurBg, 500);
     });
-    const showFallback = setTimeout(showWindow, 7000);
+    const showFallback = setTimeout(() => showWindow('fallback'), 7000);
 
     // True while the offline page replaces Apple Music. Chromium's error page still reports the failed
     // Apple URL, so the URL alone cannot tell the injection code to stand down.
@@ -956,12 +973,12 @@ function createWindow() {
         win.loadFile(path.join(__dirname, 'offline.html'), { hash: offlineHash(errorCode, errorDescription) })
             .catch(e => console.error('[Adam] offline page failed:', e.message));
         clearTimeout(showFallback);
-        showWindow();
+        showWindow('offline');
     });
 
     ipcMain.once('app:ui-ready', () => {
         clearTimeout(showFallback);
-        showWindow();
+        showWindow('ui-ready');
     });
     // Debug logging: on when started from a terminal or with ADAM_DEBUG=1; DevTools only with
     // ADAM_DEVTOOLS (see DEBUG_OUTPUT).
@@ -993,14 +1010,14 @@ function createWindow() {
         :root { --adam-glass-blur: ${glassBlur}px; --adam-glass-opacity: ${glassOpacity}; --adam-art-tint: rgba(255,255,255,0); --adam-fallback-bg: none; --adam-bg-blur: ${bgBlur}px; }
         html, body { background: transparent !important; overscroll-behavior: none !important; }
         /* Strip grey tint from alternating content sections — let album art / wallpaper show through */
-        .section--alternate, [class*="section--alternate"] { background: transparent !important; }
-        /* "Also available in the iTunes Store" CTA — hidden everywhere. Matched by
-           aria-label (Apple keeps "iTunes" in it across locales) since its classes
-           are generic Svelte hashes; the :has() rules drop the wrapper too so no
-           empty gap is left behind. */
+        .section--alternate { background: transparent !important; }
+        /* "Also available in the iTunes Store" CTA — hidden everywhere. On album and playlist pages it sits in
+           a wrapper with a stable class, which holds nothing else, so that is the hook there. Elsewhere the
+           button is found by the product name in its aria-label (Apple keeps "iTunes" in it in every
+           language, it is not translated), and its wrapper goes too so no empty gap is left behind. */
+        .tracklist-footer__native-cta-wrapper,
         button[aria-label*="iTunes"],
-        [data-testid="button-base-wrapper"]:has(> button[aria-label*="iTunes"]),
-        [class*="native-cta-wrapper"]:has(button[aria-label*="iTunes"]) { display: none !important; }
+        [data-testid="button-base-wrapper"]:has(> button[aria-label*="iTunes"]) { display: none !important; }
         nav.navigation {
             background: rgba(255,255,255,var(--adam-glass-opacity)) !important;
             backdrop-filter: blur(var(--adam-glass-blur)) !important;
@@ -1267,7 +1284,7 @@ function createWindow() {
         [class*="scope-bar"]::before, [class*="scope-bar"]::after,
         [class*="search"] > [class*="gradient"] { display: none !important; background: none !important; }
         /* Search input — transparent + blur */
-        [data-testid="search-input"], [class*="search-input-wrapper"] {
+        [data-testid="search-input"], .search-input-wrapper {
             background: rgba(255,255,255,0.08) !important;
             backdrop-filter: blur(12px) !important;
             -webkit-backdrop-filter: blur(12px) !important;
@@ -1275,7 +1292,7 @@ function createWindow() {
             border-radius: 10px !important;
             box-shadow: none !important;
         }
-        [data-testid="search-input"]:focus-within, [class*="search-input-wrapper"]:focus-within {
+        [data-testid="search-input"]:focus-within, .search-input-wrapper:focus-within {
             border-color: rgba(255,255,255,0.3) !important;
         }
         /* Remove auto-pink focus rings and selection highlight globally */
@@ -1408,8 +1425,16 @@ function createWindow() {
     win.webContents.on('did-navigate', () => {
         // Only show if the initial ready-signal already fired; don't interrupt the
         // first-load sequence where the window stays hidden until content is loaded.
-        if (shown && !win.isVisible()) win.show();
+        // A memory-maintenance reload happens while the window is hidden on purpose.
+        if (shown && !win.isVisible() && !memoryMaintenance.isReloading) win.show();
     });
+
+    // ── Idle memory maintenance (see memory-maintenance.mjs) ─────────────────
+    // Apple's page never releases the pages you leave, so reload it while nobody is looking.
+    win.webContents.on('did-finish-load', () => memoryMaintenance.pageLoaded());
+    for (const ev of ['focus', 'show', 'restore']) win.on(ev, () => memoryMaintenance.setActive(true));
+    for (const ev of ['blur', 'hide', 'minimize']) win.on(ev, () => memoryMaintenance.setActive(false));
+    memoryMaintenance.start();
 
     // Hide on close instead of destroying — keeps the page alive in memory so
     win.on('close', (e) => {
@@ -1419,26 +1444,41 @@ function createWindow() {
         } else removeCompositionBackdrop(win);
     });
 
-    win.on('closed', () => { win = null; });
+    win.on('closed', () => { memoryMaintenance.stop(); win = null; });
 }
+
+// The renderer's memory as the OS sees it (working set, MB), or null when it cannot be read.
+function _rendererMemoryMb() {
+    try {
+        const pid = win?.webContents?.getOSProcessId?.();
+        const m = app.getAppMetrics().find(x => x.pid === pid);
+        return m ? toMb(m.memory.workingSetSize) : null;
+    } catch { return null; }
+}
+
+const memoryMaintenance = createMemoryMaintenance({
+    getWin: () => win,
+    rendererMb: _rendererMemoryMb,
+    isPlaying: () => _lastMprisStatus === 'Playing',
+    msSincePlaying: () => _lastMprisStatus === 'Playing' ? 0 : (_playStoppedAt == null ? Infinity : Date.now() - _playStoppedAt),
+    onApplePage: () => !!win && _httpsHost(win.webContents.getURL()) === 'music.apple.com',
+    // Settings, the sign-in sheet and Apple's own dialogs are all <dialog> elements.
+    dialogOpen: () => win.webContents.executeJavaScript("!!document.querySelector('dialog[open]')").catch(() => true),
+    // On by default; `memoryReload` = false in the store (or ADAM_MEM_RELOAD=0) turns it off.
+    isEnabled: async () => process.env.ADAM_MEM_RELOAD !== '0' && (await _storeLoad()).memoryReload !== false,
+    // The page reads this on load: a reload of ours keeps the Resume chip until it is used.
+    markReload: async () => { const store = await _storeLoad(); store.adam_mem_reload = Date.now(); _storeDirty = true; await _storeFlushNow(); },
+    // Make the page write its queue and position now, then give that IPC time to land.
+    flushRenderer: async () => { win.webContents.send('app:flush-and-quit'); await new Promise(r => setTimeout(r, 600)); },
+    reload: () => win.webContents.reload(),
+    log: (m) => console.log('[Adam]', m),
+}, readConfigFromEnv());
 
 // Popups opened for authentication keep their opener and session. No adamBridge is exposed to
 // them (see auth-preload.cjs). A blank popup is allowed because sites open first and navigate
 // second; every later navigation of a popup is gated by `allowed`. `inWindow` URLs are loaded in
 // the opener's own window instead of a popup.
 function configureAuthPopups(contents, allowed, inWindow = () => false) {
-    contents.on('frame-created', (_event, { frame }) => {
-        frame?.on('dom-ready', () => {
-            if (_signedIn || !isAppleLoginOrigin(frame.url)) return;
-            const url = frame.url;
-            frame.executeJavaScript(`(${captureSubmittedAppleLogin.toString()})()`).then(creds => {
-                if (!creds) return;
-                try {
-                    if (!frame.isDestroyed() && frame.url === url && !_signedIn) unifiedLogin.captureCredentials(creds);
-                } finally { creds.email = creds.password = ''; }
-            }).catch(() => {});
-        });
-    });
     contents.setWindowOpenHandler(({ url }) => {
         if (inWindow(url)) {
             contents.loadURL(url).catch(() => {});
@@ -1457,9 +1497,6 @@ function configureAuthPopups(contents, allowed, inWindow = () => false) {
         return { action: 'deny' };
     });
     contents.on('did-create-window', (child) => {
-        const childContentsId = child.webContents.id;
-        _appleAuthContents.add(childContentsId);
-        child.webContents.once('destroyed', () => _appleAuthContents.delete(childContentsId));
         const gate = (event, url) => {
             if (url === 'about:blank' || allowed(url)) return;
             event.preventDefault();
@@ -1602,6 +1639,11 @@ ipcMain.once('app:ui-ready', async () => {
                 delete s.drm_email; delete s.drm_password; delete s.drm_verified;
                 _storeDirty = true; _storeFlush();
             },
+            dropPassword: async () => {
+                const s = await _storeLoad();
+                delete s.drm_password; // keep the email (and the verified mark): it pre-fills the sign-in form
+                _storeDirty = true; _storeFlush();
+            },
             log: m => console.log('[Adam]', m),
         });
         if (outcome === 'rejected') console.warn('[Adam] Saved DRM credentials rejected — cleared');
@@ -1632,17 +1674,8 @@ function engineRequest(method, urlPath, body) {
     });
 }
 
-const _appleAuthContents = new Set();
-const unifiedLogin = new UnifiedLogin({ request: engineRequest });
-app.on('before-quit', () => unifiedLogin.clear());
-
-ipcMain.on('app:auth-state', (event, signedIn) => {
-    if (event.sender !== win?.webContents || _httpsHost(event.senderFrame?.url) !== 'music.apple.com') return;
+ipcMain.on('app:auth-state', (_e, signedIn) => {
     const on = signedIn === true;
-    if (on) void unifiedLogin.complete().then(outcome => {
-        if (outcome === 'manual-required') console.warn('[Adam] Complete FairPlay sign-in in Account settings');
-    }).catch(() => console.warn('[Adam] Unified sign-in unavailable; use Account settings'));
-    else if (_signedIn) unifiedLogin.clear();
     if (on === _signedIn) return;
     _signedIn = on;
     const p = loadPrefs();
@@ -1700,7 +1733,7 @@ ipcMain.on = (channel, fn) => _ipcOn(channel, (event, ...args) => {
 // fill the disk, smuggle path separators into a dialog's default name, or poison prefs.
 function _str(v, max = 256) { return typeof v === 'string' && v.length > 0 && v.length <= max; }
 function _safeName(v) { return String(v).replace(/[^\w .()-]/g, '_').slice(0, 64) || 'preset'; }
-const _PALETTE_KEYS = new Set(['accent', 'bgColor', 'navBg', 'navBorder', 'accentActive', 'appearance']);
+const _PALETTE_KEYS = new Set(['accent', 'tint', 'bgColor', 'navBg', 'navBorder', 'accentActive', 'appearance']);
 const _COLOR_RE = /^[#a-zA-Z0-9(),.%\s/-]{1,64}$/;
 function _paletteEntryOk(key, value) {
     if (!_PALETTE_KEYS.has(key) || typeof value !== 'string') return false;
@@ -2153,6 +2186,7 @@ function createMprisPlayer() {
 }
 
 let _lastMprisStatus   = null;
+let _playStoppedAt     = null; // when playback last left 'Playing'; memory maintenance waits a minute after it
 let _lastMprisMetadata = null;
 let _lastMprisPosition = 0; // µs
 let _lastMprisShuffle  = false;
@@ -2225,7 +2259,10 @@ function replayMprisState() {
 
 ipcMain.on('mpris:update', (_, data) => {
     // Track each field independently so all survive across reconnects.
-    if (data.status)           _lastMprisStatus   = data.status;
+    if (data.status) {
+        if (_lastMprisStatus === 'Playing' && data.status !== 'Playing') _playStoppedAt = Date.now();
+        _lastMprisStatus = data.status;
+    }
     if (_reloadEngineOnPause && data.status && data.status !== 'Playing') {
         _reloadEngineOnPause = false;
         engineLifecycle.reload();
@@ -2484,7 +2521,6 @@ ipcMain.handle('drm:saved-email', async () => {
 // backstop ('account' | 'device') is passed only when the engine route failed; it is
 // recorded first, and if that fails nothing else happens (drm-signout.mjs).
 ipcMain.handle('drm:clear-credentials', async (_, opts) => {
-    unifiedLogin.clear();
     const backstop = opts?.backstop ?? null;
     if (backstop !== null && !validBackstop(backstop)) console.warn('[Adam] Ignoring invalid sign-out scope:', backstop);
     const res = await clearCredentialsFlow({
@@ -2834,7 +2870,7 @@ protocol.registerSchemesAsPrivileged([{
 }]);
 
 // Resolved faststart cache path per video-dl pathname, so range requests skip the
-// engine info round-trip. Entries are session-scoped URLs; harmless to let grow.
+// engine info round-trip. Capped where entries are added.
 const _mvPathCache = new Map();
 
 // Serve a local media file with proper Range → 206 handling for <video>.
@@ -2926,15 +2962,6 @@ app.whenReady().then(() => {
 
     console.log('[Adam] Electron ready, process.type:', process.type);
     const s = session.fromPartition('persist:apple-music');
-    // Observe only the password the user submits to Apple's sign-in endpoint,
-    // from the player or its owned popups. No renderer gets a credential bridge.
-    s.webRequest.onBeforeRequest({ urls: ['https://idmsa.apple.com/appleauth/auth/signin*',
-        'https://appleid.apple.com/appleauth/auth/signin*', 'https://account.apple.com/appleauth/auth/signin*'] }, (details, callback) => {
-        if (!_signedIn && (details.webContentsId === win?.webContents.id || _appleAuthContents.has(details.webContentsId))) {
-            unifiedLogin.capture(details);
-        }
-        callback({});
-    });
     // This session loads remote pages, so the default of "yes to everything" would hand a
     // compromised page the camera, microphone, location, USB and the clipboard. Deny the
     // capabilities Apple Music has no use for; everything else it asks for is still granted.
@@ -2994,6 +3021,8 @@ app.whenReady().then(() => {
                     if (info && info.cached && info.path) {
                         cachedPath = info.path;
                         _mvPathCache.set(u.pathname, cachedPath);
+                        // One entry per video watched; keep the newest 200 (a Map iterates oldest first).
+                        if (_mvPathCache.size > 200) _mvPathCache.delete(_mvPathCache.keys().next().value);
                         console.log(`[adam-video] resolved path for ${u.pathname} → ${cachedPath}`);
                     } else {
                         console.log(`[adam-video] not cached yet (preparing) → 503`);
@@ -3090,6 +3119,10 @@ app.whenReady().then(() => {
             sendCmd: (c) => win?.webContents.send('mpris:cmd', c),
         });
     }
+    // Start the engine before building the window so its startup overlaps the window's
+    // instead of following it. engine-playback.js checks reachability and falls back to
+    // the Apple CDN if the engine isn't running, so a missing binary is not fatal.
+    startEngine();
     createWindow();
     if (winIntegration) {
         winIntegration.init();
@@ -3113,10 +3146,6 @@ app.whenReady().then(() => {
             console.warn('[Adam] media key shortcut already taken by another app:', key);
     }
 
-    // Always attempt to start the engine API server.  engine-playback.js checks
-    // reachability at startup and silently falls back to the Apple CDN if the
-    // engine isn't running, so a missing binary is not a hard failure.
-    startEngine();
     ensureFairPlayLibs();
 
     // Cold-start deep link: if Adam was launched with a URL argument (e.g. from

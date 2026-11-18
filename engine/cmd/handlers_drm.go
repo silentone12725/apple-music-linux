@@ -53,6 +53,9 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		// Unattended: saved details tried at launch. A verification-code or recovery prompt is not shown; the sign-in
+		// ends as cancelled instead.
+		Unattended bool `json:"unattended"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -80,8 +83,9 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 		// which would abort the login mid-flight. The server's shutdown context still
 		// ends it on exit. Progress arrives via SSE.
 		if err := s.dm.Authenticate(s.shutdownCtx, drm.Credentials{
-			Email:    req.Email,
-			Password: req.Password,
+			Email:      req.Email,
+			Password:   req.Password,
+			Unattended: req.Unattended,
 		}); err != nil {
 			slog.Error("drm login error", "err", err)
 		}

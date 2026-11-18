@@ -18,7 +18,7 @@
  *   ┌──────────────────────────────────────────────────────┐               │
  *   │                     Refreshing                       │               │
  *   │   (refresh_decrypt_ctx() in progress; requests       │               │
- *   │    gated at handle() / handle_m3u8())                │               │
+ *   │    gated at hybris_open_kd_ctx_from_uri())              │               │
  *   └───────────────┬──────────────────────────────┬───────┘               │
  *                   │ preshareCtx non-null          │ preshareCtx NULL      │
  *                   ▼                               ▼                       │
@@ -64,7 +64,7 @@
 
 extern "C" void refresh_decrypt_ctx(void);
 extern "C" int  is_preshare_ctx_ready(void);
-extern "C" void handle(int fd);
+extern "C" void hybris_commit_thread_stack(void);
 
 // ---------------------------------------------------------------------------
 // RecoveryState — the daemon's lifecycle state machine
@@ -79,14 +79,7 @@ enum class RecoveryState : int {
 
 static std::atomic<RecoveryState> g_recovery_state{RecoveryState::Running};
 
-// Returns the current RecoveryState as a plain int (C-visible).
-// 0 = Running, 1 = Scheduled, 2 = Refreshing, 3 = Failed.
-extern "C" int get_recovery_state(void)
-{
-    return static_cast<int>(g_recovery_state.load());
-}
-
-// Convenience predicate used by handle() / handle_m3u8() to gate requests.
+// Predicate that gates key-context requests while a recovery cycle runs.
 // Returns 1 when the daemon is not in its normal Running state.
 extern "C" int is_recovery_active(void)
 {
@@ -125,6 +118,7 @@ static void schedule_recovery(int code)
 
 static void recovery_worker()
 {
+    hybris_commit_thread_stack(); // refresh_decrypt_ctx() runs Apple's lease and key code on this thread
     int consec_fails = 0;
 
     while (true) {
@@ -225,40 +219,10 @@ static void recovery_worker()
     }
 }
 
-// Called from main() in main.c, after leaseMgr and FHinstance are ready.
+// Called once leaseMgr and FHinstance are ready (drm_lib_init).
 extern "C" void start_recovery_thread(void)
 {
     std::thread(recovery_worker).detach();
-}
-
-// ---------------------------------------------------------------------------
-// FairPlay decrypt exception shim
-// ---------------------------------------------------------------------------
-
-extern "C" uint8_t handle_cpp(int fd)
-{
-    try {
-        handle(fd);
-        return 1;
-    } catch (const std::exception &e) {
-        fprintf(stderr, "[!] catched an exception: %s\n", e.what());
-        return 0;
-    }
-}
-
-extern "C" void handle_key_request(int fd);
-
-/* C++ exception barrier for the HTTP key service (getPersistentKey can throw SVError). */
-extern "C" uint8_t handle_key_request_cpp(int fd) {
-    try {
-        handle_key_request(fd);
-        return 1;
-    } catch (const std::exception &e) {
-        fprintf(stderr, "[!] key request exception: %s\n", e.what());
-        const char *resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 28\r\nConnection: close\r\n\r\n{\"error\":\"key retrieval failed\"}";
-        write(fd, resp, strlen(resp));
-        return 0;
-    }
 }
 
 // ---------------------------------------------------------------------------

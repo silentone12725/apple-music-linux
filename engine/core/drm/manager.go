@@ -189,7 +189,7 @@ func (m *DRMManager) GetM3U8(ctx context.Context, adamID uint64) (string, error)
 }
 
 // GetProgressiveMVURL auto-starts the backend and fetches a progressive MV URL
-// and the associated downloadKey (may be empty) via port 40020.
+// and the associated downloadKey (may be empty) from the backend.
 func (m *DRMManager) GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error) {
 	if err = m.ensureRunning(ctx); err != nil {
 		return "", "", err
@@ -202,7 +202,7 @@ func (m *DRMManager) GetProgressiveMVURL(ctx context.Context, adamID uint64) (ur
 }
 
 // DecryptItunSamples auto-starts the backend and decrypts itun-encrypted
-// samples via port 50020. The decryptor must have been initialized by a prior
+// samples through it. The decryptor must have been initialized by a prior
 // GetProgressiveMVURL call for the same adamID.
 func (m *DRMManager) DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error) {
 	if err := m.ensureRunning(ctx); err != nil {
@@ -253,8 +253,10 @@ func (m *DRMManager) NoteWebSession() {
 	}
 	m.mu.RLock()
 	// While a sign-in runs (or waits for its code) the page's token says nothing about it: an
-	// older session marker must not report "logged in" and close the sign-in sheet early.
-	signingIn := m.snapshot.State.Authentication == AuthChallenging || m.snapshot.State.Authentication == AuthLoggingIn
+	// older session marker must not report "logged in" and close the sign-in sheet early. The running
+	// flag covers the moments the snapshot does not yet say so (a sign-in waiting for its turn).
+	st := m.snapshot.State.Authentication
+	signingIn := m.signingIn.Load() || st == AuthChallenging || st == AuthLoggingIn
 	m.mu.RUnlock()
 	if !signingIn {
 		m.mergeAndEmit(DRMSnapshot{

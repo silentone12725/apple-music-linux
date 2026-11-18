@@ -15,6 +15,9 @@
   build and is restored afterwards). Apple's FairPlay libraries are downloaded by the app on first launch.
   Without -HybrisDir the installer is the release one: the DRM DLL is built but the Android runtime is not shipped.
 
+  -EngineExe packs a prebuilt engine.exe instead of running go build (for example one cross-compiled on Linux with
+  llvm-mingw, when Defender blocks the cgo build on Windows).
+
   Prerequisites: MSYS2 UCRT64 (gcc, make, openssl) on PATH, Go, Node, a 64-bit VLC 3.x install,
   and git (to fetch the libvlc headers, which the VLC installer does not ship).
 
@@ -27,6 +30,7 @@ param(
     [string]$VlcInclude = '',      # a directory containing vlc\vlc.h; fetched from VideoLAN's git when empty
     [string]$Msys = 'C:\msys64\ucrt64\bin',
     [string]$HybrisDir = '',       # nightly: a libhybris-win build directory (libhybris-core.dll, hybris-linker\q.so)
+    [string]$EngineExe = '',       # a prebuilt engine.exe (cgo + adamplay_backend, e.g. cross-compiled on Linux) to pack instead of building one
     [switch]$SkipInstaller
 )
 $ErrorActionPreference = 'Stop'
@@ -85,11 +89,16 @@ $env:CGO_ENABLED = '1'
 $env:CC = 'gcc'
 $env:CGO_CFLAGS = "-I$($Link -replace '\\','/')/inc"
 $env:CGO_LDFLAGS = "-L$($Link -replace '\\','/')/vlc -L$($Link -replace '\\','/')/drm"
-Push-Location "$Repo\engine"
-try {
-    go build -tags adamplay_backend -ldflags '-w -s' -trimpath -o "$Out\engine.exe" .\cmd
-    if ($LASTEXITCODE -ne 0) { throw 'engine build failed' }
-} finally { Pop-Location }
+if ($EngineExe) {
+    if (-not (Test-Path $EngineExe)) { throw "-EngineExe: $EngineExe not found" }
+    Copy-Item $EngineExe "$Out\engine.exe"
+} else {
+    Push-Location "$Repo\engine"
+    try {
+        go build -tags adamplay_backend -ldflags '-w -s' -trimpath -o "$Out\engine.exe" .\cmd
+        if ($LASTEXITCODE -ne 0) { throw 'engine build failed' }
+    } finally { Pop-Location }
+}
 
 # ── 3. Runtime DLLs ──────────────────────────────────────────────────────────
 Write-Host '[3/6] runtime DLLs'
@@ -103,8 +112,14 @@ if ($HybrisDir) {
     Copy-Item $QSo $QBackup -Force
     Copy-Item "$HybrisDir\hybris-linker\q.so" $QSo -Force
 }
-# libcrypto plus whatever MSYS2 DLLs it (transitively) imports; system DLLs are skipped.
+# libcrypto plus every MSYS2 DLL that it or the packed binaries (engine, DRM DLL, hybris core) import, transitively;
+# system DLLs are skipped. libdrm_client.dll and libhybris-core.dll need libstdc++, libgcc_s and libwinpthread.
 $queue = [System.Collections.Queue]::new(); $queue.Enqueue('libcrypto-3-x64.dll'); $seen = @{}
+foreach ($bin in 'engine.exe', 'libdrm_client.dll', 'libhybris-core.dll') {
+    if (Test-Path "$Out\$bin") {
+        & "$Msys\objdump.exe" -p "$Out\$bin" | Select-String 'DLL Name' | ForEach-Object { $queue.Enqueue(($_ -split ':')[1].Trim()) }
+    }
+}
 while ($queue.Count) {
     $dll = $queue.Dequeue()
     if ($seen[$dll]) { continue }; $seen[$dll] = $true
@@ -122,8 +137,18 @@ Copy-Item "$VlcDir\libvlc.dll", "$VlcDir\libvlccore.dll" $vlcOut
 foreach ($d in 'access', 'audio_filter', 'audio_mixer', 'audio_output', 'codec', 'demux', 'packetizer', 'stream_filter', 'control', 'misc') {
     if (Test-Path "$VlcDir\plugins\$d") { Copy-Item "$VlcDir\plugins\$d" "$vlcOut\plugins\$d" -Recurse }
 }
-# The cache lists the full plugin set; a stale one makes VLC rescan on every start, so drop it.
+# VLC's plugins.dat must describe exactly the packed subset. Without it libvlc_new loads every
+# plugin DLL on each start, and on the first launch after an install Defender scans all of them:
+# about a minute before the engine answers. With it VLC loads only the plugins it uses (~0.2 s).
+# vlc-cache-gen itself pays that scan once, here at build time.
 Remove-Item "$vlcOut\plugins\plugins.dat" -ErrorAction SilentlyContinue
+$cacheGen = Join-Path $VlcDir 'vlc-cache-gen.exe'
+if (Test-Path $cacheGen) {
+    & $cacheGen "$vlcOut\plugins" | Out-Null
+    if (-not (Test-Path "$vlcOut\plugins\plugins.dat")) { throw 'vlc-cache-gen did not write plugins.dat' }
+} else {
+    Write-Warning "vlc-cache-gen.exe not found in $VlcDir`: the first launch after install will stall while VLC loads every plugin"
+}
 
 # Minimal FFmpeg: the engine runs it for music-video remux and export. Prebuilt and committed
 # (scripts/build-ffmpeg-windows.sh regenerates it), so the app needs nothing installed.

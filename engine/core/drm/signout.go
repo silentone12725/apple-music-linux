@@ -231,6 +231,7 @@ func (m *DRMManager) signOut(ctx context.Context, scope logoutScope) (SignOutRes
 	}
 	m.gateMu.Unlock()
 	if op.err != nil {
+		m.setManagerState(ManagerReady) // the request stays on disk; "shutting down" would stay on show until the next sign-in
 		return res, errors.Join(stopErr, fmt.Errorf("clear session: %w", op.err))
 	}
 
@@ -248,6 +249,7 @@ func (m *DRMManager) signOut(ctx context.Context, scope logoutScope) (SignOutRes
 	}
 	m.snapshot.Capabilities = CapabilityState{}
 	m.snapshot.Challenge = nil
+	m.snapshot.Failure = nil // the failure of an earlier sign-in is not part of a signed-out state
 	snap := m.snapshot
 	m.mu.Unlock()
 	if m.sink != nil {

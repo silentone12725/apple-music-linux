@@ -58,43 +58,17 @@ int drm_lib_init(const drm_lib_config_t *cfg);
 /* drm_lib_abort_init — release the init lock after drm_lib_init did not return (exception barrier only). */
 void drm_lib_abort_init(void);
 
-/* drm_lib_shutdown — stop background threads and free global state.
- * After this returns, no further calls to drm_lib_* are valid. */
-void drm_lib_shutdown(void);
-
 /* ── DRM operations ──────────────────────────────────────────────────────────*/
-
-/* drm_lib_get_m3u8 — return the HLS m3u8 URL for adamId.
- * Returns a malloc'd string the caller must free(), or NULL on error. */
-char *drm_lib_get_m3u8(unsigned long adam_id);
-
-/* drm_lib_get_account — return {"storefront_id":…,"dev_token":…,"music_token":…}.
- * Returns a malloc'd JSON string the caller must free(), or NULL on error. */
-char *drm_lib_get_account(void);
-
-/* drm_lib_get_mv — progressive MV URL + download key for adamId.
- * out_url, out_dk: set to malloc'd strings; caller must free both.
- * out_has_itun: set to 1 if an itun decryptor is ready for this adamId.
- * Returns 0 on success, -1 on error. */
-int drm_lib_get_mv(unsigned long adam_id, char **out_url, char **out_dk,
-                   int *out_has_itun);
 
 /* drm_lib_open_kd_ctx — acquire a FairPlay key-delivery context for
  * (adam_id, uri).  The context is internally cached; the returned pointer
- * is valid until drm_lib_shutdown().  Returns NULL on failure. */
+* is valid until the next lease refresh.  Returns NULL on failure. */
 void *drm_lib_open_kd_ctx(const char *adam_id, const char *uri);
 
 /* drm_lib_decrypt — decrypt one FP-encrypted sample in-place.
  * kd_ctx: value returned by drm_lib_open_kd_ctx.
  * Returns 0 on success. */
 int drm_lib_decrypt(void *kd_ctx, uint8_t *sample, uint32_t size);
-
-/* drm_lib_decrypt_itun — decrypt one itun-encrypted sample in-place.
- * Must call drm_lib_get_mv first (creates the itun decryptor).
- * out_size: number of output bytes (may differ from in_size).
- * Returns 0 on success, -1 on error. */
-int drm_lib_decrypt_itun(unsigned long adam_id, uint8_t *sample,
-                          uint32_t in_size, uint32_t *out_size);
 
 /* drm_lib_is_recovery_active — 1 if lease recovery is in progress. */
 int drm_lib_is_recovery_active(void);
@@ -112,6 +86,10 @@ int drm_lib_login(const char *username, const char *password);
 
 /* Why the last sign-in or init failed, in words fit for the sign-in form ("" when unknown). */
 const char *drm_lib_last_error(void);
+
+/* Call on a thread before it first runs Apple's Android code (no-op off Windows). Android
+ * code skips the stack probes Windows needs, so its large frames would otherwise fault. */
+void hybris_commit_thread_stack(void);
 
 #ifdef __cplusplus
 }

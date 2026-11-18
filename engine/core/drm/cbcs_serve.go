@@ -13,8 +13,8 @@ import (
 // the size comes off the wire as a uint32 that would otherwise allocate up to 4 GiB.
 const maxCBCSSample = 64 << 20
 
-// serveCBCS speaks the FairPlay sample protocol of handle() in the wrapper's
-// main.c over conn, with key-context creation and sample decryption injected
+// serveCBCS speaks over conn the FairPlay sample protocol the wrapper's former handle() in
+// main.c spoke, with key-context creation and sample decryption injected
 // so the protocol is testable without the native library:
 //
 //	repeat:  [uint8 len][adamID] [uint8 len][keyURI]                    — select a key

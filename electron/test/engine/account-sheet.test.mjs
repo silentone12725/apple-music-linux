@@ -97,3 +97,75 @@ test('a sign-in that fails while the code is asked for goes back to the form wit
     assert.match(dlg().textContent, /Sign in with your Apple Account/);
     assert.match(dlg().textContent, /Apple did not answer in time\./);
 });
+
+const wrongPasswordSnap = (id) => ({ state: { authentication: 'challenging' }, challenge: { type: 'dialog_choice', id, title: 'Check the account information you entered and try again.', metadata: { buttons: 'Cancel\nRetry' } } });
+const buttonsOf = (dlg) => dlg().find(e => e.tag === 'button' && e.dataset.label);
+const labelled = (dlg, label) => buttonsOf(dlg).find(b => b.dataset.label === label);
+
+test('Retry on the wrong-password dialog cancels the attempt and asks for the password again', async () => {
+    const sent = [];
+    const { sheet, dlg } = setup({ submitCode: async (c) => { sent.push(c); return true; }, savedEmail: async () => 'me@example.com' });
+    sheet.onSnapshot(wrongPasswordSnap(1));
+    assert.match(dlg().textContent, /not accepted/);
+    labelled(dlg, 'Retry').click();
+    await tick(); await tick();
+    assert.deepEqual(sent, ['0'], 'Apple gets the Cancel button, not a resubmission of the same password');
+    assert.match(dlg().textContent, /Sign-In Required/);
+    assert.match(dlg().textContent, /Check your Apple Account and password/);
+    assert.equal(inputs(dlg)[0].value, 'me@example.com');
+});
+
+test('Cancel on the wrong-password dialog answers Cancel and closes the sheet', async () => {
+    const sent = [], calls = [];
+    const { sheet, dlg } = setup({ submitCode: async (c) => { sent.push(c); return true; }, onCancel: () => calls.push('cancel') });
+    sheet.onSnapshot(wrongPasswordSnap(1));
+    labelled(dlg, 'Cancel').click();
+    await tick(); await tick();
+    assert.deepEqual(sent, ['0']);
+    assert.equal(dlg().open, false);
+    assert.deepEqual(calls, ['cancel']);
+});
+
+test('a choice the engine could not take is not left stuck', async () => {
+    const { sheet, dlg } = setup({ submitCode: async () => false });
+    sheet.onSnapshot(wrongPasswordSnap(1));
+    labelled(dlg, 'Retry').click();
+    await tick(); await tick();
+    assert.match(dlg().textContent, /Could not send/);
+    labelled(dlg, 'Retry').click(); // clickable again
+    await tick();
+});
+
+test('a new dialog after the first is shown, not ignored', () => {
+    const { sheet, dlg } = setup();
+    sheet.onSnapshot(wrongPasswordSnap(1));
+    sheet.onSnapshot({ state: { authentication: 'challenging' }, challenge: { type: 'dialog_choice', id: 2, title: 'Recovery Options', metadata: { buttons: 'Text me\nCall me' } } });
+    assert.ok(labelled(dlg, 'Text me'), 'the second dialog replaced the first');
+});
+
+test('Retry keeps the sign-in form when Apple ends the cancelled attempt with a failure', async () => {
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const { sheet, dlg } = setup({ submitCode: async () => { await gate; return true; }, savedEmail: async () => 'me@example.com' });
+    sheet.onSnapshot(wrongPasswordSnap(1));
+    labelled(dlg, 'Retry').click();
+    // The engine's reply to the dialog and the failed attempt arrive over SSE before the POST resolves.
+    sheet.onSnapshot({ state: { authentication: 'logging_in' } });
+    sheet.onSnapshot({ state: { authentication: 'failed' }, failure: { message: 'sign-in cancelled' } });
+    release();
+    await tick(); await tick(); await tick();
+    assert.equal(dlg().open, true, 'the sheet is still open');
+    assert.match(dlg().textContent, /Sign-In Required|Sign in with your Apple Account/);
+    assert.equal(inputs(dlg).length >= 2, true, 'the password field is there');
+});
+
+test('a failure after Retry shows Apple’s message on the form, then later snapshots leave it alone', async () => {
+    const { sheet, dlg } = setup({ savedEmail: async () => 'me@example.com' });
+    sheet.onSnapshot(wrongPasswordSnap(1));
+    labelled(dlg, 'Retry').click();
+    await tick(); await tick(); await tick();
+    sheet.onSnapshot({ state: { authentication: 'failed' }, failure: { message: 'sign-in cancelled' } });
+    sheet.onSnapshot({ state: { authentication: 'logged_out' } });
+    assert.equal(dlg().open, true);
+    assert.equal(inputs(dlg).length >= 2, true);
+});

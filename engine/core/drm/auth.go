@@ -32,6 +32,8 @@ type AuthCoordinator struct {
 	// verification-code challenges fail at once until the next SetCredentials.
 	cancelPending context.CancelFunc
 	aborted       bool
+	// unattended: the current sign-in runs without anyone to answer a challenge (see Credentials.Unattended).
+	unattended bool
 }
 
 // NewAuthCoordinator creates an AuthCoordinator.
@@ -48,6 +50,7 @@ func (a *AuthCoordinator) SetCredentials(creds Credentials) {
 	a.mu.Lock()
 	a.stored = creds
 	a.aborted = false
+	a.unattended = creds.Unattended
 	a.mu.Unlock()
 }
 
@@ -56,6 +59,7 @@ func (a *AuthCoordinator) SetCredentials(creds Credentials) {
 func (a *AuthCoordinator) ClearCredentials() {
 	a.mu.Lock()
 	a.stored = Credentials{}
+	a.unattended = false
 	a.mu.Unlock()
 }
 
@@ -140,7 +144,9 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	a.mu.Lock()
-	if a.aborted {
+	if a.aborted || a.unattended {
+		// Aborted by a logout, or an unattended sign-in that Apple wants input for: nobody is announced a challenge, the
+		// backend gets no code and that sign-in attempt ends as cancelled (not as a failed attempt).
 		a.mu.Unlock()
 		return "", fmt.Errorf("sign-in cancelled")
 	}

@@ -71,12 +71,12 @@ type AccountTokenSource interface {
 
 	// GetProgressiveMVURL fetches a progressive video URL and associated
 	// downloadKey (base64 FairPlay token; empty if not available) for the given
-	// adamID through the wrapper's native Android StoreKit auth (port 40020).
+	// adamID. The in-process wrapper has no such call any more (the standalone wrapper's TCP
+	// services were removed), so the native backend answers with an error.
 	GetProgressiveMVURL(ctx context.Context, adamID uint64) (url string, downloadKey string, err error)
 
-	// DecryptItunSamples decrypts itun-encrypted samples via the wrapper's
-	// port 50020. Requires a prior GetProgressiveMVURL call for the same adamID
-	// to initialize the decryptor.
+	// DecryptItunSamples decrypts itun-encrypted samples. Requires a prior GetProgressiveMVURL call
+	// for the same adamID to initialize the decryptor. The native backend does not support it.
 	DecryptItunSamples(ctx context.Context, adamID uint64, samples [][]byte) ([][]byte, error)
 }
 
@@ -139,12 +139,8 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 	switch {
 	case req.Atmos && traits["atmos"]:
 		codec, hlsFilter = pipeline.CodecAtmos, "ec-3"
-	case req.Lossless && req.HiRes && traits["hi-res-lossless"]:
+	case req.Lossless && (traits["lossless"] || traits["hi-res-lossless"]):
 		codec, hlsFilter = pipeline.CodecALAC, "alac"
-		sr, bd = extractALACQuality(a.AudioTraits)
-	case req.Lossless && traits["lossless"]:
-		codec, hlsFilter = pipeline.CodecALAC, "alac"
-		sr, bd = 44100, 16
 	default:
 		codec, hlsFilter = pipeline.CodecAAC, "mp4a.40.2"
 	}
@@ -166,9 +162,18 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 		if err != nil {
 			return nil, fmt.Errorf("open master playlist: %w", err)
 		}
-		playlistURL = master.SelectByCodec(hlsFilter)
-		if playlistURL == "" {
-			return nil, fmt.Errorf("no HLS variant matching codec %q", hlsFilter)
+		if codec == pipeline.CodecALAC {
+			// The playlist states each rendition's real format; report that, not a guess from the catalog traits.
+			v, ok := master.SelectALAC(req.HiRes)
+			if !ok {
+				return nil, fmt.Errorf("no HLS variant matching codec %q", hlsFilter)
+			}
+			playlistURL, sr, bd = v.URL, v.SampleRate, v.BitDepth
+		} else {
+			playlistURL = master.SelectByCodec(hlsFilter)
+			if playlistURL == "" {
+				return nil, fmt.Errorf("no HLS variant matching codec %q", hlsFilter)
+			}
 		}
 	}
 
@@ -331,8 +336,8 @@ func (p *appleMusicProvider) openMV(ctx context.Context, req media.OpenRequest) 
 		},
 	}
 
-	// Try to obtain the progressive CDN URL and downloadKey from the native
-	// wrapper (port 40020). The downloadKey is sent as an HTTP cookie to the
+	// Try to obtain the progressive CDN URL and downloadKey from the DRM backend (the native
+	// backend does not provide them). The downloadKey is sent as an HTTP cookie to the
 	// CDN (Android pattern) — the CDN authorises server-side decryption.
 	// Non-fatal: HLS CBCS path is always the primary; this is an optimisation.
 	// Opt-in (ADAM_MV_PROGRESSIVE=1): the request costs seconds on every open, and nothing
@@ -722,20 +727,6 @@ func traitSet(traits []string) map[string]bool {
 		m[t] = true
 	}
 	return m
-}
-
-func extractALACQuality(traits []string) (sampleRate, bitDepth int) {
-	for _, t := range traits {
-		parts := strings.Split(t, "-")
-		if len(parts) >= 2 {
-			fmt.Sscanf(parts[len(parts)-2], "%d", &sampleRate)
-			fmt.Sscanf(parts[len(parts)-1], "%d", &bitDepth)
-			if sampleRate > 0 && bitDepth > 0 {
-				return
-			}
-		}
-	}
-	return 96000, 24
 }
 
 func fmtArtwork(template string, size int) string {

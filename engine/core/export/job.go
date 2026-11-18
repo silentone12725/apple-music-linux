@@ -71,6 +71,7 @@ func canTransition(from, to Phase) bool {
 // ExportCapabilities selects the content variant to export.
 type ExportCapabilities struct {
 	Lossless        bool `json:"lossless"`        // ALAC
+	HiRes           bool `json:"hiRes"`           // with Lossless: allow the tiers above 48 kHz; false caps at 48 kHz / 24-bit
 	Atmos           bool `json:"atmos"`           // Dolby Atmos
 	Video           bool `json:"video"`           // Music Video
 	Playlist        bool `json:"playlist"`        // expand playlist → per-track jobs

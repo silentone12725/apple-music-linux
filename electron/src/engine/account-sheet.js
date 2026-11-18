@@ -50,6 +50,9 @@ const STYLE = `
 #adam-account .code-links button.link-sm:hover{color:rgba(235,235,245,.8)}
 #adam-account .choice-list{align-self:stretch;display:flex;flex-direction:column;gap:6px;margin:4px 0 0}
 #adam-account .choice-list button{width:100%;justify-content:flex-start;text-align:left;padding:0 12px;height:36px;border-radius:8px;font-size:13px}
+#adam-account .phone-opts{align-self:stretch;display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin:8px 0 0;padding:8px 10px;background:rgba(255,255,255,.06);border-radius:8px}
+#adam-account .phone-opts button:not(.link-sm){width:100%;justify-content:flex-start;text-align:left;padding:0 10px;height:34px;border-radius:7px;font-size:13px}
+#adam-account .phone-opts .link-sm{align-self:center;margin-top:2px}
 #adam-account .bar{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px 14px;
   border-top:.5px solid rgba(255,255,255,.08);background:rgba(255,255,255,.02)}
 #adam-account button{min-width:76px;height:24px;padding:0 12px;border:0;border-radius:6px;cursor:default;
@@ -146,7 +149,11 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         return inputs.map(i => i.value).join('').length === CODE_LENGTH;
     }
 
+    // Sheet transitions go to the page log, so a report of "it closed by itself" shows what closed it.
+    const trace = (what) => { try { console.log(`[Adam Account] ${what}`); } catch { /* no console */ } };
+
     function render(header, content, buttons) {
+        trace(`show ${view}`);
         ensureDialog();
         const body = el(doc, 'div', { class: 'body' });
         body.insertAdjacentHTML('beforeend', APP_ICON);
@@ -190,7 +197,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
             [el(doc, 'h1', { id: 'adam-account-title' }, knownEmail ? 'Sign-In Required' : 'Sign in with your Apple Account'),
              el(doc, 'div', { class: 'sub' }, knownEmail
                  ? `Enter the password for your Apple Account ${knownEmail}.`
-                 : 'Lossless and Hi-Res Lossless use Apple’s FairPlay, which needs its own sign-in.')],
+                 : "Lossless and Hi-Res Lossless use Apple’s FairPlay, which needs its own sign-in.")],
             [el(doc, 'div', { class: 'group' }, email, el(doc, 'div', { class: 'pw' }, pass, eye)),
              rememberRow,
              el(doc, 'div', { class: 'note' }, 'Your password is sent only to Apple. Unless you tick the box, it is not kept on this computer.'),
@@ -245,9 +252,22 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         msg = el(doc, 'div', { class: 'msg', 'aria-live': 'polite' });
         const resendBtn = el(doc, 'button', { type: 'button', class: 'link-sm' }, 'Resend code');
         resendBtn.addEventListener('click', () => submitSpecialCode('__resend__', 'Resending…'));
-        const cantBtn = el(doc, 'button', { type: 'button', class: 'link-sm' }, 'Can’t get to your devices?');
-        cantBtn.addEventListener('click', () => submitSpecialCode('__cant_devices__', 'Loading options…'));
+        const cantBtn = el(doc, 'button', { type: 'button', class: 'link-sm' }, "Can’t get to your devices?");
         const codeLinks = el(doc, 'div', { class: 'code-links' }, resendBtn, '·', cantBtn);
+        let phoneOptsEl = null;
+        function closePhoneOpts() { phoneOptsEl?.remove(); phoneOptsEl = null; }
+        cantBtn.addEventListener('click', () => {
+            if (phoneOptsEl) { closePhoneOpts(); return; }
+            if (busy) return;
+            phoneOptsEl = el(doc, 'div', { class: 'phone-opts' });
+            const smsBtn = button('Text me a verification code', {
+                onClick: () => { closePhoneOpts(); submitSpecialCode('__cant_devices__', 'Sending SMS…'); },
+            });
+            const cancelLink = el(doc, 'button', { type: 'button', class: 'link-sm' }, 'Cancel');
+            cancelLink.addEventListener('click', closePhoneOpts);
+            phoneOptsEl.append(smsBtn, cancelLink);
+            codeLinks.after(phoneOptsEl);
+        });
         primary = button('Continue', { isPrimary: true, onClick: submitCodeNow });
         render(
             [el(doc, 'h1', { id: 'adam-account-title' }, 'Enter Verification Code'),
@@ -287,18 +307,27 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         if (busy) return;
         setMessage('');
         setBusy(true, busyLabel);
-        submittedId = challengeId;
+        // Do not set submittedId: special codes are not verification codes.
+        // A new challenge after resend/cant_devices is not a "wrong code" response.
         let ok = false;
         try { ok = await submitCode(value); } catch { ok = false; }
         if (view !== 'code') return; // navigated away (e.g. choice dialog opened)
-        if (!ok) { submittedId = null; setBusy(false); setMessage('Could not send. Try again.', true); }
+        if (!ok) { setBusy(false); setMessage('Could not send. Try again.', true); }
+        // ok: stay busy — SSE will deliver the new challenge and onSnapshot will refresh
     }
+
+    // Apple's "Check the account information you entered" dialog: Cancel / Retry. Retrying with the password we already sent would only
+    // count as another wrong attempt at Apple (repeated ones lock the account), so Retry ends this attempt and asks for the password again.
+    // The dialog comes from Apple's library, which the engine pins to en-US (deviceInfoPrefix in
+    // engine/core/drm/deviceid.go): its button labels are English whatever language the page is in.
+    const isWrongPasswordDialog = (labels) => labels.length === 2 && labels.some(l => /^retry$/i.test(l)) && labels.some(l => /^cancel$/i.test(l));
 
     function showChoice(buttonsStr, title = 'Recovery Options') {
         view = 'choice';
         busy = false;
         inputs = [];
         const btnLabels = (buttonsStr || '').split('\n').filter(Boolean);
+        const wrongPassword = isWrongPasswordDialog(btnLabels);
         const list = el(doc, 'div', { class: 'choice-list' });
         btnLabels.forEach((label, idx) => {
             const b = button(label, {
@@ -306,8 +335,22 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
                     if (busy) return;
                     setBusy(true, 'Sending…');
                     submittedId = challengeId;
-                    try { await submitCode(String(idx)); } catch { /* ignore */ }
-                    // engine will continue the sign-in flow; onSnapshot will drive next view
+                    const retry = wrongPassword && /^retry$/i.test(label);
+                    // Retry answers the dialog with its Cancel button; the new password goes through the sign-in form.
+                    const reply = retry ? btnLabels.findIndex(l => /^cancel$/i.test(l)) : idx;
+                    let ok = false;
+                    try { ok = await submitCode(String(reply)); } catch { ok = false; }
+                    if (view !== 'choice') return; // the engine already moved the sheet on
+                    if (!ok) { submittedId = null; setBusy(false); setMessage('Could not send. Try again.', true); return; }
+                    if (retry) {
+                        dismissedId = challengeId;
+                        let email = '';
+                        try { email = (await savedEmail()) || ''; } catch { /* the form simply starts empty */ }
+                        if (view === 'choice') showSignIn('Check your Apple Account and password, then try again.', { email });
+                    } else if (wrongPassword) {
+                        cancel();
+                    }
+                    // otherwise the engine continues the sign-in flow; onSnapshot drives the next view
                 },
             });
             list.appendChild(b);
@@ -316,7 +359,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         primary = null;
         render(
             [el(doc, 'h1', { id: 'adam-account-title' }, title),
-             el(doc, 'div', { class: 'sub' }, 'Choose how to receive your verification code.')],
+             el(doc, 'div', { class: 'sub' }, wrongPassword ? 'Your Apple Account or password was not accepted.' : 'Choose how to receive your verification code.')],
             [list, msg],
             [button('Cancel Sign-In', { onClick: cancel })],
         );
@@ -342,6 +385,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
     }
 
     function close() {
+        trace(`close from ${view} ${(new Error().stack ?? '').split('\n')[2]?.trim() ?? ''}`);
         stopPoll();
         hidePassword();
         if (dlg?.open) dlg.close();
@@ -356,7 +400,8 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
     }
 
     function onSnapshot(snap) {
-        const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId });
+        const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
+        if (action !== 'none') trace(`snapshot auth=${snap?.state?.authentication} challenge=${snap?.challenge?.type ?? '-'} → ${action}`);
         if (snap?.challenge?.type === 'two_factor' || snap?.challenge?.type === 'dialog_choice') {
             challengeId = snap.challenge.id ?? null;
         }

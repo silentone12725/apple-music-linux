@@ -219,3 +219,34 @@ type stateFileResult struct {
 func ParseStateFile(content string) stateFileResult {
 	return stateFileStrings[strings.TrimSpace(content)]
 }
+
+// SnapshotForStateString turns a state string written by the wrapper into the snapshot the manager merges.
+//
+// The wrapper reports RUNNING as soon as the library is initialised (drm_init), which is before any sign-in. Backend.Start holds
+// its lock for the whole sign-in, so those states are only processed once Start returns, and an unsigned-in RUNNING then read as
+// "logged in": a failed sign-in closed the account sheet before the failure arrived. Logged in is only reported once hybris
+// FairPlay has initialised (hybrisReady); until then the string carries no authentication state, and FairPlay is capped at unknown.
+// The challenging and logging-in states belong to the AuthCoordinator, which announces them (with the challenge) and withdraws them
+// in order; the wrapper's WAITING_* and LOGIN strings arrive on another goroutine and must not move that state back.
+func SnapshotForStateString(state string, hybrisReady bool) DRMSnapshot {
+	result := ParseStateFile(state)
+	fp, auth := result.FairPlay, result.Auth
+	if !hybrisReady {
+		if fp == FairPlayReady {
+			fp = FairPlayUnknown
+		}
+	}
+	if auth != AuthLoggedIn || !hybrisReady {
+		auth = 0
+	}
+	return DRMSnapshot{
+		State: DRMState{
+			Process:        result.Process,
+			FairPlay:       fp,
+			Authentication: auth,
+			Recovery:       result.Recovery,
+		},
+		Timestamp: time.Now(),
+		Message:   "state change: " + state,
+	}
+}

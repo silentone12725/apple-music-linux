@@ -182,3 +182,26 @@ func TestAuthenticateRefusesWhilePausedAndCancelIsNotAFailure(t *testing.T) {
 		t.Fatalf("failure not published with the snapshot: %+v", f)
 	}
 }
+
+// A sign-in that is queued (the running flag is set, the snapshot does not say so yet) must not be answered by the web token either.
+func TestWebSessionDoesNotAnswerForAQueuedSignIn(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "session-ready", "1")
+	m := newTestManager(t, dir, newFake())
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggedOut}})
+	m.signingIn.Store(true)
+	m.NoteWebSession()
+	if got := m.Status().State.Authentication; got == AuthLoggedIn {
+		t.Fatalf("a web session answered a queued sign-in: %v", got)
+	}
+}
+
+// "Temporarily" alone also appears in outage messages; those must not read as a locked account (a 30 minute sign-in pause).
+func TestClassifyOutageIsNotALockedAccount(t *testing.T) {
+	if f := ClassifySignInError(errors.New("authenticate: The service is temporarily unavailable")); f.Kind == FailLocked {
+		t.Fatalf("an outage was classified as a locked account: %+v", f)
+	}
+	if f := ClassifySignInError(errors.New("authenticate: This Apple Account is temporarily locked")); f.Kind != FailLocked {
+		t.Fatalf("a temporarily locked account was not classified as locked: %+v", f)
+	}
+}

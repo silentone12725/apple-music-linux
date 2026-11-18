@@ -305,30 +305,13 @@ func TestCBCSSeekStartsMidTrackWithTheContentKey(t *testing.T) {
 	}
 }
 
-// A later declared content key must be opened, including after the usual
-// prefetch-to-content transition has already happened.
-func TestCBCSHonorsLaterKeyTags(t *testing.T) {
-	tr := buildEncryptedTrack(t, 4)
-	const laterKey = "skd://itunes.apple.com/p1/c99"
-	fp := newFakeFairPlay(t, map[string][]byte{cbcsPrefetchKey: prefetchAK, testContentKey: contentAK, laterKey: contentAK})
-	keys := []string{cbcsPrefetchKey, testContentKey, "", laterKey}
-
-	var out bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := CBCSSource(testAdamID, DialerFromAddr(fp.ln.Addr().String()), serveFile(t, tr.file), keys, 0).Stream(ctx, &out); err != nil {
-		t.Fatal(err)
-	}
-	checkFragments(t, decodeOutput(t, out.Bytes()), tr.plain, 0)
-	if got := fp.opened(); len(got) != 3 || got[2] != testAdamID+" "+laterKey {
-		t.Fatalf("keys opened = %q, want prefetch, content and later keys", got)
-	}
-}
-
-func TestCBCSPipelineDecryptsTwoPrefetchSegments(t *testing.T) {
-	tr := buildEncryptedTrackWithPrefetch(t, 5, 2)
+// The first content key can arrive after several prefetch fragments. A later
+// unknown tag must never reach the server.
+func TestCBCSIgnoresTagsAfterFirstContentKey(t *testing.T) {
+	tr := buildEncryptedTrackWithPrefetch(t, 4, 2)
 	fp := newFakeFairPlay(t, map[string][]byte{cbcsPrefetchKey: prefetchAK, testContentKey: contentAK})
-	keys := []string{cbcsPrefetchKey, "", testContentKey, "", ""}
+	keys := []string{cbcsPrefetchKey, "", testContentKey, "skd://itunes.apple.com/p1/c99"}
+
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -336,8 +319,8 @@ func TestCBCSPipelineDecryptsTwoPrefetchSegments(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkFragments(t, decodeOutput(t, out.Bytes()), tr.plain, 0)
-	if got := fp.opened(); len(got) != 2 || got[1] != testAdamID+" "+testContentKey {
-		t.Fatalf("keys opened = %q, want sentinel then the delayed content key", got)
+	if got := fp.opened(); len(got) != 2 {
+		t.Fatalf("keys opened = %q, want only the prefetch and content keys", got)
 	}
 }
 

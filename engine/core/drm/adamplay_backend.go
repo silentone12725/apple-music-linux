@@ -93,6 +93,9 @@ type adamplayBackend struct {
 	drained     chan struct{} // closed when active reaches 0 while Stop is waiting
 	gen         uint64        // incremented by every successful Start
 	hybrisReady bool          // true when hybris_backend_init+hybris_fairplay_init succeeded
+	// hybrisUp mirrors hybrisReady for stateLoop, which must not take mu: Start holds it for the whole sign-in, and the wrapper's
+	// state strings would then reach the manager only after the sign-in ended, in no useful order.
+	hybrisUp atomic.Bool
 
 	// hybrisInitDone is closed when the background hybris init goroutine completes
 	// (success or failure). nil means hybris was initialised synchronously (login
@@ -292,6 +295,7 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 			return err
 		}
 		b.hybrisReady = true
+		b.hybrisUp.Store(true)
 		b.emitFairPlayReady()
 	} else if !b.hybrisReady {
 		// Session-reuse path: spin hybris init in the background so Start()
@@ -306,6 +310,7 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 			} else {
 				b.mu.Lock()
 				b.hybrisReady = true
+				b.hybrisUp.Store(true)
 				b.mu.Unlock()
 				b.emitFairPlayReady()
 			}
@@ -521,6 +526,7 @@ func (b *adamplayBackend) RetryFairPlay(mut string) {
 	} else {
 		b.mu.Lock()
 		b.hybrisReady = true
+		b.hybrisUp.Store(true)
 		b.mu.Unlock()
 		b.emitFairPlayReady()
 		log.Printf("[drm] RetryFairPlay: FairPlay ready via web MUT")
@@ -803,30 +809,10 @@ func (b *adamplayBackend) Events() <-chan DRMEvent {
 // stateLoop processes state changes from C callbacks
 func (b *adamplayBackend) stateLoop() {
 	for state := range b.stateCh {
-		// Parse state string and emit event
-		result := ParseStateFile(state)
-
-		// The C library emits RUNNING when the AAC path is ready, and RUNNING also
-		// maps to FairPlayReady in ParseStateFile. But FairPlay (ALAC/CBCS) requires
-		// hybris_fairplay_init to have succeeded. Cap FairPlay at FairPlayUnknown
-		// when hybris didn't initialise, regardless of what the state string says.
-		fpState := result.FairPlay
-		b.mu.Lock()
-		if !b.hybrisReady && fpState == FairPlayReady {
-			fpState = FairPlayUnknown
-		}
-		b.mu.Unlock()
-
-		snap := DRMSnapshot{
-			State: DRMState{
-				Process:        result.Process,
-				FairPlay:       fpState,
-				Authentication: result.Auth,
-				Recovery:       result.Recovery,
-			},
-			Timestamp: time.Now(),
-			Message:   fmt.Sprintf("state change: %s", state),
-		}
+		// The C library emits RUNNING when the AAC path is ready, and RUNNING also maps to FairPlayReady and
+		// logged in. FairPlay (ALAC/CBCS) requires hybris_fairplay_init to have succeeded, so neither is
+		// reported until it has (see SnapshotForStateString).
+		snap := SnapshotForStateString(state, b.hybrisUp.Load())
 
 		select {
 		case b.eventCh <- DRMEvent{

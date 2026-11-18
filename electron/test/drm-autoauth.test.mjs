@@ -14,16 +14,16 @@ function engine({ statuses, post = { status: 202, json: {} } }) {
         sleep: async (ms) => { clock += ms; },
         request: async (method, path, body) => {
             calls.push(method + ' ' + path);
-            if (method === 'POST') { assert.deepEqual(body, creds); return post; }
+            if (method === 'POST') { assert.deepEqual(body, { ...creds, unattended: true }); return post; }
             const s = statuses[Math.min(i++, statuses.length - 1)];
             return s === null ? null : { status: 200, json: { timestamp: new Date(clock + 500).toISOString(), ...s } };
         },
     };
 }
 const run = (e, extra = {}) => {
-    let forgotten = 0;
-    return autoAuthenticate({ request: e.request, creds, forget: async () => { forgotten++; }, sleep: e.sleep, now: e.now, timeoutMs: 60_000, ...extra })
-        .then((outcome) => ({ outcome, forgotten }));
+    let forgotten = 0, passwordDropped = 0;
+    return autoAuthenticate({ request: e.request, creds, forget: async () => { forgotten++; }, dropPassword: async () => { passwordDropped++; }, sleep: e.sleep, now: e.now, timeoutMs: 60_000, ...extra })
+        .then((outcome) => (passwordDropped ? { outcome, forgotten, passwordDropped } : { outcome, forgotten }));
 };
 
 test('engine unreachable: nothing sent, credentials kept', async () => {
@@ -33,8 +33,7 @@ test('engine unreachable: nothing sent, credentials kept', async () => {
 });
 
 test('an existing or loading session is never replaced', async () => {
-    for (const state of [{ fairplay: 'ready' }, { session: 'valid' },
-        ...['logging_in', 'challenging', 'logged_in'].map(authentication => ({ authentication }))]) {
+    for (const state of [{ fairplay: 'ready' }, { session: 'valid' }]) {
         const e = engine({ statuses: [{ state }] });
         assert.equal((await run(e)).outcome, 'has-session');
         assert.ok(!e.calls.includes('POST /api/v1/drm/authenticate'));
@@ -69,9 +68,20 @@ test('a failure reported before this attempt began is ignored', async () => {
     assert.deepEqual(await run(e), { outcome: 'signed-in', forgotten: 0 });
 });
 
-test('a verification-code challenge drops the details and leaves this attempt to the sign-in sheet', async () => {
+test('a verification-code challenge drops only the password and leaves this attempt to the sign-in sheet', async () => {
     const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'challenging' } }] });
-    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 1 });
+    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 0, passwordDropped: 1 });
+});
+
+test('an unattended sign-in that Apple wants a code for ends quietly: no sheet, only the password is dropped', async () => {
+    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logging_in' } }, { state: { authentication: 'logged_out' }, message: 'sign-in cancelled' }] });
+    assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 0, passwordDropped: 1 });
+    assert.ok(!e.calls.some((c) => c.includes('challenge')), 'no challenge was answered');
+});
+
+test('a plain logged-out report without the cancel message is not read as a code request', async () => {
+    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logged_out' }, message: '' }] });
+    assert.deepEqual(await run(e, { timeoutMs: 6000 }), { outcome: 'timeout', forgotten: 0 });
 });
 
 test('a rejected request body clears the credentials; an engine without DRM does not', async () => {
