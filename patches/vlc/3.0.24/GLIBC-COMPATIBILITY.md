@@ -83,7 +83,10 @@ exit
 
 Both builders reject build GLIBC >2.38. FFmpeg preflight still strictly checks
 source major ABIs 62/62/60 against the staged plugins; it checks produced SONAMEs
-and every output ELF's GLIBC requirements before copying. The normvol helper
+and every output ELF's GLIBC requirements before copying. `check-vlc-glibc.py` runs
+`readelf` in the C locale whatever the user's locale, and fails closed: a `readelf`
+failure, or an ELF with `DT_VERNEED` whose version-needs entries cannot be parsed,
+is an audit error rather than "no GLIBC requirement". The normvol helper
 builds only that module, checks its GLIBC and core ABI, and leaves staging separate.
 The existing Candidate C patch, MP4 module, core and FFmpeg 9 remain unchanged.
 

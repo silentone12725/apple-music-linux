@@ -72,7 +72,7 @@ mkdir -p "$WORK/build" && cd "$WORK/build"   # out of tree: the source stays pri
 # Validate before copying anything into OUT. Use only real matching SONAMEs.
 for so in $WANT; do
     [ -e "$STAGE/lib/$so" ] || { echo "error: built libraries lack $so" >&2; exit 1; }
-    soname="$(readelf -d "$STAGE/lib/$so" | sed -n 's/.*(SONAME).*\[\([^]]*\)\].*/\1/p')"
+    soname="$(LC_ALL=C LANG=C LANGUAGE= readelf -d "$STAGE/lib/$so" | sed -n 's/.*(SONAME).*\[\([^]]*\)\].*/\1/p')"
     [ "$soname" = "$so" ] || { echo "error: $so is not a matching ELF SONAME" >&2; exit 1; }
 done
 python3 "$REPO/scripts/check-vlc-glibc.py" --runtime "$STAGE/lib"

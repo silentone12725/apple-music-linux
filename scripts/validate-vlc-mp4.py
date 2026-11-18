@@ -14,31 +14,64 @@ REPO = Path(__file__).resolve().parents[1]
 from vlc_runtime import expected_paths, vlc_paths
 
 
+class ValidationError(Exception):
+    pass
+
+
+def require(condition, message):
+    # Explicit check: PASS/FAIL must not depend on asserts that python -O strips.
+    if not condition:
+        raise ValidationError(message)
+
+
 def validate(data, mode):
-    assert data['ok'] and data['events'] and not data['dropped']
+    try:
+        check_probe_output(data, mode)
+    except (KeyError, TypeError, IndexError) as error:
+        raise ValidationError(f'{mode}: malformed probe output: {error!r}') from error
+
+
+def check_probe_output(data, mode):
+    require(data['ok'] is True, f'{mode}: probe reported ok=false')
+    require(data['events'], f'{mode}: no events recorded')
+    require(not data['dropped'], f'{mode}: {data["dropped"]} events dropped')
     rows = data['events']
     ids = {e['eventType'] for e in rows}
     if mode == 'lifecycle':
         for gen in [1, 2, 3]:
-            assert {260, 261, 262, 10002} <= {e['eventType'] for e in rows if e['generation'] == gen}
             sequence = [e['eventType'] for e in rows if e['generation'] == gen]
-            assert 260 in sequence[sequence.index(261) + 1:], 'resume Playing event missing'
+            require({260, 261, 262, 10002} <= set(sequence), f'lifecycle generation {gen}: events missing')
+            require(260 in sequence[sequence.index(261) + 1:], f'lifecycle generation {gen}: resume Playing event missing')
     elif mode == 'failure':
-        assert 10007 in ids and any(e['failed'] for e in rows) and (265 in ids or 266 in ids)
+        require(10007 in ids, 'failure: injected read failure not recorded')
+        require(any(e['failed'] for e in rows), 'failure: no failed state recorded')
+        require(265 in ids or 266 in ids, 'failure: neither EndReached nor EncounteredError')
     else:
-        assert 265 in ids and 266 not in ids and not any(e['failed'] for e in rows)
-        assert 10001 in ids
-        assert data['stats'] and data['stats'][0]['valid']
-        assert data['stats'][0]['decodedAudio'] > 0 and data['stats'][0]['playedAudioBuffers'] > 0
-        assert data['stats'][0]['lostAudioBuffers'] == 0 and data['stats'][0]['demuxCorrupted'] == 0
+        require(265 in ids, f'{mode}: EndReached missing')
+        require(266 not in ids, f'{mode}: EncounteredError reported')
+        require(not any(e['failed'] for e in rows), f'{mode}: source failure recorded')
+        require(10001 in ids, f'{mode}: source EOF not reached')
+        stats = data['stats']
+        require(stats and stats[0]['valid'], f'{mode}: playback statistics missing or invalid')
+        require(stats[0]['decodedAudio'] > 0 and stats[0]['playedAudioBuffers'] > 0, f'{mode}: no audio decoded/played')
+        require(stats[0]['lostAudioBuffers'] == 0, f'{mode}: lost audio buffers')
+        require(stats[0]['demuxCorrupted'] == 0, f'{mode}: demux corruption reported')
         if mode == 'seek':
-            assert 10005 in ids
+            require(10005 in ids, 'seek: seek request not recorded')
         else:
             positions = [e for e in rows if e['eventType'] == 10000 and e['mediaTimeMs'] > 0 and e['lengthMs'] > 0]
-            assert positions and 0 <= positions[-1]['lengthMs'] - positions[-1]['mediaTimeMs'] <= 500
-            assert all(b['mediaTimeMs'] >= a['mediaTimeMs'] for a, b in zip(positions, positions[1:]))
+            require(positions, f'{mode}: no position samples')
+            residual = positions[-1]['lengthMs'] - positions[-1]['mediaTimeMs']
+            require(0 <= residual <= 500, f'{mode}: final residual {residual} ms outside 0..500')
+            require(all(b['mediaTimeMs'] >= a['mediaTimeMs'] for a, b in zip(positions, positions[1:])),
+                    f'{mode}: media time went backwards')
     # Public media time is not an independent PCR measurement.
     # This standalone production probe does not measure raw PCR.
+
+
+def check_run(loader, mode):
+    require(loader['valid'], f'{mode}: VLC loader paths differ from the runtime under test')
+    require(loader['exitCode'] == 0, f'{mode}: native probe exit code {loader["exitCode"]}')
 
 
 def main():
@@ -86,7 +119,7 @@ def main():
                 proc.wait()
         loader = {'valid': paths == expected_paths(runtime), 'paths': sorted(paths), 'exitCode': proc.returncode}
         (out / f'{mode}-loader.json').write_text(json.dumps(loader, indent=2))
-        assert loader['valid'] and proc.returncode == 0, mode
+        check_run(loader, mode)
         validate(json.loads((out / f'{mode}.json').read_text()), mode)
         summary[mode] = 'PASS'
     (out / 'summary.json').write_text(json.dumps(summary, indent=2))

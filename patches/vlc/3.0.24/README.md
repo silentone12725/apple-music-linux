@@ -171,7 +171,9 @@ If the bundled minimal FFmpeg lacks generation features, provide a suitable publ
 synthetic fixture instead. Do not use protected audio. The script compiles
 `scripts/tests/vlc_native_probe.c` and checks natural EndReached/tail position,
 Seek, failure and three-generation Pause/Resume/Stop/Replace. Every case verifies
-actual loaded libraries and writes new JSON/summary output. Raw PCR is explicitly
+actual loaded libraries and writes new JSON/summary output. Every PASS condition is an
+explicit check raising `ValidationError` (non-zero exit), so `python3 -O` cannot skip
+it; malformed or incomplete probe JSON fails too. Raw PCR is explicitly
 **NOT_MEASURED**; source-failure coverage is bounded, not all network/cache recovery.
 
 Close other Adam instances. Launch/login/play only by the user through the normal

@@ -12,15 +12,39 @@ def version(value):
     return tuple(map(int, value.split('.')))
 
 
+def needs_section(text):
+    # Only the needs section; definitions/symbols sections may come before or after it.
+    sections = re.split(r'^(?=Version \w+ section)', text, flags=re.M)
+    return ''.join(s for s in sections if s.startswith('Version needs section'))
+
+
 def required_versions(text):
     # Definitions exported by libc itself are not requirements.
-    needs = text.split('Version needs section', 1)
-    return sorted(set(re.findall(r'Name: GLIBC_([0-9.]+)', needs[1] if len(needs) == 2 else '')), key=version)
+    return sorted(set(re.findall(r'Name: GLIBC_([0-9.]+)', needs_section(text))), key=version)
+
+
+def readelf(*args):
+    # binutils localizes section headers and labels; parse only the C locale output.
+    env = dict(os.environ, LC_ALL='C', LANG='C')
+    env.pop('LANGUAGE', None)
+    return subprocess.check_output(['readelf', *args], env=env, text=True)
 
 
 def maximum(path):
-    values = required_versions(subprocess.check_output(['readelf', '--version-info', str(path)], text=True))
+    text = readelf('--dynamic', '--version-info', '--wide', str(path))
+    # An ELF with DT_VERNEED must yield parsed needs entries; otherwise fail closed.
+    if '(VERNEED)' in text and not re.search(r'Name: \S+', needs_section(text)):
+        raise ValueError(f'{path}: version needs present but not parsed')
+    values = required_versions(text)
     return values[-1] if values else None
+
+
+def checked_maximum(path, errors, label):
+    try:
+        return maximum(path)
+    except (ValueError, subprocess.CalledProcessError) as error:
+        errors.append(f'{label}: GLIBC requirements unreadable: {error}')
+        return None
 
 
 def check_build_env():
@@ -32,8 +56,9 @@ def check_build_env():
 
 def audit(root, limit, library_dirs=(), closure=False):
     bundled, external, errors, seen = [], {}, [], set()
-    env = dict(os.environ, LC_ALL='C', LD_LIBRARY_PATH=os.pathsep.join(map(str, [root, *library_dirs])))
+    env = dict(os.environ, LC_ALL='C', LANG='C', LD_LIBRARY_PATH=os.pathsep.join(map(str, [root, *library_dirs])))
     env.pop('LD_PRELOAD', None)
+    env.pop('LANGUAGE', None)
     for path in sorted(root.rglob('*')):
         if not path.is_file() or path.resolve() in seen:
             continue
@@ -41,7 +66,7 @@ def audit(root, limit, library_dirs=(), closure=False):
             if stream.read(4) != b'\x7fELF':
                 continue
         seen.add(path.resolve())
-        value = maximum(path)
+        value = checked_maximum(path, errors, path.relative_to(root))
         bundled.append({'path': str(path.relative_to(root)), 'required': value,
                         'overLimit': bool(value and version(value) > version(limit))})
         if closure:
@@ -57,7 +82,7 @@ def audit(root, limit, library_dirs=(), closure=False):
             for provider in providers:
                 resolved = Path(provider).resolve()
                 if not resolved.is_relative_to(root) and str(resolved) not in external:
-                    value = maximum(resolved)
+                    value = checked_maximum(resolved, errors, resolved)
                     external[str(resolved)] = {'required': value,
                         'overLimit': bool(value and version(value) > version(limit))}
     if not bundled:

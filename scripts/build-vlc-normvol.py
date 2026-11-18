@@ -35,7 +35,7 @@ def main():
         report = glibc.audit(Path(work), '2.38')
         if report['errors'] or any(p['overLimit'] for p in report['bundled']):
             raise ValueError(report)
-        dynamic = subprocess.check_output(['readelf', '-d', str(plugin)], text=True)
+        dynamic = glibc.readelf('-d', str(plugin))
         if 'Shared library: [libvlccore.so.9]' not in dynamic:
             raise ValueError('normvol must link the existing libvlccore.so.9 ABI')
         shutil.copy2(plugin, out / plugin.name)
