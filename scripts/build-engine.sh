@@ -24,6 +24,11 @@ if [ ! -f "$REPO/drm/libdrm_client.so" ]; then
     exit 1
 fi
 
+# The Android linker is resolved beside the engine, including in development.
+# Without it a successful Go build cannot restore or authenticate FairPlay.
+test -s "$REPO/drm/hybris-linker/q.so" || { echo 'error: missing drm/hybris-linker/q.so (run git lfs pull)' >&2; exit 1; }
+make -C "$REPO/drm" android-stubs
+
 # CGO splits CGO_LDFLAGS on spaces, and the repo path may contain one, so link
 # against the libraries through a spaceless temporary directory.
 LINKDIR="$(mktemp -d)"
@@ -34,5 +39,8 @@ cd "$REPO/engine"
 CGO_ENABLED=1 CGO_LDFLAGS="-L$LINKDIR -Wl,-rpath,\$ORIGIN" \
     go build -tags adamplay_backend "$@" -o "$OUT/engine" ./cmd
 cp "$REPO/drm/libdrm_client.so" "$OUT/"
+mkdir -p "$OUT/hybris-linker" "$OUT/android-stubs"
+cp "$REPO/drm/hybris-linker/q.so" "$OUT/hybris-linker/"
+cp "$REPO/drm/stubs/out/"*.so "$OUT/android-stubs/"
 
 echo "engine + DRM libs → $OUT"
