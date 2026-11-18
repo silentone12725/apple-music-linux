@@ -221,6 +221,8 @@ the pre-hardening build:
 | ALAC, seek 6 s → 2 s near the end: final position | 5922 ms | — | 6250 ms |
 | 45 s ALAC in two 22.5 s fragments, seekable: final position | 37301 ms, went backwards | 44801 ms | 44900 ms |
 | Same, non-seekable: final position (end 44.7 s for all) | 21937 ms | 44438 ms | 37183 ms |
+| 6.27 s AAC, seekable: final position / end | 5800 ms / 6.42 s | — | 6174 ms / 6.41 s |
+| AAC, final duration 0xFFFFFFFF, seekable | ends 6.2 s | — | ends 21.0 s |
 
 Position was monotonic in every current-patch run (after the seek, for seek runs).
 
@@ -246,6 +248,6 @@ millisecond position measurement was taken on this branch.
 Not covered by any result above: A/V files whose video outlasts the audio, with a
 video decoder present; a seek that lands in a different fragment during catch-up
 (the reset there is shown by code: every seek reloads through `FragResetContext()`);
-compressed `cmov` playback; ASan/UBSan runs; bit-exact PCM or raw PCR timelines; codecs other than ALAC;
+compressed `cmov` playback; ASan/UBSan runs; bit-exact PCM or raw PCR timelines; codecs other than ALAC and AAC;
 HTTP non-seekable transport; and target-system release compatibility (see
 [GLIBC-COMPATIBILITY.md](GLIBC-COMPATIBILITY.md)).
