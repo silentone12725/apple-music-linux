@@ -146,6 +146,8 @@ HARDENED = """
  0x0000000000000001 (NEEDED)             Shared library: [libz.so.1]
  0x000000000000001e (FLAGS)              BIND_NOW
  0x000000006ffffffb (FLAGS_1)            Flags: NOW
+      Properties: x86 feature: IBT, SHSTK
+	x86 feature used: x86, XMM
     12: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __stack_chk_fail@GLIBC_2.4 (3)
     13: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __memcpy_chk@GLIBC_2.3.4 (4)
     40: 0000000000012340   300 FUNC    GLOBAL DEFAULT   12 vlc_entry__3_0_0f
@@ -162,6 +164,7 @@ class HardeningTests(unittest.TestCase):
             'no RELRO segment': HARDENED.replace('GNU_RELRO', 'LOAD'),
             'no BIND_NOW': HARDENED.replace('BIND_NOW', '').replace('Flags: NOW', 'Flags: PIE'),
             'executable or missing GNU_STACK': HARDENED.replace(' RW  0x10', ' RWE 0x10'),
+            'no CET (IBT/SHSTK) property': HARDENED.replace('IBT, SHSTK', 'IBT'),
             'zlib (cmov) support not linked': HARDENED.replace('libz.so.1', 'libm.so.6'),
             'no stack protector': HARDENED.replace('__stack_chk_fail', 'abort'),
             'no _FORTIFY_SOURCE checks': HARDENED.replace('__memcpy_chk', 'memcpy'),

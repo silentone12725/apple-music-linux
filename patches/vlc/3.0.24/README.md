@@ -7,8 +7,8 @@ Stock VLC stays the default; release packages never contain the patched plugin.
 
 **Status.** Current patch SHA256
 `9eac960942eba7d147c662811c0a48013d797151eb16d9210c56edff18f3bb09`: automated and
-synthetic checks pass (see [Evidence](#evidence)); real Adam playback with this patch
-is **pending**. Earlier real-playback results apply to the previous, unbounded patch.
+synthetic checks pass, and the user reports normal real playback with the original
+ending problem gone (see [Evidence](#evidence)).
 
 ## The change
 
@@ -26,11 +26,15 @@ in `modules/demux/mp4/mp4.c`.
   never move backwards. Non-seekable input selects every valid track in `DemuxFrag()`,
   so dropping stock's `!b_selected && !b_seekable` clause changes nothing there.
 - **Bound.** The target is capped at the cursor at the fragment's first exhaustion
-  plus `DEMUX_INCREMENT + DEMUX_TRACK_MAX_PRELOAD` (15.25 s): the most seekable input
-  queues ahead of the clock. The cap is fixed once per fragment in
-  `demux_sys_t.context`, cleared by `FragResetContext()` (new fragment and seek), and
-  saturates at `INT64_MAX`. A corrupt final sample duration therefore cannot hold
-  EndReached; beyond the cap the stock EOF handling applies.
+  plus `DEMUX_INCREMENT + DEMUX_TRACK_MAX_PRELOAD` (15.25 s). Seekable input queues at
+  most that far ahead of the clock plus one sample duration (`FragDemuxTrack()` stops
+  past `DEMUX_TRACK_MAX_PRELOAD`), so there the cap costs at most one sample. The cap
+  is fixed once per fragment in `demux_sys_t.context`, cleared by `FragResetContext()`
+  (new fragment and seek), and saturates at `INT64_MAX`. A corrupt final sample
+  duration therefore cannot hold EndReached: at most about 61 extra 250 ms steps per
+  fragment. Beyond the cap the stock EOF handling applies. Non-seekable input has no
+  preload limit and can queue a whole fragment: a final fragment longer than 15.25 s
+  is only partly corrected there (still never behind stock).
 
 There is no fixed position offset, and no duration, decoder or audio-output change.
 The MP4 demuxer is shared by all codecs; this is not ALAC-specific code.
@@ -60,7 +64,9 @@ rejected, not assumed compatible from its soname.
   `-fstack-protector-strong`, `-fstack-clash-protection`, `-fcf-protection`,
   `_FORTIFY_SOURCE=2`, full RELRO, non-executable stack, `-fvisibility=hidden` (only
   `vlc_entry__3_0_0f` is exported, all the VLC loader looks up). The build fails
-  unless `readelf` confirms each property. Debug info carries no local paths;
+  unless `readelf` confirms RELRO, BIND_NOW, the stack flags, the CET (IBT/SHSTK)
+  property, stack-protector and FORTIFY imports, zlib and the exports
+  (`-fstack-clash-protection` leaves no ELF trace). Debug info carries no local paths;
 - installs crash-safely: the plugin is copied beside the target and checked against
   the build hash, `plugins.dat` is dropped, the marker `playback01-candidate-c.json`
   is written atomically, then the plugin is renamed into place. A crash never leaves
@@ -71,8 +77,9 @@ rejected, not assumed compatible from its soname.
   stay in the build directory's `build-info.json`.
 
 `scripts/build-installer.sh` refuses to package a runtime holding the marker or an
-interrupted staging file, and re-audits `resources/vlc` at the glibc 2.38 release
-target. See [GLIBC-COMPATIBILITY.md](GLIBC-COMPATIBILITY.md) for the glibc target and
+interrupted staging file, or whose MP4 demuxer is not byte-identical to the system
+VLC's (so a patched plugin cannot ship even without its marker), and re-audits
+`resources/vlc` at the glibc 2.38 release target. See [GLIBC-COMPATIBILITY.md](GLIBC-COMPATIBILITY.md) for the glibc target and
 the FFmpeg 8 / normvol compatibility builds.
 
 ### Development build
@@ -189,15 +196,18 @@ source (Fedora 44 SDK container, glibc 2.43):
 |---|---|
 | Unit tests (Python 3.14, also `-O`; Python 3.10) | 40/40 PASS |
 | Plugin build, pin and hunk checks, crash-safe install, rebuild on a stale marker | PASS |
-| ELF: RELRO + BIND_NOW, non-executable stack, stack protector, FORTIFY, zlib, only `vlc_entry__3_0_0f` exported, no local paths | PASS |
+| ELF: RELRO + BIND_NOW, non-executable stack, CET, stack protector, FORTIFY, zlib, only `vlc_entry__3_0_0f` exported, no local paths | PASS |
+| Reproducible: two builds in different build directories are byte-identical (`41feb79a…`) | PASS |
 | `bundle-vlc.sh` on the stage: FFmpeg ABI 62/62/60, glibc ≤ 2.38 closure (any locale) | PASS |
-| `validate-vlc-mp4.py`, all six cases | 6/6 PASS |
-| Real Adam playback, actual Engine loader, original track | **PENDING** |
+| `validate-vlc-mp4.py`, all six cases, on the staged runtime | 6/6 PASS |
+| Real Adam playback of the originally affected track (user-reported) | PASS: normal playback, ending problem not reproduced. No millisecond position or loader output recorded |
 
 Synthetic comparison on the same runtime with only the MP4 plugin swapped. "stock"
 is the Fedora VLC 3.0.24 plugin; "unbounded" is the previous patch. Fixtures: 6.25 s
 ALAC, a two-track file (6.25 s selected, 9 s unselected), and audio + MPEG-4 video
-(8 s; the audio-only runtime has no video decoder):
+(8 s; the audio-only runtime has no video decoder). The "current" column was re-run on
+the final hardened plugin (`41feb79a…`, the staged runtime) with the same results as
+the pre-hardening build:
 
 | Fixture | stock | unbounded | current |
 |---|---|---|---|
@@ -207,8 +217,12 @@ ALAC, a two-track file (6.25 s selected, 9 s unselected), and audio + MPEG-4 vid
 | Audio + video, seekable: end | 6.39 s | 6.39 s | 6.39 s |
 | Final duration 0xFFFFFFFF, seekable | ends 6.2 s | still Playing at 40 s (≈27 h) | ends 21.0 s |
 | Same, non-seekable: CPU | 0.03 s | 0.96 s | 0.03 s |
+| Seek 10 s → 1 s during that catch-up | — (ended at 6.2 s) | still Playing at 50 s | ends 30.0 s, no error |
+| ALAC, seek 6 s → 2 s near the end: final position | 5922 ms | — | 6250 ms |
+| 45 s ALAC in two 22.5 s fragments, seekable: final position | 37301 ms, went backwards | 44801 ms | 44900 ms |
+| Same, non-seekable: final position (end 44.7 s for all) | 21937 ms | 44438 ms | 37183 ms |
 
-Position was monotonic in every run.
+Position was monotonic in every current-patch run (after the seek, for seek runs).
 
 ### Previous patch (`b39a6cea…`, unbounded), independent nightly port
 
@@ -230,8 +244,8 @@ millisecond position measurement was taken on this branch.
 ### Not covered
 
 Not covered by any result above: A/V files whose video outlasts the audio, with a
-video decoder present; seeking while the bounded catch-up runs; non-seekable
-fragments longer than 15.25 s (these fall back to the stock lag); compressed `cmov`
-playback; ASan/UBSan runs; bit-exact PCM or raw PCR timelines; codecs other than ALAC;
+video decoder present; a seek that lands in a different fragment during catch-up
+(the reset there is shown by code: every seek reloads through `FragResetContext()`);
+compressed `cmov` playback; ASan/UBSan runs; bit-exact PCM or raw PCR timelines; codecs other than ALAC;
 HTTP non-seekable transport; and target-system release compatibility (see
 [GLIBC-COMPATIBILITY.md](GLIBC-COMPATIBILITY.md)).

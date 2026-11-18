@@ -73,7 +73,8 @@ def readelf(*args):
 
 
 def hardening_problems(text):
-    """Problems in `readelf -lW -dW --dyn-syms -W` output of the built plugin."""
+    """Problems in `readelf -lW -dW -n --dyn-syms -W` output of the built plugin.
+    (-fstack-clash-protection leaves no ELF trace; it is enforced by the command only.)"""
     problems = []
     if 'GNU_RELRO' not in text:
         problems.append('no RELRO segment')
@@ -82,6 +83,8 @@ def hardening_problems(text):
     stack = re.search(r'GNU_STACK(?:\s+\S+){5}\s+(\S+)', text)
     if not stack or 'E' in stack[1]:
         problems.append('executable or missing GNU_STACK')
+    if not (re.search(r'x86 feature:.*\bIBT\b', text) and re.search(r'x86 feature:.*\bSHSTK\b', text)):
+        problems.append('no CET (IBT/SHSTK) property')
     if 'Shared library: [libz.so.1]' not in text:
         problems.append('zlib (cmov) support not linked')
     symbols = [line.split() for line in text.splitlines() if re.match(r'\s*\d+:\s', line)]
@@ -215,7 +218,7 @@ def main():
         'command': command, 'runtime': str(runtime)}, indent=2))
     with (work / 'build.log').open('x') as log:
         subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT, cwd=work)
-    problems = hardening_problems(readelf('-lW', '-dW', '--dyn-syms', '-W', str(plugin)))
+    problems = hardening_problems(readelf('-lW', '-dW', '-n', '--dyn-syms', '-W', str(plugin)))
     if problems:
         raise ValueError('plugin hardening check failed: ' + '; '.join(problems))
     env = dict(os.environ, LD_LIBRARY_PATH=str(runtime))
