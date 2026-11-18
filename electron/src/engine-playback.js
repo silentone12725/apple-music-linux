@@ -5275,7 +5275,8 @@ function _histPush(item) {
         catalogId:  item.playParams?.catalogId  || item.attributes?.playParams?.catalogId || item.id,
         ts:         Date.now(),
     };
-    if (!entry.name || _queueHistory[0]?.id === entry.id) return;
+    if (!entry.name || !entry.catalogId) return;
+    _queueHistory = _queueHistory.filter(h => h.catalogId !== entry.catalogId);
     _queueHistory.unshift(entry);
     if (_queueHistory.length > _HIST_MAX) _queueHistory.length = _HIST_MAX;
     _histSaveAsync();
@@ -6238,7 +6239,7 @@ function _histRender() {
     const section = document.getElementById('adam-history-section');
     if (!section) return;
     if (_queueHistory.length === 0) {
-        section.textContent = document.documentElement.lang.startsWith('it') ? 'Nessun brano recente.' : 'No recently played songs.';
+        section.textContent = _t('queueEmpty');
         return;
     }
     // Use data attrs — inline onclick is blocked by Apple Music's CSP.
@@ -6264,8 +6265,8 @@ function _histInjectStyles() {
     const s = document.createElement('style');
     s.id = 'adam-hist-css';
     s.textContent = `
-.side-panel[data-adam-queue-view] {
-    display: flex !important;
+.side-panel[data-adam-queue-view]:not([hidden]):not([inert]):not([aria-hidden="true"]) {
+    display: flex;
     flex-direction: column;
 }
 .side-panel[data-adam-queue-view] > .side-panel-header-wrapper { flex: 0 0 auto; }
@@ -6286,7 +6287,7 @@ function _histInjectStyles() {
     font: inherit;
     cursor: pointer;
 }
-.adam-queue-tabs button[aria-pressed="true"] { background: rgba(128,128,128,.2); }
+.adam-queue-tabs button[aria-selected="true"] { background: rgba(128,128,128,.2); }
 .adam-queue-tabs button:focus-visible { outline: 2px solid currentColor !important; outline-offset: -2px; }
 .side-panel[data-adam-queue-view] > .side-panel-content {
     flex: 1;
@@ -6367,15 +6368,23 @@ function _histInject() {
     const existing = document.getElementById('adam-history-section');
     if (existing && (existing.parentElement !== panel || !_histEnabled)) existing.remove();
     if (!panel) return;
+    const content = panel.querySelector('.side-panel-content') ?? panel.querySelector('.side-panel-empty');
     if (!_histEnabled) {
         panel.querySelector('.adam-queue-tabs')?.remove();
-        const heading = panel.querySelector('[data-testid="side-panel-header"]');
-        if (heading && panel.dataset.adamQueueTitle) heading.textContent = panel.dataset.adamQueueTitle;
         delete panel.dataset.adamQueueView;
+        if (content?.getAttribute('aria-labelledby') === 'adam-queue-tab-queue') {
+            content.removeAttribute('aria-labelledby');
+            content.removeAttribute('role');
+            if (content.id === 'adam-queue-content') content.removeAttribute('id');
+        }
         return;
     }
+    if (content) {
+        if (!content.id) content.id = 'adam-queue-content';
+        content.setAttribute('role', 'tabpanel');
+        content.setAttribute('aria-labelledby', 'adam-queue-tab-queue');
+    }
     if (panel.querySelector('#adam-history-section')) return;
-    const italian = document.documentElement.lang.startsWith('it');
     const div = document.createElement('div');
     div.id = 'adam-history-section';
     div.hidden = true;
@@ -6385,26 +6394,43 @@ function _histInject() {
     });
     const tabs = document.createElement('div');
     tabs.className = 'adam-queue-tabs';
-    tabs.setAttribute('role', 'group');
-    tabs.setAttribute('aria-label', italian ? 'Vista coda' : 'Queue view');
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', _t('queueNext'));
     const header = panel.querySelector('.side-panel-header-wrapper');
-    const heading = panel.querySelector('[data-testid="side-panel-header"]');
-    const queueTitle = panel.dataset.adamQueueTitle ?? heading?.textContent;
-    if (queueTitle) panel.dataset.adamQueueTitle = queueTitle;
-    for (const [view, label] of [['queue', italian ? 'In coda' : 'Playing Next'], ['history', italian ? 'Cronologia' : 'History']]) {
+    div.setAttribute('role', 'tabpanel');
+    for (const [view, label] of [['queue', _t('queueNext')], ['history', _t('queueHistory')]]) {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = label;
         button.dataset.view = view;
-        button.setAttribute('aria-pressed', String(view === 'queue'));
+        button.id = `adam-queue-tab-${view}`;
+        button.setAttribute('role', 'tab');
+        button.setAttribute('aria-selected', String(view === 'queue'));
+        button.setAttribute('aria-controls', view === 'history' ? div.id : content?.id ?? panel.id);
+        button.tabIndex = view === 'queue' ? 0 : -1;
+        (view === 'history' ? div : content)?.setAttribute('aria-labelledby', button.id);
         button.addEventListener('click', () => {
             panel.dataset.adamQueueView = view;
             div.hidden = view !== 'history';
-            if (heading) heading.textContent = view === 'history' ? label : queueTitle;
-            for (const tab of tabs.children) tab.setAttribute('aria-pressed', String(tab === button));
+            for (const tab of tabs.children) {
+                tab.setAttribute('aria-selected', String(tab === button));
+                tab.tabIndex = tab === button ? 0 : -1;
+            }
         });
         tabs.appendChild(button);
     }
+    tabs.addEventListener('keydown', (event) => {
+        const buttons = [...tabs.children];
+        const index = buttons.indexOf(event.target);
+        const rtl = getComputedStyle(tabs).direction === 'rtl';
+        const step = event.key === 'ArrowRight' ? (rtl ? -1 : 1) : event.key === 'ArrowLeft' ? (rtl ? 1 : -1) : 0;
+        const target = event.key === 'Home' ? buttons[0] : event.key === 'End' ? buttons.at(-1)
+            : step && index >= 0 ? buttons[(index + step + buttons.length) % buttons.length] : null;
+        if (!target) return;
+        event.preventDefault();
+        target.click();
+        target.focus();
+    });
     panel.dataset.adamQueueView = 'queue';
     if (header) header.after(tabs); else panel.prepend(tabs);
     panel.appendChild(div);

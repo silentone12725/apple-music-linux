@@ -342,6 +342,123 @@
     "zh-hk"
   ];
   var STRINGS = {
+    queueNext: {
+      "ar": "\u0627\u0644\u062A\u0627\u0644\u064A",
+      "ca": "A continuaci\xF3",
+      "cs": "N\xE1sleduje",
+      "da": "Afspil som n\xE6ste",
+      "de": "Als N\xE4chstes",
+      "el": "\u0395\u03C0\u03CC\u03BC\u03B5\u03BD\u03B1",
+      "en": "Playing Next",
+      "es": "A continuaci\xF3n",
+      "es-mx": "A continuaci\xF3n",
+      "fi": "Seuraavaksi",
+      "fr": "Morceaux suivants",
+      "fr-ca": "\xC0 suivre",
+      "he": "\u05D4\u05D1\u05D0\u05D9\u05DD \u05D1\u05EA\u05D5\u05E8",
+      "hi": "\u0906\u0917\u0947 \u091A\u0932\u093E\u090F\u0901",
+      "hr": "Sljede\u0107e",
+      "hu": "K\xF6vetkez\u0151k",
+      "id": "Berikutnya",
+      "it": "In coda",
+      "ja": "\u6B21\u306B\u518D\u751F",
+      "ko": "\uB2E4\uC74C\uC5D0 \uC7AC\uC0DD",
+      "ms": "Main Seterusnya",
+      "nb": "Neste",
+      "nl": "Hierna",
+      "pl": "Nast\u0119pne",
+      "pt-br": "A Seguir",
+      "pt-pt": "A seguir",
+      "ro": "\xCEn continuare",
+      "ru": "\u041D\u0430 \u043E\u0447\u0435\u0440\u0435\u0434\u0438",
+      "sk": "Nasleduj\xFAce",
+      "sv": "N\xE4sta",
+      "th": "\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23\u0E16\u0E31\u0E14\u0E44\u0E1B",
+      "tr": "S\u0131radaki",
+      "uk": "\u0414\u0430\u043B\u0456",
+      "vi": "Ph\xE1t ti\u1EBFp theo",
+      "zh-hans": "\u5F85\u64AD\u6E05\u5355",
+      "zh-hant": "\u5F85\u64AD\u6E05\u55AE",
+      "zh-hk": "\u5F85\u64AD\u6E05\u55AE"
+    },
+    queueHistory: {
+      "ar": "\u0627\u0644\u0633\u062C\u0644",
+      "ca": "Historial",
+      "cs": "Historie",
+      "da": "Historik",
+      "de": "Verlauf",
+      "el": "\u0399\u03C3\u03C4\u03BF\u03C1\u03B9\u03BA\u03CC",
+      "en": "History",
+      "es": "Historial",
+      "es-mx": "Historial",
+      "fi": "Historia",
+      "fr": "Historique",
+      "fr-ca": "Historique",
+      "he": "\u05D4\u05D9\u05E1\u05D8\u05D5\u05E8\u05D9\u05D4",
+      "hi": "\u0907\u0924\u093F\u0939\u093E\u0938",
+      "hr": "Povijest",
+      "hu": "El\u0151zm\xE9nyek",
+      "id": "Riwayat",
+      "it": "Cronologia",
+      "ja": "\u5C65\u6B74",
+      "ko": "\uAE30\uB85D",
+      "ms": "Sejarah",
+      "nb": "Logg",
+      "nl": "Geschiedenis",
+      "pl": "Historia",
+      "pt-br": "Hist\xF3rico",
+      "pt-pt": "Hist\xF3rico",
+      "ro": "Istoric",
+      "ru": "\u0418\u0441\u0442\u043E\u0440\u0438\u044F",
+      "sk": "Hist\xF3ria",
+      "sv": "Historik",
+      "th": "\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34",
+      "tr": "Ge\xE7mi\u015F",
+      "uk": "\u0406\u0441\u0442\u043E\u0440\u0456\u044F",
+      "vi": "L\u1ECBch s\u1EED",
+      "zh-hans": "\u5386\u53F2\u8BB0\u5F55",
+      "zh-hant": "\u64AD\u653E\u8A18\u9304",
+      "zh-hk": "\u64AD\u653E\u8A18\u9304"
+    },
+    queueEmpty: {
+      "ar": "\u0644\u0627 \u062A\u0648\u062C\u062F \u0623\u063A\u0627\u0646\u064D \u062D\u062F\u064A\u062B\u0629.",
+      "ca": "No hi ha can\xE7ons recents.",
+      "cs": "\u017D\xE1dn\xE9 ned\xE1vno p\u0159ehran\xE9 skladby.",
+      "da": "Ingen nyligt afspillede sange.",
+      "de": "Keine k\xFCrzlich gespielten Titel.",
+      "el": "\u0394\u03B5\u03BD \u03C5\u03C0\u03AC\u03C1\u03C7\u03BF\u03C5\u03BD \u03C0\u03C1\u03CC\u03C3\u03C6\u03B1\u03C4\u03B1 \u03C4\u03C1\u03B1\u03B3\u03BF\u03CD\u03B4\u03B9\u03B1.",
+      "en": "No recently played songs.",
+      "es": "No hay canciones recientes.",
+      "es-mx": "No hay canciones recientes.",
+      "fi": "Ei \xE4skett\xE4in toistettuja kappaleita.",
+      "fr": "Aucun morceau r\xE9cent.",
+      "fr-ca": "Aucun morceau r\xE9cent.",
+      "he": "\u05D0\u05D9\u05DF \u05E9\u05D9\u05E8\u05D9\u05DD \u05E9\u05D4\u05D5\u05E9\u05DE\u05E2\u05D5 \u05DC\u05D0\u05D7\u05E8\u05D5\u05E0\u05D4.",
+      "hi": "\u0939\u093E\u0932 \u092E\u0947\u0902 \u0915\u094B\u0908 \u0917\u0940\u0924 \u0928\u0939\u0940\u0902 \u091A\u0932\u093E\u0964",
+      "hr": "Nema nedavno reproduciranih pjesama.",
+      "hu": "Nincsenek nemr\xE9g lej\xE1tszott dalok.",
+      "id": "Belum ada lagu yang diputar.",
+      "it": "Nessun brano recente.",
+      "ja": "\u6700\u8FD1\u518D\u751F\u3057\u305F\u66F2\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
+      "ko": "\uCD5C\uADFC \uC7AC\uC0DD\uD55C \uB178\uB798\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+      "ms": "Tiada lagu dimainkan baru-baru ini.",
+      "nb": "Ingen nylig avspilte sanger.",
+      "nl": "Geen onlangs afgespeelde nummers.",
+      "pl": "Brak ostatnio odtwarzanych utwor\xF3w.",
+      "pt-br": "Nenhuma m\xFAsica reproduzida recentemente.",
+      "pt-pt": "Nenhuma m\xFAsica reproduzida recentemente.",
+      "ro": "Nicio melodie redat\u0103 recent.",
+      "ru": "\u041D\u0435\u0434\u0430\u0432\u043D\u043E \u043F\u0440\u043E\u0441\u043B\u0443\u0448\u0430\u043D\u043D\u044B\u0445 \u043F\u0435\u0441\u0435\u043D \u043D\u0435\u0442.",
+      "sk": "\u017Diadne ned\xE1vno prehran\xE9 skladby.",
+      "sv": "Inga nyligen spelade l\xE5tar.",
+      "th": "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E40\u0E1E\u0E25\u0E07\u0E17\u0E35\u0E48\u0E40\u0E25\u0E48\u0E19\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14",
+      "tr": "Yak\u0131n zamanda \xE7al\u0131nan par\xE7a yok.",
+      "uk": "\u041D\u0435\u043C\u0430\u0454 \u043D\u0435\u0449\u043E\u0434\u0430\u0432\u043D\u043E \u0432\u0456\u0434\u0442\u0432\u043E\u0440\u0435\u043D\u0438\u0445 \u043F\u0456\u0441\u0435\u043D\u044C.",
+      "vi": "Ch\u01B0a c\xF3 b\xE0i h\xE1t \u0111\u01B0\u1EE3c ph\xE1t g\u1EA7n \u0111\xE2y.",
+      "zh-hans": "\u6CA1\u6709\u6700\u8FD1\u64AD\u653E\u7684\u6B4C\u66F2\u3002",
+      "zh-hant": "\u6C92\u6709\u6700\u8FD1\u64AD\u653E\u7684\u6B4C\u66F2\u3002",
+      "zh-hk": "\u6C92\u6709\u6700\u8FD1\u64AD\u653E\u7684\u6B4C\u66F2\u3002"
+    },
     // The context-menu item that downloads a song (replaces Apple's "Copy Embed Code").
     download: {
       "ar": "\u062A\u0646\u0632\u064A\u0644",
@@ -5870,7 +5987,8 @@
       catalogId: item.playParams?.catalogId || item.attributes?.playParams?.catalogId || item.id,
       ts: Date.now()
     };
-    if (!entry.name || _queueHistory[0]?.id === entry.id) return;
+    if (!entry.name || !entry.catalogId) return;
+    _queueHistory = _queueHistory.filter((h) => h.catalogId !== entry.catalogId);
     _queueHistory.unshift(entry);
     if (_queueHistory.length > _HIST_MAX) _queueHistory.length = _HIST_MAX;
     _histSaveAsync();
@@ -6827,7 +6945,7 @@
     const section = document.getElementById("adam-history-section");
     if (!section) return;
     if (_queueHistory.length === 0) {
-      section.textContent = document.documentElement.lang.startsWith("it") ? "Nessun brano recente." : "No recently played songs.";
+      section.textContent = t("queueEmpty");
       return;
     }
     section.innerHTML = `
@@ -6848,8 +6966,8 @@
     const s = document.createElement("style");
     s.id = "adam-hist-css";
     s.textContent = `
-.side-panel[data-adam-queue-view] {
-    display: flex !important;
+.side-panel[data-adam-queue-view]:not([hidden]):not([inert]):not([aria-hidden="true"]) {
+    display: flex;
     flex-direction: column;
 }
 .side-panel[data-adam-queue-view] > .side-panel-header-wrapper { flex: 0 0 auto; }
@@ -6870,7 +6988,7 @@
     font: inherit;
     cursor: pointer;
 }
-.adam-queue-tabs button[aria-pressed="true"] { background: rgba(128,128,128,.2); }
+.adam-queue-tabs button[aria-selected="true"] { background: rgba(128,128,128,.2); }
 .adam-queue-tabs button:focus-visible { outline: 2px solid currentColor !important; outline-offset: -2px; }
 .side-panel[data-adam-queue-view] > .side-panel-content {
     flex: 1;
@@ -6948,15 +7066,23 @@
     const existing = document.getElementById("adam-history-section");
     if (existing && (existing.parentElement !== panel || !_histEnabled)) existing.remove();
     if (!panel) return;
+    const content = panel.querySelector(".side-panel-content") ?? panel.querySelector(".side-panel-empty");
     if (!_histEnabled) {
       panel.querySelector(".adam-queue-tabs")?.remove();
-      const heading2 = panel.querySelector('[data-testid="side-panel-header"]');
-      if (heading2 && panel.dataset.adamQueueTitle) heading2.textContent = panel.dataset.adamQueueTitle;
       delete panel.dataset.adamQueueView;
+      if (content?.getAttribute("aria-labelledby") === "adam-queue-tab-queue") {
+        content.removeAttribute("aria-labelledby");
+        content.removeAttribute("role");
+        if (content.id === "adam-queue-content") content.removeAttribute("id");
+      }
       return;
     }
+    if (content) {
+      if (!content.id) content.id = "adam-queue-content";
+      content.setAttribute("role", "tabpanel");
+      content.setAttribute("aria-labelledby", "adam-queue-tab-queue");
+    }
     if (panel.querySelector("#adam-history-section")) return;
-    const italian = document.documentElement.lang.startsWith("it");
     const div = document.createElement("div");
     div.id = "adam-history-section";
     div.hidden = true;
@@ -6966,26 +7092,42 @@
     });
     const tabs = document.createElement("div");
     tabs.className = "adam-queue-tabs";
-    tabs.setAttribute("role", "group");
-    tabs.setAttribute("aria-label", italian ? "Vista coda" : "Queue view");
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", t("queueNext"));
     const header = panel.querySelector(".side-panel-header-wrapper");
-    const heading = panel.querySelector('[data-testid="side-panel-header"]');
-    const queueTitle = panel.dataset.adamQueueTitle ?? heading?.textContent;
-    if (queueTitle) panel.dataset.adamQueueTitle = queueTitle;
-    for (const [view, label] of [["queue", italian ? "In coda" : "Playing Next"], ["history", italian ? "Cronologia" : "History"]]) {
+    div.setAttribute("role", "tabpanel");
+    for (const [view, label] of [["queue", t("queueNext")], ["history", t("queueHistory")]]) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = label;
       button.dataset.view = view;
-      button.setAttribute("aria-pressed", String(view === "queue"));
+      button.id = `adam-queue-tab-${view}`;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", String(view === "queue"));
+      button.setAttribute("aria-controls", view === "history" ? div.id : content?.id ?? panel.id);
+      button.tabIndex = view === "queue" ? 0 : -1;
+      (view === "history" ? div : content)?.setAttribute("aria-labelledby", button.id);
       button.addEventListener("click", () => {
         panel.dataset.adamQueueView = view;
         div.hidden = view !== "history";
-        if (heading) heading.textContent = view === "history" ? label : queueTitle;
-        for (const tab of tabs.children) tab.setAttribute("aria-pressed", String(tab === button));
+        for (const tab of tabs.children) {
+          tab.setAttribute("aria-selected", String(tab === button));
+          tab.tabIndex = tab === button ? 0 : -1;
+        }
       });
       tabs.appendChild(button);
     }
+    tabs.addEventListener("keydown", (event) => {
+      const buttons = [...tabs.children];
+      const index = buttons.indexOf(event.target);
+      const rtl = getComputedStyle(tabs).direction === "rtl";
+      const step = event.key === "ArrowRight" ? rtl ? -1 : 1 : event.key === "ArrowLeft" ? rtl ? 1 : -1 : 0;
+      const target = event.key === "Home" ? buttons[0] : event.key === "End" ? buttons.at(-1) : step && index >= 0 ? buttons[(index + step + buttons.length) % buttons.length] : null;
+      if (!target) return;
+      event.preventDefault();
+      target.click();
+      target.focus();
+    });
     panel.dataset.adamQueueView = "queue";
     if (header) header.after(tabs);
     else panel.prepend(tabs);

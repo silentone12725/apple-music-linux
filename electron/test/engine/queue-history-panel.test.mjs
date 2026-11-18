@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { t } from '../../src/engine/i18n.js';
 const source = readFileSync(new URL('../../src/engine-playback.js', import.meta.url), 'utf8');
 const start = source.indexOf('function _histInject() {');
 const inject = source.slice(start, source.indexOf('\nasync function setupQueueHistory', start));
@@ -13,6 +14,8 @@ class Element {
     after(child) { this.parentElement.appendChild(child); }
     setAttribute(key, value) { this.attrs[key] = value; }
     getAttribute(key) { return this.attrs[key]; }
+    click() { this.listeners.click?.(); }
+    focus() { this.focused = true; }
     addEventListener(type, listener) { this.listeners[type] = listener; }
     querySelector(selector) {
         const match = e => selector.startsWith('#') ? e.id === selector.slice(1)
@@ -36,6 +39,7 @@ function setup() {
             querySelector: selector => selector.includes('up-next-button') ? button : null,
             getElementById: id => root.querySelector('#' + id),
         },
+        _t: key => t(key, 'it'), getComputedStyle: () => ({ direction: 'ltr' }),
         window: {}, _histEnabled: true, _histRender: () => renders++,
     });
     vm.runInContext(inject, context);
@@ -57,9 +61,9 @@ test('queue and history are exclusive views and disabling history restores the n
     history.listeners.click();
     assert.equal(s.queue.dataset.adamQueueView, 'history');
     assert.equal(section.hidden, false);
-    assert.equal(history.getAttribute('aria-pressed'), 'true');
-    assert.equal(queue.getAttribute('aria-pressed'), 'false');
-    assert.equal(s.heading.textContent, 'Cronologia');
+    assert.equal(history.getAttribute('aria-selected'), 'true');
+    assert.equal(queue.getAttribute('aria-selected'), 'false');
+    assert.equal(s.heading.textContent, 'In coda', 'Apple owns its heading; selecting History must not mutate it');
     queue.listeners.click();
     assert.equal(section.hidden, true);
     assert.equal(s.heading.textContent, 'In coda');
@@ -74,4 +78,36 @@ test('a lyrics-only panel without a mounted queue receives no history', () => {
     s.context._histInject();
     assert.equal(s.lyrics.children.length, 0);
     assert.equal(s.renders(), 0);
+});
+
+
+test('queue tabs provide roving keyboard selection without editing native headings', () => {
+    const s = setup(); s.context._histInject();
+    const tabs = s.queue.querySelector('.adam-queue-tabs');
+    const [queue, history] = tabs.children;
+    assert.equal(tabs.getAttribute('role'), 'tablist');
+    assert.equal(history.getAttribute('role'), 'tab');
+    let prevented = false;
+    tabs.listeners.keydown({ key: 'ArrowRight', target: queue, preventDefault: () => { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.equal(history.focused, true);
+    assert.equal(history.tabIndex, 0);
+    assert.equal(queue.tabIndex, -1);
+    assert.equal(history.getAttribute('aria-controls'), 'adam-history-section');
+    tabs.listeners.keydown({ key: 'Home', target: history, preventDefault() {} });
+    assert.equal(queue.tabIndex, 0);
+    assert.equal(s.heading.textContent, 'In coda');
+});
+test('replaying an older history item moves it to the head without a duplicate', () => {
+    const i = source.indexOf('function _histPush(item) {');
+    const push = source.slice(i, source.indexOf('\nfunction _histClear()', i));
+    const context = vm.createContext({
+        _queueHistory: [{ id: 'a', catalogId: 'a' }, { id: 'b', catalogId: 'b' }], _HIST_MAX: 100,
+        _histArtUrl() {}, _histFmtDur() {}, _histSaveAsync() {}, _histRender() {},
+    });
+    vm.runInContext(push, context);
+    context._histPush({ id: 'b', attributes: { name: 'Song B' } });
+    assert.equal(context._queueHistory.length, 2);
+    assert.equal(context._queueHistory[0].id, 'b');
+    assert.equal(context._queueHistory[1].id, 'a');
 });
