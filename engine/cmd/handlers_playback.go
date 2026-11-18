@@ -455,14 +455,6 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 
 func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	// A released session must not keep playing if the next track cannot open.
-	// Serialize with loads so a late DELETE cannot stop a newer session.
-	s.vlcLoads.mu.Lock()
-	if s.vlcPlayer != nil && s.vlcGate.owns(id) {
-		s.vlcGate.clear()
-		s.vlcPlayer.Stop()
-	}
-	s.vlcLoads.mu.Unlock()
 	// Cancel any active vseg (segmented video) producer for this session.
 	s.stopVsegSession(id)
 	// If this session's MV faststart file was written under "caching disabled",
@@ -473,7 +465,14 @@ func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request)
 			log.Printf("%s ephemeral mv-dl removed assetID=%s (caching disabled)", tagInfo("[video-dl]"), sess.AssetID)
 		}
 	}
-	s.pm.Release(id)
+	// Recheck session liveness in the load critical section before attaching media.
+	s.vlcLoads.withPlayer(func() {
+		s.pm.Release(id)
+		if s.vlcPlayer != nil && s.vlcGate.owns(id) {
+			s.vlcGate.clear()
+			s.vlcPlayer.Stop()
+		}
+	})
 	s.events.emit("playback.deleted", map[string]string{"sessionId": id})
 	w.WriteHeader(http.StatusNoContent)
 }

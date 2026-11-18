@@ -12,11 +12,11 @@ function setup() {
         _generation: 0, _abortCtrl: null, console: { log() {}, error() {} }, performance,
         window: {}, document: { documentElement: { lang: 'it' } },
         PLAY_STATE: { IDLE: 'idle', OPENING: 'opening' },
-        _extractItemId: item => item?.id, _closeCDNGate() {}, _htcConfirmDirectPlay: () => false, _resetPlaybackState() {},
+        _extractItemId: item => item?.id, _closeCDNGate() {}, _htcConfirmDirectPlay: () => false, _resetPlaybackState() { states.push(['idle']); },
         _slInitForTrack() {}, _htcDiscardStalePrewarms() {}, getMKAudio: () => audio,
         installPlayProxy() {}, waitForLossless: async () => {}, T: () => ({ losslessWait: 0 }),
         _resolveSession: () => new Promise((_, reject) => { rejectOpen = reject; }),
-        setPlayState: (...args) => states.push(args), _adamToast: text => messages.push(text),
+        setPlayState: (...args) => states.push(args), _adamToast: text => messages.push(text), _t: key => key,
     });
     vm.runInContext('function genStale(g) { return g !== _generation; }\n' + body, context);
     const mk = { nowPlayingItem: { id: 'unavailable', attributes: { name: 'Unavailable song' } }, storefrontId: 'it' };

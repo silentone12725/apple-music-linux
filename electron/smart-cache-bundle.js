@@ -1,10 +1,4 @@
 (() => {
-  // src/engine/catalog.js
-  var extractItemId = (item) => {
-    const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.relationships?.catalog?.data?.[0]?.id ?? item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
-    return typeof id === "string" ? id.replace(/^a\.(?=\d+$)/, "") : id;
-  };
-
   // src/smart-cache.js
   var ENGINE = window._adamEngineURL || "https://127.0.0.1:20025";
   var PLAY_COUNTS_KEY = "adam_play_counts";
@@ -86,7 +80,7 @@
         lossless: window._adamLossless ?? false,
         tracks: tracks.slice(start, start + MAX_CONTEXT_TRACKS).map((t, k) => {
           const i = start + k;
-          const assetId = extractItemId(t);
+          const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId ?? t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;
           if (!assetId) return null;
           const entry = this._counts[assetId] ?? {};
           return {

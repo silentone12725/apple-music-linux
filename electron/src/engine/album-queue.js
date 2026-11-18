@@ -1,18 +1,32 @@
 import { extractItemId } from './catalog.js';
 
-// A library album may contain only its favorited songs; album Play needs the full catalog edition.
-export async function resolveAlbumQueue(mk, albumId, startId, fetchAll) {
-    const res = await mk.api.music(`/v1/me/library/albums/${encodeURIComponent(albumId)}`, { include: 'catalog' });
+const catalogId = id => typeof id === 'string' && /^\d+$/.test(id);
+
+export async function resolveAlbumQueue(mk, albumId, startId, fetchAll, { clickedId, cachedTracks = [] } = {}) {
+    const encodedId = encodeURIComponent(albumId);
+    const res = await mk.api.music(`/v1/me/library/albums/${encodedId}`, { include: 'catalog' });
+    if (res?.data?.errors?.length) throw new Error('Album lookup failed');
     const album = res?.data?.data?.[0];
-    const catalogId = album?.relationships?.catalog?.data?.[0]?.id;
-    const path = catalogId
-        ? `/v1/catalog/${mk.storefrontId || 'us'}/albums/${encodeURIComponent(catalogId)}/tracks`
-        : `/v1/me/library/albums/${encodeURIComponent(albumId)}/tracks`;
-    const items = await fetchAll(path);
-    const ids = items.map(extractItemId).filter(id => /^\d+$/.test(id));
-    const libraryItem = album?.relationships?.tracks?.data?.find(i => i.id === startId);
-    const target = extractItemId(libraryItem ?? { id: startId });
-    if (!ids.length) throw new Error('Album has no playable catalog tracks');
-    if (startId && !ids.includes(target)) throw new Error('Album start track could not be resolved');
-    return { ids, startId: target };
+    if (!album) throw new Error('Library album not found');
+    const catalog = album.relationships?.catalog?.data?.[0];
+    const count = catalog?.attributes?.trackCount;
+    const libraryItems = album.relationships?.tracks?.data ?? [];
+    const path = catalog?.id
+        ? `/v1/catalog/${encodeURIComponent(mk.storefrontId || 'us')}/albums/${encodeURIComponent(catalog.id)}/tracks`
+        : `/v1/me/library/albums/${encodedId}/tracks`;
+
+    // A library album can contain only favorites. Trust the local DB only when the
+    // catalog's track count independently confirms that we have a complete edition.
+    const cachedIds = cachedTracks.map(track => track.cid);
+    const completeCache = count > 0 && cachedIds.length === count && new Set(cachedIds).size === count && cachedIds.every(catalogId);
+    const items = completeCache ? [] : await fetchAll(path);
+    const ids = completeCache ? cachedIds : items.map(extractItemId);
+    if (!ids.length || ids.some(id => !catalogId(id)) || (count > 0 && ids.length !== count)) {
+        throw new Error('Album queue is incomplete or contains a track without a catalog ID');
+    }
+    const libraryItem = [...libraryItems, ...items].find(item => item.id === startId);
+    const cached = cachedTracks.find(item => item.lid === startId);
+    const start = [extractItemId(libraryItem), startId, clickedId, cached?.cid].find(id => ids.includes(id));
+    if (startId && !start) throw new Error('Album start track could not be resolved');
+    return { ids, startId: start ?? null };
 }

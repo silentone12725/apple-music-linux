@@ -8,8 +8,6 @@
  * This module never makes scheduling decisions itself.
  */
 
-import { extractItemId } from './engine/catalog.js';
-
 const ENGINE = window._adamEngineURL || 'https://127.0.0.1:20025';
 const PLAY_COUNTS_KEY = 'adam_play_counts';
 const MAX_STORED_TRACKS = 200;
@@ -115,7 +113,8 @@ class SmartCache {
             lossless: window._adamLossless ?? false,
             tracks: tracks.slice(start, start + MAX_CONTEXT_TRACKS).map((t, k) => {
                 const i = start + k;
-                const assetId = extractItemId(t);
+                const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId
+                    ?? t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;
                 if (!assetId) return null;
                 const entry = this._counts[assetId] ?? {};
                 return {

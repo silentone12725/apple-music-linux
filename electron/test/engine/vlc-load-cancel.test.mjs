@@ -12,7 +12,7 @@ function setup() {
     const requests = [], revoked = [], polls = [];
     const audio = new EventTarget();
     const context = vm.createContext({
-        console, performance, Event, MediaSource: class {},
+        console, performance, Event, AbortSignal, setTimeout, clearTimeout, MediaSource: class {},
         URL: { createObjectURL: () => 'blob:old', revokeObjectURL: u => revoked.push(u) },
         HTMLMediaElement: { prototype: { load() {} } },
         window: {}, ENGINE: 'https://engine', _sessionId: 'old',

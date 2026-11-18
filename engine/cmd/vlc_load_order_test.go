@@ -2,6 +2,10 @@ package main
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+
+	"engine/core/vlc"
 	"sync"
 	"testing"
 	"time"
@@ -80,5 +84,26 @@ func TestStopSupersedesAnOpeningLoad(t *testing.T) {
 	})
 	if loaded || err != nil {
 		t.Fatal("old load was not abandoned")
+	}
+}
+
+func TestConcurrentStopsSucceedAndCancelPendingLoad(t *testing.T) {
+	s := &APIServer{vlcPlayer: &vlc.Player{}}
+	old := s.vlcLoads.begin()
+	var wg sync.WaitGroup
+	for range 60 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			s.handleVLCStop(w, httptest.NewRequest(http.MethodPost, "/vlc/stop", nil))
+			if w.Code != http.StatusOK {
+				t.Errorf("concurrent stop returned %d", w.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	if ran, _ := s.vlcLoads.runIfCurrent(old, func() error { return nil }); ran {
+		t.Fatal("a load opened before stop survived")
 	}
 }

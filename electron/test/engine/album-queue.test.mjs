@@ -31,3 +31,28 @@ test('a missing start track or failed fetch cannot silently play the wrong song'
     await assert.rejects(resolveAlbumQueue(mk, 'l.partial', 'i.missing', fetchAll), /could not be resolved/);
     await assert.rejects(resolveAlbumQueue(mk, 'l.partial', undefined, async () => { throw new Error('offline'); }), /offline/);
 });
+
+test('a partial library cache cannot replace the complete catalog edition', async () => {
+    const { mk, fetchAll, paths } = setup();
+    const original = mk.api.music;
+    mk.api.music = async (...args) => {
+        const res = await original(...args);
+        res.data.data[0].relationships.catalog.data[0].attributes = { trackCount: ids.length };
+        return res;
+    };
+    const partial = [{ lid: 'i.favorite', cid: ids[1] }];
+    const clicked = { clickedId: ids[2], cachedTracks: partial };
+    assert.deepEqual(await resolveAlbumQueue(mk, 'l.partial', 'i.clicked', fetchAll, clicked), { ids, startId: ids[2] });
+    assert.equal(paths.length, 1);
+    const full = ids.map((cid, i) => ({ lid: 'i.' + i, cid }));
+    assert.deepEqual(await resolveAlbumQueue(mk, 'l.full', 'i.1', fetchAll, { cachedTracks: full }), { ids, startId: ids[1] });
+    assert.equal(paths.length, 1, 'a verified complete local cache avoids another track request');
+});
+test('storefront path is encoded and an unmappable track cannot quietly disappear', async () => {
+    const { mk } = setup();
+    mk.storefrontId = 'it/../us';
+    await assert.rejects(resolveAlbumQueue(mk, 'l.partial', null, async path => {
+        assert.match(path, /it%2F\.\.%2Fus/);
+        return [{ id: ids[0] }, { id: 'a.123' }, { id: ids[2] }];
+    }), /incomplete/);
+});

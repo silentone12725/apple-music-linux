@@ -9,8 +9,27 @@ import (
 // a while (it may wait for a cache writer), so an earlier request can finish
 // after a later one; without this its LoadSource would replace the newer track.
 type loadOrder struct {
-	mu  sync.Mutex
-	seq atomic.Uint64
+	mu      sync.Mutex
+	seq     atomic.Uint64
+	applied uint64
+}
+
+// Lock order: loadOrder, then the session owner gate, then Player.
+func (o *loadOrder) withPlayer(fn func()) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	fn()
+}
+
+// stop invalidates older opens, but does not interrupt a newer load already applied.
+func (o *loadOrder) stop(fn func()) {
+	seq := o.begin()
+	o.withPlayer(func() {
+		if seq > o.applied {
+			o.applied = seq
+			fn()
+		}
+	})
 }
 
 // begin registers a request as the newest one.
@@ -25,5 +44,6 @@ func (o *loadOrder) runIfCurrent(seq uint64, fn func() error) (bool, error) {
 	if o.seq.Load() != seq {
 		return false, nil
 	}
+	o.applied = seq
 	return true, fn()
 }
