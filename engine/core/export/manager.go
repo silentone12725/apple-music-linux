@@ -501,9 +501,12 @@ func deriveQuality(cap ExportCapabilities, audioTraits []string) string {
 	case cap.Atmos:
 		return "Atmos"
 	case cap.Lossless:
-		for _, t := range audioTraits {
-			if t == "hi-res-lossless" {
-				return "Hi-Res Lossless"
+		// Only the tier that was asked for: a hi-res track exported with the cap on is plain Lossless.
+		if cap.HiRes {
+			for _, t := range audioTraits {
+				if t == "hi-res-lossless" {
+					return "Hi-Res Lossless"
+				}
 			}
 		}
 		return "Lossless"
@@ -718,6 +721,7 @@ func (m *Manager) downloadToTemp(ctx context.Context, req ExportRequest, job *Ex
 		MUT:         req.MUT,
 		Language:    lang,
 		Lossless:    req.Capabilities.Lossless,
+		HiRes:       req.Capabilities.Lossless && req.Capabilities.HiRes,
 		Atmos:       req.Capabilities.Atmos,
 		Video:       req.Capabilities.Video,
 		MVMaxHeight: req.MVMaxHeight,
@@ -1086,6 +1090,10 @@ func exportAudioQualifier(c ExportCapabilities) string {
 	switch {
 	case c.Atmos:
 		return string(pipeline.CodecAtmos)
+	case c.Lossless && c.HiRes:
+		// The Hi-Res tier caches apart from the capped one (see playbackCacheQualifier in cmd): a capped request
+		// must never be served a hi-res file, nor a hi-res request a capped one.
+		return string(pipeline.CodecALAC) + "-hires"
 	case c.Lossless:
 		return string(pipeline.CodecALAC)
 	default:

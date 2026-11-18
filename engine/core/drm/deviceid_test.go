@@ -80,3 +80,15 @@ func TestLogoutKeepsTheIDAndForgetDeviceRenewsIt(t *testing.T) {
 		t.Fatalf("after forgetting the device got %q, want a fresh unique ID", id)
 	}
 }
+
+// Apple's library answers in the locale this string names. The sign-in code reads its English wording, in
+// ClassifySignInError and in the account sheet's wrong-password dialog; see the note on deviceInfoPrefix.
+func TestDeviceInfoPinsTheEnglishLocale(t *testing.T) {
+	info, err := DeviceInfo(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(info, "/en-US/en-US/") {
+		t.Fatalf("device info %q no longer pins the English locale: update ClassifySignInError and the account sheet's isWrongPasswordDialog, whose matching depends on it", info)
+	}
+}

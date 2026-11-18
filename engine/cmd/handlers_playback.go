@@ -155,9 +155,16 @@ func (s *APIServer) handleCreatePlayback(w http.ResponseWriter, r *http.Request)
 	// API round-trip (~1–3 s) and lets playback start immediately. Lossless
 	// and AAC sessions are tracked separately — the scheduler now pre-warms
 	// at whichever quality the renderer reported via ContextPayload.Lossless.
+	// The renderer's idea of what is available can be stale (FairPlay not up yet, or lost since): serve AAC rather
+	// than open a lossless session that cannot decrypt.
+	if l, h, a, dropped := clampQuality(req.Capabilities.Lossless, req.Capabilities.HiRes, req.Capabilities.Atmos, s.drmCapabilities()); dropped {
+		log.Printf("[playback] %s: DRM not ready (lossless %t->%t hiRes %t->%t atmos %t->%t), opening as AAC", req.AssetID,
+			req.Capabilities.Lossless, l, req.Capabilities.HiRes, h, req.Capabilities.Atmos, a)
+		req.Capabilities.Lossless, req.Capabilities.HiRes, req.Capabilities.Atmos = l, h, a
+	}
 	var sess *playback.Session
 	if !req.Capabilities.Atmos && !req.Capabilities.Video {
-		if sessionID, ok := s.scheduler.TakePreWarmed(req.AssetID, req.Capabilities.Lossless); ok {
+		if sessionID, ok := s.scheduler.TakePreWarmed(req.AssetID, req.Capabilities.Lossless, req.Capabilities.HiRes); ok {
 			if preOpened, found := s.pm.GetSession(sessionID); found {
 				sess = preOpened
 			}
@@ -261,7 +268,7 @@ func (s *APIServer) handlePlaybackAudio(w http.ResponseWriter, r *http.Request) 
 	// MV sessions stream audio direct to MSE — skip disk cache to avoid
 	// colliding with same-AssetID song cache entries.
 	if s.diskCache != nil && sess.Type != "mv" && seekSec == 0 {
-		qualifier := sess.Codec
+		qualifier := playbackCacheQualifier(sess.Codec, sess.SampleRate)
 		if f, ok := s.diskCache.Get(sess.AssetID, qualifier); ok {
 			defer f.Close()
 			w.Header().Set("Content-Type", "audio/mp4")
@@ -420,7 +427,7 @@ func (s *APIServer) handlePlaybackPrecache(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	qualifier := sess.Codec
+	qualifier := playbackCacheQualifier(sess.Codec, sess.SampleRate)
 	if _, inCache := s.diskCache.Path(sess.AssetID, qualifier); inCache {
 		w.WriteHeader(http.StatusNoContent) // already in cache
 		return
@@ -493,6 +500,8 @@ func (s *APIServer) handlePlaybackContext(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	// Warm only what playback could open: lossless sessions cannot decrypt without a ready FairPlay session.
+	payload.Lossless, payload.HiRes, _, _ = clampQuality(payload.Lossless, payload.HiRes, false, s.drmCapabilities())
 	jobID := s.scheduler.Submit(payload)
 	writeJSON(w, http.StatusAccepted, map[string]string{"jobId": jobID})
 }

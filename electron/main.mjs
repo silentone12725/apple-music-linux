@@ -1011,13 +1011,13 @@ function createWindow() {
         html, body { background: transparent !important; overscroll-behavior: none !important; }
         /* Strip grey tint from alternating content sections — let album art / wallpaper show through */
         .section--alternate { background: transparent !important; }
-        /* "Also available in the iTunes Store" CTA — hidden everywhere. Matched by
-           aria-label (Apple keeps "iTunes" in it across locales) since its classes
-           are generic Svelte hashes; the :has() rules drop the wrapper too so no
-           empty gap is left behind. */
+        /* "Also available in the iTunes Store" CTA — hidden everywhere. On album and playlist pages it sits in
+           a wrapper with a stable class, which holds nothing else, so that is the hook there. Elsewhere the
+           button is found by the product name in its aria-label (Apple keeps "iTunes" in it in every
+           language, it is not translated), and its wrapper goes too so no empty gap is left behind. */
+        .tracklist-footer__native-cta-wrapper,
         button[aria-label*="iTunes"],
-        [data-testid="button-base-wrapper"]:has(> button[aria-label*="iTunes"]),
-        .tracklist-footer__native-cta-wrapper:has(button[aria-label*="iTunes"]) { display: none !important; }
+        [data-testid="button-base-wrapper"]:has(> button[aria-label*="iTunes"]) { display: none !important; }
         nav.navigation {
             background: rgba(255,255,255,var(--adam-glass-opacity)) !important;
             backdrop-filter: blur(var(--adam-glass-blur)) !important;
