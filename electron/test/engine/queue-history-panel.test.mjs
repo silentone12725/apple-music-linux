@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { t } from '../../src/engine/i18n.js';
+import { extractItemId } from '../../src/engine/catalog.js';
 const source = readFileSync(new URL('../../src/engine-playback.js', import.meta.url), 'utf8');
 const start = source.indexOf('function _histInject() {');
 const inject = source.slice(start, source.indexOf('\nasync function setupQueueHistory', start));
@@ -103,7 +104,7 @@ test('replaying an older history item moves it to the head without a duplicate',
     const push = source.slice(i, source.indexOf('\nfunction _histClear()', i));
     const context = vm.createContext({
         _queueHistory: [{ id: 'a', catalogId: 'a' }, { id: 'b', catalogId: 'b' }], _HIST_MAX: 100,
-        _histArtUrl() {}, _histFmtDur() {}, _histSaveAsync() {}, _histRender() {},
+        _histArtUrl() {}, _histFmtDur() {}, _histSaveAsync() {}, _histRender() {}, _extractItemId: extractItemId,
     });
     vm.runInContext(push, context);
     context._histPush({ id: 'b', attributes: { name: 'Song B' } });
