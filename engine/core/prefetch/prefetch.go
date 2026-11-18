@@ -118,6 +118,7 @@ type ContextPayload struct {
 	CurrentIndex int         `json:"currentIndex"`
 	Tracks       []TrackItem `json:"tracks"`
 	Lossless     bool        `json:"lossless"` // true when the renderer has lossless DRM + quality pref
+	HiRes        bool        `json:"hiRes"`    // with Lossless: the Hi-Res tier is chosen; false caps ALAC at 48 kHz
 }
 
 // Phase describes the lifecycle state of a warm job.
@@ -245,6 +246,7 @@ type workItem struct {
 	token      string
 	mut        string
 	lossless   bool
+	hiRes      bool
 	ctx        context.Context
 	baseScore  float64   // computed once at Submit time via scoreTrack
 	enqueuedAt time.Time // for aging calculation
@@ -351,6 +353,7 @@ type preWarmedEntry struct {
 	sessionID string
 	expiresAt time.Time
 	lossless  bool                 // true when the session was opened with Lossless=true
+	hiRes     bool                 // true when it was opened for the Hi-Res tier (above 48 kHz)
 	req       playback.OpenRequest // stored so we can re-warm on expiry
 }
 
@@ -580,6 +583,7 @@ func (s *Scheduler) Submit(payload ContextPayload) string {
 			token:      tok,
 			mut:        mut,
 			lossless:   payload.Lossless,
+			hiRes:      payload.Lossless && payload.HiRes,
 			ctx:        ctx,
 			baseScore:  scoreTrack(t),
 			enqueuedAt: now,
@@ -618,12 +622,13 @@ func (s *Scheduler) Cancel(id string) bool {
 }
 
 // TakePreWarmed returns and removes the pre-opened session ID for assetID
-// when its quality tier (lossless vs. AAC) matches the caller's request,
+// when its quality tier (AAC, lossless capped at 48 kHz, or hi-res lossless) matches the caller's request,
 // allowing real playback to skip the webplayback API round-trip (~1–3 s).
 // Returns ("", false) if no matching session exists or it has expired.
 // A mismatched-quality or expired entry is released and a background re-warm
 // is kicked off so subsequent requests benefit from a fresh session.
-func (s *Scheduler) TakePreWarmed(assetID string, lossless bool) (sessionID string, ok bool) {
+func (s *Scheduler) TakePreWarmed(assetID string, lossless, hiRes bool) (sessionID string, ok bool) {
+	hiRes = lossless && hiRes // hi-res is a tier of lossless
 	s.mu.Lock()
 	entry, found := s.preWarmed[assetID]
 	if found {
@@ -640,14 +645,16 @@ func (s *Scheduler) TakePreWarmed(assetID string, lossless bool) (sessionID stri
 		}
 		return "", false
 	}
-	if entry.lossless != lossless {
+	if entry.lossless != lossless || entry.hiRes != hiRes {
 		// Quality mismatch — release this session; the caller will open fresh.
 		// Re-warm with the correct quality so the next request can benefit.
 		if s.pm != nil {
 			s.pm.Release(entry.sessionID)
 			newEntry := entry
 			newEntry.lossless = lossless
+			newEntry.hiRes = hiRes
 			newEntry.req.Lossless = lossless
+			newEntry.req.HiRes = hiRes
 			go s.rewarm(newEntry)
 		}
 		return "", false
@@ -680,6 +687,7 @@ func (s *Scheduler) rewarm(entry preWarmedEntry) {
 			sessionID: sess.ID,
 			expiresAt: time.Now().Add(preWarmTTL),
 			lossless:  entry.req.Lossless, // must match req, or TakePreWarmed mismatches forever
+			hiRes:     entry.req.Lossless && entry.req.HiRes,
 			req:       entry.req,
 		}
 	} else {
@@ -860,6 +868,7 @@ func (s *Scheduler) warm(item *workItem) {
 			Token:      item.token,
 			MUT:        item.mut,
 			Lossless:   item.lossless,
+			HiRes:      item.hiRes,
 			Private:    true,
 		})
 		if err != nil {
@@ -888,10 +897,12 @@ func (s *Scheduler) warm(item *workItem) {
 			sessionID: sess.ID,
 			expiresAt: time.Now().Add(preWarmTTL),
 			lossless:  item.lossless,
+			hiRes:     item.hiRes,
 			req: playback.OpenRequest{
 				AssetID:    item.track.AssetID,
 				Storefront: sf,
 				Lossless:   item.lossless,
+				HiRes:      item.hiRes,
 			},
 		}
 		s.mu.Unlock()

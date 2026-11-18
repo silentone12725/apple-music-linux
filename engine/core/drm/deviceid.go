@@ -12,6 +12,10 @@ import (
 // The wrapper's default 9-field device string. Only the last field, the Android
 // ID, identifies the device to Apple; it used to be the same for every install.
 const (
+	// The locale and language (en-US twice) are part of this string and are what Apple's library answers in:
+	// its dialogs ("Retry", "Cancel", "Sign In") and its error text are English whatever language the page is in.
+	// ClassifySignInError and the account sheet's wrong-password dialog match that English text, so changing the
+	// locale here means changing them too; TestDeviceInfoPinsTheEnglishLocale fails until you do.
 	deviceInfoPrefix = "Music/4.9/Android/10/Samsung S9/7663313/en-US/en-US/"
 	legacyAndroidID  = "dc28071e981c439e"
 	deviceIDFile     = "device-id"

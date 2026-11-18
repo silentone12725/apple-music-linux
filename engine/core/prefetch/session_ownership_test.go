@@ -70,7 +70,7 @@ func TestRewarmKeepsLosslessTier(t *testing.T) {
 	pm := playback.NewWithProvider(okProvider{})
 	s := NewScheduler(pm, func() string { return "t" }, func() string { return "m" }, nil, 1)
 	s.rewarm(preWarmedEntry{lossless: true, req: playback.OpenRequest{AssetID: "L", Lossless: true}})
-	if _, ok := s.TakePreWarmed("L", true); !ok {
+	if _, ok := s.TakePreWarmed("L", true, false); !ok {
 		t.Fatal("re-warmed lossless session was stored as AAC and rejected")
 	}
 }

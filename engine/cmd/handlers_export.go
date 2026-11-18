@@ -3,10 +3,23 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 
+	"engine/core/drm"
 	"engine/core/export"
 )
+
+// downgradeExportCapabilities drops the content variants an export cannot decrypt right now. Lossless
+// and Atmos come through FairPlay, which only a ready DRM session provides; without one the song is
+// still downloadable as AAC, so the export asks for that instead of failing at the CBCS dial. Hi-res is
+// a tier of lossless: it goes with it, and when this engine does not allow it.
+// It reports whether anything was dropped. A request that already fits is returned unchanged.
+func downgradeExportCapabilities(c export.ExportCapabilities, have drm.CapabilityState) (export.ExportCapabilities, bool) {
+	var dropped bool
+	c.Lossless, c.HiRes, c.Atmos, dropped = clampQuality(c.Lossless, c.HiRes, c.Atmos, have)
+	return c, dropped
+}
 
 func (s *APIServer) handleExportCreate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10) // 64 KB
@@ -32,6 +45,14 @@ func (s *APIServer) handleExportCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Language == "" {
 		req.Language = s.lang(r)
+	}
+	var have drm.CapabilityState
+	if s.dm != nil { // nil when built without adamplay_backend
+		have = s.dm.Status().Capabilities
+	}
+	if c, dropped := downgradeExportCapabilities(req.Capabilities, have); dropped {
+		log.Printf("[export] %s: DRM not ready (lossless=%t atmos=%t), exporting as AAC", req.AssetID, have.ALAC, have.Atmos)
+		req.Capabilities = c
 	}
 	job, err := s.em.Enqueue(req)
 	if err != nil {
