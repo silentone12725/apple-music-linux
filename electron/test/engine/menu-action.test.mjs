@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fnv1a, createMenuActionResolver, menuAction } from '../../src/engine/menu-action.js';
+import { fnv1a, createMenuActionResolver, menuAction, normalizeTitle, TRANSLATED_TITLE_ACTIONS } from '../../src/engine/menu-action.js';
 
 test('fnv1a matches the published 32-bit FNV-1a vectors', () => {
     assert.equal(fnv1a(''), '811c9dc5');
@@ -46,5 +46,38 @@ test("the icon table covers Apple's menu icons and is well-formed", async () => 
 
 test('Add to Playlist is found by title on English pages, and by its icon in any language', () => {
     assert.equal(menuAction('', 'Add to Playlist'), 'add-to-playlist');
-    assert.equal(menuAction('', 'Aggiungi a playlist'), null, 'a translated title alone is not enough');
+    assert.equal(menuAction('', 'Aggiungi alla playlist'), 'add-to-playlist', 'Apple ships the Italian title too');
+});
+
+test('pin, unpin and delete are recognised by title in every language Apple ships', async () => {
+    const { MENU_TITLES } = await import('../../src/engine/menu-titles.js');
+    assert.equal(menuAction('', 'Pin Album'), 'pin');
+    assert.equal(menuAction('', 'Unpin Song'), 'unpin');
+    assert.equal(menuAction('', 'Delete from Library'), 'delete-from-library');
+    assert.equal(menuAction('', 'Remove from Library'), 'delete-from-library');
+    assert.equal(menuAction('', 'Album rögzítése'), 'pin');
+    assert.equal(menuAction('', 'Kiinnitä albumi'), 'pin');
+    for (const action of ['pin', 'unpin', 'delete-from-library', 'add-to-playlist']) {
+        assert.ok(MENU_TITLES[action].length >= 20, `${action} has titles from many languages`);
+        for (const t of MENU_TITLES[action]) {
+            assert.equal(t, normalizeTitle(t), 'stored titles are normalised');
+            assert.equal(TRANSLATED_TITLE_ACTIONS[t], action, `${t} is not claimed by another action`);
+        }
+    }
+});
+
+test('titles match through Apple\'s soft hyphens, non-breaking spaces and case', () => {
+    assert.equal(normalizeTitle('Delete\u00a0from\u00ad Library '), 'delete from library');
+    assert.equal(menuAction('', 'Dele\u00adte\u00a0from Library'), 'delete-from-library');
+    assert.equal(menuAction('', 'UNPIN ALBUM'), 'unpin');
+    assert.equal(menuAction('', 'Something else'), null);
+});
+
+test('no title is shared by two actions', async () => {
+    const { MENU_TITLES } = await import('../../src/engine/menu-titles.js');
+    const seen = new Map();
+    for (const [action, titles] of Object.entries(MENU_TITLES)) for (const t of titles) {
+        assert.ok(!seen.has(t) || seen.get(t) === action, `${t}: ${seen.get(t)} vs ${action}`);
+        seen.set(t, action);
+    }
 });

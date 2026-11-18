@@ -11115,6 +11115,10 @@ window.adamGetQueueInfo = function () {
         'Copy Embed Code':       mkSvg(DL_PATH, ''),
     };
 
+    // What each recognised action draws, whatever language its title is in.
+    const ACTION_ICON = { 'embed': ICON_SVG['Copy Embed Code'], 'pin': _PIN, 'unpin': _PIN, 'delete-from-library': _TRASH };
+    const ACTION_MARKED = ['embed', 'pin', 'unpin', 'delete-from-library'];
+
     // One-time CSS: hides Apple's native SVGs and renames "Copy Embed Code".
     // All hiding is CSS-only so we never touch Glimmer-managed element styles
     // (inline style mutations on Glimmer nodes trigger its reconciler and can
@@ -11136,7 +11140,9 @@ window.adamGetQueueInfo = function () {
         // marker on the icon span we inject into it (see injectMenuIcons), never through its title.
         const EMBED_BY_ACTION = `li.contextual-menu-item:has([data-adam-action="embed"])`;
 
-        const SELECTORS = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(li).concat(EMBED_BY_ACTION);
+        // Pin, unpin and delete are found the same way, through the marker on the span we inject.
+        const MARKED = ACTION_MARKED.map(a => `li.contextual-menu-item:has([data-adam-action="${a}"])`);
+        const SELECTORS = [...PIN_TITLES, ...TRASH_TITLES, EMBED_TITLE].map(li).concat(MARKED);
         const ALL_CON = SELECTORS.map(con).join(',\n');
         const ALL_SVG = SELECTORS.map(svg).join(',\n');
         const EMBED_LIS = [li(EMBED_TITLE), EMBED_BY_ACTION];
@@ -11210,13 +11216,13 @@ ${ALL_SVG} { opacity:0 !important; }
                 || '';
             const li = btn.closest('li');
             const action = li ? _itemAction(li) : null;
-            // The embed item is found by its glyph; the pin and delete items still by title (English only).
-            const svgHtml = (action === 'embed' ? ICON_SVG['Copy Embed Code'] : null) ?? ICON_SVG[title];
+            // Embed is found by its glyph; pin, unpin and delete by their title in any of Apple's languages.
+            const svgHtml = ACTION_ICON[action] ?? ICON_SVG[title];
             if (!svgHtml) return;
             // Container may be inside the button OR elsewhere in the same li.
             const container = btn.querySelector('.contextual-menu-item__icon-container')
                 || li?.querySelector('.contextual-menu-item__icon-container');
-            if (container) _armContainer(container, svgHtml, action === 'embed' ? action : null);
+            if (container) _armContainer(container, svgHtml, ACTION_ICON[action] ? action : null);
         });
     }
 
