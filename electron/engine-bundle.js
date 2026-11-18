@@ -641,27 +641,27 @@
     const focus = Math.min(index + digits.length, CODE_LENGTH - 1);
     return { digits: next, focus };
   }
-  function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null, challengeId = null }) {
+  function promptAction(snap, { open, view = null, submittedId = null, dismissedIds = /* @__PURE__ */ new Set(), challengeId = null }) {
     const st = snap?.state ?? {};
     if (st.fairplay === "ready" || snap?.capabilities?.cbcs === true || st.authentication === "logged_in") {
       return open ? "close" : "none";
     }
+    if (st.authentication === "failed" && open) return view === "code" ? "expired" : "failed";
     const ch = snap?.challenge;
-    if (ch?.id != null && ch.id === dismissedId) return "none";
+    if (ch?.id != null && dismissedIds.has(ch.id)) return "none";
     if (ch?.type === "two_factor") {
-      if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "code";
+      if (!open) return "code";
       if (view !== "code") return "code";
       if (submittedId != null && ch.id !== submittedId) return "retry";
       if (submittedId == null && challengeId != null && ch.id !== challengeId) return "code";
       return "none";
     }
     if (ch?.type === "dialog_choice") {
-      if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "choice";
+      if (!open) return "choice";
       if (view !== "choice") return "choice";
       if (challengeId != null && ch.id !== challengeId) return "choice";
       return "none";
     }
-    if (st.authentication === "failed" && open) return view === "code" ? "expired" : "failed";
     return "none";
   }
 
@@ -755,7 +755,9 @@
   }, fetchSnapshot = null, pollMs = 4e3, savedEmail = async () => "", openUrl = () => {
   }, doc = globalThis.document }) {
     let dlg = null, view = null, busy = false, poll = null, remember = null;
-    let challengeId = null, submittedId = null, dismissedId = null;
+    let challengeId = null, submittedId = null;
+    const dismissedIds = /* @__PURE__ */ new Set();
+    let passwordActionPending = false;
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {
     };
@@ -1013,6 +1015,7 @@
       revision++;
       view = "choice";
       busy = false;
+      passwordActionPending = false;
       inputs = [];
       const btnLabels = (buttonsStr || "").split("\n").filter(Boolean);
       const wrongPassword = isWrongPasswordDialog(btnLabels);
@@ -1026,6 +1029,7 @@
             trace(`choice ${wrongPassword ? /^retry$/i.test(label) ? "retry" : "cancel" : idx}`);
             setBusy(true, "Sending\u2026");
             submittedId = challengeId;
+            passwordActionPending = wrongPassword;
             const retry = wrongPassword && /^retry$/i.test(label);
             const reply = retry ? btnLabels.findIndex((l) => /^cancel$/i.test(l)) : idx;
             let ok = false;
@@ -1042,7 +1046,7 @@
               return;
             }
             if (retry) {
-              dismissedId = answeredId;
+              dismissedIds.add(answeredId);
               let email = "";
               try {
                 email = await savedEmail() || "";
@@ -1108,13 +1112,13 @@
     }
     function cancel() {
       const running = view === "code" || view === "choice" || view === "signin" && busy;
-      if (view === "code" || view === "choice") dismissedId = challengeId;
+      if (view === "code" || view === "choice") dismissedIds.add(challengeId);
       close();
       if (running) onCancel();
     }
     function onSnapshot(snap) {
-      if (view === "choice" && busy && submittedId != null && snap?.state?.authentication === "failed") return;
-      const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
+      if (passwordActionPending && view === "choice" && busy && submittedId != null && snap?.state?.authentication === "failed") return;
+      const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedIds, challengeId });
       if (action !== "none") trace(`snapshot auth=${snap?.state?.authentication} challenge=${snap?.challenge?.type ?? "-"} \u2192 ${action}`);
       if (snap?.challenge?.type === "two_factor" || snap?.challenge?.type === "dialog_choice") {
         challengeId = snap.challenge.id ?? null;

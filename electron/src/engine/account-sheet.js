@@ -107,7 +107,9 @@ function el(doc, tag, props = {}, ...children) {
  */
 export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCancel = () => {}, fetchSnapshot = null, pollMs = 4000, savedEmail = async () => '', openUrl = () => {}, doc = globalThis.document }) {
     let dlg = null, view = null, busy = false, poll = null, remember = null;
-    let challengeId = null, submittedId = null, dismissedId = null;
+    let challengeId = null, submittedId = null;
+    const dismissedIds = new Set();
+    let passwordActionPending = false;
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {};
     let revision = 0;
@@ -330,6 +332,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         revision++;
         view = 'choice';
         busy = false;
+        passwordActionPending = false;
         inputs = [];
         const btnLabels = (buttonsStr || '').split('\n').filter(Boolean);
         const wrongPassword = isWrongPasswordDialog(btnLabels);
@@ -343,6 +346,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
                     trace(`choice ${wrongPassword ? (/^retry$/i.test(label) ? 'retry' : 'cancel') : idx}`);
                     setBusy(true, 'Sending…');
                     submittedId = challengeId;
+                    passwordActionPending = wrongPassword;
                     const retry = wrongPassword && /^retry$/i.test(label);
                     // Retry answers the dialog with its Cancel button; the new password goes through the sign-in form.
                     const reply = retry ? btnLabels.findIndex(l => /^cancel$/i.test(l)) : idx;
@@ -351,7 +355,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
                     if (revision !== myRevision) return; // closed or a newer challenge took over
                     if (!ok) { submittedId = null; setBusy(false); setMessage('Could not send. Try again.', true); return; }
                     if (retry) {
-                        dismissedId = answeredId;
+                        dismissedIds.add(answeredId);
                         let email = '';
                         try { email = (await savedEmail()) || ''; } catch { /* the form simply starts empty */ }
                         if (revision === myRevision) showSignIn('Check your Apple Account and password, then try again.', { email });
@@ -403,15 +407,15 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
 
     function cancel() {
         const running = view === 'code' || view === 'choice' || (view === 'signin' && busy);
-        if (view === 'code' || view === 'choice') dismissedId = challengeId;
+        if (view === 'code' || view === 'choice') dismissedIds.add(challengeId);
         close();
         if (running) onCancel();
     }
 
     function onSnapshot(snap) {
         // The outcome of an answered choice can arrive before its POST response.
-        if (view === 'choice' && busy && submittedId != null && snap?.state?.authentication === 'failed') return;
-        const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
+        if (passwordActionPending && view === 'choice' && busy && submittedId != null && snap?.state?.authentication === 'failed') return;
+        const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedIds, challengeId });
         if (action !== 'none') trace(`snapshot auth=${snap?.state?.authentication} challenge=${snap?.challenge?.type ?? '-'} → ${action}`);
         if (snap?.challenge?.type === 'two_factor' || snap?.challenge?.type === 'dialog_choice') {
             challengeId = snap.challenge.id ?? null;

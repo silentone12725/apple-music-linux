@@ -38,8 +38,8 @@ test('promptAction tells a re-ask (wrong code) from the same challenge repeated'
 });
 
 test('promptAction does not reopen a challenge the user cancelled', () => {
-    assert.equal(promptAction(twoFactor(3), { open: false, dismissedId: 3 }), 'none');
-    assert.equal(promptAction(twoFactor(4), { open: false, dismissedId: 3 }), 'code', 'a new challenge opens again');
+    assert.equal(promptAction(twoFactor(3), { open: false, dismissedIds: new Set([3]) }), 'none');
+    assert.equal(promptAction(twoFactor(4), { open: false, dismissedIds: new Set([3]) }), 'code', 'a new challenge opens again');
 });
 
 test('promptAction: a sign-in that fails while the code is being asked for goes back to the form', async () => {
