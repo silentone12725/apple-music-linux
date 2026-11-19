@@ -1463,10 +1463,10 @@ function createWindow() {
 
     // Windows logoff or shutdown closes the window, and the hide-on-close handler above would refuse
     // and hold the session up. Treat it as a quit, then release everything before the OS ends us.
-    win.on('query-end-session', () => { isQuitting = true; });
+    win.on('query-end-session', () => { isQuitting = true; console.log('[Adam] Windows session ending: not holding it up'); });
     win.on('session-end', () => {
         isQuitting = true;
-        try { _storeFlushSync(); releaseResources(); } catch (_) {}
+        try { _storeFlushSync(); releaseResources(); console.log('[Adam] Windows session ended: state saved, resources released'); } catch (_) {}
         // The engine's stdin closes with this process, so it stops itself too.
     });
 }
