@@ -646,8 +646,9 @@
     if (st.fairplay === "ready" || snap?.capabilities?.cbcs === true || st.authentication === "logged_in") {
       return open ? "close" : "none";
     }
-    if (st.authentication === "failed" && open) return view === "code" ? "expired" : "failed";
     const ch = snap?.challenge;
+    const newChallenge = ch?.id != null && ch.id !== challengeId && ch.id !== submittedId && !dismissedIds.has(ch.id);
+    if (st.authentication === "failed" && open && !newChallenge) return view === "code" ? "expired" : "failed";
     if (ch?.id != null && dismissedIds.has(ch.id)) return "none";
     if (ch?.type === "two_factor") {
       if (!open) return "code";

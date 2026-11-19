@@ -63,3 +63,11 @@ test('a new dialog challenge while one is shown re-renders; the same one does no
     assert.equal(promptAction(snap(2), { open: true, view: 'choice', challengeId: 1 }), 'choice');
     assert.equal(promptAction(snap(1), { open: true, view: 'choice', challengeId: 1 }), 'none');
 });
+
+test('a failure closes the open dialog, but a challenge Apple has just asked still wins', () => {
+    const failedWith = id => ({ state: { authentication: 'failed' }, challenge: { type: 'dialog_choice', id } });
+    assert.equal(promptAction(failedWith(4), { open: true, view: 'choice', challengeId: 4, submittedId: 4 }), 'failed', 'the answered dialog');
+    assert.equal(promptAction(failedWith(5), { open: true, view: 'choice', challengeId: 4, submittedId: 4 }), 'choice', 'a new dialog');
+    assert.equal(promptAction(failedWith(5), { open: true, view: 'choice', challengeId: 4, dismissedIds: new Set([5]) }), 'failed', 'a dismissed one is not new');
+    assert.equal(promptAction({ state: { authentication: 'failed' } }, { open: true, view: 'code' }), 'expired');
+});

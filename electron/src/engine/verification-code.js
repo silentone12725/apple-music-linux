@@ -35,8 +35,11 @@ export function promptAction(snap, { open, view = null, submittedId = null, dism
     if (st.fairplay === 'ready' || snap?.capabilities?.cbcs === true || st.authentication === 'logged_in') {
         return open ? 'close' : 'none';
     }
-    if (st.authentication === 'failed' && open) return view === 'code' ? 'expired' : 'failed';
     const ch = snap?.challenge;
+    // A failure ends the dialog that is open, unless Apple has already asked a new question
+    // (an ID we have neither shown, answered nor dismissed): that one is shown instead.
+    const newChallenge = ch?.id != null && ch.id !== challengeId && ch.id !== submittedId && !dismissedIds.has(ch.id);
+    if (st.authentication === 'failed' && open && !newChallenge) return view === 'code' ? 'expired' : 'failed';
     if (ch?.id != null && dismissedIds.has(ch.id)) return 'none';
     if (ch?.type === 'two_factor') {
         if (!open) return 'code';
