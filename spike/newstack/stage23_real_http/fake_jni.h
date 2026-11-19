@@ -79,6 +79,18 @@ static jobject JNICALL fake_AllocObject(void *env, jclass cls) {
 #define FID_CAPACITY  ((jfieldID)0x43)
 #define FID_OTHER     ((jfieldID)0x01)
 
+/* stage23: HTTPResponse Java-field IDs. Callback.complete() reads the response
+ * object's status(I)/headers(Ljava/lang/Iterable;)/body([B) fields via
+ * GetFieldID+Get{Int,Object}Field; we hand back values the probe stages here. */
+#define FID_RESP_STATUS  ((jfieldID)0x201)
+#define FID_RESP_HEADERS ((jfieldID)0x202)
+#define FID_RESP_BODY    ((jfieldID)0x203)
+#define FID_RESP_NULLOBJ ((jfieldID)0x204)  /* object fields we deliberately null out */
+typedef struct { jsize len; jbyte data[1]; } fake_array_t;  /* used by GetArrayLength below + the array ops lower down */
+static jint     g_resp_status_val  = 0;
+static jobject  g_resp_body_jarr   = NULL;  /* a fake byte[] (fake_obj_t→fake_array_t) */
+static jobject  g_resp_headers_obj = NULL;  /* an (empty) Iterable, or NULL */
+
 static jfieldID JNICALL fake_GetFieldID(void *env, jclass cls, const char *name, const char *sig) {
     jfieldID result = FID_OTHER;
     if (name) {
@@ -86,6 +98,13 @@ static jfieldID JNICALL fake_GetFieldID(void *env, jclass cls, const char *name,
         else if (!strcmp(name, "position")) result = FID_POSITION;
         else if (!strcmp(name, "limit"))    result = FID_LIMIT;
         else if (!strcmp(name, "capacity")) result = FID_CAPACITY;
+        else if (!strcmp(name, "status"))   result = FID_RESP_STATUS;
+        else if (!strcmp(name, "headers"))  result = FID_RESP_HEADERS;
+        else if (!strcmp(name, "body"))     result = FID_RESP_BODY;
+        /* Optional telemetry sub-objects — hand back NULL so complete() skips
+         * them instead of doing shared_ptr/atomic ops on a garbage object. */
+        else if (!strcmp(name, "metrics"))  result = FID_RESP_NULLOBJ;
+        else if (!strcmp(name, "internal")) result = FID_RESP_NULLOBJ;
     }
     fprintf(stderr, "  [GFI] name=%s sig=%s → fid=0x%lx\n",
             name ? name : "(null)", sig ? sig : "(null)",
@@ -201,11 +220,19 @@ static jobject JNICALL fake_CallStaticObjectMethodV(void *env, jclass cls, jmeth
 }
 static jboolean JNICALL fake_IsInstanceOf(void *env, jobject obj, jclass cls) { return JNI_TRUE; }
 static jboolean JNICALL fake_IsSameObject(void *env, jobject a, jobject b) { return a == b ? JNI_TRUE : JNI_FALSE; }
-static jint JNICALL fake_GetIntField(void *env, jobject obj, jfieldID fid) { return 0; }
+static jint JNICALL fake_GetIntField(void *env, jobject obj, jfieldID fid) {
+    if (fid == FID_RESP_STATUS) return g_resp_status_val;
+    return 0;
+}
 static void JNICALL fake_SetIntField(void *env, jobject obj, jfieldID fid, jint val) {}
 static jboolean JNICALL fake_GetBooleanField(void *env, jobject obj, jfieldID fid) { return JNI_FALSE; }
 static void JNICALL fake_SetBooleanField(void *env, jobject obj, jfieldID fid, jboolean val) {}
-static jobject JNICALL fake_GetObjectField(void *env, jobject obj, jfieldID fid) { return obj; }
+static jobject JNICALL fake_GetObjectField(void *env, jobject obj, jfieldID fid) {
+    if (fid == FID_RESP_BODY)    return g_resp_body_jarr;
+    if (fid == FID_RESP_HEADERS) return g_resp_headers_obj;
+    if (fid == FID_RESP_NULLOBJ) return NULL;
+    return obj;
+}
 static void JNICALL fake_SetObjectField(void *env, jobject obj, jfieldID fid, jobject val) {}
 static jint JNICALL fake_CallIntMethod(void *env, jobject obj, jmethodID mid, ...) { return 0; }
 static jboolean JNICALL fake_CallBooleanMethod(void *env, jobject obj, jmethodID mid, ...) { return JNI_FALSE; }
@@ -231,7 +258,14 @@ static jobject JNICALL fake_NewObjectV(void *env, jclass cls, jmethodID mid, va_
 static jobject JNICALL fake_NewObject(void *env, jclass cls, jmethodID mid, ...) {
     return fake_alloc_obj((jlong)(uintptr_t)cls);
 }
-static jsize JNICALL fake_GetArrayLength(void *env, jarray arr) { return 0; }
+static jsize JNICALL fake_GetArrayLength(void *env, jarray arr) {
+    /* Our response byte[] is a fake_obj_t whose address points at a fake_array_t. */
+    if (arr && arr == g_resp_body_jarr) {
+        fake_obj_t *o = (fake_obj_t *)arr;
+        if (o->address) return ((fake_array_t *)(uintptr_t)o->address)->len;
+    }
+    return 0;
+}
 static void JNICALL fake_GetByteArrayRegion(void *env, jarray arr, jsize start, jsize len, jbyte *buf) {
     if (buf && len > 0) memset(buf, 0, (size_t)len);
 }
@@ -239,8 +273,8 @@ static jint JNICALL fake_GetJavaVM(void *env, void **vm) { if (vm) *vm = env; re
 static jint JNICALL fake_UnregisterNatives(void *env, jclass cls) { return 0; }
 
 /* ---- Array operations (needed by perform's credential handling) ----------- */
-/* Store raw bytes at address so GetByteArrayElements/Region can read them. */
-typedef struct { jsize len; jbyte data[1]; } fake_array_t;
+/* Store raw bytes at address so GetByteArrayElements/Region can read them.
+ * (fake_array_t is declared up top so GetArrayLength can see it.) */
 static jarray JNICALL fake_NewByteArray(void *env, jsize len) {
     fake_obj_t *o = fake_alloc_obj(0);
     if (!o) return NULL;

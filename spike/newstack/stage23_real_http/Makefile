@@ -17,12 +17,15 @@ $(DRM)/embedded_blobs/libhybris-core.so.o:
 
 all: $(PROBE)
 
-$(PROBE): stage23_probe.c ../stage22_inline_resp/fake_jni.h \
+# NOTE: #include "fake_jni.h" resolves to THIS dir's copy (C "" include rule),
+# so the dependency and -I must point here, not at stage22 — otherwise edits to
+# the local fake_jni.h never trigger a rebuild (bit us 2026-11-19).
+$(PROBE): stage23_probe.c fake_jni.h lookup_v2_body.h \
           $(DRM)/embedded_blobs/embedded_loader.o \
           $(DRM)/embedded_blobs/libhybris-core.so.o
 	gcc -O0 -g3 \
 	    -I$(DRM) \
-	    -I../stage22_inline_resp \
+	    -I. -I../stage22_inline_resp \
 	    -Wno-unused-function -Wno-unused-variable \
 	    stage23_probe.c \
 	    $(DRM)/embedded_blobs/embedded_loader.o \

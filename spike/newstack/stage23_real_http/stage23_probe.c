@@ -770,9 +770,70 @@ static void deliver_via_callback(void *callback_native, long status,
     fprintf(stderr, "[deliver] resp_make(status=%ld) -> %p\n", status, resp);
     if (!resp) return;
 
+    /* complete() reads the response jobject's Java fields status(I)/headers
+     * (Iterable)/body([B).  Stage them for the fake JNIEnv to hand back:
+     *  - status -> the real HTTP status
+     *  - body   -> a fake byte[] carrying the real response bytes
+     *  - headers-> an empty Iterable (CallBooleanMethod hasNext()==false ends it) */
+    g_resp_status_val = (jint)status;
+    g_resp_headers_obj = NULL;                   /* null headers → complete skips iteration */
+    g_resp_body_jarr = NULL;
+    if (body && body_len > 0 && body_len < (64u*1024*1024)) {
+        jarray arr = fake_NewByteArray(env, (jsize)body_len);
+        if (arr) {
+            fake_SetByteArrayRegion(env, arr, 0, (jsize)body_len, (const jbyte*)body);
+            g_resp_body_jarr = arr;
+        }
+    }
+    fprintf(stderr, "[deliver] staged status=%d body[%zu] headers=%p\n",
+            g_resp_status_val, body_len, (void*)g_resp_headers_obj);
+
+    /* complete() locks the shared_ptr<CallbackTarget> at callback+0x20, gets the
+     * managed object, and traps (ud2 @ ELF 0x3410d0) unless its +0x120 "armed"
+     * byte is non-zero.  Inspect that shared_ptr and probe whether forcing the
+     * flag clears the trap (diagnostic — tells us if +0x120 is the only gate). */
+    {
+        uintptr_t *sp = (uintptr_t *)((uint8_t *)callback_native + 0x20);
+        void *managed = NULL, *ctrl = NULL;
+        SAFE_CALL("read shared_ptr", (managed = (void*)sp[0], ctrl = (void*)sp[1]));
+        fprintf(stderr, "[deliver] cb+0x20 shared_ptr: ptr=%p ctrl=%p\n", managed, ctrl);
+        if (managed && (uintptr_t)managed > 0x10000) {
+            uint8_t armed = 0xff;
+            SAFE_CALL("read +0x120", armed = *((uint8_t*)managed + 0x120));
+            fprintf(stderr, "[deliver] managed+0x120 (armed) = %u %s\n", armed,
+                    armed ? "(ARMED — async worked!)" : "(not armed)");
+            /* Only force as a last resort if the async arming did not happen. */
+            if (!armed) {
+                SAFE_CALL("set +0x120", *((uint8_t*)managed + 0x120) = 1);
+                fprintf(stderr, "[deliver] forced managed+0x120 = 1\n");
+            }
+        }
+    }
+
     fake_obj_t cbobj = { .class_id = 0, .address = (jlong)(uintptr_t)callback_native };
     SAFE_CALL("cb_complete", g_cb_complete(env, (jobject)&cbobj, (jobject)resp));
     fprintf(stderr, "[deliver] complete() returned\n");
+}
+
+/* ---- Async delivery: complete AFTER submitRequest returns ----------------- */
+typedef struct {
+    void   *callback;   /* real_vt3's `self` */
+    long    status;
+    uint8_t *body;      /* owned copy */
+    size_t  body_len;
+} async_deliver_t;
+
+static void *async_deliver_fn(void *arg) {
+    async_deliver_t *ad = (async_deliver_t *)arg;
+    /* Give perform() time to return from submitRequest, arm the callback, and
+     * begin waiting.  Then complete on this thread. */
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = 150 * 1000 * 1000 };
+    nanosleep(&ts, NULL);
+    fprintf(stderr, "[async] delivering status=%ld body=%zu\n", ad->status, ad->body_len);
+    deliver_via_callback(ad->callback, ad->status, ad->body, ad->body_len);
+    free(ad->body);
+    free(ad);
+    return NULL;
 }
 
 /* ---- Real HTTP vtable ----------------------------------------------------- */
@@ -996,10 +1057,28 @@ static void real_vt3(void *self, void *req_a, void *req_b, void *c, void *d) {
                                   (const uint8_t *)empty_plist, strlen(empty_plist));
         }
     } else {
-        /* NEW PATH: deliver through the library's HTTPResponse::make + Callback.
-         * Native complete() reads the callable at callback_slot+0x20; req_b is
-         * self+0x20, so the Callback OBJECT is `self` and self+0x20 is its callable. */
-        deliver_via_callback(self, resp.status, resp.body, resp.body_len);
+        /* NEW PATH: deliver asynchronously.  The callback's callable at
+         * callback+0x20 is NOT armed (+0x120==0) while we are still inside
+         * submitRequest, so completing synchronously uses uninitialised state.
+         * Hand off to a thread that fires after real_vt3 returns and perform()
+         * has armed the callback + started waiting. */
+        async_deliver_t *ad = calloc(1, sizeof(*ad));
+        if (ad) {
+            ad->callback = self;
+            ad->status = resp.status;
+            ad->body_len = resp.body_len;
+            if (resp.body && resp.body_len) {
+                ad->body = malloc(resp.body_len);
+                if (ad->body) memcpy(ad->body, resp.body, resp.body_len);
+            }
+            pthread_t t;
+            if (pthread_create(&t, NULL, async_deliver_fn, ad) == 0) {
+                pthread_detach(t);
+                fprintf(stderr, "[real_vt3] async deliver dispatched\n");
+            } else {
+                free(ad->body); free(ad);
+            }
+        }
     }
     free(resp.body);
 
@@ -1249,10 +1328,21 @@ int main(void) {
     setvbuf(stderr, NULL, _IONBF, 0);
     disable_io_vtable_check();
 
+    /* Alternate signal stack so the handler still runs (and can print a
+     * backtrace) if the fault is a stack overflow. */
+    static char s_altstack[262144];
+    stack_t ss = {0};
+    ss.ss_sp = s_altstack; ss.ss_size = sizeof(s_altstack); ss.ss_flags = 0;
+    sigaltstack(&ss, NULL);
+
     struct sigaction sa = {0};
-    sa.sa_flags = SA_SIGINFO|SA_NODEFER;
+    sa.sa_flags = SA_SIGINFO|SA_NODEFER|SA_ONSTACK;
     sa.sa_sigaction = sigsegv_handler; sigaction(SIGSEGV, &sa, NULL);
     sa.sa_sigaction = sigabrt_handler; sigaction(SIGABRT, &sa, NULL);
+    sa.sa_sigaction = sigsegv_handler; sigaction(SIGBUS, &sa, NULL);
+    sa.sa_sigaction = sigsegv_handler; sigaction(SIGFPE, &sa, NULL);
+    sa.sa_sigaction = sigsegv_handler; sigaction(SIGILL, &sa, NULL);
+    sa.sa_sigaction = sigsegv_handler; sigaction(SIGTRAP, &sa, NULL);
     g_main_thread = pthread_self();
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
