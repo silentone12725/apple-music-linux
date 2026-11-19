@@ -914,6 +914,9 @@ func (s *APIServer) Stop() {
 	if s.scheduler != nil {
 		s.scheduler.Stop()
 	}
+	if s.pm != nil {
+		s.pm.Close()
+	}
 	// Stop the wrapper process first so it doesn't keep running as an orphan.
 	// Session files are NOT cleared — they persist for the next server start.
 	if s.dm != nil {

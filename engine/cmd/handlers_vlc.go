@@ -107,7 +107,7 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[vlc] load url=%s startMs=%d (no disk cache)", url, req.StartMs)
 		return s.vlcPlayer.Load(url)
 	})
-	if !loaded || err == errLoadAbandoned {
+	if !loaded || errors.Is(err, errLoadAbandoned) {
 		if src != nil {
 			src.Abort()
 			src.Close()

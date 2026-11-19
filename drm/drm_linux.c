@@ -75,13 +75,12 @@ int drm_init(const struct drm_config *cfg)
     }
 
     g_initialized = 1;
-    /* Copy under the lock: drm_shutdown may clear them the moment we unlock. */
-    drm_state_callback_t cb = g_state_cb;
-    void *ud = g_state_ud;
+    /* Call under the lock: drm_shutdown clears the callback and its user data, which the caller
+     * may free right after, so a call made after unlocking could reach freed memory. The callback
+     * only queues the state (it never calls back into drm_*), so holding the lock is safe. */
+    if (g_state_cb)
+        g_state_cb(DRM_STATE_RUNNING, g_state_ud);
     pthread_mutex_unlock(&g_init_lock);
-
-    if (cb)
-        cb(DRM_STATE_RUNNING, ud);
 
     return 0;
 }
@@ -131,9 +130,12 @@ char *drm_get_account(void)
     char mt_path[4096], sf_path[4096];
 
     pthread_mutex_lock(&g_init_lock);
-    snprintf(mt_path, sizeof(mt_path), "%s/MUSIC_TOKEN", g_base_dir);
-    snprintf(sf_path, sizeof(sf_path), "%s/STOREFRONT_ID", g_base_dir);
+    /* A path that does not fit would be cut short and read the wrong file: refuse it. */
+    int mt_n = snprintf(mt_path, sizeof(mt_path), "%s/MUSIC_TOKEN", g_base_dir);
+    int sf_n = snprintf(sf_path, sizeof(sf_path), "%s/STOREFRONT_ID", g_base_dir);
     pthread_mutex_unlock(&g_init_lock);
+    if (mt_n < 0 || (size_t)mt_n >= sizeof(mt_path) || sf_n < 0 || (size_t)sf_n >= sizeof(sf_path))
+        return NULL;
 
     char *mt = read_file_trimmed(mt_path);
     char *sf = read_file_trimmed(sf_path);

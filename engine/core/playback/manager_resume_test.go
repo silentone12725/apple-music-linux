@@ -231,3 +231,15 @@ func (p *slowProvider) Open(ctx context.Context, req media.OpenRequest) (*media.
 		},
 	}, nil
 }
+
+func TestCloseStopsTheReaperAndIsIdempotent(t *testing.T) {
+	m := NewWithProvider(nil)
+	m.Close()
+	m.Close()
+	select {
+	case <-m.stopReap:
+	default:
+		t.Fatal("reaper stop channel was not closed")
+	}
+	(&Manager{}).Close() // no reaper: must not panic
+}

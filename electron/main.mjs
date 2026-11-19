@@ -37,6 +37,7 @@ import https from 'https';
 import { autoAuthenticate } from './drm-autoauth.mjs';
 import { fetchFairPlayLibs } from './fairplay-fetch.mjs';
 import { setCompositionBackdrop, setNativeCaptionDrag, removeCompositionBackdrop } from './composition-backdrop.mjs';
+import { cleanZoom, cleanBgBlur, cleanTrackReport } from './src/engine/view-limits.js';
 import { cleanBlur, cleanGlassOpacity, sidebarOpacityControl, artNavAlpha } from './src/engine/sidebar-glass.js';
 
 const require = createRequire(import.meta.url);
@@ -1692,12 +1693,13 @@ ipcMain.on('app:auth-state', (_e, signedIn) => {
 
 function applyPersistedViewSettings() {
     const p = loadPrefs();
-    if (p.zoomFactor && p.zoomFactor !== 1.0)
-        win?.webContents.setZoomFactor(p.zoomFactor);
+    const zoom = cleanZoom(p.zoomFactor); // an earlier version saved whatever the page sent
+    if (zoom !== null && zoom !== 1.0)
+        win?.webContents.setZoomFactor(zoom);
     applyGlassEffect(p.glassBlur ?? 20, p.glassOpacity ?? 0.07);
     if (p.bgBlur != null)
         win?.webContents.executeJavaScript(
-            `document.documentElement.style.setProperty('--adam-bg-blur','${parseFloat(p.bgBlur) || 18}px')`
+            `document.documentElement.style.setProperty('--adam-bg-blur','${cleanBgBlur(p.bgBlur) ?? 18}px')`
         ).catch(() => {});
     applyTweak('__noop', null);
     applyThemeMode();
@@ -1816,12 +1818,14 @@ ipcMain.on('pref:set', (_, k, v) => {
     if (!(Number.isFinite(v) && v >= 0 && v <= 1e7)) return;
     const p = loadPrefs(); p[k] = v; savePrefs(p);
 });
-ipcMain.on('view:zoom',       (_, f) => setZoom(parseFloat(f)));
+ipcMain.on('view:zoom',       (_, f) => { const z = cleanZoom(f); if (z !== null) setZoom(z); });
 ipcMain.on('view:glass-blur', (_, b) => { applyGlassEffect(b, loadPrefs().glassOpacity); });
-ipcMain.on('view:bg-blur',   (_, b) => {
-    const p = loadPrefs(); p.bgBlur = parseInt(b); savePrefs(p);
+ipcMain.on('view:bg-blur',   (_, raw) => {
+    const b = cleanBgBlur(raw);
+    if (b === null) return;
+    const p = loadPrefs(); p.bgBlur = b; savePrefs(p);
     win?.webContents.executeJavaScript(
-        `document.documentElement.style.setProperty('--adam-bg-blur','${parseInt(b)}px')`
+        `document.documentElement.style.setProperty('--adam-bg-blur','${b}px')`
     ).catch(() => {});
     _refreshWallpaperBlur();
 });
@@ -2487,8 +2491,8 @@ async function _lastfmCall(params, httpMethod = 'GET') {
     full.format  = 'json';
     const body = new URLSearchParams(full).toString();
     const resp = httpMethod === 'POST'
-        ? await fetch(LASTFM_ROOT, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body })
-        : await fetch(`${LASTFM_ROOT}?${body}`);
+        ? await fetch(LASTFM_ROOT, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body, signal: AbortSignal.timeout(15000) })
+        : await fetch(`${LASTFM_ROOT}?${body}`, { signal: AbortSignal.timeout(15000) });
     return resp.json();
 }
 
@@ -2633,8 +2637,9 @@ ipcMain.handle('lastfm:disconnect', async () => {
     return { ok: true };
 });
 
-ipcMain.on('lastfm:nowplaying', async (_, t) => {
-    if (!t?.artist || !t?.track) return;
+ipcMain.on('lastfm:nowplaying', async (_, raw) => {
+    const t = cleanTrackReport(raw);
+    if (!t) return;
     const store = await _storeLoad();
     if (!store.lastfm_sk || !store.lastfm_api_key) return;
     const p = { method: 'track.updateNowPlaying', artist: t.artist, track: t.track, sk: store.lastfm_sk };
@@ -2644,8 +2649,9 @@ ipcMain.on('lastfm:nowplaying', async (_, t) => {
     try { await _lastfmCall(p, 'POST'); } catch (_) {}
 });
 
-ipcMain.on('lastfm:scrobble', async (_, t) => {
-    if (!t?.artist || !t?.track || !t?.timestamp) return;
+ipcMain.on('lastfm:scrobble', async (_, raw) => {
+    const t = cleanTrackReport(raw, { needTimestamp: true });
+    if (!t) return;
     const store = await _storeLoad();
     if (!store.lastfm_sk || !store.lastfm_api_key) return;
     const p = { method: 'track.scrobble', artist: t.artist, track: t.track, timestamp: String(t.timestamp), sk: store.lastfm_sk };
@@ -2677,6 +2683,7 @@ async function _lbSubmit(body) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Token ${token}` },
             body: JSON.stringify(body),
+            signal: AbortSignal.timeout(15000),
         });
     } catch (_) {}
 }
@@ -2707,13 +2714,15 @@ ipcMain.handle('lb:disconnect', async () => {
     return { ok: true };
 });
 
-ipcMain.on('lb:nowplaying', async (_, t) => {
-    if (!t?.artist || !t?.track) return;
+ipcMain.on('lb:nowplaying', async (_, raw) => {
+    const t = cleanTrackReport(raw);
+    if (!t) return;
     await _lbSubmit({ listen_type: 'playing_now', payload: [{ track_metadata: _lbTrackMeta(t) }] });
 });
 
-ipcMain.on('lb:scrobble', async (_, t) => {
-    if (!t?.artist || !t?.track || !t?.timestamp) return;
+ipcMain.on('lb:scrobble', async (_, raw) => {
+    const t = cleanTrackReport(raw, { needTimestamp: true });
+    if (!t) return;
     await _lbSubmit({ listen_type: 'single', payload: [{ listened_at: t.timestamp, track_metadata: _lbTrackMeta(t) }] });
 });
 

@@ -11380,10 +11380,14 @@ ${ALL_SVG} { opacity:0 !important; }
       const title = btn?.title || btn?.querySelector(".contextual-menu-item__option-text")?.textContent?.trim() || "";
       return menuAction(glyph, title);
     }
-    function _armContainer(container, svgHtml, action = null) {
+    function _armContainer(container, svgHtml, action = null, still = () => true) {
       if (container._adamArmed) return;
       container._adamArmed = true;
       const inject = () => {
+        if (!still()) {
+          container.querySelector("[data-adam]")?.remove();
+          return;
+        }
         if (container.querySelector("[data-adam]")) return;
         const span = document.createElement("span");
         span.setAttribute("data-adam", "1");
@@ -11409,7 +11413,10 @@ ${ALL_SVG} { opacity:0 !important; }
         const svgHtml = ACTION_ICON[action] ?? ICON_SVG[title];
         if (!svgHtml) return;
         const container = btn.querySelector(".contextual-menu-item__icon-container") || li?.querySelector(".contextual-menu-item__icon-container");
-        if (container) _armContainer(container, svgHtml, ACTION_ICON[action] ? action : null);
+        if (container) _armContainer(container, svgHtml, ACTION_ICON[action] ? action : null, () => {
+          const a = li ? _itemAction(li) : null;
+          return (ACTION_ICON[a] ?? ICON_SVG[btn.title || btn.querySelector(".contextual-menu-item__option-text")?.textContent?.trim() || ""]) === svgHtml;
+        });
       });
     }
     let _ctxTarget = null;

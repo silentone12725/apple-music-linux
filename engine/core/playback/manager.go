@@ -73,6 +73,8 @@ type openFlight struct {
 // to know about the apple, fairplay, hls, or pipeline packages.
 type Manager struct {
 	provider       media.Provider
+	stopReap       chan struct{}
+	closeOnce      sync.Once
 	mu             sync.RWMutex
 	sessions       map[string]*Session
 	contexts       map[string]*playContext
@@ -210,6 +212,7 @@ func (c countingHeaderWriter) SetHeader(k, v string) { c.hw.SetHeader(k, v) }
 func NewWithProvider(p media.Provider) *Manager {
 	m := &Manager{
 		provider:       p,
+		stopReap:       make(chan struct{}),
 		sessions:       make(map[string]*Session),
 		contexts:       make(map[string]*playContext),
 		assetIndex:     make(map[string]string),
@@ -697,9 +700,24 @@ func (m *Manager) lookup(id string) (*Session, *playContext, bool) {
 func (m *Manager) reap() {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
-	for range t.C {
-		m.sweepExpired(time.Now())
+	for {
+		select {
+		case <-t.C:
+			m.sweepExpired(time.Now())
+		case <-m.stopReap:
+			return
+		}
 	}
+}
+
+// Close stops the background session reaper. The Manager keeps working; sessions simply
+// expire only when they are next looked up.
+func (m *Manager) Close() {
+	m.closeOnce.Do(func() {
+		if m.stopReap != nil { // a Manager built without NewWithProvider has no reaper
+			close(m.stopReap)
+		}
+	})
 }
 
 // sweepExpired removes every session expired at now, with its index entries.
