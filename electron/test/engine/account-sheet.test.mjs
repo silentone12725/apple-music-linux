@@ -169,3 +169,67 @@ test('a failure after Retry shows Apple’s message on the form, then later snap
     assert.equal(dlg().open, true);
     assert.equal(inputs(dlg).length >= 2, true);
 });
+
+
+for (const label of ['Retry', 'Cancel']) {
+    test(`${label} completes when the failure event arrives before the POST`, async () => {
+        let release;
+        const calls = [];
+        const { sheet, dlg } = setup({
+            submitCode: () => new Promise(r => { release = r; }),
+            savedEmail: async () => 'me@example.com', onCancel: () => calls.push('cancel'),
+        });
+        sheet.onSnapshot(wrongPasswordSnap(7));
+        labelled(dlg, label).click();
+        sheet.onSnapshot({ state: { authentication: 'failed' } });
+        release(true);
+        await tick(); await tick();
+        if (label === 'Retry') {
+            assert.equal(inputs(dlg)[0].value, 'me@example.com');
+            sheet.onSnapshot(wrongPasswordSnap(7));
+            assert.match(dlg().textContent, /Sign-In Required/);
+        } else {
+            assert.equal(dlg().open, false);
+            assert.deepEqual(calls, ['cancel']);
+        }
+        sheet.close();
+    });
+}
+
+test('Cancel Sign-In while Retry waits for the account never reopens the sheet', async () => {
+    let release;
+    const { sheet, dlg } = setup({ savedEmail: () => new Promise(r => { release = r; }) });
+    sheet.onSnapshot(wrongPasswordSnap(8));
+    labelled(dlg, 'Retry').click();
+    await tick();
+    labelled(dlg, 'Cancel Sign-In').click();
+    release('me@example.com');
+    await tick();
+    assert.equal(dlg().open, false);
+});
+
+for (const beforeResponse of [true, false]) {
+    test(`generic recovery choice reports sign-in failure ${beforeResponse ? 'before' : 'after'} its POST`, async () => {
+        let resolve;
+        const { sheet, dlg } = setup({ submitCode: () => new Promise(r => { resolve = r; }) });
+        const challenge = { type: 'dialog_choice', id: 30, title: 'Recovery Options', metadata: { buttons: 'Text me\nCall me' } };
+        sheet.onSnapshot({ state: { authentication: 'challenging' }, challenge });
+        labelled(dlg, 'Text me').click();
+        const fail = () => sheet.onSnapshot({ state: { authentication: 'failed' }, challenge, failure: { message: 'Apple rejected the request.' } });
+        if (beforeResponse) fail();
+        resolve(true); await tick();
+        if (!beforeResponse) fail();
+        assert.match(dlg().textContent, /Apple rejected the request/);
+        assert.ok(inputs(dlg).length >= 2, 'failure returns to the password form');
+        sheet.close();
+    });
+}
+test('cancelling later challenges does not forget earlier dismissed challenges', async () => {
+    const { sheet, dlg } = setup();
+    sheet.onSnapshot(wrongPasswordSnap(40));
+    labelled(dlg, 'Cancel').click(); await tick();
+    sheet.onSnapshot(wrongPasswordSnap(41));
+    labelled(dlg, 'Cancel').click(); await tick();
+    sheet.onSnapshot(wrongPasswordSnap(40));
+    assert.equal(dlg().open, false);
+});

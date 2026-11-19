@@ -30,14 +30,19 @@ export function spreadDigits(current, index, text) {
  * Snapshots keep a pending challenge until sign-in moves on, so challenges are
  * told apart by ID, and a challenge the user cancelled is not reopened.
  */
-export function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null, challengeId = null }) {
+export function promptAction(snap, { open, view = null, submittedId = null, dismissedIds = new Set(), challengeId = null }) {
     const st = snap?.state ?? {};
     if (st.fairplay === 'ready' || snap?.capabilities?.cbcs === true || st.authentication === 'logged_in') {
         return open ? 'close' : 'none';
     }
     const ch = snap?.challenge;
+    // A failure ends the dialog that is open, unless Apple has already asked a new question
+    // (an ID we have neither shown, answered nor dismissed): that one is shown instead.
+    const newChallenge = ch?.id != null && ch.id !== challengeId && ch.id !== submittedId && !dismissedIds.has(ch.id);
+    if (st.authentication === 'failed' && open && !newChallenge) return view === 'code' ? 'expired' : 'failed';
+    if (ch?.id != null && dismissedIds.has(ch.id)) return 'none';
     if (ch?.type === 'two_factor') {
-        if (!open) return ch.id != null && ch.id === dismissedId ? 'none' : 'code';
+        if (!open) return 'code';
         if (view !== 'code') return 'code';
         if (submittedId != null && ch.id !== submittedId) return 'retry';
         // New challenge arrived after a special code (resend / can't-reach-devices):
@@ -46,12 +51,11 @@ export function promptAction(snap, { open, view = null, submittedId = null, dism
         return 'none';
     }
     if (ch?.type === 'dialog_choice') {
-        if (!open) return ch.id != null && ch.id === dismissedId ? 'none' : 'choice';
+        if (!open) return 'choice';
         if (view !== 'choice') return 'choice';
         // Apple asked again (a new dialog, e.g. after Retry): show it instead of leaving the old buttons stuck.
         if (challengeId != null && ch.id !== challengeId) return 'choice';
         return 'none';
     }
-    if (st.authentication === 'failed' && open) return view === 'code' ? 'expired' : 'failed';
     return 'none';
 }
