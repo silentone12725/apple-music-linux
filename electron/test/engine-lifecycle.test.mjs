@@ -246,3 +246,36 @@ test('recovery skips the ownership check when the recorded engine is gone', asyn
         assert.equal(readFileSync(lockPath, 'utf8'), '4242\n');
     } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('the engine is asked to stop by closing its stdin, and Windows is not killed first', async () => {
+    const make = () => {
+        const proc = fakeChild();
+        proc.stdinEnded = 0;
+        proc.stdin = { end: () => { proc.stdinEnded++; } };
+        return proc;
+    };
+    const linux = make();
+    const l1 = createEngineLifecycle({ prepare: async () => {}, spawn: () => linux, log: noop, plat: 'linux' });
+    await l1.start(); await l1.stop();
+    assert.equal(linux.stdinEnded, 1);
+    assert.deepEqual(linux.signals, ['SIGTERM']);
+
+    const win = make();
+    win.kill = signal => { win.signals.push(signal); win.signalCode = signal; win.emit('exit', null, signal); win.emit('close', null, signal); };
+    const l2 = createEngineLifecycle({ prepare: async () => {}, spawn: () => win, log: noop, plat: 'win32', killDelay: 20 });
+    await l2.start();
+    const stopping = l2.stop();
+    await wait(5);
+    assert.equal(win.stdinEnded, 1);
+    assert.deepEqual(win.signals, [], 'no kill while the engine can still exit on its own');
+    await stopping;
+    assert.deepEqual(win.signals, ['SIGKILL'], 'killed only after the grace period');
+
+    const polite = make();
+    const l3 = createEngineLifecycle({ prepare: async () => {}, spawn: () => polite, log: noop, plat: 'win32', killDelay: 50 });
+    await l3.start();
+    const s3 = l3.stop();
+    polite.emit('exit', 0, null); polite.emit('close', 0, null); // the engine leaves by itself
+    await s3;
+    assert.deepEqual(polite.signals, []);
+});

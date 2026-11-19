@@ -394,14 +394,18 @@ const engineLifecycle = createEngineLifecycle({
         // before adding our PATH or the child would see two competing entries.
         const baseEnv = { ...process.env };
         if (IS_WIN && libEnv.PATH) delete baseEnv.Path;
-        return spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
+        const child = spawn(ENGINE_BIN, ['--api', String(ENGINE_PORT)], {
             cwd: ENGINE_DATA_DIR,
-            stdio: ['ignore', 'pipe', 'pipe'],
+            // stdin stays open for as long as this process lives: the engine stops itself, cleanly, when it
+            // closes, however Adam went away (quit, signal, crash or kill). See ADAM_EXIT_ON_STDIN_EOF.
+            stdio: ['pipe', 'pipe', 'pipe'],
             windowsHide: true,
             // Force Go's pure-Go DNS resolver to avoid CGO getaddrinfo SIGSEGV
             // when the engine makes HTTP requests to Apple's API servers.
-            env: { ...baseEnv, GODEBUG: 'netdns=go', ADAM_EXPORT_PICKED: EXPORT_PICKED_FILE, ...libEnv },
+            env: { ...baseEnv, GODEBUG: 'netdns=go', ADAM_EXPORT_PICKED: EXPORT_PICKED_FILE, ADAM_EXIT_ON_STDIN_EOF: '1', ...libEnv },
         });
+        child.stdin.on('error', () => {}); // a closed pipe (EPIPE) is the engine having already gone
+        return child;
     },
     killDelay: 3000, // allow normal VLC teardown before forced termination
     onOutput: data => console.log('[engine]', data.toString().trimEnd()),
@@ -422,6 +426,7 @@ function stopEngine() { return engineLifecycle.stop(); }
 // when nothing is playing, otherwise at the next pause so playback is never cut.
 const FAIRPLAY_LIB64 = path.join(CONFIG_DIR, 'drm', 'rootfs', 'system', 'lib64');
 let _reloadEngineOnPause = false;
+let _fairplayFetch = null; // the library download child (Linux), so a quit can stop it
 function ensureFairPlayLibs() {
     if (!app.isPackaged) return;
     if (IS_WIN) return ensureFairPlayLibsWindows();
@@ -430,10 +435,12 @@ function ensureFairPlayLibs() {
     const script = path.join(process.resourcesPath, 'fetch-fairplay-libs.sh');
     if (!existsSync(script)) return;
     console.log('[Adam] Downloading the FairPlay libraries for lossless playback...');
-    const proc = spawn('sh', [script, '--dest', FAIRPLAY_LIB64, '--quiet'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const proc = _fairplayFetch = spawn('sh', [script, '--dest', FAIRPLAY_LIB64, '--quiet'], { stdio: ['ignore', 'ignore', 'pipe'] });
     proc.stderr.on('data', d => console.error('[Adam] fairplay:', String(d).trim()));
     proc.on('error', e => console.error('[Adam] FairPlay download could not start:', e.message));
     proc.on('close', code => {
+        if (_fairplayFetch === proc) _fairplayFetch = null;
+        if (_released) return; // quitting: nothing to reload
         if (code !== 0) return console.error('[Adam] FairPlay libraries unavailable; lossless stays off');
         console.log('[Adam] FairPlay libraries ready; enabling lossless');
         if (_lastMprisStatus === 'Playing') _reloadEngineOnPause = true;
@@ -834,14 +841,15 @@ function pageLogLevel(event) {
     return typeof l === 'number' ? PAGE_LEVELS[l] ?? 'info' : l || 'info';
 }
 
+let _debugLogStream = null;
 function setupDebugLogging(win) {
     if (!DEBUG_OUTPUT && !process.env.ADAM_DEVTOOLS) return;
     const logsDir = path.join(CONFIG_DIR, 'logs');
     ensurePrivateDir(logsDir);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const logStream = createWriteStream(path.join(logsDir, `debug-${stamp}.log`), { mode: 0o600 });
+    const logStream = _debugLogStream = createWriteStream(path.join(logsDir, `debug-${stamp}.log`), { mode: 0o600 });
     pruneDebugLogs(logsDir);
-    const _write = (tag, args) => logStream.write(`[${new Date().toISOString()}] ${tag} ${args.join(' ')}\n`);
+    const _write = (tag, args) => { if (!logStream.writableEnded) logStream.write(`[${new Date().toISOString()}] ${tag} ${args.join(' ')}\n`); };
     const origLog = console.log, origError = console.error, origWarn = console.warn;
     console.log   = (...a) => { origLog(...a);   _write('LOG  ', a); };
     console.error = (...a) => { origError(...a); _write('ERROR', a); };
@@ -1452,6 +1460,15 @@ function createWindow() {
     });
 
     win.on('closed', () => { memoryMaintenance.stop(); win = null; });
+
+    // Windows logoff or shutdown closes the window, and the hide-on-close handler above would refuse
+    // and hold the session up. Treat it as a quit, then release everything before the OS ends us.
+    win.on('query-end-session', () => { isQuitting = true; });
+    win.on('session-end', () => {
+        isQuitting = true;
+        try { _storeFlushSync(); releaseResources(); } catch (_) {}
+        // The engine's stdin closes with this process, so it stops itself too.
+    });
 }
 
 // The renderer's memory as the OS sees it (working set, MB), or null when it cannot be read.
@@ -2089,7 +2106,8 @@ process.on('uncaughtException', (err) => {
     }
     // Re-throw anything unrelated to D-Bus / X11.
     console.error('Uncaught exception:', err);
-    app.exit(1);
+    try { _storeFlushSync(); releaseResources(); } catch (_) {}
+    app.exit(1); // the engine's stdin closes with this process and it stops itself
 });
 
 // Properly release the D-Bus service name before nulling the player.
@@ -3192,6 +3210,48 @@ function _storeFlushSync() {
     } catch (_) {}
 }
 
+// Everything this process holds outside its own memory, released in one place so that every way out
+// (tray Exit, window close, SIGINT/SIGTERM/SIGHUP, Windows logoff or shutdown, a crash) leaves nothing
+// for the next start to clean up. Synchronous and idempotent: it runs from signal and crash paths too.
+let _released = false;
+function releaseResources() {
+    if (_released) return;
+    _released = true;
+    try { globalShortcut.unregisterAll(); } catch (_) {}
+    // Presence outlives a killed process on Discord's side until it is cleared.
+    try { _discordEnabled = false; _discordPendingActivity = null; _discordClearActivity(); } catch (_) {}
+    if (_discordReconnectTimer) { clearTimeout(_discordReconnectTimer); _discordReconnectTimer = null; }
+    if (_discordSocket) { try { _discordSocket.destroy(); } catch (_) {} _discordSocket = null; }
+    if (_mprisRetryTimer) { clearTimeout(_mprisRetryTimer); _mprisRetryTimer = null; }
+    try { _destroyMprisPlayer(); } catch (_) {} // gives the D-Bus name back
+    try { win?.setProgressBar?.(-1); } catch (_) {}
+    try { if (miniWin && !miniWin.isDestroyed()) miniWin.destroy(); } catch (_) {}
+    try { if (tray) { tray.destroy(); tray = null; } } catch (_) {}
+    // An unfinished library download must not outlive us or leave its partial file behind.
+    try { _fairplayFetch?.kill('SIGTERM'); } catch (_) {}
+    try {
+        for (const name of readdirSync(FAIRPLAY_LIB64)) {
+            if (/^\..+\.part$/.test(name)) { try { unlinkSync(path.join(FAIRPLAY_LIB64, name)); } catch (_) {} }
+        }
+    } catch (_) { /* no library directory yet */ }
+    try { _debugLogStream?.end(); } catch (_) {}
+}
+
+// Quit through before-quit (which flushes state and stops the engine) on a signal; if that stalls,
+// leave anyway. The engine notices the closed pipe and stops itself.
+let _signalQuitTimer = null;
+function quitOnSignal(name) {
+    console.log(`[Adam] ${name}: quitting`);
+    if (!_signalQuitTimer) {
+        _signalQuitTimer = setTimeout(() => { _storeFlushSync(); releaseResources(); app.exit(0); }, 10_000);
+        _signalQuitTimer.unref?.();
+    }
+    app.quit();
+}
+for (const sig of IS_WIN ? ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] : ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => quitOnSignal(sig));
+}
+
 // Stop engine and mark quitting before any window closes so the close handler
 // allows the window to actually be destroyed.
 app.on('before-quit', (e) => {
@@ -3203,6 +3263,7 @@ app.on('before-quit', (e) => {
     // sync-writing to disk and really quitting.
     try { win?.webContents?.send('app:flush-and-quit'); } catch (_) {}
     globalShortcut.unregisterAll();
+    try { _discordClearActivity(); } catch (_) {} // written now, flushed during the delay below
     setTimeout(async () => {
         _storeFlushSync();
         // Bound the cookie flush: a stalled promise must not hold the quit open.
@@ -3210,7 +3271,7 @@ app.on('before-quit', (e) => {
         part.flushStorageData();
         await Promise.race([part.cookies.flushStore().catch(() => {}), new Promise(r => setTimeout(r, 3000))]);
         await stopEngine();
-        if (tray) { tray.destroy(); tray = null; }
+        releaseResources();
         // Cleanup is complete: the web player's unload handlers must not be able to veto the quit
         // and leave a window open with a stopped engine.
         app.exit(0);
@@ -3223,7 +3284,4 @@ app.on('before-quit', (e) => {
 // (triggered by app.quit() from the tray or SIGINT), so do nothing.
 app.on('window-all-closed', () => {});
 
-// Ctrl+C in the launch terminal sends SIGINT. Without this handler Electron
-// ignores it (the window-close override keeps the process alive).
-// SIGINT from terminal — before-quit will call stopEngine().
-process.on('SIGINT', () => { app.quit(); });
+

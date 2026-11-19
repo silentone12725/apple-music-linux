@@ -94,7 +94,7 @@ export function isPortFree(port) {
 // Keep async preparation, child events and restart timers under one owner.
 export function createEngineLifecycle({ prepare, spawn, onOutput = () => {}, onStderr = () => {},
     onError = console.error, log = console.log, isQuitting = () => false,
-    restartDelay = 1000, killDelay = 800 }) {
+    restartDelay = 1000, killDelay = 800, plat = process.platform }) {
     let child = null;
     let starting = null;
     let stopped = false;
@@ -173,6 +173,11 @@ export function createEngineLifecycle({ prepare, spawn, onOutput = () => {}, onS
                 }
             }, killDelay);
             deadline = setTimeout(done, killDelay + 800);
+            // Closing the engine's stdin asks it to shut down cleanly on every platform. Windows has
+            // no SIGTERM (Node turns any signal into TerminateProcess, which skips the engine's
+            // cleanup), so there the stdin close is the only polite request and the kill waits.
+            try { proc.stdin?.end(); } catch {}
+            if (plat === 'win32') return;
             try { proc.kill('SIGTERM'); } catch { done(); }
         });
     }

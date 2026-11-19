@@ -928,6 +928,10 @@ func (s *APIServer) Stop() {
 	if s.tlsSrv != nil {
 		s.tlsSrv.Shutdown(ctx) //nolint:errcheck
 	}
+	// Nothing can write now: drop the unfinished downloads instead of leaving them for the next start.
+	if s.diskCache != nil {
+		s.diskCache.RemoveInFlight()
+	}
 	// Release the session lock last, after the wrapper is fully stopped.
 	// Guard nil: when drmReady==false, Start() never acquires the lock.
 	if s.sessionLock != nil {

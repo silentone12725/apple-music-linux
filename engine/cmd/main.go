@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -98,10 +99,38 @@ func main() {
 			slog.Error("API server failed to start", "err", err)
 			os.Exit(1)
 		}
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		slog.Info("Shutting down API server")
+		shutdown := make(chan string, 1)
+		stopFor := func(reason string) {
+			select {
+			case shutdown <- reason:
+			default:
+			}
+		}
+		sigCh := make(chan os.Signal, 2)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		go func() {
+			<-sigCh
+			stopFor("signal")
+			<-sigCh // a second signal means the first shutdown is taking too long
+			slog.Error("Second signal during shutdown: exiting now")
+			os.Exit(1)
+		}()
+		// Windows has no signal that reaches a child, and a parent that is killed outright cannot send
+		// one. The parent therefore holds the engine's stdin open, and its closing is the stop request
+		// on every platform and however the parent went away.
+		if os.Getenv("ADAM_EXIT_ON_STDIN_EOF") == "1" {
+			go func() {
+				_, _ = io.Copy(io.Discard, os.Stdin)
+				stopFor("parent closed stdin")
+			}()
+		}
+		reason := <-shutdown
+		slog.Info("Shutting down API server", "reason", reason)
+		// A stop that hangs must not leave the engine running with nobody to stop it.
+		time.AfterFunc(20*time.Second, func() {
+			slog.Error("Shutdown timed out: exiting")
+			os.Exit(1)
+		})
 		srv.Stop()
 		return
 	}

@@ -269,6 +269,18 @@ func (c *Cache) sweepStaleTmp() {
 	}
 }
 
+// RemoveInFlight deletes every .tmp file: the unfinished downloads. It is for shutdown, once
+// nothing can write any more, so an exit leaves no partial files for the next start to sweep.
+// Committed entries are untouched.
+func (c *Cache) RemoveInFlight() {
+	entries, _ := os.ReadDir(c.dir)
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".tmp") {
+			os.Remove(filepath.Join(c.dir, e.Name())) //nolint:errcheck
+		}
+	}
+}
+
 // Evict removes the oldest entries (by mtime) until the total size is below
 // the configured limit.  No-op when no limit is set.
 func (c *Cache) Evict() {
