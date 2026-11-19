@@ -39,7 +39,7 @@ type RestartPolicy struct {
 	StartupTimeout time.Duration
 
 	// AuthTimeout is how long Login() waits for the backend to reach
-	// FairPlayReady after authentication completes.
+	// FairPlaySignedIn after authentication completes.
 	AuthTimeout time.Duration
 }
 
@@ -165,10 +165,10 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 	}
 	if session.HasSession() {
 		m.snapshot.State.Session = SessionValid
-		m.snapshot.State.Authentication = AuthLoggedIn
+		m.snapshot.State.Authentication = AuthSignedIn
 	} else {
 		m.snapshot.State.Session = SessionEmpty
-		m.snapshot.State.Authentication = AuthLoggedOut
+		m.snapshot.State.Authentication = AuthSignedOut
 	}
 	go m.watchEvents()
 	return m
@@ -256,11 +256,11 @@ func (m *DRMManager) NoteWebSession() {
 	// older session marker must not report "logged in" and close the sign-in sheet early. The running
 	// flag covers the moments the snapshot does not yet say so (a sign-in waiting for its turn).
 	st := m.snapshot.State.Authentication
-	signingIn := m.signingIn.Load() || st == AuthChallenging || st == AuthLoggingIn
+	signingIn := m.signingIn.Load() || st == AuthChallenging || st == AuthSigningIn
 	m.mu.RUnlock()
 	if !signingIn {
 		m.mergeAndEmit(DRMSnapshot{
-			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+			State:   DRMState{Session: SessionValid, Authentication: AuthSignedIn},
 			Message: "web session",
 		})
 	}
@@ -325,7 +325,7 @@ func (m *DRMManager) ensureRunning(ctx context.Context) error {
 		// Session DB is present — reflect that immediately so the UI shows the
 		// correct state without waiting for a wrapper-emitted event.
 		m.mergeAndEmit(DRMSnapshot{
-			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+			State:   DRMState{Session: SessionValid, Authentication: AuthSignedIn},
 			Message: "session reuse — mpl_db present",
 		})
 		return nil
@@ -388,7 +388,7 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 	m.setManagerState(ManagerInitializing)
 	// Replace the previous attempt's outcome right away: a client that polls (or reconnects)
 	// must not read an earlier failure as this attempt's result.
-	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggingIn}, Message: "signing in"})
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthSigningIn}, Message: "signing in"})
 
 	loginCtx, cancel := context.WithTimeout(ctx, m.policy.AuthTimeout)
 	defer cancel()
@@ -408,7 +408,7 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 		if errors.Is(authErr, ErrSignInCancelled) {
 			// Nobody failed: the code was not given. Back to "signed out", without a failure.
 			m.setManagerState(ManagerReady)
-			m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggedOut}, Message: "sign-in cancelled"})
+			m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthSignedOut}, Message: "sign-in cancelled"})
 			return fmt.Errorf("authenticate: %w", authErr)
 		}
 		m.setManagerState(ManagerFailed)
@@ -433,14 +433,14 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 		// Fresh login succeeded — credentials were verified by the backend;
 		// session files (mpl_db, MUSIC_TOKEN) are now on disk.
 		m.mergeAndEmit(DRMSnapshot{
-			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+			State:   DRMState{Session: SessionValid, Authentication: AuthSignedIn},
 			Message: "login successful",
 		})
 	} else if m.session.HasSession() {
 		// Session-reuse restart — reflect the existing session immediately so
 		// the UI shows the correct state without waiting for a backend event.
 		m.mergeAndEmit(DRMSnapshot{
-			State:   DRMState{Session: SessionValid, Authentication: AuthLoggedIn},
+			State:   DRMState{Session: SessionValid, Authentication: AuthSignedIn},
 			Message: "session reuse — mpl_db present",
 		})
 	}
@@ -649,7 +649,7 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 		m.snapshot.State.Recovery = snap.State.Recovery
 	}
 
-	if m.snapshot.State.FairPlay == FairPlayReady {
+	if m.snapshot.State.FairPlay == FairPlaySignedIn {
 		// Capabilities are derived at the snapshot level, not inside State.
 		m.snapshot.Capabilities = CapabilityState{
 			CBCS:  true,

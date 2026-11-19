@@ -66,14 +66,14 @@ func TestWebSessionDoesNotAnswerForARunningSignIn(t *testing.T) {
 	write(t, dir, "session-ready", "1")
 	b := newFake()
 	m := newTestManager(t, dir, b)
-	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggingIn}})
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthSigningIn}})
 	m.NoteWebSession()
-	if got := m.Status().State.Authentication; got != AuthLoggingIn {
+	if got := m.Status().State.Authentication; got != AuthSigningIn {
 		t.Fatalf("a web session overwrote the running sign-in: %v", got)
 	}
 	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthFailed}})
 	m.NoteWebSession()
-	if got := m.Status().State.Authentication; got != AuthLoggedIn {
+	if got := m.Status().State.Authentication; got != AuthSignedIn {
 		t.Fatalf("with no sign-in running the marker should report logged in, got %v", got)
 	}
 }
@@ -167,7 +167,7 @@ func TestAuthenticateRefusesWhilePausedAndCancelIsNotAFailure(t *testing.T) {
 	b.startFn = func(context.Context, *fakeBackend) error { return ErrSignInCancelled }
 	_ = m.Authenticate(context.Background(), Credentials{Email: "a@b.c", Password: "pw"})
 	st := m.Status()
-	if st.State.Authentication != AuthLoggedOut || st.Failure != nil {
+	if st.State.Authentication != AuthSignedOut || st.Failure != nil {
 		t.Fatalf("a cancelled sign-in must end signed out without a failure: %+v", st)
 	}
 	if !m.session.SignInPausedUntil().IsZero() {
@@ -188,10 +188,10 @@ func TestWebSessionDoesNotAnswerForAQueuedSignIn(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "session-ready", "1")
 	m := newTestManager(t, dir, newFake())
-	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthLoggedOut}})
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthSignedOut}})
 	m.signingIn.Store(true)
 	m.NoteWebSession()
-	if got := m.Status().State.Authentication; got == AuthLoggedIn {
+	if got := m.Status().State.Authentication; got == AuthSignedIn {
 		t.Fatalf("a web session answered a queued sign-in: %v", got)
 	}
 }

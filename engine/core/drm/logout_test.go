@@ -304,8 +304,8 @@ func TestLogoutDuringVerificationCodeIsImmediateAndComplete(t *testing.T) {
 	if (m.auth.stored != Credentials{}) {
 		t.Error("sign-out must forget the credentials held in memory")
 	}
-	if st := m.Status().State; st.Session != SessionEmpty || st.Authentication != AuthLoggedOut {
-		t.Errorf("want empty/logged_out, got %v/%v", st.Session, st.Authentication)
+	if st := m.Status().State; st.Session != SessionEmpty || st.Authentication != AuthSignedOut {
+		t.Errorf("want empty/signed_out, got %v/%v", st.Session, st.Authentication)
 	}
 }
 

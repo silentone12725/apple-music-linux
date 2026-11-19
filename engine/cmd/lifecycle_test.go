@@ -53,39 +53,39 @@ func TestEpoch_SinceIsRecentTimestamp(t *testing.T) {
 
 // ── engineLifecycle ───────────────────────────────────────────────────────────
 
-func TestLifecycle_DRMReadySinceZeroBeforeReady(t *testing.T) {
+func TestLifecycle_DRMSignedInSinceZeroBeforeReady(t *testing.T) {
 	em := newEpochManager()
 	lc := newEngineLifecycle(em)
-	if !lc.DRMReadySince().IsZero() {
-		t.Fatal("DRMReadySince must be zero before OnFairPlayReady is called")
+	if !lc.DRMSignedInSince().IsZero() {
+		t.Fatal("DRMSignedInSince must be zero before OnFairPlaySignedIn is called")
 	}
 }
 
-func TestLifecycle_OnFairPlayReadySetsTimestamp(t *testing.T) {
+func TestLifecycle_OnFairPlaySignedInSetsTimestamp(t *testing.T) {
 	em := newEpochManager()
 	lc := newEngineLifecycle(em)
 
 	before := time.Now()
-	lc.OnFairPlayReady(func() {})
+	lc.OnFairPlaySignedIn(func() {})
 	after := time.Now()
 
-	ts := lc.DRMReadySince()
+	ts := lc.DRMSignedInSince()
 	if ts.IsZero() {
-		t.Fatal("DRMReadySince must be non-zero after OnFairPlayReady")
+		t.Fatal("DRMSignedInSince must be non-zero after OnFairPlaySignedIn")
 	}
 	if ts.Before(before) || ts.After(after) {
-		t.Fatalf("DRMReadySince %v not in window [%v, %v]", ts, before, after)
+		t.Fatalf("DRMSignedInSince %v not in window [%v, %v]", ts, before, after)
 	}
 }
 
-func TestLifecycle_OnFairPlayReadySchedulesCallback(t *testing.T) {
+func TestLifecycle_OnFairPlaySignedInSchedulesCallback(t *testing.T) {
 	em := newEpochManager()
 	lc := newEngineLifecycle(em)
 
 	// Patch resetAfter to be tiny so we can observe the callback in the test.
 	// We can't patch the const, so we stop and replace the timer directly.
 	fired := make(chan struct{}, 1)
-	lc.OnFairPlayReady(func() { fired <- struct{}{} })
+	lc.OnFairPlaySignedIn(func() { fired <- struct{}{} })
 
 	// Manually stop the long timer and replace with a 10ms one.
 	lc.drmReadyMu.Lock()
@@ -101,23 +101,23 @@ func TestLifecycle_OnFairPlayReadySchedulesCallback(t *testing.T) {
 	}
 }
 
-func TestLifecycle_OnFairPlayReadyCancelsOldTimer(t *testing.T) {
+func TestLifecycle_OnFairPlaySignedInCancelsOldTimer(t *testing.T) {
 	em := newEpochManager()
 	lc := newEngineLifecycle(em)
 
 	count := 0
 	// Call twice — only the second timer should fire.
-	lc.OnFairPlayReady(func() { count++ })
-	lc.OnFairPlayReady(func() { count++ })
+	lc.OnFairPlaySignedIn(func() { count++ })
+	lc.OnFairPlaySignedIn(func() { count++ })
 
 	// Both timers have drmSessionTTL duration, so neither fires in the test.
 	// What matters is that the first one was stopped and replaced — no double-fire.
-	// We verify this by checking DRMReadySince is updated each call.
-	t1 := lc.DRMReadySince()
-	lc.OnFairPlayReady(func() {})
-	t2 := lc.DRMReadySince()
+	// We verify this by checking DRMSignedInSince is updated each call.
+	t1 := lc.DRMSignedInSince()
+	lc.OnFairPlaySignedIn(func() {})
+	t2 := lc.DRMSignedInSince()
 	if !t2.Equal(t2) || t1.After(t2) {
-		t.Fatal("OnFairPlayReady must update DRMReadySince each call")
+		t.Fatal("OnFairPlaySignedIn must update DRMSignedInSince each call")
 	}
 }
 

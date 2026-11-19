@@ -25,7 +25,7 @@ export async function autoAuthenticate({ request, creds, forget, dropPassword = 
     if (!status || status.status !== 200 || !status.json) return 'no-engine';
     const st = status.json.state ?? {};
     // A session still loading must not be replaced by a fresh sign-in, which would ask Apple for another code.
-    if (st.fairplay === 'ready' || st.session === 'valid') return 'has-session';
+    if (st.fairplay === 'signed_in' || st.session === 'valid') return 'has-session';
 
     log('Auto-authenticating with saved DRM credentials');
     const sentAt = now();
@@ -44,8 +44,8 @@ export async function autoAuthenticate({ request, creds, forget, dropPassword = 
         const at = Date.parse(snap.timestamp ?? '');
         if (Number.isFinite(at) && at < sentAt - 1000) continue;
         const auth = snap.state?.authentication;
-        if (auth === 'logged_in' || snap.state?.fairplay === 'ready') return 'signed-in';
-        if (auth === 'logged_out' && /cancel/i.test(String(snap.message ?? ''))) {
+        if (auth === 'signed_in' || snap.state?.fairplay === 'signed_in') return 'signed-in';
+        if (auth === 'signed_out' && /cancel/i.test(String(snap.message ?? ''))) {
             // Apple wanted a verification code and nobody launched this sign-in: the engine ended it quietly, with no
             // prompt. The password would ask again on every launch, so drop it; the email stays to pre-fill the form.
             await dropPassword();

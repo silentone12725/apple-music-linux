@@ -24,7 +24,7 @@ test('promptAction shows code entry for a two-factor challenge and closes once F
     assert.equal(promptAction(twoFactor(1), { open: false }), 'code');
     assert.equal(promptAction(twoFactor(1), { open: true, view: 'signin' }), 'code', 'the sign-in sheet moves on to the code');
     assert.equal(promptAction({ state: { authentication: 'challenging' }, challenge: { type: 'credentials' } }, { open: false }), 'none');
-    assert.equal(promptAction({ state: { fairplay: 'ready' } }, { open: true }), 'close');
+    assert.equal(promptAction({ state: { fairplay: 'signed_in' } }, { open: true }), 'close');
     assert.equal(promptAction({ capabilities: { cbcs: true }, state: {} }, { open: true }), 'close');
     assert.equal(promptAction({ state: { authentication: 'failed' } }, { open: true }), 'failed');
     assert.equal(promptAction({ state: { session: 'valid' } }, { open: false }), 'none', 'a web session alone opens nothing');
@@ -52,7 +52,7 @@ test('promptAction: a sign-in that fails while the code is being asked for goes 
 
 test('promptAction: a cancelled sign-in (signed out, no failure) never reopens the sheet', async () => {
     const { promptAction } = await import('../../src/engine/verification-code.js');
-    const out = { state: { authentication: 'logged_out' }, message: 'sign-in cancelled' };
+    const out = { state: { authentication: 'signed_out' }, message: 'sign-in cancelled' };
     assert.equal(promptAction(out, { open: true, view: 'signin' }), 'none');
     assert.equal(promptAction(out, { open: false, view: null }), 'none');
 });

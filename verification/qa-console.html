@@ -1377,9 +1377,9 @@ async function customErrTest() {
 // ── DRM ────────────────────────────────────────────────────────────────────
 
 const DRM_STATE_COLORS = {
-  ready: 'var(--green)', running: 'var(--green)', logged_in: 'var(--green)', valid: 'var(--green)', fairplay_ready: 'var(--green)',
-  initializing: 'var(--yellow)', logging_in: 'var(--yellow)', challenging: 'var(--yellow)', refreshing: 'var(--yellow)', scheduled: 'var(--yellow)',
-  failed: 'var(--red)', logged_out: 'var(--red)', empty: 'var(--red)', expired: 'var(--red)',
+  ready: 'var(--green)', running: 'var(--green)', signed_in: 'var(--green)', valid: 'var(--green)', fairplay_ready: 'var(--green)',
+  initializing: 'var(--yellow)', signing_in: 'var(--yellow)', challenging: 'var(--yellow)', refreshing: 'var(--yellow)', scheduled: 'var(--yellow)',
+  failed: 'var(--red)', signed_out: 'var(--red)', empty: 'var(--red)', expired: 'var(--red)',
   stopped: 'var(--muted)', unknown: 'var(--muted)',
 };
 
@@ -1413,7 +1413,7 @@ function renderDRMStatus(data) {
   // Badge: show auth state abbreviation
   const badge = document.getElementById('drm-badge');
   const fp = state.fairplay;
-  if (fp === 'ready') {
+  if (fp === 'signed_in') {
     badge.textContent = '✓';
     badge.style.background = 'var(--green)';
     badge.style.color = '#000';
@@ -1421,7 +1421,7 @@ function renderDRMStatus(data) {
     badge.textContent = '2FA';
     badge.style.background = 'var(--yellow)';
     badge.style.color = '#000';
-  } else if (state.authentication === 'logged_out' || state.session === 'empty') {
+  } else if (state.authentication === 'signed_out' || state.session === 'empty') {
     badge.textContent = '✗';
     badge.style.background = 'var(--red)';
     badge.style.color = '#fff';

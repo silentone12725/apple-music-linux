@@ -11,7 +11,7 @@ import (
 // A wrong password: Apple raises the "Check the account information" dialog, the user answers it,
 // the backend reports the failure. No snapshot in that sequence may say "logged in": the account
 // sheet closes on it and the user never gets to retry.
-func TestWrongPasswordDialogNeverReportsLoggedIn(t *testing.T) {
+func TestWrongPasswordDialogNeverReportsSignedIn(t *testing.T) {
 	b := newFake()
 	var mu sync.Mutex
 	var seen []DRMSnapshot
@@ -55,26 +55,26 @@ func TestWrongPasswordDialogNeverReportsLoggedIn(t *testing.T) {
 	defer mu.Unlock()
 	for i, s := range seen {
 		t.Logf("%d auth=%v process=%v msg=%q challenge=%v", i, s.State.Authentication, s.State.Process, s.Message, s.Challenge != nil)
-		if s.State.Authentication == AuthLoggedIn {
-			t.Errorf("snapshot %d reports logged_in during a failed sign-in (msg %q)", i, s.Message)
+		if s.State.Authentication == AuthSignedIn {
+			t.Errorf("snapshot %d reports signed_in during a failed sign-in (msg %q)", i, s.Message)
 		}
 	}
 }
 
 // The wrapper reports RUNNING when the library initialises, long before any sign-in. Until hybris FairPlay is up it must
-// not read as logged in (or FairPlay ready); once it is up it must.
-func TestStateStringsOnlyReportLoggedInOnceFairPlayIsUp(t *testing.T) {
+// not read as signed in (or FairPlay signed in); once it is up it must.
+func TestStateStringsOnlyReportSignedInOnceFairPlayIsUp(t *testing.T) {
 	for _, state := range []string{"RUNNING", "INITIALIZING_FAIRPLAY"} {
 		early := SnapshotForStateString(state, false)
-		if early.State.Authentication == AuthLoggedIn {
-			t.Errorf("%s before hybris is ready reports logged_in", state)
+		if early.State.Authentication == AuthSignedIn {
+			t.Errorf("%s before hybris is ready reports signed_in", state)
 		}
-		if early.State.FairPlay == FairPlayReady {
-			t.Errorf("%s before hybris is ready reports FairPlay ready", state)
+		if early.State.FairPlay == FairPlaySignedIn {
+			t.Errorf("%s before hybris is ready reports FairPlay signed in", state)
 		}
 		late := SnapshotForStateString(state, true)
-		if late.State.Authentication != AuthLoggedIn {
-			t.Errorf("%s after hybris is ready does not report logged_in", state)
+		if late.State.Authentication != AuthSignedIn {
+			t.Errorf("%s after hybris is ready does not report signed_in", state)
 		}
 	}
 	// The challenge state belongs to the AuthCoordinator: a wrapper string arriving late must not move it back.

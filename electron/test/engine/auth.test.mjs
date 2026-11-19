@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { accountSignedIn, authProgress, drmURL, losslessReady, downloadQuality } from '../../src/engine/auth.js';
 
 test('a saved account survives a lazy backend restart', () => {
-    assert.equal(accountSignedIn({ state: { session: 'valid', authentication: 'logged_in', process: 'stopped' } }), true);
-    assert.equal(authProgress({ state: { session: 'valid', authentication: 'logging_in', process: 'starting' } }), 'pending');
+    assert.equal(accountSignedIn({ state: { session: 'valid', authentication: 'signed_in', process: 'stopped' } }), true);
+    assert.equal(authProgress({ state: { session: 'valid', authentication: 'signing_in', process: 'starting' } }), 'pending');
 });
 test('a fresh challenge or failure wins over retained session/capabilities', () => {
     const saved = { capabilities: { cbcs: true }, state: { session: 'valid', authentication: 'challenging' }, challenge: { type: '2fa' } };
@@ -15,7 +15,7 @@ test('a fresh challenge or failure wins over retained session/capabilities', () 
     assert.equal(accountSignedIn(saved), false);
 });
 test('successful live authentication completes polling', () => {
-    assert.equal(authProgress({ state: { authentication: 'logged_in', process: 'running' } }), 'done');
+    assert.equal(authProgress({ state: { authentication: 'signed_in', process: 'running' } }), 'done');
     assert.equal(authProgress({}), 'pending');
 });
 test('challenge endpoint is valid with and without a trailing slash', () => {
@@ -25,10 +25,10 @@ test('challenge endpoint is valid with and without a trailing slash', () => {
 });
 
 test('a saved account is not lossless-ready until FairPlay is live', () => {
-    const savedOnly = { state: { session: 'valid', authentication: 'logged_in', process: 'stopped', fairplay: 'unknown' }, capabilities: { cbcs: false } };
+    const savedOnly = { state: { session: 'valid', authentication: 'signed_in', process: 'stopped', fairplay: 'unknown' }, capabilities: { cbcs: false } };
     assert.equal(accountSignedIn(savedOnly), true, 'the account is saved');
     assert.equal(losslessReady(savedOnly), false, 'but lossless is not available');
-    assert.equal(losslessReady({ state: { fairplay: 'ready' } }), true);
+    assert.equal(losslessReady({ state: { fairplay: 'signed_in' } }), true);
     assert.equal(losslessReady({ capabilities: { cbcs: true } }), true);
     for (const empty of [{}, null, undefined, { state: {}, capabilities: {} }]) assert.equal(losslessReady(empty), false);
 });

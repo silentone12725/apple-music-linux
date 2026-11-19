@@ -193,7 +193,7 @@ func makeSession(t *testing.T, baseDir string) {
 
 // TestManagerInitialStateWithSession verifies the startup-time session fix:
 // when mpl_db exists on disk, NewDRMManager must immediately reflect
-// Session=valid and Authentication=logged_in in Status() — without any
+// Session=valid and Authentication=signed_in in Status() — without any
 // playback request or explicit Authenticate call.
 func TestManagerInitialStateWithSession(t *testing.T) {
 	backend := newMockBackend()
@@ -209,13 +209,13 @@ func TestManagerInitialStateWithSession(t *testing.T) {
 	if snap.State.Session != drm.SessionValid {
 		t.Errorf("Session: got %s, want valid", snap.State.Session)
 	}
-	if snap.State.Authentication != drm.AuthLoggedIn {
-		t.Errorf("Authentication: got %s, want logged_in", snap.State.Authentication)
+	if snap.State.Authentication != drm.AuthSignedIn {
+		t.Errorf("Authentication: got %s, want signed_in", snap.State.Authentication)
 	}
 }
 
 // TestManagerInitialStateWithoutSession verifies that without a session DB,
-// the initial state shows SessionEmpty and AuthLoggedOut — not the zero/unknown
+// the initial state shows SessionEmpty and AuthSignedOut — not the zero/unknown
 // values, which would leave the UI with no actionable information.
 func TestManagerInitialStateWithoutSession(t *testing.T) {
 	backend := newMockBackend()
@@ -225,8 +225,8 @@ func TestManagerInitialStateWithoutSession(t *testing.T) {
 	if snap.State.Session != drm.SessionEmpty {
 		t.Errorf("Session without DB: got %s, want empty", snap.State.Session)
 	}
-	if snap.State.Authentication != drm.AuthLoggedOut {
-		t.Errorf("Authentication without DB: got %s, want logged_out", snap.State.Authentication)
+	if snap.State.Authentication != drm.AuthSignedOut {
+		t.Errorf("Authentication without DB: got %s, want signed_out", snap.State.Authentication)
 	}
 }
 
@@ -235,14 +235,14 @@ func TestManagerInitialStateWithoutSession(t *testing.T) {
 // to always show session:empty even when ensureRunning had emitted SessionValid.
 func TestManagerMergeEmitSession(t *testing.T) {
 	backend := newMockBackend()
-	// Emit Session=valid + Auth=logged_in when Start is called (session-reuse path).
+	// Emit Session=valid + Auth=signed_in when Start is called (session-reuse path).
 	backend.emitOnStart = []drm.DRMEvent{{
 		Snapshot: drm.DRMSnapshot{
 			State: drm.DRMState{
 				Process:        drm.ProcessRunning,
-				FairPlay:       drm.FairPlayReady,
+				FairPlay:       drm.FairPlaySignedIn,
 				Session:        drm.SessionValid,
-				Authentication: drm.AuthLoggedIn,
+				Authentication: drm.AuthSignedIn,
 			},
 			Message: "session reuse",
 		},
@@ -282,8 +282,8 @@ func TestManagerMergeEmitSession(t *testing.T) {
 	if snap.State.Session != drm.SessionValid {
 		t.Errorf("Session after ensureRunning: got %s, want valid", snap.State.Session)
 	}
-	if snap.State.Authentication != drm.AuthLoggedIn {
-		t.Errorf("Authentication after ensureRunning: got %s, want logged_in", snap.State.Authentication)
+	if snap.State.Authentication != drm.AuthSignedIn {
+		t.Errorf("Authentication after ensureRunning: got %s, want signed_in", snap.State.Authentication)
 	}
 }
 
@@ -361,7 +361,7 @@ func TestManagerAuthenticateForwardsCredentials(t *testing.T) {
 }
 
 // TestManagerLogoutResetsState verifies that after Logout, the DRMSnapshot
-// reflects AuthLoggedOut, SessionEmpty, and ProcessStopped — regardless of
+// reflects AuthSignedOut, SessionEmpty, and ProcessStopped — regardless of
 // what state was active before.
 func TestManagerLogoutResetsState(t *testing.T) {
 	backend := newMockBackend()
@@ -381,8 +381,8 @@ func TestManagerLogoutResetsState(t *testing.T) {
 	}
 
 	snap := mgr.Status()
-	if snap.State.Authentication != drm.AuthLoggedOut {
-		t.Errorf("post-Logout Authentication: got %s, want logged_out", snap.State.Authentication)
+	if snap.State.Authentication != drm.AuthSignedOut {
+		t.Errorf("post-Logout Authentication: got %s, want signed_out", snap.State.Authentication)
 	}
 	if snap.State.Session != drm.SessionEmpty {
 		t.Errorf("post-Logout Session: got %s, want empty", snap.State.Session)
@@ -425,7 +425,7 @@ func TestManagerStatusThreadSafety(t *testing.T) {
 		defer wg.Done()
 		for j := 0; j < iters; j++ {
 			backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
-				State:   drm.DRMState{Process: drm.ProcessRunning, FairPlay: drm.FairPlayReady},
+				State:   drm.DRMState{Process: drm.ProcessRunning, FairPlay: drm.FairPlaySignedIn},
 				Message: "concurrent write",
 			}})
 			time.Sleep(time.Millisecond)
@@ -435,16 +435,16 @@ func TestManagerStatusThreadSafety(t *testing.T) {
 	wg.Wait()
 }
 
-// TestManagerCapabilitiesOnFairPlayReady verifies that capabilities (CBCS, ALAC,
-// Atmos, HiRes) are set to true when the backend emits FairPlayReady, and are
+// TestManagerCapabilitiesOnFairPlaySignedIn verifies that capabilities (CBCS, ALAC,
+// Atmos, HiRes) are set to true when the backend emits FairPlaySignedIn, and are
 // cleared on Logout.
-func TestManagerCapabilitiesOnFairPlayReady(t *testing.T) {
+func TestManagerCapabilitiesOnFairPlaySignedIn(t *testing.T) {
 	backend := newMockBackend()
 	mgr, _ := newUnitManager(t, backend)
 
-	// Emit FairPlayReady from the backend.
+	// Emit FairPlaySignedIn from the backend.
 	backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
-		State:   drm.DRMState{FairPlay: drm.FairPlayReady},
+		State:   drm.DRMState{FairPlay: drm.FairPlaySignedIn},
 		Message: "fair play ready",
 	}})
 
@@ -460,16 +460,16 @@ func TestManagerCapabilitiesOnFairPlayReady(t *testing.T) {
 	}
 
 	if !snap.Capabilities.CBCS {
-		t.Error("Capabilities.CBCS must be true after FairPlayReady")
+		t.Error("Capabilities.CBCS must be true after FairPlaySignedIn")
 	}
 	if !snap.Capabilities.ALAC {
-		t.Error("Capabilities.ALAC must be true after FairPlayReady")
+		t.Error("Capabilities.ALAC must be true after FairPlaySignedIn")
 	}
 	if !snap.Capabilities.Atmos {
-		t.Error("Capabilities.Atmos must be true after FairPlayReady")
+		t.Error("Capabilities.Atmos must be true after FairPlaySignedIn")
 	}
 	if !snap.Capabilities.HiRes {
-		t.Error("Capabilities.HiRes must be true after FairPlayReady")
+		t.Error("Capabilities.HiRes must be true after FairPlaySignedIn")
 	}
 
 	// Logout must clear capabilities.
@@ -488,7 +488,7 @@ func TestManagerCapabilitiesOnFairPlayReady(t *testing.T) {
 
 // TestManagerChallengeFieldClearedAfterLogin verifies that the Challenge field
 // in DRMSnapshot is non-nil only while Authentication == AuthChallenging.
-// After the backend transitions to AuthLoggedIn, Challenge must be nil.
+// After the backend transitions to AuthSignedIn, Challenge must be nil.
 func TestManagerChallengeFieldClearedAfterLogin(t *testing.T) {
 	backend := newMockBackend()
 	mgr, _ := newUnitManager(t, backend)
@@ -513,15 +513,15 @@ func TestManagerChallengeFieldClearedAfterLogin(t *testing.T) {
 		t.Error("Challenge must be non-nil while AuthChallenging")
 	}
 
-	// Now transition to AuthLoggedIn — challenge must clear.
+	// Now transition to AuthSignedIn — challenge must clear.
 	backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
-		State: drm.DRMState{Authentication: drm.AuthLoggedIn},
+		State: drm.DRMState{Authentication: drm.AuthSignedIn},
 	}})
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		snap = mgr.Status()
-		if snap.State.Authentication == drm.AuthLoggedIn {
+		if snap.State.Authentication == drm.AuthSignedIn {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -695,16 +695,16 @@ func TestParseStateFile(t *testing.T) {
 		recovery drm.RecoveryState
 	}{
 		{"STARTING", drm.ProcessStarting, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
-		{"LOGIN", drm.ProcessStarting, drm.FairPlayUnknown, drm.AuthLoggingIn, drm.RecoveryUnknown},
+		{"LOGIN", drm.ProcessStarting, drm.FairPlayUnknown, drm.AuthSigningIn, drm.RecoveryUnknown},
 		{"WAITING_2FA", drm.ProcessStarting, drm.FairPlayUnknown, drm.AuthChallenging, drm.RecoveryUnknown},
-		{"INITIALIZING_FAIRPLAY", drm.ProcessRunning, drm.FairPlayInitializing, drm.AuthLoggedIn, drm.RecoveryUnknown},
-		{"RUNNING", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryIdle},
-		{"RECOVERY", drm.ProcessRunning, drm.FairPlayReady, drm.AuthUnknown, drm.RecoveryRefreshing},
+		{"INITIALIZING_FAIRPLAY", drm.ProcessRunning, drm.FairPlayInitializing, drm.AuthSignedIn, drm.RecoveryUnknown},
+		{"RUNNING", drm.ProcessRunning, drm.FairPlaySignedIn, drm.AuthSignedIn, drm.RecoveryIdle},
+		{"RECOVERY", drm.ProcessRunning, drm.FairPlaySignedIn, drm.AuthUnknown, drm.RecoveryRefreshing},
 		{"FAILED", drm.ProcessFailed, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
 		{"STOPPED", drm.ProcessStopped, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
 		// Trailing whitespace / newline (written by real main.c via fprintf).
-		{"RUNNING\n", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryIdle},
-		{"RUNNING\r\n", drm.ProcessRunning, drm.FairPlayReady, drm.AuthLoggedIn, drm.RecoveryIdle},
+		{"RUNNING\n", drm.ProcessRunning, drm.FairPlaySignedIn, drm.AuthSignedIn, drm.RecoveryIdle},
+		{"RUNNING\r\n", drm.ProcessRunning, drm.FairPlaySignedIn, drm.AuthSignedIn, drm.RecoveryIdle},
 		// Unknown state: all fields must be zero.
 		{"UNKNOWN_GARBAGE", drm.ProcessUnknown, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
 		{"", drm.ProcessUnknown, drm.FairPlayUnknown, drm.AuthUnknown, drm.RecoveryUnknown},
@@ -826,9 +826,9 @@ func TestDRMStateStrings(t *testing.T) {
 		drm.ManagerReady, drm.ManagerShuttingDown, drm.ManagerFailed,
 		drm.ProcessUnknown, drm.ProcessStopped, drm.ProcessStarting,
 		drm.ProcessRunning, drm.ProcessFailed,
-		drm.AuthUnknown, drm.AuthLoggedOut, drm.AuthLoggingIn,
-		drm.AuthChallenging, drm.AuthLoggedIn, drm.AuthFailed,
-		drm.FairPlayUnknown, drm.FairPlayInitializing, drm.FairPlayReady, drm.FairPlayFailed,
+		drm.AuthUnknown, drm.AuthSignedOut, drm.AuthSigningIn,
+		drm.AuthChallenging, drm.AuthSignedIn, drm.AuthFailed,
+		drm.FairPlayUnknown, drm.FairPlayInitializing, drm.FairPlaySignedIn, drm.FairPlayFailed,
 		drm.SessionUnknown, drm.SessionEmpty, drm.SessionValid, drm.SessionExpired,
 		drm.RecoveryIdle, drm.RecoveryIdle, drm.RecoveryScheduled,
 		drm.RecoveryRefreshing, drm.RecoveryFailed,
@@ -859,7 +859,7 @@ func TestManagerDisableHiRes(t *testing.T) {
 		drm.BackendConfig{BaseDir: t.TempDir(), DisableHiRes: true}, drm.RestartPolicy{})
 
 	backend.emitEvent(drm.DRMEvent{Snapshot: drm.DRMSnapshot{
-		State: drm.DRMState{FairPlay: drm.FairPlayReady},
+		State: drm.DRMState{FairPlay: drm.FairPlaySignedIn},
 	}})
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && !mgr.Status().Capabilities.CBCS {

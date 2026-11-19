@@ -242,7 +242,7 @@ func (m *DRMManager) signOut(ctx context.Context, scope logoutScope) (SignOutRes
 	m.snapshot.State = DRMState{
 		Manager:        ManagerReady,
 		Process:        ProcessStopped,
-		Authentication: AuthLoggedOut,
+		Authentication: AuthSignedOut,
 		FairPlay:       FairPlayUnknown,
 		Session:        SessionEmpty,
 		Recovery:       RecoveryUnknown,

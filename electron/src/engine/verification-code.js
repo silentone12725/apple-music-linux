@@ -23,7 +23,7 @@ export function spreadDigits(current, index, text) {
  * What the account sheet should do with an engine DRM snapshot.
  *   'code'   show the code entry (Apple asked for the verification code)
  *   'retry'  Apple asked again after a submit: the code was wrong
- *   'close'  FairPlay is ready, sign-in finished
+ *   'close'  FairPlay is signed in, sign-in finished
  *   'failed' sign-in failed
  *   'expired' sign-in failed while the code was still being asked for (Apple or the
  *            engine gave up waiting): back to the sign-in form, the code can no longer be sent
@@ -32,7 +32,7 @@ export function spreadDigits(current, index, text) {
  */
 export function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null, challengeId = null }) {
     const st = snap?.state ?? {};
-    if (st.fairplay === 'ready' || snap?.capabilities?.cbcs === true || st.authentication === 'logged_in') {
+    if (st.fairplay === 'signed_in' || snap?.capabilities?.cbcs === true || st.authentication === 'signed_in') {
         return open ? 'close' : 'none';
     }
     const ch = snap?.challenge;

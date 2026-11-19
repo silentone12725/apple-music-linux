@@ -223,7 +223,7 @@ export function createAccountSheet({ signIn, submitCode, onDone = () => {}, onCa
         catch (e) { res = { ok: false, error: e?.message }; }
         if (view !== 'signin') return; // moved on to the code meanwhile
         if (!res?.ok) { setBusy(false); setMessage(res?.error || 'Could not sign in. Try again.', true); }
-        // ok: stay busy until the engine asks for the code or reports FairPlay ready
+        // ok: stay busy until the engine asks for the code or reports FairPlay signed in
         else startPoll();
     }
 

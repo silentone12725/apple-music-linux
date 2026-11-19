@@ -150,7 +150,7 @@ test('Retry keeps the sign-in form when Apple ends the cancelled attempt with a 
     sheet.onSnapshot(wrongPasswordSnap(1));
     labelled(dlg, 'Retry').click();
     // The engine's reply to the dialog and the failed attempt arrive over SSE before the POST resolves.
-    sheet.onSnapshot({ state: { authentication: 'logging_in' } });
+    sheet.onSnapshot({ state: { authentication: 'signing_in' } });
     sheet.onSnapshot({ state: { authentication: 'failed' }, failure: { message: 'sign-in cancelled' } });
     release();
     await tick(); await tick(); await tick();
@@ -165,7 +165,7 @@ test('a failure after Retry shows Apple’s message on the form, then later snap
     labelled(dlg, 'Retry').click();
     await tick(); await tick(); await tick();
     sheet.onSnapshot({ state: { authentication: 'failed' }, failure: { message: 'sign-in cancelled' } });
-    sheet.onSnapshot({ state: { authentication: 'logged_out' } });
+    sheet.onSnapshot({ state: { authentication: 'signed_out' } });
     assert.equal(dlg().open, true);
     assert.equal(inputs(dlg).length >= 2, true);
 });

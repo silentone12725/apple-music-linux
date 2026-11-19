@@ -9,7 +9,7 @@ import (
 // DRMState is a multi-dimensional snapshot of the DRM subsystem.
 // Every axis is an independent state dimension.
 // The manager may be Ready while the process is Stopped (lazy start);
-// FairPlay may be Initializing while Authentication is LoggedIn.
+// FairPlay may be Initializing while Authentication is SignedIn.
 //
 // CapabilityState is NOT embedded here. Capabilities are derived properties
 // (FairPlay ready + subscription tier), not state transitions. They belong
@@ -83,15 +83,15 @@ type AuthState int
 
 const (
 	AuthUnknown AuthState = iota
-	AuthLoggedOut
-	AuthLoggingIn
+	AuthSignedOut
+	AuthSigningIn
 	AuthChallenging // waiting for AuthChallenge reply
-	AuthLoggedIn
+	AuthSignedIn
 	AuthFailed
 )
 
 func (s AuthState) String() string {
-	return [...]string{"unknown", "logged_out", "logging_in", "challenging", "logged_in", "failed"}[s]
+	return [...]string{"unknown", "signed_out", "signing_in", "challenging", "signed_in", "failed"}[s]
 }
 
 func (s AuthState) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
@@ -103,12 +103,12 @@ type FairPlayState int
 const (
 	FairPlayUnknown FairPlayState = iota
 	FairPlayInitializing
-	FairPlayReady
+	FairPlaySignedIn
 	FairPlayFailed
 )
 
 func (s FairPlayState) String() string {
-	return [...]string{"unknown", "initializing", "ready", "failed"}[s]
+	return [...]string{"unknown", "initializing", "signed_in", "failed"}[s]
 }
 
 func (s FairPlayState) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
@@ -196,12 +196,12 @@ type DRMSnapshot struct {
 // strings to {BaseDir}/drm-state.
 var stateFileStrings = map[string]stateFileResult{
 	"STARTING":              {Process: ProcessStarting, FairPlay: FairPlayUnknown},
-	"LOGIN":                 {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthLoggingIn},
+	"LOGIN":                 {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthSigningIn},
 	"WAITING_2FA":           {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
 	"WAITING_DIALOG":        {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
-	"INITIALIZING_FAIRPLAY": {Process: ProcessRunning, FairPlay: FairPlayInitializing, Auth: AuthLoggedIn},
-	"RUNNING":               {Process: ProcessRunning, FairPlay: FairPlayReady, Auth: AuthLoggedIn, Recovery: RecoveryIdle},
-	"RECOVERY":              {Process: ProcessRunning, FairPlay: FairPlayReady, Recovery: RecoveryRefreshing},
+	"INITIALIZING_FAIRPLAY": {Process: ProcessRunning, FairPlay: FairPlayInitializing, Auth: AuthSignedIn},
+	"RUNNING":               {Process: ProcessRunning, FairPlay: FairPlaySignedIn, Auth: AuthSignedIn, Recovery: RecoveryIdle},
+	"RECOVERY":              {Process: ProcessRunning, FairPlay: FairPlaySignedIn, Recovery: RecoveryRefreshing},
 	"FAILED":                {Process: ProcessFailed},
 	"STOPPED":               {Process: ProcessStopped},
 }
@@ -232,11 +232,11 @@ func SnapshotForStateString(state string, hybrisReady bool) DRMSnapshot {
 	result := ParseStateFile(state)
 	fp, auth := result.FairPlay, result.Auth
 	if !hybrisReady {
-		if fp == FairPlayReady {
+		if fp == FairPlaySignedIn {
 			fp = FairPlayUnknown
 		}
 	}
-	if auth != AuthLoggedIn || !hybrisReady {
+	if auth != AuthSignedIn || !hybrisReady {
 		auth = 0
 	}
 	return DRMSnapshot{

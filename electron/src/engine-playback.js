@@ -9667,19 +9667,19 @@ window.adamGetQueueInfo = function () {
             const procOk = proc === 'running';
             const procLoading = proc === 'starting';
             const fp = st.fairplay ?? 'unknown';
-            const fpOk = fp === 'ready';
+            const fpOk = fp === 'signed_in';
             const fpLoading = fp === 'unknown' && procLoading;
             const cbcs = d?.capabilities?.cbcs === true;
             // Session is only "valid" (green) when backed by a real engine login —
-            // i.e. FairPlay is ready or CBCS capability is present. A web-session MUT
+            // i.e. FairPlay is signed in or CBCS capability is present. A web-session MUT
             // alone sets session=valid in the engine for AAC, but that is not an
-            // explicit engine login: show "none" (red) until FairPlay is ready.
+            // explicit engine login: show "none" (red) until FairPlay is signed in.
             const sessOk = cbcs || fpOk;
             const sessText = cbcs ? 'active (cbcs)' : fpOk ? 'valid' : 'none';
             const sessLoading = !sessOk && (procLoading || proc === 'running');
             return [
                 { label: 'DRM process', ok: procOk, loading: procLoading, text: proc },
-                { label: 'FairPlay',    ok: fpOk,   loading: fpLoading,   text: fp },
+                { label: 'FairPlay',    ok: fpOk,   loading: fpLoading,   text: fp.replace(/_/g, ' ') },
                 { label: 'Session',     ok: sessOk, loading: sessLoading, text: sessText,
                   subtitle: 'Authentication lease with Apple servers' },
                 { label: 'Backend',     text: (n => n ? n[0].toUpperCase() + n.slice(1) : 'Unknown')(d.backend?.selected), noDot: true },
@@ -9706,7 +9706,7 @@ window.adamGetQueueInfo = function () {
         stBody.appendChild(refreshRow);
         const isResolved = d => {
             const st = d.state ?? {};
-            return (st.process === 'running') && (st.fairplay === 'ready') &&
+            return (st.process === 'running') && (st.fairplay === 'signed_in') &&
                    (st.session === 'valid' || d?.capabilities?.cbcs === true);
         };
         if (!isResolved(drm)) {

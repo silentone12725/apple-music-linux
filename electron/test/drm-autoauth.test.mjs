@@ -33,7 +33,7 @@ test('engine unreachable: nothing sent, credentials kept', async () => {
 });
 
 test('an existing or loading session is never replaced', async () => {
-    for (const state of [{ fairplay: 'ready' }, { session: 'valid' }]) {
+    for (const state of [{ fairplay: 'signed_in' }, { session: 'valid' }]) {
         const e = engine({ statuses: [{ state }] });
         assert.equal((await run(e)).outcome, 'has-session');
         assert.ok(!e.calls.includes('POST /api/v1/drm/authenticate'));
@@ -41,7 +41,7 @@ test('an existing or loading session is never replaced', async () => {
 });
 
 test('accepted by Apple: signed in, credentials kept', async () => {
-    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logging_in' } }, { state: { authentication: 'logged_in' } }] });
+    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'signing_in' } }, { state: { authentication: 'signed_in' } }] });
     assert.deepEqual(await run(e), { outcome: 'signed-in', forgotten: 0 });
 });
 
@@ -62,7 +62,7 @@ test('a failure reported before this attempt began is ignored', async () => {
     e.request = async (m, p, b) => {
         const r = await base(m, p, b);
         if (m === 'GET' && r?.json && ++n === 2) return { status: 200, json: { timestamp: new Date(e.now() - 60_000).toISOString(), state: { authentication: 'failed' }, message: 'old' } };
-        if (m === 'GET' && r?.json && n >= 3) return { status: 200, json: { timestamp: new Date(e.now()).toISOString(), state: { authentication: 'logged_in' } } };
+        if (m === 'GET' && r?.json && n >= 3) return { status: 200, json: { timestamp: new Date(e.now()).toISOString(), state: { authentication: 'signed_in' } } };
         return r;
     };
     assert.deepEqual(await run(e), { outcome: 'signed-in', forgotten: 0 });
@@ -74,13 +74,13 @@ test('a verification-code challenge drops only the password and leaves this atte
 });
 
 test('an unattended sign-in that Apple wants a code for ends quietly: no sheet, only the password is dropped', async () => {
-    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logging_in' } }, { state: { authentication: 'logged_out' }, message: 'sign-in cancelled' }] });
+    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'signing_in' } }, { state: { authentication: 'signed_out' }, message: 'sign-in cancelled' }] });
     assert.deepEqual(await run(e), { outcome: 'needs-code', forgotten: 0, passwordDropped: 1 });
     assert.ok(!e.calls.some((c) => c.includes('challenge')), 'no challenge was answered');
 });
 
 test('a plain logged-out report without the cancel message is not read as a code request', async () => {
-    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logged_out' }, message: '' }] });
+    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'signed_out' }, message: '' }] });
     assert.deepEqual(await run(e, { timeoutMs: 6000 }), { outcome: 'timeout', forgotten: 0 });
 });
 
@@ -90,6 +90,6 @@ test('a rejected request body clears the credentials; an engine without DRM does
 });
 
 test('no answer within the time limit ends the wait without touching the credentials', async () => {
-    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'logging_in' } }] });
+    const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'signing_in' } }] });
     assert.deepEqual(await run(e), { outcome: 'timeout', forgotten: 0 });
 });

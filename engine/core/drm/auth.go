@@ -182,7 +182,7 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		// Answered: drop the challenge from the snapshot while Apple checks the
 		// reply, so a reloaded page does not ask for the same code again.
 		if a.emitter != nil {
-			a.emitter(DRMSnapshot{State: DRMState{Authentication: AuthLoggingIn}})
+			a.emitter(DRMSnapshot{State: DRMState{Authentication: AuthSigningIn}})
 		}
 		return reply, nil
 	case <-ctx.Done():

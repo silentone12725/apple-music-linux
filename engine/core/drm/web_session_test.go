@@ -118,8 +118,8 @@ func TestInitialStatusIsStoppedNotUnknown(t *testing.T) {
 	if st.Process != ProcessStopped {
 		t.Errorf("an idle, lazily started backend is stopped, got %v", st.Process)
 	}
-	if st.Session != SessionEmpty || st.Authentication != AuthLoggedOut {
-		t.Errorf("no token yet: want empty/logged_out, got %v/%v", st.Session, st.Authentication)
+	if st.Session != SessionEmpty || st.Authentication != AuthSignedOut {
+		t.Errorf("no token yet: want empty/signed_out, got %v/%v", st.Session, st.Authentication)
 	}
 }
 
@@ -133,7 +133,7 @@ func TestWebTokenStartsTheBackendOnlyWhenSignedIn(t *testing.T) {
 	tok.Store(&v)
 	m.NoteWebSession()
 	time.Sleep(50 * time.Millisecond)
-	if stub.starts.Load() != 0 || m.Status().State.Session != SessionEmpty || m.Status().State.Authentication != AuthLoggedOut {
+	if stub.starts.Load() != 0 || m.Status().State.Session != SessionEmpty || m.Status().State.Authentication != AuthSignedOut {
 		t.Fatalf("a web token without a sign-in must not start the backend or report a session: starts=%d state=%+v",
 			stub.starts.Load(), m.Status().State)
 	}
@@ -148,8 +148,8 @@ func TestWebTokenStartsTheBackendOnlyWhenSignedIn(t *testing.T) {
 		t.Fatalf("a signed-in engine must start once the web token appears, starts=%d", stub.starts.Load())
 	}
 	st := m.Status().State
-	if st.Session != SessionValid || st.Authentication != AuthLoggedIn {
-		t.Errorf("want valid/logged_in, got %v/%v", st.Session, st.Authentication)
+	if st.Session != SessionValid || st.Authentication != AuthSignedIn {
+		t.Errorf("want valid/signed_in, got %v/%v", st.Session, st.Authentication)
 	}
 }
 
@@ -204,7 +204,7 @@ func TestAnsweredChallengeIsWithdrawn(t *testing.T) {
 	if _, err := a.Challenge(ctx, AuthChallenge{Type: ChallengeTwoFactor}); err != nil {
 		t.Fatal(err)
 	}
-	if last.Challenge != nil || last.State.Authentication != AuthLoggingIn {
+	if last.Challenge != nil || last.State.Authentication != AuthSigningIn {
 		t.Fatalf("after the reply the snapshot still asks for a code: %+v", last)
 	}
 }
