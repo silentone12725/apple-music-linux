@@ -1,0 +1,21 @@
+# Spike work: commit source / captured service-bag data / notes only.
+# Everything is ignored, then specific SOURCE types are allowed back in, so
+# compiled probe binaries (named with no extension) and shared objects (.so)
+# stay out automatically.
+
+*
+!*/
+!*.c
+!*.h
+!*.py
+!*.md
+!*.plist
+!Makefile
+!.gitignore
+
+# Belt-and-braces for captured secrets. The state/ dir holds the user's real
+# device-identity / anisette / OTP material (cred_*.txt, deviceid, adi.pb).
+# NEVER commit it. These patterns are scoped so they can't catch source files.
+state/
+cred_*.txt
+adi.pb
