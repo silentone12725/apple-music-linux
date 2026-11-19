@@ -39,7 +39,7 @@ type RestartPolicy struct {
 	StartupTimeout time.Duration
 
 	// AuthTimeout is how long Login() waits for the backend to reach
-	// FairPlaySignedIn after authentication completes.
+	// FairPlayReady after authentication completes.
 	AuthTimeout time.Duration
 }
 
@@ -649,7 +649,7 @@ func (m *DRMManager) mergeAndEmit(snap DRMSnapshot) {
 		m.snapshot.State.Recovery = snap.State.Recovery
 	}
 
-	if m.snapshot.State.FairPlay == FairPlaySignedIn {
+	if m.snapshot.State.FairPlay == FairPlayReady {
 		// Capabilities are derived at the snapshot level, not inside State.
 		m.snapshot.Capabilities = CapabilityState{
 			CBCS:  true,

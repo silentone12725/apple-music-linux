@@ -24,7 +24,7 @@ test('promptAction shows code entry for a two-factor challenge and closes once F
     assert.equal(promptAction(twoFactor(1), { open: false }), 'code');
     assert.equal(promptAction(twoFactor(1), { open: true, view: 'signin' }), 'code', 'the sign-in sheet moves on to the code');
     assert.equal(promptAction({ state: { authentication: 'challenging' }, challenge: { type: 'credentials' } }, { open: false }), 'none');
-    assert.equal(promptAction({ state: { fairplay: 'signed_in' } }, { open: true }), 'close');
+    assert.equal(promptAction({ state: { fairplay: 'ready' } }, { open: true }), 'close');
     assert.equal(promptAction({ capabilities: { cbcs: true }, state: {} }, { open: true }), 'close');
     assert.equal(promptAction({ state: { authentication: 'failed' } }, { open: true }), 'failed');
     assert.equal(promptAction({ state: { session: 'valid' } }, { open: false }), 'none', 'a web session alone opens nothing');

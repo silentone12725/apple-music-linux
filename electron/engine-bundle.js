@@ -423,10 +423,10 @@
   function accountSignedIn(status) {
     const state = status?.state ?? {};
     if (state.authentication === "failed" || state.session === "expired") return false;
-    return status?.capabilities?.cbcs === true || state.fairplay === "signed_in" || state.authentication === "signed_in" || state.session === "valid";
+    return status?.capabilities?.cbcs === true || state.fairplay === "ready" || state.authentication === "signed_in" || state.session === "valid";
   }
   function losslessReady(status) {
-    return status?.capabilities?.cbcs === true || status?.state?.fairplay === "signed_in";
+    return status?.capabilities?.cbcs === true || status?.state?.fairplay === "ready";
   }
   function downloadQuality({ prefs = {}, fallback = "lossless", ready = false }) {
     const wanted = prefs["dl-quality"] || prefs["downloads-quality"] || fallback;
@@ -643,7 +643,7 @@
   }
   function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null, challengeId = null }) {
     const st = snap?.state ?? {};
-    if (st.fairplay === "signed_in" || snap?.capabilities?.cbcs === true || st.authentication === "signed_in") {
+    if (st.fairplay === "ready" || snap?.capabilities?.cbcs === true || st.authentication === "signed_in") {
       return open ? "close" : "none";
     }
     const ch = snap?.challenge;
@@ -9829,7 +9829,7 @@
         const procOk = proc === "running";
         const procLoading = proc === "starting";
         const fp = st.fairplay ?? "unknown";
-        const fpOk = fp === "signed_in";
+        const fpOk = fp === "ready";
         const fpLoading = fp === "unknown" && procLoading;
         const cbcs = d?.capabilities?.cbcs === true;
         const sessOk = cbcs || fpOk;
@@ -9869,7 +9869,7 @@
       stBody.appendChild(refreshRow);
       const isResolved = (d) => {
         const st = d.state ?? {};
-        return st.process === "running" && st.fairplay === "signed_in" && (st.session === "valid" || d?.capabilities?.cbcs === true);
+        return st.process === "running" && st.fairplay === "ready" && (st.session === "valid" || d?.capabilities?.cbcs === true);
       };
       if (!isResolved(drm)) {
         const poll = setInterval(async () => {

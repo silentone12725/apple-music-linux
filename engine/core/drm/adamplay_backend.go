@@ -296,7 +296,7 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		}
 		b.hybrisReady = true
 		b.hybrisUp.Store(true)
-		b.emitFairPlaySignedIn()
+		b.emitFairPlayReady()
 	} else if !b.hybrisReady {
 		// Session-reuse path: spin hybris init in the background so Start()
 		// returns immediately and AAC playback works while hybris loads (~11 s).
@@ -312,7 +312,7 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 				b.hybrisReady = true
 				b.hybrisUp.Store(true)
 				b.mu.Unlock()
-				b.emitFairPlaySignedIn()
+				b.emitFairPlayReady()
 			}
 		}()
 	}
@@ -415,12 +415,12 @@ func (b *adamplayBackend) emitState(st DRMState, msg string) {
 	}
 }
 
-// emitFairPlaySignedIn emits a FairPlaySignedIn event after hybris succeeds.
-func (b *adamplayBackend) emitFairPlaySignedIn() {
+// emitFairPlayReady emits a FairPlayReady event after hybris succeeds.
+func (b *adamplayBackend) emitFairPlayReady() {
 	b.emitState(DRMState{
 		Process:  ProcessRunning,
 		Manager:  ManagerReady,
-		FairPlay: FairPlaySignedIn,
+		FairPlay: FairPlayReady,
 		Recovery: RecoveryIdle,
 	}, "hybris FairPlay ready")
 }
@@ -528,7 +528,7 @@ func (b *adamplayBackend) RetryFairPlay(mut string) {
 		b.hybrisReady = true
 		b.hybrisUp.Store(true)
 		b.mu.Unlock()
-		b.emitFairPlaySignedIn()
+		b.emitFairPlayReady()
 		log.Printf("[drm] RetryFairPlay: FairPlay ready via web MUT")
 	}
 }
@@ -809,7 +809,7 @@ func (b *adamplayBackend) Events() <-chan DRMEvent {
 // stateLoop processes state changes from C callbacks
 func (b *adamplayBackend) stateLoop() {
 	for state := range b.stateCh {
-		// The C library emits RUNNING when the AAC path is ready, and RUNNING also maps to FairPlaySignedIn and
+		// The C library emits RUNNING when the AAC path is ready, and RUNNING also maps to FairPlayReady and
 		// logged in. FairPlay (ALAC/CBCS) requires hybris_fairplay_init to have succeeded, so neither is
 		// reported until it has (see SnapshotForStateString).
 		snap := SnapshotForStateString(state, b.hybrisUp.Load())

@@ -23,12 +23,12 @@ func TestMergeKeepsPendingChallengeAcrossUnrelatedUpdates(t *testing.T) {
 	}
 }
 
-// A FairPlay session that is no longer signed in must stop advertising playback capabilities.
+// A FairPlay session that is no longer ready must stop advertising playback capabilities.
 func TestMergeClearsCapabilitiesWhenFairPlayFails(t *testing.T) {
 	m := newMergeManager(t)
-	m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlaySignedIn}})
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlayReady}})
 	if !m.Status().Capabilities.CBCS {
-		t.Fatal("a signed-in FairPlay should enable CBCS")
+		t.Fatal("ready FairPlay should enable CBCS")
 	}
 	m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlayFailed}})
 	if got := m.Status().Capabilities; got.CBCS || got.ALAC {

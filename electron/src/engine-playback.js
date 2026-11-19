@@ -9667,13 +9667,13 @@ window.adamGetQueueInfo = function () {
             const procOk = proc === 'running';
             const procLoading = proc === 'starting';
             const fp = st.fairplay ?? 'unknown';
-            const fpOk = fp === 'signed_in';
+            const fpOk = fp === 'ready';
             const fpLoading = fp === 'unknown' && procLoading;
             const cbcs = d?.capabilities?.cbcs === true;
             // Session is only "valid" (green) when backed by a real engine login —
-            // i.e. FairPlay is signed in or CBCS capability is present. A web-session MUT
+            // i.e. FairPlay is ready or CBCS capability is present. A web-session MUT
             // alone sets session=valid in the engine for AAC, but that is not an
-            // explicit engine login: show "none" (red) until FairPlay is signed in.
+            // explicit engine login: show "none" (red) until FairPlay is ready.
             const sessOk = cbcs || fpOk;
             const sessText = cbcs ? 'active (cbcs)' : fpOk ? 'valid' : 'none';
             const sessLoading = !sessOk && (procLoading || proc === 'running');
@@ -9706,7 +9706,7 @@ window.adamGetQueueInfo = function () {
         stBody.appendChild(refreshRow);
         const isResolved = d => {
             const st = d.state ?? {};
-            return (st.process === 'running') && (st.fairplay === 'signed_in') &&
+            return (st.process === 'running') && (st.fairplay === 'ready') &&
                    (st.session === 'valid' || d?.capabilities?.cbcs === true);
         };
         if (!isResolved(drm)) {

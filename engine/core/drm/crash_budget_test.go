@@ -69,16 +69,16 @@ func TestChallengeKeepsReplySentRightAfterAnnouncement(t *testing.T) {
 	}
 }
 
-// The snapshot announcing FairPlay-signed-in must already carry the capabilities;
+// The snapshot announcing FairPlay-ready must already carry the capabilities;
 // the renderer picks lossless vs AAC from each event it receives.
-func TestFairPlaySignedInEventCarriesCapabilities(t *testing.T) {
+func TestFairPlayReadyEventCarriesCapabilities(t *testing.T) {
 	var got []DRMSnapshot
 	stub := &crashStub{events: make(chan DRMEvent)}
 	m := NewDRMManager(stub, NewSessionManager(t.TempDir()), func(s DRMSnapshot) { got = append(got, s) },
 		BackendConfig{}, DefaultRestartPolicy)
-	m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlaySignedIn, Process: ProcessRunning}})
+	m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlayReady, Process: ProcessRunning}})
 	last := got[len(got)-1]
-	if last.State.FairPlay != FairPlaySignedIn || !last.Capabilities.ALAC || !last.Capabilities.CBCS {
+	if last.State.FairPlay != FairPlayReady || !last.Capabilities.ALAC || !last.Capabilities.CBCS {
 		t.Fatalf("ready event capabilities = %+v", last.Capabilities)
 	}
 }
@@ -98,7 +98,7 @@ func TestEmitOrderNeverRegressesCapabilities(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); m.mergeAndEmit(DRMSnapshot{State: DRMState{Session: SessionValid}}) }()
-		go func() { defer wg.Done(); m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlaySignedIn}}) }()
+		go func() { defer wg.Done(); m.mergeAndEmit(DRMSnapshot{State: DRMState{FairPlay: FairPlayReady}}) }()
 		wg.Wait()
 		seen := false
 		for _, v := range seq {

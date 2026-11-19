@@ -3,7 +3,7 @@
 export function accountSignedIn(status) {
     const state = status?.state ?? {};
     if (state.authentication === 'failed' || state.session === 'expired') return false;
-    return status?.capabilities?.cbcs === true || state.fairplay === 'signed_in' ||
+    return status?.capabilities?.cbcs === true || state.fairplay === 'ready' ||
         state.authentication === 'signed_in' || state.session === 'valid';
 }
 
@@ -11,7 +11,7 @@ export function accountSignedIn(status) {
 // enough (accountSignedIn is true for it): the DRM backend starts lazily, and until it is ready, or after it
 // failed, only AAC works. Everything that offers or requests lossless asks this, never accountSignedIn.
 export function losslessReady(status) {
-    return status?.capabilities?.cbcs === true || status?.state?.fairplay === 'signed_in';
+    return status?.capabilities?.cbcs === true || status?.state?.fairplay === 'ready';
 }
 
 // The quality a download should ask for: the Downloads setting, held to what the global Lossless toggle and the
@@ -30,7 +30,7 @@ export function authProgress(status) {
     if (state.authentication === 'failed' || state.manager === 'failed') return 'failed';
     if (state.authentication === 'signing_in' || state.process === 'starting') return 'pending';
     if (state.authentication === 'signed_in' && state.process === 'running' ||
-        state.fairplay === 'signed_in' || status?.capabilities?.cbcs === true) return 'done';
+        state.fairplay === 'ready' || status?.capabilities?.cbcs === true) return 'done';
     return 'pending';
 }
 

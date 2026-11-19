@@ -40,7 +40,7 @@ func (s *APIServer) handleDRMStatus(w http.ResponseWriter, r *http.Request) {
 		Available:   s.dm != nil,
 		Backend:     backendStatus{Selected: s.backendName},
 	}
-	if since := s.lifecycle.DRMSignedInSince(); !since.IsZero() {
+	if since := s.lifecycle.DRMReadySince(); !since.IsZero() {
 		resp.ReadySinceMs = since.UnixMilli()
 		resp.SessionAgeMs = time.Since(since).Milliseconds()
 		resp.SessionTTLMs = drmSessionTTL.Milliseconds()

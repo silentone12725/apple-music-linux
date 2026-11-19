@@ -33,7 +33,7 @@ test('engine unreachable: nothing sent, credentials kept', async () => {
 });
 
 test('an existing or loading session is never replaced', async () => {
-    for (const state of [{ fairplay: 'signed_in' }, { session: 'valid' }]) {
+    for (const state of [{ fairplay: 'ready' }, { session: 'valid' }]) {
         const e = engine({ statuses: [{ state }] });
         assert.equal((await run(e)).outcome, 'has-session');
         assert.ok(!e.calls.includes('POST /api/v1/drm/authenticate'));

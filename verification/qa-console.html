@@ -1413,7 +1413,7 @@ function renderDRMStatus(data) {
   // Badge: show auth state abbreviation
   const badge = document.getElementById('drm-badge');
   const fp = state.fairplay;
-  if (fp === 'signed_in') {
+  if (fp === 'ready') {
     badge.textContent = '✓';
     badge.style.background = 'var(--green)';
     badge.style.color = '#000';

@@ -199,10 +199,10 @@ type engineLifecycle struct {
 	lastDRMSession atomic.Value // stores string; tracks session transitions
 
 	// Proactive DRM session tracking
-	drmReadyMu       sync.Mutex
-	drmSignedInSince time.Time   // when FairPlaySignedIn was last achieved
-	drmRefreshAt     time.Time   // scheduled proactive-refresh fire time
-	drmRefreshTimer  *time.Timer // cancels previous timer on new FairPlaySignedIn
+	drmReadyMu      sync.Mutex
+	drmReadySince   time.Time   // when FairPlayReady was last achieved
+	drmRefreshAt    time.Time   // scheduled proactive-refresh fire time
+	drmRefreshTimer *time.Timer // cancels previous timer on new FairPlayReady
 }
 
 // drmSessionTTL is Apple's approximate FairPlay session lifetime.
@@ -225,25 +225,25 @@ func (l *engineLifecycle) OnDRMStateChanged(sessionStr string) {
 	}
 }
 
-// OnFairPlaySignedIn is called by the event watcher when the DRM backend
-// transitions to FairPlaySignedIn. It resets the session-age clock and
+// OnFairPlayReady is called by the event watcher when the DRM backend
+// transitions to FairPlayReady. It resets the session-age clock and
 // schedules a proactive drm.refresh_due event (via onRefreshDue) so the
 // JS can pre-warm before the session expires and avoid the losslessWait stall.
-func (l *engineLifecycle) OnFairPlaySignedIn(onRefreshDue func()) {
+func (l *engineLifecycle) OnFairPlayReady(onRefreshDue func()) {
 	l.drmReadyMu.Lock()
 	defer l.drmReadyMu.Unlock()
-	l.drmSignedInSince = time.Now()
-	l.drmRefreshAt = l.drmSignedInSince.Add(drmSessionTTL - drmRefreshLeadTime)
+	l.drmReadySince = time.Now()
+	l.drmRefreshAt = l.drmReadySince.Add(drmSessionTTL - drmRefreshLeadTime)
 	if l.drmRefreshTimer != nil {
 		l.drmRefreshTimer.Stop()
 	}
 	l.drmRefreshTimer = time.AfterFunc(drmSessionTTL-drmRefreshLeadTime, onRefreshDue)
 }
 
-// DRMSignedInSince returns when FairPlaySignedIn was last achieved (zero if never).
-func (l *engineLifecycle) DRMSignedInSince() time.Time {
+// DRMReadySince returns when FairPlayReady was last achieved (zero if never).
+func (l *engineLifecycle) DRMReadySince() time.Time {
 	l.drmReadyMu.Lock()
-	t := l.drmSignedInSince
+	t := l.drmReadySince
 	l.drmReadyMu.Unlock()
 	return t
 }
@@ -575,15 +575,15 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 			drmSession,
 			func(snap drm.DRMSnapshot) {
 				s.lifecycle.OnDRMStateChanged(snap.State.Session.String())
-				if snap.State.FairPlay == drm.FairPlaySignedIn {
-					s.lifecycle.OnFairPlaySignedIn(func() {
+				if snap.State.FairPlay == drm.FairPlayReady {
+					s.lifecycle.OnFairPlayReady(func() {
 						// Fired ~5min before the expected 24h FairPlay session expiry.
 						// Emit a drm.refresh_due SSE event so the JS can pre-warm a
 						// session while the current one is still valid — avoiding the
 						// losslessWait stall that would otherwise happen after expiry.
 						s.events.emit("drm.refresh_due", map[string]any{
-							"readySinceMs": s.lifecycle.DRMSignedInSince().UnixMilli(),
-							"refreshAtMs":  s.lifecycle.DRMSignedInSince().Add(drmSessionTTL - drmRefreshLeadTime).UnixMilli(),
+							"readySinceMs": s.lifecycle.DRMReadySince().UnixMilli(),
+							"refreshAtMs":  s.lifecycle.DRMReadySince().Add(drmSessionTTL - drmRefreshLeadTime).UnixMilli(),
 						})
 					})
 				}

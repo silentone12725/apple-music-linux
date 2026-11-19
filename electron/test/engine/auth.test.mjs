@@ -28,7 +28,7 @@ test('a saved account is not lossless-ready until FairPlay is live', () => {
     const savedOnly = { state: { session: 'valid', authentication: 'signed_in', process: 'stopped', fairplay: 'unknown' }, capabilities: { cbcs: false } };
     assert.equal(accountSignedIn(savedOnly), true, 'the account is saved');
     assert.equal(losslessReady(savedOnly), false, 'but lossless is not available');
-    assert.equal(losslessReady({ state: { fairplay: 'signed_in' } }), true);
+    assert.equal(losslessReady({ state: { fairplay: 'ready' } }), true);
     assert.equal(losslessReady({ capabilities: { cbcs: true } }), true);
     for (const empty of [{}, null, undefined, { state: {}, capabilities: {} }]) assert.equal(losslessReady(empty), false);
 });

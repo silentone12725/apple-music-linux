@@ -11,6 +11,14 @@ import (
 // The manager may be Ready while the process is Stopped (lazy start);
 // FairPlay may be Initializing while Authentication is SignedIn.
 //
+// Vocabulary, kept apart on purpose:
+//   - "signed in" / "signed out" / "signing in" describe the ACCOUNT (Authentication only).
+//   - "ready" describes a SERVICE that can do its job: the manager (Manager) or FairPlay decryption
+//     (FairPlay). FairPlay is ready only once the account is signed in AND the library loaded, so a
+//     signed-in account does not imply ready, and lossless needs both.
+//
+// No axis uses the other's word; TestStateVocabulariesDoNotOverlap keeps it that way.
+//
 // CapabilityState is NOT embedded here. Capabilities are derived properties
 // (FairPlay ready + subscription tier), not state transitions. They belong
 // at the DRMSnapshot level, alongside State.
@@ -103,12 +111,12 @@ type FairPlayState int
 const (
 	FairPlayUnknown FairPlayState = iota
 	FairPlayInitializing
-	FairPlaySignedIn
+	FairPlayReady
 	FairPlayFailed
 )
 
 func (s FairPlayState) String() string {
-	return [...]string{"unknown", "initializing", "signed_in", "failed"}[s]
+	return [...]string{"unknown", "initializing", "ready", "failed"}[s]
 }
 
 func (s FairPlayState) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
@@ -200,8 +208,8 @@ var stateFileStrings = map[string]stateFileResult{
 	"WAITING_2FA":           {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
 	"WAITING_DIALOG":        {Process: ProcessStarting, FairPlay: FairPlayUnknown, Auth: AuthChallenging},
 	"INITIALIZING_FAIRPLAY": {Process: ProcessRunning, FairPlay: FairPlayInitializing, Auth: AuthSignedIn},
-	"RUNNING":               {Process: ProcessRunning, FairPlay: FairPlaySignedIn, Auth: AuthSignedIn, Recovery: RecoveryIdle},
-	"RECOVERY":              {Process: ProcessRunning, FairPlay: FairPlaySignedIn, Recovery: RecoveryRefreshing},
+	"RUNNING":               {Process: ProcessRunning, FairPlay: FairPlayReady, Auth: AuthSignedIn, Recovery: RecoveryIdle},
+	"RECOVERY":              {Process: ProcessRunning, FairPlay: FairPlayReady, Recovery: RecoveryRefreshing},
 	"FAILED":                {Process: ProcessFailed},
 	"STOPPED":               {Process: ProcessStopped},
 }
@@ -232,7 +240,7 @@ func SnapshotForStateString(state string, hybrisReady bool) DRMSnapshot {
 	result := ParseStateFile(state)
 	fp, auth := result.FairPlay, result.Auth
 	if !hybrisReady {
-		if fp == FairPlaySignedIn {
+		if fp == FairPlayReady {
 			fp = FairPlayUnknown
 		}
 	}
