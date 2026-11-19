@@ -436,8 +436,9 @@ static const char s_fake_gs_lookup_body[] = "{\"il\":{},\"cd\":14}";
 
 /* Directory holding extracted-session credential sidecar files (kept out of the
  * repo; these are the user's own account tokens, read at runtime only). */
-#define CRED_DIR "/tmp/claude-1000/-home-daksh-Git-Projects-apple-music-linux/" \
-                 "00f6bb53-6fb1-4f8a-b2a1-89e4cf2412cf/scratchpad"
+/* Persistent, gitignored creds dir (was a now-deleted session scratchpad).
+ * Holds the account tokens fetched from the signed-in phone clone + anisette set. */
+#define CRED_DIR "/home/daksh/Git Projects/apple-music-linux/spike/newstack/state"
 
 /* Read a sidecar credential file into a malloc'd NUL-terminated string, trailing
  * newline stripped. Returns NULL (and logs) if missing. Never prints the value. */
@@ -463,17 +464,18 @@ static int s_http_call_count = 0;
  * precedes the TRACE_SLOT macros, can gate the lookup-body plant on call #1) */
 static volatile int g_slot_calls[32];
 
-/* Write a libc++ SHORT (SSO) std::string (<=22 chars) into the 24 bytes at dst.
- * New-layout short mode (matching the body's long layout data@+0/size@+8/cap@+16):
- * chars at bytes[0..], size*2 at byte[23] (bit0=0 => short). SSO strings hold NO
- * heap, so the response destructor frees nothing for them — far less corruption
- * risk than malloc-backed long strings (which caused heap aborts). */
+/* Write a libc++ __ndk1 SHORT (SSO) std::string (<=23 chars) into the 24 bytes at
+ * dst.  Layout CONFIRMED from libc++_shared.so basic_string::~basic_string (0xcd5c0):
+ *   is_long = bit0 of byte[0];  SHORT => chars at byte[1..], size = byte[0]>>1.
+ * (The earlier "new layout" encoding — chars at byte[0], size at byte[23] — made the
+ * first char's low bit read as is_long=1, so the dtor freed a garbage __data_ at
+ * offset 0x10 and crashed.  This is the __ndk1 OLD layout, which this stack uses.) */
 static void put_long_str(uint8_t *dst, const char *s) {
     size_t n = strlen(s);
-    if (n > 22) n = 22;
+    if (n > 23) n = 23;
     memset(dst, 0, 24);
-    memcpy(dst, s, n);
-    dst[23] = (uint8_t)(n << 1);
+    dst[0] = (uint8_t)(n << 1);   /* bit0 = 0 => short; high 7 bits = size */
+    memcpy(dst + 1, s, n);        /* chars live at byte[1..] in __ndk1 short mode */
 }
 
 /*
