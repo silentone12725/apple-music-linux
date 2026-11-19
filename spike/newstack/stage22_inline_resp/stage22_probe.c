@@ -83,6 +83,15 @@ void abort(void) {
     pthread_exit(NULL);
 }
 
+/* One-shot int3 breakpoint at HTTPResponse::getDecodedBody (lib+0x729eee): capture the
+ * REAL response object (this=rdi) and forge the Content-Type header map on IT (at
+ * this+0xd0) — buf_data (self[0]) is a different object the decoder never reads. */
+static volatile uintptr_t g_gdb_bp    = 0;   /* lib_base + 0x729eee */
+static volatile uint8_t   g_gdb_orig  = 0;
+static volatile int       g_gdb_done  = 0;
+static volatile void     *g_gdb_this  = 0;
+static void build_header_map(uint8_t *hmap, const char *key, const char *val); /* fwd */
+
 static void sigsegv_handler(int sig, siginfo_t *si, void *ctx) {
     (void)sig;
     g_fault_addr = si->si_addr;
@@ -135,6 +144,53 @@ static void sigsegv_handler(int sig, siginfo_t *si, void *ctx) {
         pthread_exit(NULL);
     }
     signal(SIGSEGV, SIG_DFL); raise(SIGSEGV);
+}
+
+/* One-shot breakpoint handler: fires when execution hits the 0xCC we planted at
+ * getDecodedBody's entry.  Capture this=rdi, forge the Content-Type header map on the
+ * real response object, restore the original byte, and rewind rip to re-execute. */
+static void sigtrap_handler(int sig, siginfo_t *si, void *ctx) {
+    (void)sig; (void)si;
+    ucontext_t *uc = (ucontext_t *)ctx;
+    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    if (g_gdb_bp && rip == g_gdb_bp + 1) {
+        void *self = (void *)uc->uc_mcontext.gregs[REG_RDI];
+        g_gdb_this = self;
+        *(volatile uint8_t *)g_gdb_bp = g_gdb_orig;          /* remove breakpoint */
+        uc->uc_mcontext.gregs[REG_RIP] = (greg_t)g_gdb_bp;   /* rewind to re-exec */
+        if (self && !g_gdb_done) {
+            g_gdb_done = 1;
+            char m[160];
+            int n = snprintf(m, sizeof(m),
+                "[gdb-hook] getDecodedBody this=%p — dumping this+0xc0..0x120:\n", self);
+            if (n > 0) { int r = write(2, m, n); (void)r; }
+            /* dump map + body region to locate where the real body lives on `this` */
+            for (uintptr_t off = 0xc0; off <= 0x118; off += 8) {
+                uint64_t v = *(volatile uint64_t *)((uint8_t *)self + off);
+                char b[64]; int bn = snprintf(b, sizeof(b), "   +0x%03lx: %016lx\n",
+                                              (unsigned long)off, (unsigned long)v);
+                if (bn > 0) { int r = write(2, b, bn); (void)r; }
+            }
+            build_header_map((uint8_t *)self + 0xd0, "Content-Type", "text/x-xml-plist");
+            int r = write(2, "[gdb-hook] forged map at this+0xd0\n", 35); (void)r;
+        }
+        return;
+    }
+    signal(SIGTRAP, SIG_DFL); raise(SIGTRAP);
+}
+
+/* Plant a one-shot int3 at getDecodedBody; leave the page writable so the handler can
+ * restore the original byte. */
+static void install_gdb_breakpoint(uintptr_t lib_base) {
+    uintptr_t addr = lib_base + 0x729eee;
+    uintptr_t page = addr & ~(uintptr_t)4095;
+    if (mprotect((void *)page, 4096, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        fprintf(stderr, "[gdb-hook] mprotect failed\n"); return;
+    }
+    g_gdb_orig = *(uint8_t *)addr;
+    g_gdb_bp   = addr;
+    *(uint8_t *)addr = 0xCC;
+    fprintf(stderr, "[gdb-hook] int3 breakpoint armed at getDecodedBody 0x%lx\n", addr);
 }
 
 extern uintptr_t g_lib_base_for_diag;
@@ -844,6 +900,48 @@ static void patch_har_body_serializer(uintptr_t lib_base) {
     patch_code(lib_base + 0x60c1f0, nop5, sizeof(nop5), "HAR body-obj serializer NOP");
 }
 
+/* AMSCore::Any type-dispatch bounds patches (ported from stage23). The plist decoder
+ * builds Any objects for each dict value; dispatch sites lack an upper-bounds check and
+ * only guard type_id==0xffffffff, so an Any with an unhandled type_id goes out of bounds.
+ * That can make the decoded body fail the map<string,Any> type check (bodyNotObjectType). */
+static void patch_any_je_site(uintptr_t base, uint32_t nc_off,
+                               uint8_t max_id, uint8_t je_offset) {
+    uint8_t p[10];
+    p[0]=0x83; p[1]=0xf8; p[2]=max_id;
+    p[3]=0x90; p[4]=0x90; p[5]=0x90; p[6]=0x90; p[7]=0x90;
+    p[8]=0x77; p[9]=je_offset;
+    char lbl[64]; snprintf(lbl, sizeof(lbl), "Any je-dispatch@0x%x", nc_off);
+    patch_code(base + nc_off, p, sizeof(p), lbl);
+}
+static void patch_any_cmov_site(uintptr_t base, uint32_t nc_off, uint8_t max_id) {
+    uint8_t p[10];
+    p[0]=0x83; p[1]=0xf8; p[2]=(uint8_t)(max_id > 0 ? max_id-1 : 0);
+    p[3]=0x72; p[4]=0x03; p[5]=0x31; p[6]=0xc0; p[7]=0x90; p[8]=0x6a; p[9]=0xff;
+    char lbl[64]; snprintf(lbl, sizeof(lbl), "Any cmov-dispatch@0x%x", nc_off);
+    patch_code(base + nc_off, p, sizeof(p), lbl);
+}
+static void patch_any_dispatch_bounds(uintptr_t base) {
+    static const uint8_t mv[] = {0x41,0x83,0xff,0x13, 0x90, 0x90,0x90,0x90, 0x77,0x19};
+    patch_code(base + 0x5e20f3, mv, sizeof(mv), "Any move-ctor dispatch bounds-check");
+    static const struct { uint32_t off; uint8_t max_id; uint8_t je_off; } je_sites[] = {
+        {0x336bd0,30,0x11},{0x3391dc,30,0x11},{0x34a5ee,31,0x11},{0x52efd2,29,0x11},
+        {0x5bf3e4,31,0x11},{0x5e26df,31,0x25},{0x60a432,30,0x11},{0x613088,31,0x11},
+        {0x69b0d0,31,0x11},{0x6dcf38,31,0x11},{0x762d04,31,0x11},{0x7b5e20,31,0x11},
+    };
+    for (size_t i = 0; i < sizeof(je_sites)/sizeof(je_sites[0]); i++)
+        patch_any_je_site(base, je_sites[i].off, je_sites[i].max_id, je_sites[i].je_off);
+    static const struct { uint32_t off; uint8_t max_id; } cmov_sites[] = {
+        {0x357b42,31},{0x357bba,31},{0x357c2e,31},{0x357ca2,31},{0x357d16,31},{0x357d8a,31},
+        {0x357dfe,31},{0x3530bd,31},{0x353149,31},{0x3531d6,31},{0x353263,31},{0x3532f0,31},
+        {0x35337d,31},{0x35340a,31},{0x353497,31},{0x5f1a2a,31},{0x5f1ae4,31},{0x5f1b9e,31},
+        {0x5f1c58,31},{0x5f1d12,31},{0x5f1dcc,31},{0x5f1e86,31},{0x5f1f40,31},{0x5f1ffa,31},
+        {0x5f4a5c,31},{0x5f4ad4,31},{0x5f4b48,31},{0x5f4bbc,31},{0x5f4c30,31},{0x5f4ca4,31},
+        {0x5f4d18,31},{0x5f4d8c,31},{0x5f4e00,31},
+    };
+    for (size_t i = 0; i < sizeof(cmov_sites)/sizeof(cmov_sites[0]); i++)
+        patch_any_cmov_site(base, cmov_sites[i].off, cmov_sites[i].max_id);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -855,6 +953,8 @@ int main(void) {
     sigaction(SIGSEGV, &sa, NULL);
     sa.sa_sigaction = sigabrt_handler;
     sigaction(SIGABRT, &sa, NULL);
+    sa.sa_sigaction = sigtrap_handler;
+    sigaction(SIGTRAP, &sa, NULL);
     g_main_thread = pthread_self();
 
     printf("=== stage22 inline_resp probe ===\n\n");
@@ -897,6 +997,8 @@ int main(void) {
         install_fake_jvm(lib_base);
         patch_should_redact(lib_base);
         patch_har_body_serializer(lib_base);
+        patch_any_dispatch_bounds(lib_base);
+        install_gdb_breakpoint(lib_base);
     }
 
     JNIEnv *env = fake_jni_env();
