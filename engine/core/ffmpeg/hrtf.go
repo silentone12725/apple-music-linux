@@ -137,7 +137,7 @@ func wavSampleRate(path string) (int, error) {
 // hrtfCacheDir returns (creating if needed) ~/.cache/adam/hrtf/.
 func hrtfCacheDir() (string, error) {
 	dir := filepath.Join(appdir.Cache(), "hrtf")
-	return dir, os.MkdirAll(dir, 0o755)
+	return dir, os.MkdirAll(dir, 0o700)
 }
 
 // stampRecord is serialised to stamp.json to detect SOFA file changes.
@@ -195,7 +195,7 @@ func extractHRTFSet(sofa string) (*HRTFSet, error) {
 	// Write stamp.
 	rec := stampRecord{SofaPath: sofa, ModNS: fi.ModTime().UnixNano(), SR: sr}
 	raw, _ := json.Marshal(rec)
-	_ = os.WriteFile(stamp, raw, 0o644)
+	_ = os.WriteFile(stamp, raw, 0o600)
 
 	return &HRTFSet{Mode: "stereo", IRPaths: paths, SampleRate: sr}, nil
 }
@@ -260,7 +260,7 @@ sys.stdout.buffer.write(pos[:, :2].astype(np.float64).tobytes())  # M*2 float64
 
 	var stdout bytes.Buffer
 	var stderr strings.Builder
-	cmd := exec.Command("python3", sf.Name(), sofa)
+	cmd := exec.Command("python3", "-I", sf.Name(), sofa)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

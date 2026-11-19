@@ -42,7 +42,7 @@ func invalidateALACCacheIfStale(cacheDir string) {
 	if deleted > 0 {
 		log.Printf("[vlc] invalidated %d stale ALAC cache file(s) (FairPlay key fix)", deleted)
 	}
-	_ = os.WriteFile(verFile, []byte(alacCacheVersion), 0o644)
+	_ = os.WriteFile(verFile, []byte(alacCacheVersion), 0o600)
 }
 
 // errLoadAbandoned marks a load whose request was cancelled before it reached the player.

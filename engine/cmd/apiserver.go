@@ -552,7 +552,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	}
 	// For native backend, use a default path if not set
 	if drmBaseDir == "" {
-		drmBaseDir = filepath.Join(os.TempDir(), "adam-drm", "files")
+		drmBaseDir = filepath.Join(privateTempDir(), "adam-drm", "files")
 	}
 	drmSession := drm.NewSessionManager(drmBaseDir)
 
@@ -564,7 +564,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 		drmDir = drmBinaryPath
 	}
 	if drmDir == "" {
-		drmDir = filepath.Join(os.TempDir(), "adam-drm")
+		drmDir = filepath.Join(privateTempDir(), "adam-drm")
 	}
 	drmBackend = drm.AdamplayBackend(drmDir)
 	if drmBackend != nil {
@@ -1188,4 +1188,15 @@ func (handshakeNoiseFilter) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	return log.Writer().Write(p)
+}
+
+// privateTempDir is where the DRM session lives when no directory is configured. It holds the
+// Apple session, so it must not be a name in the shared temp directory that another user could
+// have created first.
+func privateTempDir() string {
+	dir, err := appdir.PrivateTemp()
+	if err != nil {
+		log.Fatalf("no private directory for the DRM session: %v", err)
+	}
+	return dir
 }

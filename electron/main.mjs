@@ -13,7 +13,7 @@ process.stderr.on('error', (e) => { if (!['EPIPE', 'EIO'].includes(e.code)) thro
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, mkdirSync, unlinkSync, createWriteStream, createReadStream, readdirSync, cpSync } from 'fs';
+import { readFileSync, existsSync, statSync, readFileSync as readFile, writeFileSync, unlinkSync, createWriteStream, createReadStream, readdirSync, cpSync } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
 import os from 'os';
 import { isatty } from 'tty';
@@ -26,6 +26,7 @@ import { createLinkSchemeManager } from './link-schemes.mjs';
 import { resolveThemeMode } from './theme-mode.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
 import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
+import { ensurePrivateDir, isWithin } from './private-fs.mjs';
 import { validBackstop, writeBackstop, clearCredentialsFlow } from './drm-signout.mjs';
 import { parseByteRange } from './range.mjs';
 import { shouldShowOffline, offlineHash } from './load-failure.mjs';
@@ -59,7 +60,7 @@ function loadPrefs() {
     try { return JSON.parse(readFile(PREF_FILE, 'utf8')); } catch { return {}; }
 }
 function savePrefs(p) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+    ensurePrivateDir(CONFIG_DIR);
     writeFileAtomicSync(PREF_FILE, JSON.stringify(p, null, 2));
 }
 
@@ -92,7 +93,7 @@ function _storeFlushNow() {
     _storeWrite = _storeWrite.then(async () => {
         try {
             if (!_storeCache) { ok = true; return; }
-            mkdirSync(CONFIG_DIR, { recursive: true });
+            ensurePrivateDir(CONFIG_DIR);
             const enc = safeStorage.isEncryptionAvailable();
             const json = JSON.stringify(_storeCache);
             await writeFileAtomic(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
@@ -113,7 +114,7 @@ function _storeFlush() {
         _storeDirty = false;
         _storeWrite = _storeWrite.then(async () => {
             try {
-                mkdirSync(CONFIG_DIR, { recursive: true });
+                ensurePrivateDir(CONFIG_DIR);
                 const enc = safeStorage.isEncryptionAvailable();
                 const json = JSON.stringify(_storeCache); // latest state when this step runs
                 await writeFileAtomic(STORE_FILE, enc ? safeStorage.encryptString(json) : json);
@@ -287,7 +288,7 @@ const DEBUG_OUTPUT = process.env.ADAM_DEBUG === '1' || [0, 1, 2].some((fd) => { 
 // mpl_db/) which lives in the user config dir for packaged builds.
 function ensureUserDRM() {
     const userDir = path.join(CONFIG_DIR, 'drm');
-    mkdirSync(userDir, { recursive: true });
+    ensurePrivateDir(userDir);
 
     // Clean up stale artefacts from the old hybris-based DRM path.
     for (const stale of ['drm-rootless', 'drm-native', 'hybris-linker']) {
@@ -298,7 +299,7 @@ function ensureUserDRM() {
 }
 
 function ensureEngineConfig() {
-    mkdirSync(ENGINE_DATA_DIR, { recursive: true });
+    ensurePrivateDir(ENGINE_DATA_DIR);
     const cfgPath = path.join(ENGINE_DATA_DIR, 'config.yaml');
 
     let drmBase;
@@ -311,7 +312,7 @@ function ensureEngineConfig() {
             try { cpSync(legacyBase, drmBase, { recursive: true }); }
             catch (e) { console.error('[Adam] could not migrate the DRM session:', e.message); }
         }
-        mkdirSync(drmBase, { recursive: true });
+        ensurePrivateDir(drmBase);
     } else {
         // Dev: use the repo's own drm/files/ directly.
         drmBase = path.join(__dirname, '..', 'drm', 'files');
@@ -328,7 +329,7 @@ function ensureEngineConfig() {
             'alac-max: 192000',
             `drm-base-dir: ${yamlStr(drmBase)}`,
         ].join('\n') + '\n';
-        writeFileSync(cfgPath, stub);
+        writeFileAtomicSync(cfgPath, stub);
         return;
     }
 
@@ -347,7 +348,7 @@ function ensureEngineConfig() {
             changed = true;
         }
     }
-    if (changed) writeFileSync(cfgPath, content);
+    if (changed) writeFileAtomicSync(cfgPath, content);
 }
 
 // The engine's Apple session directory (session files, device trust, session lock).
@@ -730,6 +731,11 @@ function _injectCustomFallbackBg() {
 let _customCssKey = null;
 async function _injectCustomCss(filePath) {
     if (!win || !filePath || !existsSync(filePath)) return;
+    // The page can only be styled by a plain .css file of sensible size, whatever the pref says.
+    try {
+        const st = statSync(filePath);
+        if (!st.isFile() || !/\.css$/i.test(filePath) || st.size > 4 * 1024 * 1024) { console.warn('[Adam] Custom CSS ignored: not a .css file under 4 MB'); return; }
+    } catch { return; }
     if (_customCssKey) { await win.webContents.removeInsertedCSS(_customCssKey).catch(() => {}); _customCssKey = null; }
     try {
         const css = readFileSync(filePath, 'utf8');
@@ -830,9 +836,9 @@ function pageLogLevel(event) {
 function setupDebugLogging(win) {
     if (!DEBUG_OUTPUT && !process.env.ADAM_DEVTOOLS) return;
     const logsDir = path.join(CONFIG_DIR, 'logs');
-    mkdirSync(logsDir, { recursive: true });
+    ensurePrivateDir(logsDir);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const logStream = createWriteStream(path.join(logsDir, `debug-${stamp}.log`));
+    const logStream = createWriteStream(path.join(logsDir, `debug-${stamp}.log`), { mode: 0o600 });
     pruneDebugLogs(logsDir);
     const _write = (tag, args) => logStream.write(`[${new Date().toISOString()}] ${tag} ${args.join(' ')}\n`);
     const origLog = console.log, origError = console.error, origWarn = console.warn;
@@ -1799,7 +1805,7 @@ ipcMain.handle('dialog:choose-download-dir', async () => {
         // user's own choice, so record it where only this process can write.
         try {
             const cur = existsSync(EXPORT_PICKED_FILE) ? readFileSync(EXPORT_PICKED_FILE, 'utf8').split('\n').filter(Boolean) : [];
-            if (!cur.includes(filePaths[0])) writeFileSync(EXPORT_PICKED_FILE, [...cur, filePaths[0]].slice(-8).join('\n') + '\n');
+            if (!cur.includes(filePaths[0])) writeFileAtomicSync(EXPORT_PICKED_FILE, [...cur, filePaths[0]].slice(-8).join('\n') + '\n');
         } catch (e) { console.warn('[Adam] could not record download folder:', e.message); }
     }
     return { canceled, filePaths };
@@ -3018,7 +3024,7 @@ app.whenReady().then(() => {
                 if (!cachedPath) {
                     const info = await electronNet.fetch(engineUrl + '-info')
                         .then(r => r.ok ? r.json() : null).catch(e => { console.error(`[adam-video] info fetch err=${e.message}`); return null; });
-                    if (info && info.cached && info.path) {
+                    if (info && info.cached && info.path && isWithin(path.join(app.getPath('cache'), 'adam'), info.path)) {
                         cachedPath = info.path;
                         _mvPathCache.set(u.pathname, cachedPath);
                         // One entry per video watched; keep the newest 200 (a Map iterates oldest first).
@@ -3169,7 +3175,7 @@ function _storeFlushSync() {
     if (_storeFlushTimer) { clearTimeout(_storeFlushTimer); _storeFlushTimer = null; }
     if (!_storeDirty || !_storeCache) return;
     try {
-        mkdirSync(CONFIG_DIR, { recursive: true });
+        ensurePrivateDir(CONFIG_DIR);
         const enc = safeStorage.isEncryptionAvailable();
         const json = JSON.stringify(_storeCache);
         writeFileAtomicSync(STORE_FILE, enc ? safeStorage.encryptString(json) : json);

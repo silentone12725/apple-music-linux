@@ -30,10 +30,12 @@ import (
 	"time"
 
 	"engine/core/pipeline"
+	"engine/internal/appdir"
 )
 
 const (
-	socketPath  = "/tmp/CoreFxPipe_CavernPipe"
+	// .NET puts a named pipe at $TMPDIR/CoreFxPipe_<name>.
+	pipeName    = "CoreFxPipe_CavernPipe"
 	saveDatDir  = ".config/Cavern"
 	saveDatFile = "Save.dat"
 	// maxChunk bounds one PCM chunk; the length comes off the socket.
@@ -115,7 +117,21 @@ func (c *CavernSource) Stream(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("cavern: CavernPipeServer not found")
 	}
 
+	// The server's socket goes in a directory of our own: in the shared /tmp another user could
+	// bind the name first and receive the stream, or feed us audio of their own.
+	root, err := appdir.PrivateTemp()
+	if err != nil {
+		return fmt.Errorf("cavern: private directory: %w", err)
+	}
+	runDir, err := os.MkdirTemp(root, "cavern-")
+	if err != nil {
+		return fmt.Errorf("cavern: private directory: %w", err)
+	}
+	defer os.RemoveAll(runDir)
+	socketPath := filepath.Join(runDir, pipeName)
+
 	cmd := exec.CommandContext(ctx, bin)
+	cmd.Env = append(os.Environ(), "TMPDIR="+runDir)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {

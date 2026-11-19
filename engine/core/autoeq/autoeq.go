@@ -64,13 +64,13 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 // configDir returns ~/.config/adam, creating it if needed.
 func configDir() (string, error) {
 	d := appdir.Config()
-	return d, os.MkdirAll(d, 0o755)
+	return d, os.MkdirAll(d, 0o700)
 }
 
 // cacheDir returns ~/.cache/adam/autoeq, creating it if needed.
 func cacheDir() (string, error) {
 	d := filepath.Join(appdir.Cache(), "autoeq")
-	return d, os.MkdirAll(d, 0o755)
+	return d, os.MkdirAll(d, 0o700)
 }
 
 // LoadSettings reads the current EQ settings from ~/.config/adam/eq.json.
@@ -104,7 +104,7 @@ func SaveSettings(s *Settings) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "eq.json"), raw, 0o644)
+	return os.WriteFile(filepath.Join(dir, "eq.json"), raw, 0o600)
 }
 
 // FFmpegChain returns the FFmpeg -af filter fragment for the current EQ settings.
@@ -217,7 +217,7 @@ func FetchTargets(ctx context.Context) ([]TargetEntry, error) {
 	}
 
 	if out, err := json.Marshal(targets); err == nil {
-		os.WriteFile(cachePath, out, 0o644) //nolint:errcheck
+		os.WriteFile(cachePath, out, 0o600) //nolint:errcheck
 	}
 	return targets, nil
 }
@@ -273,7 +273,7 @@ func FetchIndex(ctx context.Context) ([]Model, error) {
 
 	// Cache to disk.
 	if out, err := json.Marshal(models); err == nil {
-		os.WriteFile(indexPath, out, 0o644) //nolint:errcheck
+		os.WriteFile(indexPath, out, 0o600) //nolint:errcheck
 	}
 	log.Printf("[autoeq] fetched index: %d models", len(models))
 	return models, nil
@@ -368,7 +368,7 @@ func FetchBands(ctx context.Context, source, form, name, rig, target string) (*S
 
 	slug := slugify(source+"_"+name+"_"+usedTarget) + "_bands.json"
 	if out, err := json.Marshal(s); err == nil {
-		os.WriteFile(filepath.Join(dir, slug), out, 0o644) //nolint:errcheck
+		os.WriteFile(filepath.Join(dir, slug), out, 0o600) //nolint:errcheck
 	}
 	return s, nil
 }
@@ -610,7 +610,7 @@ func FetchFR(ctx context.Context, source, form, name, rig, target string) (*FRDa
 	d := &FRData{Original: original, Corrected: corrected}
 	slug := slugify(source+"_"+name+"_"+usedTarget) + "_fr.json"
 	if out, err := json.Marshal(d); err == nil {
-		os.WriteFile(filepath.Join(dir, slug), out, 0o644) //nolint:errcheck
+		os.WriteFile(filepath.Join(dir, slug), out, 0o600) //nolint:errcheck
 	}
 	return d, nil
 }

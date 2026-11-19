@@ -914,6 +914,13 @@ func (m *Manager) runPostProcess(ctx context.Context, req ExportRequest, job *Ex
 		return
 	}
 	m.advance(job, PhaseMoving, 96)
+	// The folder was checked when the job was accepted, which may be long ago: a symlink put in
+	// its place since must not carry the file outside the allowed folders.
+	if err := m.checkOutputDir(filepath.Dir(finalPath)); err != nil {
+		os.Remove(tmpPath) //nolint:errcheck
+		m.fail(job, err)
+		return
+	}
 	// The existence check in Phase 2 ran long ago and another job may have
 	// produced the same file since, so the policy is enforced atomically here.
 	dest, err := moveNoClobber(tmpPath, finalPath, req.Options.OverwritePolicy)

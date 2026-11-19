@@ -37,7 +37,10 @@ func root(cache bool) string {
 	}
 	home, herr := os.UserHomeDir()
 	if herr != nil || home == "" {
-		return os.TempDir()
+		if dir, perr := PrivateTemp(); perr == nil {
+			return dir
+		}
+		return filepath.Join(os.TempDir(), "adam-unavailable")
 	}
 	if cache {
 		return filepath.Join(home, ".cache")
