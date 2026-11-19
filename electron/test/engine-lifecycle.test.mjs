@@ -31,7 +31,7 @@ test('concurrent starts share one preparation and one child', async () => {
     const proc = fakeChild();
     const lifecycle = createEngineLifecycle({
         prepare: async () => { prepareCount++; await wait(10); },
-        spawn: () => { spawnCount++; return proc; }, log: noop,
+        spawn: () => { spawnCount++; return proc; }, log: noop, plat: 'linux', // SIGTERM is the Linux request; Windows has its own test
     });
     await Promise.all([lifecycle.start(), lifecycle.start(), lifecycle.start()]);
     assert.equal(prepareCount, 1);
@@ -111,7 +111,7 @@ test('shutdown waits for SIGTERM and escalates only for an unresponsive child', 
         }
     };
     const lifecycle = createEngineLifecycle({
-        prepare: async () => {}, spawn: () => proc, log: noop, killDelay: 5,
+        prepare: async () => {}, spawn: () => proc, log: noop, killDelay: 5, plat: 'linux',
     });
     await lifecycle.start();
     await lifecycle.stop();

@@ -660,6 +660,9 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	if cacheBase := appdir.Cache(); cacheBase != "" {
 		if dc, err := diskcache.New(filepath.Join(cacheBase, "playback")); err == nil {
 			s.diskCache = dc
+			// A previous run that was killed outright (power loss, kill -9) left its unfinished downloads;
+			// no writer exists yet in this process, so every .tmp file is an orphan.
+			dc.RemoveInFlight()
 			s.alac = newALACGate()
 			invalidateALACCacheIfStale(filepath.Join(cacheBase, "playback"))
 			go func() {
