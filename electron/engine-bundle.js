@@ -7066,21 +7066,10 @@
     const existing = document.getElementById("adam-history-section");
     if (existing && (existing.parentElement !== panel || !_histEnabled)) existing.remove();
     if (!panel) return;
-    const content = panel.querySelector(".side-panel-content") ?? panel.querySelector(".side-panel-empty");
     if (!_histEnabled) {
       panel.querySelector(".adam-queue-tabs")?.remove();
       delete panel.dataset.adamQueueView;
-      if (content?.getAttribute("aria-labelledby") === "adam-queue-tab-queue") {
-        content.removeAttribute("aria-labelledby");
-        content.removeAttribute("role");
-        if (content.id === "adam-queue-content") content.removeAttribute("id");
-      }
       return;
-    }
-    if (content) {
-      if (!content.id) content.id = "adam-queue-content";
-      content.setAttribute("role", "tabpanel");
-      content.setAttribute("aria-labelledby", "adam-queue-tab-queue");
     }
     if (panel.querySelector("#adam-history-section")) return;
     const div = document.createElement("div");
@@ -7104,9 +7093,11 @@
       button.id = `adam-queue-tab-${view}`;
       button.setAttribute("role", "tab");
       button.setAttribute("aria-selected", String(view === "queue"));
-      button.setAttribute("aria-controls", view === "history" ? div.id : content?.id ?? panel.id);
+      if (view === "history") {
+        button.setAttribute("aria-controls", div.id);
+        div.setAttribute("aria-labelledby", button.id);
+      }
       button.tabIndex = view === "queue" ? 0 : -1;
-      (view === "history" ? div : content)?.setAttribute("aria-labelledby", button.id);
       button.addEventListener("click", () => {
         panel.dataset.adamQueueView = view;
         div.hidden = view !== "history";
