@@ -124,15 +124,15 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		}
 		return loadErr
 	})
-	if !loaded || err == errLoadAbandoned || err == errLoadReleased {
+	if !loaded || errors.Is(err, errLoadAbandoned) || errors.Is(err, errLoadReleased) {
 		if src != nil {
 			src.Abort()
 			src.Close()
 		}
-		if err == errLoadAbandoned {
+		if errors.Is(err, errLoadAbandoned) {
 			return
 		}
-		if err == errLoadReleased {
+		if errors.Is(err, errLoadReleased) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
