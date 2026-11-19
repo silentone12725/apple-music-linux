@@ -161,16 +161,11 @@ func (p *Player) SetTime(posMs int64) {
 		return
 	}
 	state := C.libvlc_media_player_get_state(p.mp)
-	p.mu.Unlock()
 	if state == C.libvlc_Playing || state == C.libvlc_Paused {
-		p.mu.Lock()
-		if p.mp != nil {
-			C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
-		}
+		C.libvlc_media_player_set_time(p.mp, C.libvlc_time_t(posMs))
 		p.mu.Unlock()
 		return
 	}
-	p.mu.Lock()
 	myGen := p.loadGen
 	p.mu.Unlock()
 	go func() {

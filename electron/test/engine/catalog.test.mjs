@@ -37,3 +37,15 @@ test('extractItemType: type then kind fallbacks', () => {
     assert.equal(extractItemType({}), null);
     assert.equal(extractItemType(null), null);
 });
+
+test('a favorite/library item keeps the same identity and album position as its catalog track', () => {
+    const album = ['6826288475', '6826288476', '6826288477'];
+    const favorite = { id: 'a.123', type: 'library-songs', playParams: { catalogId: album[1] } };
+    assert.equal(extractItemId({ id: 'a.6826288476' }), 'a.6826288476');
+    assert.equal(extractItemId(favorite), album[1]);
+    assert.equal(album.indexOf(extractItemId(favorite)), 1);
+    assert.deepEqual([album[0], favorite, album[2]].map(i => typeof i === 'string' ? i : extractItemId(i)), album);
+    assert.equal(extractItemId({ id: 'i.opaque', relationships: { catalog: { data: [{ id: album[1] }] } } }), album[1]);
+    assert.equal(extractItemId({ id: 'i.opaque' }), 'i.opaque', 'opaque library IDs must never be fabricated');
+    assert.equal(extractItemId({ id: 'a.not-a-number' }), 'a.not-a-number');
+});

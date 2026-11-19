@@ -21,6 +21,7 @@ import { mp4FirstDecodeSeconds } from './engine/mp4base.js';
 import { GLASS, cleanBlur, sidebarOpacityControl, navColorWithAlphaVar } from './engine/sidebar-glass.js';
 import { extractItemId as _extractItemId, isVideoType as _isVideoType, extractItemType as _extractItemType } from './engine/catalog.js';
 import { extractPalette as _extractPalette, paletteRoles as _paletteRoles, rgbToHsl as _rgbToHsl } from './engine/artpalette.js';
+import { resolveAlbumQueue } from './engine/album-queue.js';
 import { menuAction as _menuAction } from './engine/menu-action.js';
 import { SKIP_SELECTOR as _SKIP_SELECTOR, skipDirection as _skipDirection, footerAction as _footerAction } from './engine/transport-skip.js';
 import { t as _t } from './engine/i18n.js';
@@ -1506,7 +1507,7 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
 })();
 
 function deleteSession(id) {
-    if (id) fetch(`${ENGINE}/api/v1/playback/${id}`, { method: 'DELETE' }).catch(() => {});
+    if (id) return fetch(`${ENGINE}/api/v1/playback/${id}`, { method: 'DELETE', signal: AbortSignal.timeout(5000) }).catch(() => {});
 }
 
 // ── MSE pipe + seek (AAC path) ────────────────────────────────────────────────
@@ -3907,6 +3908,7 @@ function _vlcUpdatePosition(posMs, state, mkAudio) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ sessionId: _sessionId, assetId: _currentAssetId, startMs: reloadMs }),
+                signal: _abortCtrl.signal,
             }).then(() => {
                 if (seekRevision !== _vlcSeekRevision) return;
                 _vlcSeekFrozen = false;
@@ -3947,7 +3949,7 @@ async function _reopenCurrentTrack(positionSec) {
     _sessionLost = null;
     if (!mk?.nowPlayingItem || !adamId) return false;
     _resumeSeekWhenReady(mk, { adamId, positionSec });
-    try { await handleTrackChange(mk); return true; }
+    try { return await handleTrackChange(mk); }
     catch (e) { console.warn('[Adam Engine] reopen after expired session failed:', e?.message || e); return false; }
 }
 
@@ -3961,7 +3963,7 @@ function _vlcRetryFrom(posMs, mkAudio, delay) {
             const response = await fetch(`${ENGINE}/api/v1/vlc/load`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ sessionId, assetId, startMs: posMs }),
-                signal: AbortSignal.timeout(15000),
+                signal: AbortSignal.any([AbortSignal.timeout(15000), _abortCtrl.signal]),
             });
             if (response.status === 404) { _reopenCurrentTrack(posMs / 1000); return; } // session expired: open a new one
             if (!response.ok) throw new Error(`VLC reload: HTTP ${response.status}`);
@@ -4228,11 +4230,7 @@ async function _prewarmNextAlac() {
     const pos   = mk.queue?.position ?? -1;
     if (!items || pos < 0 || pos + 1 >= items.length) return;
     const nextItem   = items[pos + 1];
-    const nextAdamId = nextItem?.playParams?.catalogId
-        ?? nextItem?.attributes?.playParams?.catalogId
-        ?? nextItem?.id
-        ?? nextItem?.playParams?.id
-        ?? nextItem?.attributes?.playParams?.id;
+    const nextAdamId = _extractItemId(nextItem);
     if (!nextAdamId) return;
     if (nextItem?.type === 'music-videos' || nextItem?.type === 'musicVideo' ||
         nextItem?.type === 'library-music-videos') return;
@@ -4307,11 +4305,7 @@ async function _prewarmNextAac() {
     const pos   = mk.queue?.position ?? -1;
     if (!items || pos < 0 || pos + 1 >= items.length) return;
     const nextItem   = items[pos + 1];
-    const nextAdamId = nextItem?.playParams?.catalogId
-        ?? nextItem?.attributes?.playParams?.catalogId
-        ?? nextItem?.id
-        ?? nextItem?.playParams?.id
-        ?? nextItem?.attributes?.playParams?.id;
+    const nextAdamId = _extractItemId(nextItem);
     if (!nextAdamId) return;
     if (nextItem?.type === 'music-videos' || nextItem?.type === 'musicVideo' ||
         nextItem?.type === 'library-music-videos') return;
@@ -4352,11 +4346,7 @@ async function _prewarmNextMv() {
     if (!items || pos < 0 || pos + 1 >= items.length) return;
     const nextItem = items[pos + 1];
     if (!_isVideoType(nextItem?.type)) return;
-    const nextAdamId = nextItem?.playParams?.catalogId
-        ?? nextItem?.attributes?.playParams?.catalogId
-        ?? nextItem?.id
-        ?? nextItem?.playParams?.id
-        ?? nextItem?.attributes?.playParams?.id;
+    const nextAdamId = _extractItemId(nextItem);
     if (!nextAdamId) return;
 
     const nextName = nextItem?.attributes?.name ?? nextAdamId;
@@ -4443,6 +4433,8 @@ function _closeCDNGate(mk) {
     _pendingPlaylistFetch = null;
 }
 
+let _sessionReleasePending = Promise.resolve();
+
 function _resetPlaybackState() {
     setPlayState(PLAY_STATE.IDLE, 'reset');
     if (_pipeCtrl)  { _pipeCtrl.abort();  _pipeCtrl  = null; }
@@ -4474,13 +4466,15 @@ function _resetPlaybackState() {
     if (_vlcSeekTimer) { clearTimeout(_vlcSeekTimer); _vlcSeekTimer = null; }
     stopVLCPoll();
     unbridgeDuration();
-    deleteSession(_sessionId);
+    // Wait across superseded resets too: reopening the same song must not reuse a session being deleted.
+    _sessionReleasePending = Promise.all([_sessionReleasePending, deleteSession(_sessionId)]).then(() => {});
     _sessionId      = null;
     _currentAssetId = null;
     _durationSec = 0;
     // Do NOT reset _losslessWaitDone here — it's a one-shot per DRM state change,
     // not per track. Resetting it would re-enable the 2.5 s wait on every skip.
     showQualityBadge(null);
+    return _sessionReleasePending;
 }
 
 async function _resolveSession(item, adamId, sf, mk) {
@@ -4520,6 +4514,7 @@ async function _resolveSession(item, adamId, sf, mk) {
     if (isVideo) console.log(`[Adam MV quality] opening ${adamId} with a ${_mvMaxHeight >= 2160 ? '4K (2160p)' : _mvMaxHeight + 'p'} limit`);
     const sessResp = await fetch(`${ENGINE}/api/v1/playback`, {
         method:  'POST',
+        signal: AbortSignal.timeout(20000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             assetId:    adamId,
@@ -4580,11 +4575,15 @@ async function _setupMSEPath(mkAudio, sess, mk, ctrl, t0) {
     HTMLMediaElement.prototype.load.call(mkAudio);
     mkAudio.load = () => {};
 
-    await new Promise((resolve, reject) => {
-        ctrl.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-        ms.addEventListener('sourceopen', resolve, { once: true });
-    });
-    URL.revokeObjectURL(blobUrl);
+    try {
+        await new Promise((resolve, reject) => {
+            ctrl.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+            ms.addEventListener('sourceopen', resolve, { once: true });
+        });
+    } finally {
+        URL.revokeObjectURL(blobUrl);
+    }
+    if (ctrl.signal.aborted) return;
     if (_durationSec > 0) { try { ms.duration = _durationSec; } catch (_) {} }
 
     const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
@@ -4852,14 +4851,30 @@ async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
         _startLyricsFreeze(mkAudio);
     };
 
+    ctrl.signal.addEventListener('abort', () => {
+        unbridgeDuration();
+        stopVLCPoll();
+        _stopLyricsFreeze();
+        _vlcLoading = false;
+        URL.revokeObjectURL(_silentUrl);
+        delete mkAudio.paused;
+        delete mkAudio.currentTime;
+        delete mkAudio.volume;
+        delete mkAudio.muted;
+        delete mkAudio.pause;
+        _vlcPaused = false;
+    }, { once: true });
+
     _vlcLoading = true;
     const vlcResp = await fetch(`${ENGINE}/api/v1/vlc/load`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId: _sessionId, assetId: adamId, startMs: 0 }),
-        signal: ctrl.signal,
+        signal: AbortSignal.any([ctrl.signal, AbortSignal.timeout(15000)]),
     });
     if (!vlcResp.ok) throw new Error(`VLC load: ${await vlcResp.text()}`);
+
+    if (ctrl.signal.aborted) return;
 
     // Every track opens unmuted at the remembered level. The player otherwise
     // keeps whatever the previous track left it at, including a mute or a 0.
@@ -4880,24 +4895,34 @@ async function _setupVLCPath(mkAudio, sess, adamId, ctrl, t0) {
     if (_pendingVLCIntent !== null) {
         const paused = _pendingVLCIntent; _pendingVLCIntent = null;
         await _requestVLCTransport(paused);
+        if (ctrl.signal.aborted) return;
         if (paused) mkAudio.dispatchEvent(new Event('pause'));
     }
+    // A load response only means VLC accepted the media. Wait for its first
+    // decoded-playing poll before another queued navigation tears the element down.
+    const playerReady = new Promise((resolve, reject) => {
+        const cleanup = () => {
+            clearTimeout(timer);
+            mkAudio.removeEventListener('playing', done);
+            ctrl.signal.removeEventListener('abort', done);
+        };
+        const done = () => {
+            if (!ctrl.signal.aborted && _vlcLoading && !_vlcPaused) return;
+            cleanup();
+            resolve();
+        };
+        const timer = setTimeout(() => {
+            cleanup();
+            reject(new Error('Timed out waiting for native audio'));
+        }, 20000);
+        mkAudio.addEventListener('playing', done);
+        ctrl.signal.addEventListener('abort', done, { once: true });
+        done();
+    });
     startVLCPoll(mkAudio);
+    await playerReady;
+    if (ctrl.signal.aborted) return;
     console.log(`[Adam Engine] VLC playing +${((performance.now()-t0)/1000).toFixed(2)}s`);
-
-    ctrl.signal.addEventListener('abort', () => {
-        unbridgeDuration();
-        stopVLCPoll();
-        _stopLyricsFreeze();
-        _vlcLoading = false;
-        URL.revokeObjectURL(_silentUrl);
-        delete mkAudio.paused;
-        delete mkAudio.currentTime;
-        delete mkAudio.volume;
-        delete mkAudio.muted;
-        delete mkAudio.pause;
-        _vlcPaused = false;
-    }, { once: true });
 }
 
 // Fast-path: start engine session + MSE immediately at click time, before NPIDF fires.
@@ -4922,7 +4947,7 @@ async function _triggerDirectPlay(adamId, mk) {
     const myGen = ++_generation;
     _directPlayGen    = myGen;
     _directPlayAdamId = adamId;
-    _resetPlaybackState();
+    const released = _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `direct:${adamId}`);
 
     if (!mkAudio.paused && !mkAudio.ended) mkAudio.pause();
@@ -4939,7 +4964,7 @@ async function _triggerDirectPlay(adamId, mk) {
     const t0 = performance.now();
     console.log(`[Adam DirectPlay] → ${adamId} (pre-NPIDF fast path)`);
 
-    await waitForLossless(T().losslessWait);
+    await Promise.all([released, waitForLossless(T().losslessWait)]);
     if (genStale(myGen)) return;
     // CDN gate stays open here so MK's concurrent setQueue can set audio.src=CDN and fire NPIDF.
     // We close it below, just before _setupMSEPath takes over the audio element.
@@ -4980,13 +5005,19 @@ async function _triggerDirectPlay(adamId, mk) {
             if (_htcSkippedItem) {
                 const pendingItem = _htcSkippedItem;
                 _htcSkippedItem = null;
-                const pendingId = pendingItem?.playParams?.catalogId
-                    ?? pendingItem?.attributes?.playParams?.catalogId
-                    ?? pendingItem?.id;
-                if (pendingId === adamId) handleTrackChange(pendingItem);
+                const pendingId = _extractItemId(pendingItem);
+                if (pendingId === adamId) handleTrackChange(mk);
             }
             return;
         }
+
+        const left = await leaveLossless({
+            live: _vlcLive, nextMode: 'aac',
+            stop: () => fetch(`${ENGINE}/api/v1/vlc/stop`, { method: 'POST' }),
+        });
+        if (genStale(myGen)) return;
+        if (!left.ok) throw new Error('Could not stop the previous lossless track');
+        if (left.stopped) _vlcLive = false;
 
         _sessionId      = sess.sessionId;
         _directPlayAdamId = null; // session live — play proxy can now use _sessionId branch
@@ -5068,36 +5099,28 @@ async function handleTrackChange(mk) {
     let item = mk.nowPlayingItem;
     if (!item) {
         item = await _handleNullNPIDF(mk);
-        if (!item) return;
+        if (!item) return false;
     }
 
     _closeCDNGate(mk);
 
-    const _htcAdamId = item.playParams?.catalogId
-        ?? item.attributes?.playParams?.catalogId
-        ?? item.id
-        ?? item.playParams?.id
-        ?? item.attributes?.playParams?.id;
+    const _htcAdamId = _extractItemId(item);
     if (_htcConfirmDirectPlay(_htcAdamId)) {
         _htcSkippedItem = item; // codec-fallback in _triggerDirectPlay will retry if ALAC/MV
-        return;
+        return true;
     }
     _htcSkippedItem = null;
     _directPlayAdamId = null;
     _directPlayGen    = 0;
 
     const myGen = ++_generation;
-    _resetPlaybackState();
+    const released = _resetPlaybackState();
     setPlayState(PLAY_STATE.OPENING, `htc:${_htcAdamId ?? '?'}`);
 
     // Library tracks have an `i.` prefixed id; the engine needs the catalog id.
-    const adamId = item.playParams?.catalogId
-        ?? item.attributes?.playParams?.catalogId
-        ?? item.id
-        ?? item.playParams?.id
-        ?? item.attributes?.playParams?.id;
+    const adamId = _extractItemId(item);
     const sf     = mk.storefrontId ?? 'us';
-    if (!adamId) { console.warn('[Adam Engine] No Adam ID'); return; }
+    if (!adamId) { console.warn('[Adam Engine] No Adam ID'); return false; }
     _currentAssetId = adamId;
 
     // Kick off syllable lyrics fetch for the new track (non-blocking).
@@ -5124,8 +5147,8 @@ async function handleTrackChange(mk) {
 
     // Wait for DRM to report lossless capability before opening the session.
     // Timeout scales with power mode: throttled CPUs need more time for DRM to report in.
-    await waitForLossless(T().losslessWait);
-    if (genStale(myGen)) return;
+    await Promise.all([released, waitForLossless(T().losslessWait)]);
+    if (genStale(myGen)) return false;
 
     try {
         const sess = await _resolveSession(item, adamId, sf, mk);
@@ -5141,7 +5164,7 @@ async function handleTrackChange(mk) {
                 if (_sessionId !== null) { deleteSession(sess.sessionId); return; } // true orphan
                 setTimeout(() => { if (_sessionId !== sess.sessionId) deleteSession(sess.sessionId); }, 5000);
             });
-            return;
+            return false;
         }
 
         _sessionId      = sess.sessionId;
@@ -5151,8 +5174,8 @@ async function handleTrackChange(mk) {
         _audioAnalysis  = null; // reset; async fetch below may populate it
         console.log(`[Adam Engine] Session ${_sessionId} codec=${sess.codec} dur=${_durationSec.toFixed(1)}s +${((performance.now()-t0)/1000).toFixed(2)}s`);
 
-        // Leaving the lossless path: releasing the session does not stop libvlc, so stop it and
-        // wait for the engine to confirm before the next path starts. _vlcLive survives a
+        // Confirm native playback has stopped before another player starts, including when
+        // session release failed or timed out. _vlcLive survives a
         // superseded track change, so the stop is never lost.
         {
             const left = await leaveLossless({
@@ -5161,8 +5184,8 @@ async function handleTrackChange(mk) {
             });
             if (left.stopped) {
                 if (left.ok) _vlcLive = false;
-                else console.warn('[Adam Handoff] libvlc stop did not complete; continuing');
-                if (genStale(myGen)) return;
+                else throw new Error('Could not stop the previous lossless track');
+                if (genStale(myGen)) return false;
             }
         }
 
@@ -5177,7 +5200,7 @@ async function handleTrackChange(mk) {
             bridgeDuration(mk, _durationSec);
             setPlayState(PLAY_STATE.STREAMING, `htc:mv:${adamId}`);
             await startMVPipeline();
-            return;
+            return !genStale(myGen);
         }
 
         if (!mkAudio) throw new Error('MK audio element not found');
@@ -5206,7 +5229,9 @@ async function handleTrackChange(mk) {
             await _setupVLCPath(mkAudio, sess, adamId, ctrl, t0);
         }
 
+        return !genStale(myGen) && !ctrl.signal.aborted;
     } catch (err) {
+        if (genStale(myGen)) return false;
         if (!_abortCtrl?.signal.aborted) {
             const mk2 = window.MusicKit?.getInstance?.();
             console.error('[Adam Engine] Playback error:', err,
@@ -5214,8 +5239,11 @@ async function handleTrackChange(mk) {
                 '\n  mk.state=', mk2?.playbackState, 'mk.item=', mk2?.nowPlayingItem?.id ?? 'null'
             );
         }
+        await _resetPlaybackState();
+        if (genStale(myGen)) return false;
         if (mkAudio) delete mkAudio.load;
-        setPlayState(PLAY_STATE.IDLE, 'htc:error');
+        _adamToast(_t('playbackFailed'));
+        return false;
     }
 }
 
@@ -5272,7 +5300,7 @@ function _histPush(item) {
         artworkUrl: _histArtUrl(item.attributes?.artwork),
         duration:   _histFmtDur(item.attributes?.durationInMillis),
         id:         item.id,
-        catalogId:  item.playParams?.catalogId  || item.attributes?.playParams?.catalogId || item.id,
+        catalogId:  _extractItemId(item),
         ts:         Date.now(),
     };
     if (!entry.name || _queueHistory[0]?.id === entry.id) return;
@@ -6541,19 +6569,24 @@ async function setup() {
 
     // _mkFetchAll paginates a MusicKit library endpoint until exhausted.
     // Extracted from _syncLibraryViaJS so its CC stays independent.
-    async function _mkFetchAll(mkInst, basePath, extraParams, onProgress) {
+    async function _mkFetchAll(mkInst, basePath, extraParams, onProgress, strict = false) {
         const items = [];
         const [pathOnly, qs] = basePath.split('?');
         const baseParams = Object.assign({ limit: 100 }, extraParams);
         if (qs) qs.split('&').forEach(kv => { const [k,v] = kv.split('='); if (k && !(k in baseParams)) baseParams[k] = v; });
         let nextOffset = null;
+        const offsets = new Set();
         while (true) {
-            if (items.length > 50_000) break;
+            if (items.length > 50_000) {
+                if (strict) throw new Error('Album pagination exceeded track limit');
+                break;
+            }
             const params = Object.assign({}, baseParams);
             if (nextOffset !== null) params.offset = nextOffset;
             const res = await mkInst.api.music(pathOnly, params);
             const body = res?.data;
             if (body?.errors?.length) throw new Error(body.errors[0]?.detail || body.errors[0]?.title || 'API error');
+            if (strict && !Array.isArray(body?.data)) throw new Error('Album page has no track list');
             const page = body?.data || [];
             items.push(...page);
             onProgress(items.length, pathOnly);
@@ -6561,7 +6594,11 @@ async function setup() {
             if (!nextUrl) break;
             const m = nextUrl.match(/[?&]offset=(\d+)/);
             nextOffset = m ? parseInt(m[1], 10) : null;
-            if (nextOffset === null) break;
+            if (nextOffset === null || offsets.has(nextOffset)) {
+                if (strict) throw new Error('Invalid album pagination cursor');
+                break;
+            }
+            offsets.add(nextOffset);
         }
         return items;
     }
@@ -6728,6 +6765,10 @@ async function setup() {
     // The nowPlayingItemDidChange listener resets it once a change is confirmed.
 
     let _adamAdvancing = false;
+    let _adamQueuedGoto = null;
+    let _adamNavRevision = 0;
+    let _adamCommandRevision = 0;
+    let _adamReadyRevision = 0;
     let _adamAdvancingTimer = null;
     let _adamGotoTarget = null;   // queue index we're transitioning TO (set by _adamGoto)
     let _adamGotoTargetId = null; // catalog ID of the target track — fallback for stale queue.items
@@ -6739,11 +6780,33 @@ async function setup() {
         // block spurious events for the old track after the null NPIDF clears _adamAdvancing.
         clearTimeout(_adamAdvancingTimer);
         _adamAdvancingTimer = null;
+        queueMicrotask(() => {
+            if (_adamAdvancing || !_adamQueuedGoto) return;
+            const [ci, ii] = _adamQueuedGoto;
+            _adamQueuedGoto = null;
+            _adamGoto(ci, ii).catch(err => console.warn('[Adam] queued navigation:', err.message));
+        });
+    }
+
+    function _cancelNavigation() {
+        // An external Play replaces the queue, so the old target must no longer filter its events.
+        ++_adamNavRevision;
+        ++trackEventRevision;
+        _adamQueuedGoto = null;
+        _adamGotoTarget = null;
+        _adamGotoTargetId = null;
+        _adamInGotoTransition = false;
+        _adamTransitioning = false;
+        _adamNavInternal = false;
+        _adamPendingCI = -1;
+        _adamPendingII = -1;
+        _clearAdvancing();
     }
 
     // Navigate to container ci, item ii within that container.
     async function _adamGoto(ci, ii) {
-        if (_adamAdvancing) { console.log('[Adam] _adamGoto busy, ignoring ci=', ci, 'ii=', ii); return; }
+        if (_adamAdvancing) { _adamQueuedGoto = [ci, ii]; return; }
+        const navigationRevision = ++_adamNavRevision;
         _adamAdvancing = true;
         _adamTransitioning = true;
         _adamLastGotoMs = performance.now(); // open 1s suppression window for error dialog
@@ -6791,17 +6854,14 @@ async function setup() {
         // track, which prevents MK's changeToMediaAtIndex from advancing the queue.
         _vlcMode = false;
 
-        // MPRIS pre-update: find target item in current MK queue by song ID.
+        // Publish metadata only after the target pipeline is ready in the item-change handler.
         const targetSongId = _sessionContainers[ci]?.items[ii];
-        const targetItem = targetSongId
-            ? (mk.queue?.items ?? []).find(it => _extractItemId(it) === targetSongId)
-            : null;
-        if (targetItem) sendMprisMetadata(targetItem);
 
-        // Safety valve: if NPIDF never fires (ctmi failed silently), reset NPIDF state after 6s.
-        // _adamAdvancing itself is released right after ctmi below, so this only cleans up
-        // the remaining NPIDF-tracking flags (_adamGotoTarget, _adamNavInternal, pending coords).
+        // This timeout only covers a missing MusicKit track event. Once it
+        // arrives, the pipeline's own readiness check owns the barrier.
         _adamAdvancingTimer = setTimeout(() => {
+            if (navigationRevision !== _adamNavRevision || _adamGotoTarget === null) return;
+            ++_adamNavRevision;
             _adamGotoTarget = null;
             _adamGotoTargetId = null;
             _adamInGotoTransition = false;
@@ -6864,12 +6924,14 @@ async function setup() {
                 _adamGotoTarget = 0;
                 _adamGotoTargetId = targetSongId ?? null;
                 await mk.setQueue(desc).catch(() => {});
+                if (navigationRevision !== _adamNavRevision) return;
                 await mk.changeToMediaAtIndex(0).catch(() => {});
             } else if (songIdx >= 0 && songIds.length !== allIds.length) {
                 console.log('[Adam] _adamGoto mixed session — songs only, idx=' + songIdx + ' of ' + songIds.length);
                 _adamGotoTarget = songIdx;
                 _adamGotoTargetId = targetSongId ?? null;
                 await mk.setQueue({ songs: songIds }).catch(() => {});
+                if (navigationRevision !== _adamNavRevision) return;
                 await mk.changeToMediaAtIndex(songIdx).catch(() => {});
             } else {
                 const targetIdx = Math.max(0, Math.min(targetFlat, allIds.length - 1));
@@ -6883,14 +6945,17 @@ async function setup() {
                     ? { songs: allIds, startWith: { id: targetSongId } }
                     : { songs: allIds };
                 await mk.setQueue(sqDesc).catch(() => {});
+                if (navigationRevision !== _adamNavRevision) return;
                 await mk.play().catch(() => {});
             }
         }
 
-        // ctmi has been sent — release the advancing lock immediately so rapid prev/next
-        // clicks aren't swallowed. The NPIDF filter (_adamGotoTarget) and session-state
-        // tracking (_adamNavInternal, _adamPendingCI/II) continue independently.
-        _clearAdvancing();
+        if (navigationRevision !== _adamNavRevision) return;
+        _adamCommandRevision = navigationRevision;
+        if (_adamReadyRevision === navigationRevision) _clearAdvancing();
+
+        // Keep navigation locked until the target's pipeline is ready; queued skips
+        // otherwise detach its audio element while it is still being configured.
         _updateTransportButtons();
 
         // Show MK's native loading spinner on the MSE path. Not needed for VLC —
@@ -6902,8 +6967,10 @@ async function setup() {
     // manual=false → auto-advance (respects repeat-one: restarts same track)
     // manual=true  → explicit user skip (always advances past current track)
     async function _adamNext(manual = false) {
+        if (!manual && _adamInGotoTransition) return;
         const repeat = mk.repeatMode ?? 0; // 0=none, 1=one, 2=all
-        const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+        const [ci, ii] = _adamQueuedGoto ?? (_adamPendingCI >= 0
+            ? [_adamPendingCI, _adamPendingII] : [_sessionContainerIdx, _sessionItemIdx]);
         const cur = _sessionContainers[ci];
 
         if (repeat === 1 && !manual) {
@@ -6943,7 +7010,8 @@ async function setup() {
     }
 
     async function _adamPrev() {
-        const ci = _sessionContainerIdx, ii = _sessionItemIdx;
+        const [ci, ii] = _adamQueuedGoto ?? (_adamPendingCI >= 0
+            ? [_adamPendingCI, _adamPendingII] : [_sessionContainerIdx, _sessionItemIdx]);
         if (ci < 0) return; // no container yet
         if (ii > 0) {
             // Previous item within the same container.
@@ -6997,25 +7065,50 @@ async function setup() {
             .catch(err => _ADAM_DEBUG && console.log(`[MK-DBG] ${label} → owned change failed:`, err?.message || err));
     }
 
-    // Normalise a descriptor's startWith.id to a catalog song ID.
-    // Library IDs arrive as "a.123456789" — strip the prefix — and fall back to the
-    // catalog ID the click handler pulled off the DOM when startWith carries an opaque
-    // library ID ("i.XXXX") that has no numeric form. Borrowed from the VLC path, which
-    // handled these shapes; the AAC path previously required a bare numeric ID and let
-    // every library-track descriptor fall through to MK.
+    async function _libraryAlbumGoto(desc, closeGate, fallback) {
+        const revision = _adamNavRevision;
+        const albumId = desc.albums[0];
+        const clickedId = _pendingExternalClickCatalogId;
+        clearTimeout(_externalPlayGateTimer);
+        _externalPlayGateTimer = setTimeout(closeGate, 20000);
+        const signal = AbortSignal.timeout(8000);
+        const cached = fetch(`${ENGINE}/api/v1/library/albums/${encodeURIComponent(albumId)}/tracks`, {
+            signal: AbortSignal.timeout(1000),
+        }).then(r => r.ok ? r.json() : null).catch(() => null);
+        let rejectTimeout;
+        const timeout = new Promise((_, reject) => { rejectTimeout = () => reject(signal.reason); });
+        signal.addEventListener('abort', rejectTimeout, { once: true });
+        let queue;
+        try {
+            queue = await Promise.race([timeout, cached.then(result => resolveAlbumQueue(mk, albumId, desc.startWith?.id,
+                path => _mkFetchAll(mk, path, {}, () => {}, true), { clickedId, cachedTracks: result?.tracks ?? [] }))]);
+        } catch (err) {
+            if (revision !== _adamNavRevision || !_allowCDNTransition) return;
+            console.warn('[Adam Album] queue resolution failed:', err.message);
+            clearTimeout(_externalPlayGateTimer);
+            _externalPlayGateTimer = setTimeout(closeGate, mk.playbackState === 2 ? 65000 : 45000);
+            try { return await fallback(); }
+            catch (error) { if (revision === _adamNavRevision) closeGate(); throw error; }
+        } finally {
+            signal.removeEventListener('abort', rejectTimeout);
+        }
+        if (revision !== _adamNavRevision || !_allowCDNTransition) return;
+        return _ownedGoto(queue.ids, queue.startId, 'album/catalog', closeGate);
+    }
+
+    // Map opaque library identifiers only using explicit catalog metadata.
     function _normalizeStartId(desc) {
         const raw = desc?.startWith?.id;
         if (!raw) return null;
-        const stripped = raw.startsWith('a.') ? raw.slice(2) : raw;
-        if (/^\d{6,}$/.test(stripped)) return stripped;
+        if (/^\d{6,}$/.test(raw)) return raw;
         // Opaque library ID ("i.XXXX") — resolve via queue items first (avoids needing DOM
         // data-id attribute, handles albums descriptor startWith without extra API calls).
         const qItems = mk?.queue?.items;
         if (qItems?.length) {
             for (const it of qItems) {
                 const lid = it?.id ?? it?.playParams?.id ?? it?.attributes?.playParams?.id;
-                if (lid === raw || lid === stripped) {
-                    const cid = it?.playParams?.catalogId ?? it?.attributes?.playParams?.catalogId;
+                if (lid === raw) {
+                    const cid = _extractItemId(it);
                     if (cid && /^\d{6,}$/.test(String(cid))) return String(cid);
                 }
             }
@@ -7204,8 +7297,7 @@ async function setup() {
 
     // Stable ID from any MusicKit MediaItem regardless of whether the item came
     // from the catalog, library, or a queue insertion (each uses a different path).
-    const _qId = (item) =>
-        item?.id ?? item?.playParams?.id ?? item?.attributes?.playParams?.id ?? null;
+    const _qId = _extractItemId;
 
     // ── Track-row play button interceptor ────────────────────────────────────────
     // Fetch playlist tracks from the engine cache (DB → live Apple API fallback).
@@ -7267,6 +7359,7 @@ async function setup() {
             //      MK calls pause() (sets _msePaused=true) then play() during its track-change
             //      sequence; the proxy returns a never-resolving Promise → MK hangs forever.
             // Fixes mirror the VLC path: delete load/play overrides, clear _ourBlobUrl, open gate.
+            _cancelNavigation();
             if (_allowCDNTransition) return; // gate already open from a previous click
             const _aacMkAudio = getMKAudio();
             if (_aacMkAudio) {
@@ -7452,80 +7545,9 @@ async function setup() {
                     });
                 }
 
-                // Intercept library album descriptors — serve from local DB (instantaneous).
-                if (desc?.albums?.length === 1 && typeof desc.albums[0] === 'string' && desc.albums[0].startsWith('l.')) {
-                    const albumId = desc.albums[0];
-                    const startWithLid = desc.startWith?.id ?? null;
-                    if (_ADAM_DEBUG) console.log('[MK-DBG AAC] albums → querying local cache for ' + albumId);
-                    const fetchPromise = fetch(`${ENGINE}/api/v1/library/albums/${encodeURIComponent(albumId)}/tracks`)
-                        .then(r => r.ok ? r.json() : null).catch(() => null);
-                    return Promise.race([fetchPromise, new Promise(res => setTimeout(() => res(null), 3000))]).then(result => {
-                        const tracks = result?.tracks || [];
-                        const catalogIds = tracks.map(t => t.cid).filter(id => id && /^\d{6,}$/.test(id));
-                        if (catalogIds.length > 0) {
-                            if (_ADAM_DEBUG) console.log('[MK-DBG AAC] albums → local cache: ' + catalogIds.length + ' tracks');
-                            const startCid = startWithLid
-                                ? (tracks.find(t => t.lid === startWithLid) || {}).cid
-                                : (_pendingExternalClickCatalogId || null);
-                            return _aacOwnedGoto(catalogIds, startCid, 'albums/local');
-                        }
-                        // Cache cold — fetch album tracks directly via MK's REST API.
-                        // This is a simple REST call (no playback state machine) — same as
-                        // Android's queryItemsFromAlbum(albumId) which hits SVMediaLibrary or falls
-                        // back to a direct /v1/me/library/albums/{id}/tracks fetch.
-                        // Avoids the 30-40s delay of setQueue({albums:[...]}) when playbackState=2.
-                        if (_ADAM_DEBUG) console.log('[MK-DBG AAC] albums → cache cold, fetching tracks via MK REST');
-                        if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
-                        _externalPlayGateTimer = setTimeout(() => { if (_ADAM_DEBUG) console.log('[Adam click] AAC CDN gate reset (safety timeout)'); _aacCloseGate(); }, 20000);
-
-                        const mkInst = window.MusicKit?.getInstance?.();
-                        const directFetch = mkInst
-                            ? mkInst.api.music(`/v1/me/library/albums/${encodeURIComponent(albumId)}/tracks`, { limit: 100 })
-                                .then(res => res?.data?.data || []).catch(() => [])
-                            : Promise.resolve([]);
-
-                        return directFetch.then(items => {
-                            const directIds = items.map(item => {
-                                const pp = item?.attributes?.playParams;
-                                return pp?.catalogId || (pp?.isLibrary ? null : pp?.id) || null;
-                            }).filter(id => id && /^\d{6,}$/.test(id));
-
-                            if (directIds.length > 0) {
-                                if (_ADAM_DEBUG) console.log('[MK-DBG AAC] albums → REST fetch: ' + directIds.length + ' tracks (store for next time)');
-                                // Cache the result in engine DB so next click is instant
-                                const cacheTracks = items.map(item => ({
-                                    id: item.id,
-                                    attributes: item.attributes,
-                                    relationships: item.relationships || {}
-                                }));
-                                fetch(`${ENGINE}/api/v1/library/ingest`, {
-                                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ songs: cacheTracks, albums: [], playlists: {}, playlistTracks: {} })
-                                }).catch(() => {});
-
-                                const startCid = startWithLid
-                                    ? (() => {
-                                        const match = items.find(item => item.id === startWithLid);
-                                        const pp = match?.attributes?.playParams;
-                                        return pp?.catalogId || (pp?.isLibrary ? null : pp?.id) || null;
-                                    })()
-                                    : (_pendingExternalClickCatalogId || null);
-                                return _aacOwnedGoto(directIds, startCid, 'albums/REST');
-                            }
-
-                            // REST also empty (no auth yet) — last resort: Apple's slow setQueue path
-                            const _coldTimeout = (mk.playbackState === 2) ? 65000 : 45000;
-                            if (_ADAM_DEBUG) console.log('[MK-DBG AAC] albums → REST empty, last-resort Apple setQueue (timeout=' + _coldTimeout / 1000 + 's)');
-                            if (_externalPlayGateTimer) clearTimeout(_externalPlayGateTimer);
-                            _externalPlayGateTimer = setTimeout(() => { if (_ADAM_DEBUG) console.log('[Adam click] AAC CDN gate reset (safety timeout after setQueue)'); _aacCloseGate(); }, _coldTimeout);
-                            const p = _aacMkApiSaved.setQueue.apply(mk, a);
-                            if (p?.then) p.then(
-                                () => _ADAM_DEBUG && console.log('[MK-DBG AAC] setQueue resolved'),
-                                err => { if (_ADAM_DEBUG) console.log('[MK-DBG AAC] setQueue rejected:', err?.message || err); _aacCloseGate(); }
-                            );
-                            return p;
-                        });
-                    });
+                if (desc?.albums?.length === 1 && desc.albums[0]?.startsWith('l.')) {
+                    const original = _aacMkApiSaved.setQueue;
+                    return _libraryAlbumGoto(desc, _aacCloseGate, () => original.apply(mk, a));
                 }
 
                 // Context-queue descriptor with a concrete startWith.id (catalog song ID):
@@ -7704,6 +7726,7 @@ async function setup() {
                 console.log('[Adam VLC-GATE] MV click-action — skipping interceptor, allowing navigation');
                 return;
             }
+            _cancelNavigation();
             if (_mkApiSaved) return;
             // MK's setQueue reuses the existing mkAudio element. It calls:
             //   mkAudio.src = ''  → fine
@@ -7814,6 +7837,11 @@ async function setup() {
                 // If the target startWith item is already in mk.queue.items, redirect to
                 // changeToMediaAtIndex which fires NPIDF synchronously with no network fetch.
                 const desc = a[0];
+                if (desc?.albums?.length === 1 && desc.albums[0]?.startsWith('l.')) {
+                    const original = _mkApiSaved.setQueue;
+                    return _libraryAlbumGoto(desc, () => _closeCDNGate(mk), () => original.apply(mk, a));
+                }
+
                 if (desc?.playlists && desc?.startWith?.id) {
                     const targetId = desc.startWith.id;
                     // Library song IDs carry an "a." or "i." prefix. "a." is a library song ID
@@ -8092,7 +8120,12 @@ async function setup() {
         }
     });
 
+    let trackEventRevision = 0;
+    let trackChangePending = Promise.resolve(true);
     mk.addEventListener('nowPlayingItemDidChange', async () => {
+        const eventRevision = ++trackEventRevision;
+        const navigationRevision = _adamNavRevision;
+        const externalPlay = _allowCDNTransition;
         console.log('[NPIDF] fired item=' + (mk.nowPlayingItem?.attributes?.name || 'null') + ' allowCDN=' + _allowCDNTransition + ' adamGotoTarget=' + _adamGotoTarget);
         // During a controlled _adamGoto transition, filter out spurious NPIDFs.
         // setQueue fires a null NPIDF (item === null) that must be fully suppressed —
@@ -8134,13 +8167,11 @@ async function setup() {
                 }
                 return;
             }
-            // Target track arrived (or target ID indeterminate) — clear filter and cancel safety timer.
+            // Do not allow the missing-event watchdog to tear down an opening decoder.
+            clearTimeout(_adamAdvancingTimer);
+            _adamAdvancingTimer = null;
             _adamGotoTarget = null; _adamGotoTargetId = null; _adamInGotoTransition = false; _adamTransitioning = false;
-            clearTimeout(_adamAdvancingTimer); _adamAdvancingTimer = null;
         }
-        // Confirm the track change and release any residual advance lock.
-        // (_adamAdvancing is normally already false — released right after ctmi in _adamGoto.)
-        _clearAdvancing();
         // MK briefly fires null during queue transitions. Poll up to 250 ms for the
         // item to settle so handleTrackChange always sees a real item, and MPRIS
         // never gets a spurious Stopped between tracks.
@@ -8148,6 +8179,7 @@ async function setup() {
         if (!item) {
             for (let i = 0; i < 5; i++) {
                 await new Promise(r => setTimeout(r, 50));
+                if (eventRevision !== trackEventRevision) return;
                 item = mk.nowPlayingItem;
                 if (item) break;
             }
@@ -8252,7 +8284,26 @@ async function setup() {
                 }
             }
         }
-        handleTrackChange(mk);
+        // Duplicate notifications (including library/favorite refreshes) must not restart the decoder.
+        if (wasInternal || externalPlay || _extractItemId(item) !== _currentAssetId) trackChangePending = handleTrackChange(mk);
+        const ready = await trackChangePending;
+        if (eventRevision !== trackEventRevision) return;
+        if (ready === false) {
+            // A failed target cannot settle MusicKit's command; release queued user skips now.
+            if (navigationRevision === _adamNavRevision) ++_adamNavRevision;
+            _clearAdvancing();
+            _updateTransportButtons();
+            sendMprisStatus('Stopped');
+            return;
+        }
+        _adamReadyRevision = navigationRevision;
+        if (_adamCommandRevision === navigationRevision) _clearAdvancing();
+        else if (_adamAdvancing && navigationRevision === _adamNavRevision) {
+            // The decoder is ready even if MusicKit's intercepted command is still pending.
+            _adamAdvancingTimer ??= setTimeout(() => {
+                if (navigationRevision === _adamNavRevision) _clearAdvancing();
+            }, 6000);
+        }
         _updateTransportButtons();
         // Signal queue context to the prefetch scheduler.
         window._adamSmartCache?.onTrackChange(mk);
@@ -8277,7 +8328,7 @@ async function setup() {
         if (mk.playbackState === PS?.loading || mk.playbackState === PS?.playing) {
             trackFallbackTimer = setTimeout(() => {
                 const item = mk.nowPlayingItem;
-                const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id;
+                const id = _extractItemId(item);
                 if (!id || String(id) === String(_currentAssetId) || String(id) === String(_directPlayAdamId)) return;
                 if (item === _htcSkippedItem) return; // handleTrackChange already declined it
                 if (mk.playbackState !== PS?.loading && mk.playbackState !== PS?.playing) return;

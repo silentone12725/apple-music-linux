@@ -1,8 +1,8 @@
 // Playback mode handoff rules. A track plays through one of three paths and each
 // owns a different player: music video (its own pipeline), AAC (MSE on the page's
-// audio element) and ALAC (libvlc in the engine). Releasing an engine session
-// does not stop libvlc, so leaving the ALAC path has to stop it explicitly or the
-// previous track keeps playing under the new one. libvlc liveness is tracked by the
+// audio element) and ALAC (libvlc in the engine). Session deletion is asynchronous
+// in the renderer, so leaving ALAC also waits for an explicit native stop before
+// another player starts. libvlc liveness is tracked by the
 // caller (not derived at reset time) so a track change that is superseded before it
 // reaches the stop cannot lose the obligation to stop it.
 
@@ -31,7 +31,7 @@ export async function leaveLossless({ live, nextMode, stop, timeoutMs = 2000 }) 
     let timer;
     const timeout = new Promise(res => { timer = setTimeout(() => res(false), timeoutMs); });
     try {
-        const ok = await Promise.race([Promise.resolve().then(stop).then(() => true), timeout]);
+        const ok = await Promise.race([Promise.resolve().then(stop).then(r => r?.ok !== false), timeout]);
         return { stopped: true, ok };
     } catch (_) {
         return { stopped: true, ok: false };

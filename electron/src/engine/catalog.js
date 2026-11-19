@@ -4,13 +4,15 @@
 
 // extractItemId — the catalog/library id of a MusicKit queue item, trying the
 // several shapes MK uses, else null.
-export const extractItemId = (item) =>
-    item?.playParams?.catalogId
+export const extractItemId = (item) => {
+    return item?.playParams?.catalogId
     ?? item?.attributes?.playParams?.catalogId
+    ?? item?.relationships?.catalog?.data?.[0]?.id
     ?? item?.id
     ?? item?.playParams?.id
     ?? item?.attributes?.playParams?.id
     ?? null;
+};
 
 // isVideoType — true when a MusicKit type/kind string denotes a music video.
 export const isVideoType = (t) =>

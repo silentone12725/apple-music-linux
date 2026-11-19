@@ -47,6 +47,7 @@ func invalidateALACCacheIfStale(cacheDir string) {
 
 // errLoadAbandoned marks a load whose request was cancelled before it reached the player.
 var errLoadAbandoned = errors.New("vlc load abandoned")
+var errLoadReleased = errors.New("playback session released during load")
 
 func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 	if s.vlcPlayer == nil {
@@ -69,6 +70,10 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.pm.GetSession(req.SessionID)
 	if !ok {
 		http.Error(w, "session not found or expired", http.StatusNotFound)
+		return
+	}
+	if req.StartMs < 0 || (sess.DurationMs > 0 && req.StartMs > int64(sess.DurationMs)) {
+		http.Error(w, "startMs outside track duration", http.StatusBadRequest)
 		return
 	}
 	loadSeq := s.vlcLoads.begin()
@@ -99,21 +104,37 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		if r.Context().Err() != nil {
 			return errLoadAbandoned
 		}
+		if _, live := s.pm.GetSession(req.SessionID); !live {
+			return errLoadReleased
+		}
+		var loadErr error
 		if src != nil {
 			vlog.Printf("[vlc] load in-process session=%s startMs=%d", req.SessionID, req.StartMs)
-			return s.vlcPlayer.LoadSource(src)
+			loadErr = s.vlcPlayer.LoadSource(src)
+		} else {
+			url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
+			log.Printf("[vlc] load session=%s startMs=%d (no disk cache)", req.SessionID, req.StartMs)
+			loadErr = s.vlcPlayer.Load(url)
 		}
-		url := fmt.Sprintf("http://127.0.0.1:%d/api/v1/playback/%s/audio", s.port, req.SessionID)
-		log.Printf("[vlc] load url=%s startMs=%d (no disk cache)", url, req.StartMs)
-		return s.vlcPlayer.Load(url)
+		if loadErr == nil {
+			s.vlcGate.set(req.SessionID)
+			if req.StartMs > 0 {
+				s.vlcPlayer.SetTime(req.StartMs)
+			}
+		}
+		return loadErr
 	})
-	if !loaded || err == errLoadAbandoned {
+	if !loaded || errors.Is(err, errLoadAbandoned) || errors.Is(err, errLoadReleased) {
 		if src != nil {
 			src.Abort()
 			src.Close()
 		}
-		if loaded {
-			return // the caller left; nobody is waiting for a response
+		if errors.Is(err, errLoadAbandoned) {
+			return
+		}
+		if errors.Is(err, errLoadReleased) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
 		}
 		log.Printf("[vlc] load session=%s superseded by a newer load", req.SessionID)
 		http.Error(w, "superseded by a newer load", http.StatusConflict)
@@ -123,14 +144,6 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.vlcGate.set(req.SessionID)
-	// If a specific start position was requested, seek there after VLC reaches
-	// playing state. SetTime is async and polls until VLC is ready.
-	if req.StartMs > 0 {
-		s.vlcPlayer.SetTime(req.StartMs)
-		log.Printf("[vlc] SetTime startMs=%d queued after load", req.StartMs)
-	}
-
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -184,18 +197,17 @@ func (s *APIServer) handleVLCSeek(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[vlc seek] API recv posMs=%d sessionId=%s", req.PosMs, req.SessionID)
-	if !s.vlcGate.owns(req.SessionID) {
+	owned := false
+	s.vlcLoads.withPlayer(func() {
+		owned = s.vlcGate.owns(req.SessionID)
+		if owned {
+			s.vlcPlayer.SetTime(req.PosMs)
+		}
+	})
+	if !owned {
 		http.Error(w, "session does not own the player", http.StatusConflict)
 		return
 	}
-
-	// SetTime seeks within the currently loaded HTTP media. The audio endpoint
-	// serves the full cached ALAC file with Accept-Ranges, so libvlc can issue a
-	// byte-range request for the target fragment directly — no full reload needed.
-	// This avoids the ~1s pause that SeekReload causes by stopping and restarting
-	// VLC from scratch.
-	s.vlcPlayer.SetTime(req.PosMs)
-	log.Printf("[vlc seek] SetTime posMs=%d dispatched", req.PosMs)
 	writeJSON(w, http.StatusOK, map[string]any{"actualStartMs": req.PosMs})
 }
 
@@ -204,8 +216,10 @@ func (s *APIServer) handleVLCStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
 		return
 	}
-	s.vlcGate.clear()
-	s.vlcPlayer.Stop()
+	s.vlcLoads.stop(func() {
+		s.vlcGate.clear()
+		s.vlcPlayer.Stop()
+	})
 	w.WriteHeader(http.StatusOK)
 }
 

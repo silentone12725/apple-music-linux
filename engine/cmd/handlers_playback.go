@@ -465,7 +465,14 @@ func (s *APIServer) handleDeletePlayback(w http.ResponseWriter, r *http.Request)
 			log.Printf("%s ephemeral mv-dl removed assetID=%s (caching disabled)", tagInfo("[video-dl]"), sess.AssetID)
 		}
 	}
-	s.pm.Release(id)
+	// Recheck session liveness in the load critical section before attaching media.
+	s.vlcLoads.withPlayer(func() {
+		s.pm.Release(id)
+		if s.vlcPlayer != nil && s.vlcGate.owns(id) {
+			s.vlcGate.clear()
+			s.vlcPlayer.Stop()
+		}
+	})
 	s.events.emit("playback.deleted", map[string]string{"sessionId": id})
 	w.WriteHeader(http.StatusNoContent)
 }
