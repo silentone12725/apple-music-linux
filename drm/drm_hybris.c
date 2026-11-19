@@ -225,8 +225,68 @@ static watcher_t *wp_find(void *h, int create)
 
 /* Patch "is-phone-number-supported</key><false/>" -> "<true/> " in-place.
  * Both value tags are 8 bytes; the trailing space keeps the buffer length equal. */
+/* With ADAM_DRM_DEBUG set, say what the phone flag looks like in a response chunk (the key and the 24 bytes after it,
+ * never anything else), so a sign-in that offers no text-message option can be told apart from a patch that missed. */
+static void curl_trace_phone(const char *data, size_t len)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("ADAM_DRM_DEBUG") != NULL;
+    if (!on) return;
+    static const char KEY[] = "is-phone-number-supported";
+    const size_t kl = sizeof(KEY) - 1;
+    for (size_t i = 0; len >= kl && i + kl <= len; i++) {
+        if (memcmp(data + i, KEY, kl)) continue;
+        size_t n = len - i < kl + 24 ? len - i : kl + 24;
+        char buf[64];
+        size_t k = 0;
+        for (size_t j = 0; j < n && k < sizeof(buf) - 1; j++) {
+            unsigned char c = (unsigned char)data[i + j];
+            buf[k++] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+        }
+        buf[k] = '\0';
+        fprintf(stderr, "[phone-patch] chunk of %zu bytes has the flag: %s%s\n", len, buf, i + kl + 24 > len ? " (cut off by the chunk end)" : "");
+        return;
+    }
+}
+
+/* With ADAM_DRM_DEBUG set: the size and first 32 printable bytes of each response chunk, to see which requests pass through. */
+static void curl_trace_chunk(const char *data, size_t len)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("ADAM_DRM_DEBUG") != NULL;
+    if (!on) return;
+    char buf[40];
+    size_t k = 0;
+    for (size_t j = 0; j < len && k < 32; j++) {
+        unsigned char c = (unsigned char)data[j];
+        buf[k++] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+    }
+    buf[k] = '\0';
+    fprintf(stderr, "[curl-chunk] %zu bytes: %s\n", len, buf);
+    /* A small plist is a control reply (not a catalogue): list its key NAMES, never their values, to see which fields it carries. */
+    if (len < 4096 && len > 8 && memcmp(data, "<?xml", 5) == 0) {
+        char keys[512];
+        size_t kn = 0;
+        for (size_t i = 0; i + 5 < len && kn < sizeof(keys) - 40; i++) {
+            if (memcmp(data + i, "<key>", 5)) continue;
+            size_t j = i + 5, st = j;
+            while (j < len && data[j] != '<') j++;
+            size_t l = j - st;
+            if (l > 0 && l < 40) {
+                memcpy(keys + kn, data + st, l);
+                kn += l;
+                keys[kn++] = ',';
+            }
+            i = j;
+        }
+        keys[kn] = '\0';
+        fprintf(stderr, "[curl-keys] %s\n", keys);
+    }
+}
+
 static void curl_patch_phone(char *data, size_t len)
 {
+    curl_trace_phone(data, len);
     static const char KEY[] = "is-phone-number-supported</key>";
     static const char FROM[] = "<false/>";
     static const char TO[] = "<true/> ";
@@ -255,6 +315,7 @@ static size_t curl_write_shim(char *ptr, size_t size, size_t nmemb, void *ud)
     curl_wfn_t fn = w->orig_fn;
     void *fud = w->orig_ud;
     pthread_mutex_unlock(&g_wp_lock);
+    curl_trace_chunk(ptr, size * nmemb);
     curl_patch_phone(ptr, size * nmemb);
     if (!fn) return size * nmemb;
     return fn(ptr, size, nmemb, fud);
@@ -284,6 +345,14 @@ static int tls13_enabled(void)
 static int curl_setopt_intercept(void *handle, int option, void *param,
                                  curl_setopt_fn_t fwd)
 {
+    if (option == CURLOPT_URL_VAL && param && getenv("ADAM_DRM_DEBUG")) {
+        /* host and path only: a query string is never logged */
+        char u[160];
+        size_t n = 0;
+        for (const char *c = (const char *)param; *c && *c != '?' && n < sizeof(u) - 1; c++) u[n++] = *c;
+        u[n] = '\0';
+        fprintf(stderr, "[curl-url] %s\n", u);
+    }
     if (tls13_enabled()) {
         long v = tls13_sslversion(option, (long)param);
         if (v >= 0) {
