@@ -9326,10 +9326,20 @@
       const dlg = document.getElementById("adam-settings-dialog");
       if (!dlg?.open) return;
       dlg.classList.replace("adam-opening", "adam-closing") || dlg.classList.add("adam-closing");
-      dlg.addEventListener("animationend", () => {
+      let closed = false;
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        clearTimeout(fallback);
+        dlg.removeEventListener("animationend", onEnd);
         dlg.classList.remove("adam-closing");
-        dlg.close();
-      }, { once: true });
+        if (dlg.open) dlg.close();
+      };
+      const onEnd = (e) => {
+        if (e.target === dlg) finish();
+      };
+      const fallback = setTimeout(finish, 400);
+      dlg.addEventListener("animationend", onEnd);
     }
     function _adamMiniBtn(onClick) {
       const b = document.createElement("button");
@@ -9669,8 +9679,7 @@
       });
       const exportBtn = makeBtn("Export");
       exportBtn.onclick = async () => {
-        const name = prompt("Preset name to export (leave blank for current palette):") || "current";
-        await window.adamBridge.exportThemePreset(name);
+        await window.adamBridge.exportThemePreset("current");
       };
       const importBtn = makeBtn("Import");
       importBtn.onclick = async () => {
@@ -10282,6 +10291,7 @@
         setSQ("lossless");
         window.adamBridge?.setTweak("streaming-quality", "lossless");
         _streamingQuality = "lossless";
+        _syncQualityFlags();
       });
       if (!losslessUsable) {
         sqResetBtn.style.opacity = "0.38";
@@ -10316,6 +10326,7 @@
           setSQ(savedSQ);
           _streamingQuality = savedSQ;
         }
+        _syncQualityFlags();
         _onLosslessChange?.(v);
       });
       if (!losslessUsable) {
@@ -11585,16 +11596,18 @@ ${ALL_SVG} { opacity:0 !important; }
       }
       return { title: "", artist: "", artwork: "" };
     }
+    const _dlPref = (prefs, key, legacyKey) => prefs[key] ?? (legacyKey ? prefs[legacyKey] : void 0);
+    const _MV_RES_HEIGHT = { best: 0, "4k": 2160, "1080p": 1080, "720p": 720, "480p": 480 };
     function buildDownloadOptions(prefs) {
       return {
-        EmbedArtwork: prefs["embed-artwork"] !== false,
-        ArtworkSize: parseInt(prefs["artwork-size"] || "3000", 10),
-        EmbedLyrics: prefs["embed-lyrics"] !== false,
+        EmbedArtwork: _dlPref(prefs, "dl-embed-art", "embed-artwork") !== false,
+        ArtworkSize: parseInt(_dlPref(prefs, "dl-artwork-size", "artwork-size") || "1200", 10),
+        EmbedLyrics: _dlPref(prefs, "dl-lyrics", "embed-lyrics") !== false,
         LrcType: prefs["lyrics-type"] || "lyrics",
         LrcFormat: prefs["lyrics-format"] || "lrc",
         SaveLrcSidecar: !!prefs["save-lrc-sidecar"],
         OverwritePolicy: prefs["download-overwrite"] || "skip",
-        ConvertToFLAC: !!prefs["convert-to-flac"],
+        ConvertToFLAC: !!_dlPref(prefs, "dl-ffmpeg-enabled", "convert-to-flac"),
         FFmpegPath: prefs["ffmpeg-path"] || "",
         KeepOriginal: !!prefs["keep-original"],
         ExplicitChoice: prefs["explicit-enabled"] !== false ? prefs["explicit-marker"] || "[E]" : "",
@@ -11615,8 +11628,8 @@ ${ALL_SVG} { opacity:0 !important; }
         ready: _engineCaps.lossless
       });
       const hint = await prefetchHintMeta(info);
-      const _af = prefs["download-album-folder"] || "{album_artist}/{album}";
-      const _sf = prefs["download-song-file"] || "{track_number:02d} - {title}";
+      const _af = _dlPref(prefs, "dl-dirname-album", "download-album-folder") || "{album_artist}/{year} - {album}";
+      const _sf = _dlPref(prefs, "dl-filename-track", "download-song-file") || "{track_number:02d} - {title}";
       const body = {
         AssetID: info.id,
         Storefront: info.storefront,
@@ -11631,7 +11644,7 @@ ${ALL_SVG} { opacity:0 !important; }
           Playlist: info.type === "playlist",
           LibraryPlaylist: !!info.isLibrary
         },
-        MVMaxHeight: parseInt(prefs["mv-max-height"] ?? "0", 10) || 0,
+        MVMaxHeight: _MV_RES_HEIGHT[prefs["dl-mv-quality"]] ?? (parseInt(prefs["mv-max-height"] ?? "0", 10) || 0),
         OutputDir: prefs["download-dir"] || "",
         FilenameTemplate: `${_af}/${_sf}`,
         Options: buildDownloadOptions(prefs),
@@ -11852,12 +11865,17 @@ ${ALL_SVG} { opacity:0 !important; }
       panel.appendChild(list);
       return panel;
     }
+    const _retriedJobs = /* @__PURE__ */ new Set();
+    const _autoRetries = /* @__PURE__ */ new Map();
+    const MAX_AUTO_RETRIES = 3;
     function syncJobRetry(job, retryEnabled, retryDelay) {
-      if (job.phase === "failed" && retryEnabled) {
+      if (job.phase === "done") _autoRetries.delete(job.assetId);
+      if (job.phase === "failed" && retryEnabled && !_retriedJobs.has(job.jobId) && (_autoRetries.get(job.assetId) ?? 0) < MAX_AUTO_RETRIES) {
         if (!_failedAt.has(job.jobId)) {
           const deadline = Date.now() + retryDelay;
           const t2 = setTimeout(() => {
             _failedAt.delete(job.jobId);
+            _autoRetries.set(job.assetId, (_autoRetries.get(job.assetId) ?? 0) + 1);
             retryJob(job.jobId);
           }, retryDelay);
           _failedAt.set(job.jobId, { timer: t2, deadline });
@@ -12148,6 +12166,7 @@ ${ALL_SVG} { opacity:0 !important; }
       pollJobs();
     }
     async function retryJob(id) {
+      _retriedJobs.add(id);
       await fetch(`${ENGINE}/api/v1/export/${id}/retry`, { method: "POST" }).catch(() => {
       });
       pollJobs();
