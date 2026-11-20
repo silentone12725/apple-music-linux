@@ -1806,6 +1806,10 @@
   var _prevSb = null;
   var _engineCaps = { lossless: false, atmos: false };
   var _streamingQuality = "lossless";
+  function _syncQualityFlags() {
+    window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+    window._adamHiRes = window._adamLossless && _streamingQuality === "hi-res-lossless";
+  }
   var _downloadsQuality = "lossless";
   var _losslessWaitDone = false;
   var _snapshotEventId = -1;
@@ -7029,7 +7033,7 @@
       _snapshotEventId = msg?.meta?.id ?? -1;
       if (snap?.capabilities) {
         _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-        window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+        _syncQualityFlags();
       }
       console.log(`[Adam Engine] Engine ready \u2014 drm.session=${snap?.drm?.session ?? "unknown"} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
     } catch (e) {
@@ -7039,7 +7043,7 @@
       if (p["streaming-quality"]) _streamingQuality = p["streaming-quality"];
       if (p["lossless-enabled"] === false) _streamingQuality = "high-quality";
       if (p["dl-quality"] || p["downloads-quality"]) _downloadsQuality = p["dl-quality"] || p["downloads-quality"];
-      window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+      _syncQualityFlags();
       const body = {};
       if (p.prewarmLimitMB != null) body.prewarmLimitMB = p.prewarmLimitMB;
       if (p.persistLimitMB != null) body.persistLimitMB = p.persistLimitMB;
@@ -7060,7 +7064,7 @@
       const sess = snap?.state?.session ?? "unknown";
       if (snap?.capabilities) {
         _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-        window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+        _syncQualityFlags();
       }
       console.log(`[Adam Engine] DRM state \u2192 session=${sess} lossless=${_engineCaps.lossless}`);
       if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
@@ -9353,7 +9357,10 @@
         });
         if (save) {
           window.adamBridge?.setTweak(prefKey, value);
-          if (prefKey === "streaming-quality") _streamingQuality = value;
+          if (prefKey === "streaming-quality") {
+            _streamingQuality = value;
+            _syncQualityFlags();
+          }
           if (prefKey === "dl-quality") _downloadsQuality = value;
           onChange?.(value);
         }

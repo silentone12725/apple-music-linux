@@ -200,6 +200,7 @@ type engineLifecycle struct {
 
 	// Proactive DRM session tracking
 	drmReadyMu      sync.Mutex
+	drmReadyActive  bool        // FairPlay is ready now; further ready snapshots are the same session
 	drmReadySince   time.Time   // when FairPlayReady was last achieved
 	drmRefreshAt    time.Time   // scheduled proactive-refresh fire time
 	drmRefreshTimer *time.Timer // cancels previous timer on new FairPlayReady
@@ -232,12 +233,29 @@ func (l *engineLifecycle) OnDRMStateChanged(sessionStr string) {
 func (l *engineLifecycle) OnFairPlayReady(onRefreshDue func()) {
 	l.drmReadyMu.Lock()
 	defer l.drmReadyMu.Unlock()
+	// Every DRM snapshot that carries "ready" arrives here, not only the transition into it: a later event
+	// (a challenge, a sign-in step) must not restart the session-age clock or push the refresh back.
+	if l.drmReadyActive {
+		return
+	}
+	l.drmReadyActive = true
 	l.drmReadySince = time.Now()
 	l.drmRefreshAt = l.drmReadySince.Add(drmSessionTTL - drmRefreshLeadTime)
 	if l.drmRefreshTimer != nil {
 		l.drmRefreshTimer.Stop()
 	}
 	l.drmRefreshTimer = time.AfterFunc(drmSessionTTL-drmRefreshLeadTime, onRefreshDue)
+}
+
+// OnFairPlayLost ends the ready period begun by OnFairPlayReady: the next ready snapshot is a new session.
+func (l *engineLifecycle) OnFairPlayLost() {
+	l.drmReadyMu.Lock()
+	defer l.drmReadyMu.Unlock()
+	l.drmReadyActive = false
+	if l.drmRefreshTimer != nil {
+		l.drmRefreshTimer.Stop()
+		l.drmRefreshTimer = nil
+	}
 }
 
 // DRMReadySince returns when FairPlayReady was last achieved (zero if never).
@@ -575,6 +593,9 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 			drmSession,
 			func(snap drm.DRMSnapshot) {
 				s.lifecycle.OnDRMStateChanged(snap.State.Session.String())
+				if snap.State.FairPlay != drm.FairPlayReady && snap.State.FairPlay != drm.FairPlayUnknown {
+					s.lifecycle.OnFairPlayLost() // unknown is "no change" in a partial update, not a loss
+				}
 				if snap.State.FairPlay == drm.FairPlayReady {
 					s.lifecycle.OnFairPlayReady(func() {
 						// Fired ~5min before the expected 24h FairPlay session expiry.
@@ -886,6 +907,12 @@ func (s *APIServer) Start() error {
 	tlsCfg, err := loopbackTLSConfig()
 	if err != nil {
 		slog.Error("loopback TLS setup failed", "err", err)
+		// Give back what this call took: the port and the session lock would otherwise stay held by a server that never runs.
+		l.Close()
+		if s.sessionLock != nil {
+			s.sessionLock.Release()
+			s.sessionLock = nil
+		}
 		return fmt.Errorf("TLS setup failed: %w", err)
 	}
 	s.tlsSrv = &http.Server{

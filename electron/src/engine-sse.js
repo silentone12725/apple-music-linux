@@ -171,7 +171,7 @@ class EngineSSE {
                             case 'data':  dataLines.push(val);                      break;
                             case 'retry': {
                                 const ms = parseInt(val, 10);
-                                if (!isNaN(ms) && ms > 0) this._retryDelay = ms;
+                                if (!isNaN(ms) && ms > 0) this._retryDelay = Math.min(ms, 30000); // a server's value must not park reconnects for hours
                                 break;
                             }
                         }

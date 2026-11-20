@@ -142,7 +142,7 @@ var _adamSSEMod = (() => {
                   break;
                 case "retry": {
                   const ms = parseInt(val, 10);
-                  if (!isNaN(ms) && ms > 0) this._retryDelay = ms;
+                  if (!isNaN(ms) && ms > 0) this._retryDelay = Math.min(ms, 3e4);
                   break;
                 }
               }

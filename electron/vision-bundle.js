@@ -464,13 +464,23 @@ const artObserver = new MutationObserver((mutations) => {
     }
 });
 
-// Attach observer once the player bar area appears in the DOM.
+// Keep the observer on the player's current art image. Apple's player re-renders and replaces the <img>, which
+// leaves an observer attached to the old element and stops the tint for the rest of the session, so the check
+// runs again on page changes (once per frame at most: findPlayerArt is three queries) and re-attaches.
+let _observedArt = null;
+let _artCheckQueued = false;
 const barObserver = new MutationObserver(() => {
-    const img = findPlayerArt();
-    if (!img) return;
-    artObserver.observe(img, { attributes: true, attributeFilter: ['src'] });
-    sampleArtwork(img);
-    barObserver.disconnect();
+    if (_artCheckQueued) return;
+    _artCheckQueued = true;
+    requestAnimationFrame(() => {
+        _artCheckQueued = false;
+        const img = findPlayerArt();
+        if (!img || img === _observedArt) return;
+        artObserver.disconnect();
+        _observedArt = img;
+        artObserver.observe(img, { attributes: true, attributeFilter: ['src'] });
+        sampleArtwork(img);
+    });
 });
 barObserver.observe(document.documentElement, { childList: true, subtree: true });
 
@@ -576,6 +586,7 @@ function _findInNavStack(stack, cursor, href) {
     wrap.appendChild(back);
     wrap.appendChild(fwd);
 
+    let navResizeObserver = null;
     const attach = () => {
         if (document.getElementById('adam-nav-buttons')) return;
         const nav = document.querySelector('nav.navigation');
@@ -597,7 +608,9 @@ function _findInNavStack(stack, cursor, href) {
 
         positionButtons();
         // Re-measure if the header changes size (e.g. on zoom/resize or deferred layout)
-        new ResizeObserver(positionButtons).observe(header);
+        navResizeObserver?.disconnect(); // a re-attach must not leave an observer on the old header
+        navResizeObserver = new ResizeObserver(positionButtons);
+        navResizeObserver.observe(header);
 
         syncButtons();
     };

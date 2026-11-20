@@ -764,6 +764,12 @@ let _prevSb           = null;
 
 let _engineCaps       = { lossless: false, atmos: false };
 let _streamingQuality  = 'lossless'; // 'high-quality' | 'lossless' | 'hi-res-lossless'
+// What smart-cache.js (a separate bundle) reads to tell the engine which quality to pre-warm. Updated wherever the
+// engine's capabilities or the quality setting change, so a changed setting is not stale until the next engine event.
+function _syncQualityFlags() {
+    window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+    window._adamHiRes = window._adamLossless && _streamingQuality === 'hi-res-lossless';
+}
 let _downloadsQuality  = 'lossless'; // same options, applied to export requests
 let _losslessWaitDone = false;  // true after waitForLossless has timed out once — skip future waits
 let _snapshotEventId  = -1;     // SSE meta.id of the last engine.snapshot — drm events older than this are stale replays
@@ -6465,7 +6471,7 @@ async function setup() {
         _snapshotEventId = msg?.meta?.id ?? -1;  // used to filter stale replayed drm events
         if (snap?.capabilities) {
             _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-            window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+            _syncQualityFlags();
         }
         console.log(`[Adam Engine] Engine ready — drm.session=${snap?.drm?.session ?? 'unknown'} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
     } catch (e) {
@@ -6479,7 +6485,7 @@ async function setup() {
         if (p['lossless-enabled'] === false) _streamingQuality = 'high-quality';
         // The Downloads dropdown saves 'dl-quality'; 'downloads-quality' is what older builds read.
         if (p['dl-quality'] || p['downloads-quality']) _downloadsQuality = p['dl-quality'] || p['downloads-quality'];
-        window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+        _syncQualityFlags();
 
         const body = {};
         if (p.prewarmLimitMB  != null) body.prewarmLimitMB  = p.prewarmLimitMB;
@@ -6506,7 +6512,7 @@ async function setup() {
         const sess = snap?.state?.session ?? 'unknown';
         if (snap?.capabilities) {
             _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-            window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+            _syncQualityFlags();
         }
         console.log(`[Adam Engine] DRM state → session=${sess} lossless=${_engineCaps.lossless}`);
 
@@ -9268,7 +9274,7 @@ window.adamGetQueueInfo = function () {
             });
             if (save) {
                 window.adamBridge?.setTweak(prefKey, value);
-                if (prefKey === 'streaming-quality') _streamingQuality = value;
+                if (prefKey === 'streaming-quality') { _streamingQuality = value; _syncQualityFlags(); }
                 if (prefKey === 'dl-quality') _downloadsQuality = value;
                 onChange?.(value);
             }
