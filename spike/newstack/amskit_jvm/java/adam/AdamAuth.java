@@ -59,7 +59,15 @@ public class AdamAuth {
                     c.setReadTimeout(to);
                     if (hdrs instanceof Iterable) for (Object o : (Iterable<?>) hdrs) {
                         Pair<?, ?> p = (Pair<?, ?>) o;
-                        c.setRequestProperty(String.valueOf(p.getFirst()), String.valueOf(p.getSecond()));
+                        String hn = String.valueOf(p.getFirst()), hv = String.valueOf(p.getSecond());
+                        // AMSKit's own HAR-style logger redacts every header value as <H:hash>,
+                        // so the actual bytes it put in the anisette headers were never visible.
+                        // Log just these two (never anything auth/SRP-related) to check whether
+                        // AMSKit transcribes our OTPResponse bytes verbatim or re-derives them.
+                        if (hn.equalsIgnoreCase("X-Apple-I-MD") || hn.equalsIgnoreCase("X-Apple-I-MD-M")) {
+                            System.err.println("[http]    header " + hn + " = " + hv);
+                        }
+                        c.setRequestProperty(hn, hv);
                     }
                     if (body != null && body.length > 0) {
                         c.setDoOutput(true);
@@ -157,6 +165,8 @@ public class AdamAuth {
                         " times — aborting instead of retrying forever (fresh OTP was still rejected)");
                 }
                 byte[][] fresh = freshOtp(stage9Bin, provDir, androidId);
+                System.err.println("[anisette]    handing AMSKit mid(b64)=" + Base64.getEncoder().encodeToString(fresh[0]) +
+                    " otp(b64)=" + Base64.getEncoder().encodeToString(fresh[1]));
                 return success.invoke(companion, otp.getConstructor(byte[].class, byte[].class).newInstance(fresh[0], fresh[1]));
             }
             if (n.startsWith("startProvisioning")) {
