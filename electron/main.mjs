@@ -88,10 +88,12 @@ async function _storeLoad() {
 }
 
 let _storeWrite = Promise.resolve(); // serialises flushes: two overlapping writes must not interleave
+let _storeWritesPending = 0;         // flushes queued or running: their data is not on disk yet even though _storeDirty is false
 // _storeFlushNow writes the store now and resolves to whether that write succeeded.
 function _storeFlushNow() {
     if (_storeFlushTimer) { clearTimeout(_storeFlushTimer); _storeFlushTimer = null; }
     let ok = false;
+    _storeWritesPending++;
     _storeWrite = _storeWrite.then(async () => {
         try {
             if (!_storeCache) { ok = true; return; }
@@ -104,7 +106,7 @@ function _storeFlushNow() {
         } catch (e) {
             _storeDirty = true;
             console.warn('[Adam] store flush failed:', e.message);
-        }
+        } finally { _storeWritesPending--; }
     });
     return _storeWrite.then(() => ok);
 }
@@ -114,6 +116,7 @@ function _storeFlush() {
         _storeFlushTimer = null;
         if (!_storeDirty || !_storeCache) return;
         _storeDirty = false;
+        _storeWritesPending++;
         _storeWrite = _storeWrite.then(async () => {
             try {
                 ensurePrivateDir(CONFIG_DIR);
@@ -123,7 +126,7 @@ function _storeFlush() {
             } catch (e) {
                 _storeDirty = true; // keep the change; the next flush retries
                 console.warn('[Adam] store flush failed:', e.message);
-            }
+            } finally { _storeWritesPending--; }
         });
     }, 200);
 }
@@ -738,23 +741,35 @@ function _injectCustomFallbackBg() {
 }
 
 let _customCssKey = null;
-async function _injectCustomCss(filePath) {
-    if (!win || !filePath || !existsSync(filePath)) return;
-    // The page can only be styled by a plain .css file of sensible size, whatever the pref says.
-    try {
-        const st = statSync(filePath);
-        if (!st.isFile() || !/\.css$/i.test(filePath) || st.size > 4 * 1024 * 1024) { console.warn('[Adam] Custom CSS ignored: not a .css file under 4 MB'); return; }
-    } catch { return; }
-    if (_customCssKey) { await win.webContents.removeInsertedCSS(_customCssKey).catch(() => {}); _customCssKey = null; }
-    try {
-        const css = readFileSync(filePath, 'utf8');
-        _customCssKey = await win.webContents.insertCSS(css);
-    } catch (e) { console.warn('[Adam] Custom CSS inject failed:', e.message); }
+// One change at a time: two overlapping calls (a theme change while another is applying) would each insert
+// a stylesheet and keep only the last key, leaving the first in the page for good.
+let _customCssChain = Promise.resolve();
+function _serialCustomCss(fn) {
+    const run = _customCssChain.then(fn, fn);
+    _customCssChain = run.catch(() => {});
+    return run;
 }
-async function _clearCustomCss() {
-    if (!_customCssKey || !win) return;
-    await win.webContents.removeInsertedCSS(_customCssKey).catch(() => {});
-    _customCssKey = null;
+function _injectCustomCss(filePath) {
+    return _serialCustomCss(async () => {
+        if (!win || !filePath || !existsSync(filePath)) return;
+        // The page can only be styled by a plain .css file of sensible size, whatever the pref says.
+        try {
+            const st = statSync(filePath);
+            if (!st.isFile() || !/\.css$/i.test(filePath) || st.size > 4 * 1024 * 1024) { console.warn('[Adam] Custom CSS ignored: not a .css file under 4 MB'); return; }
+        } catch { return; }
+        if (_customCssKey) { await win.webContents.removeInsertedCSS(_customCssKey).catch(() => {}); _customCssKey = null; }
+        try {
+            const css = readFileSync(filePath, 'utf8');
+            _customCssKey = await win.webContents.insertCSS(css);
+        } catch (e) { console.warn('[Adam] Custom CSS inject failed:', e.message); }
+    });
+}
+function _clearCustomCss() {
+    return _serialCustomCss(async () => {
+        if (!_customCssKey || !win) return;
+        await win.webContents.removeInsertedCSS(_customCssKey).catch(() => {});
+        _customCssKey = null;
+    });
 }
 
 // ── KDE compositor blur-behind (X11 atom) ────────────────────────────────────
@@ -1021,7 +1036,11 @@ function createWindow() {
     // ── Early CSS via insertCSS — fires before first paint, no preload risk ──
     // webContents.insertCSS() is Electron's dedicated API for injecting CSS
     // before the page renders, unlike executeJavaScript which needs dom-ready.
-    const { glassBlur = 20, glassOpacity = 0.07, bgBlur = 18 } = loadPrefs();
+    // Cleaned, not trusted: the prefs file is plain JSON on disk and these land inside a stylesheet.
+    const _earlyPrefs = loadPrefs();
+    const glassBlur = cleanBlur(_earlyPrefs.glassBlur);
+    const glassOpacity = cleanGlassOpacity(_earlyPrefs.glassOpacity);
+    const bgBlur = cleanBgBlur(_earlyPrefs.bgBlur) ?? 18;
     const earlyCss = `
         :root { --adam-glass-blur: ${glassBlur}px; --adam-glass-opacity: ${glassOpacity}; --adam-art-tint: rgba(255,255,255,0); --adam-fallback-bg: none; --adam-bg-blur: ${bgBlur}px; }
         html, body { background: transparent !important; overscroll-behavior: none !important; }
@@ -1386,7 +1405,7 @@ function createWindow() {
     let bundleInjected = false;
 
     async function injectBundles() {
-        if (offlineShown || _httpsHost(win.webContents.getURL()) !== 'music.apple.com' || bundleInjected) return;
+        if (!win || win.isDestroyed() || offlineShown || _httpsHost(win.webContents.getURL()) !== 'music.apple.com' || bundleInjected) return;
         bundleInjected = true;
         console.log('[Adam] Injecting bundles into world 0');
 
@@ -1488,14 +1507,14 @@ const memoryMaintenance = createMemoryMaintenance({
     msSincePlaying: () => _lastMprisStatus === 'Playing' ? 0 : (_playStoppedAt == null ? Infinity : Date.now() - _playStoppedAt),
     onApplePage: () => !!win && _httpsHost(win.webContents.getURL()) === 'music.apple.com',
     // Settings, the sign-in sheet and Apple's own dialogs are all <dialog> elements.
-    dialogOpen: () => win.webContents.executeJavaScript("!!document.querySelector('dialog[open]')").catch(() => true),
+    dialogOpen: () => (win && !win.isDestroyed() ? win.webContents.executeJavaScript("!!document.querySelector('dialog[open]')").catch(() => true) : Promise.resolve(true)),
     // On by default; `memoryReload` = false in the store (or ADAM_MEM_RELOAD=0) turns it off.
     isEnabled: async () => process.env.ADAM_MEM_RELOAD !== '0' && (await _storeLoad()).memoryReload !== false,
     // The page reads this on load: a reload of ours keeps the Resume chip until it is used.
     markReload: async () => { const store = await _storeLoad(); store.adam_mem_reload = Date.now(); _storeDirty = true; await _storeFlushNow(); },
     // Make the page write its queue and position now, then give that IPC time to land.
-    flushRenderer: async () => { win.webContents.send('app:flush-and-quit'); await new Promise(r => setTimeout(r, 600)); },
-    reload: () => win.webContents.reload(),
+    flushRenderer: async () => { win?.webContents.send('app:flush-and-quit'); await new Promise(r => setTimeout(r, 600)); },
+    reload: () => win?.webContents.reload(),
     log: (m) => console.log('[Adam]', m),
 }, readConfigFromEnv());
 
@@ -1942,8 +1961,14 @@ ipcMain.handle('theme:get-info', async () => {
     };
 });
 
-ipcMain.on('theme:set-mode', async (_, mode) => {
+// Mode changes run one after another: each awaits the custom stylesheet, so two quick clicks would interleave
+// and the earlier mode's palette could be applied after the later mode had cleared it.
+let _themeModeChain = Promise.resolve();
+ipcMain.on('theme:set-mode', (_, mode) => {
     if (mode !== 'blur' && mode !== 'accent' && mode !== 'custom') return; // the page picks from three buttons
+    _themeModeChain = _themeModeChain.then(() => _setThemeMode(mode)).catch((e) => console.warn('[Adam] theme mode change failed:', e.message));
+});
+async function _setThemeMode(mode) {
     const p = loadPrefs();
     p.themeMode = mode;
     if (mode === 'accent') {
@@ -1962,7 +1987,7 @@ ipcMain.on('theme:set-mode', async (_, mode) => {
         if (p.customCssPath) await _injectCustomCss(p.customCssPath);
     }
     _applyNavAlpha();
-});
+}
 
 ipcMain.on('theme:set-palette', (_, key, value) => {
     if (!_paletteEntryOk(key, value)) return;
@@ -2298,6 +2323,7 @@ function replayMprisState() {
 }
 
 ipcMain.on('mpris:update', (_, data) => {
+    if (!data || typeof data !== 'object') return; // a throw here would reach the uncaught-exception handler and exit
     // Track each field independently so all survive across reconnects.
     if (data.status) {
         if (_lastMprisStatus === 'Playing' && data.status !== 'Playing') _playStoppedAt = Date.now();
@@ -2389,8 +2415,12 @@ function _discordConnect() {
     const tryNext = () => {
         if (idx >= paths.length) { _discordConnecting = false; return; }
         const sock = net.createConnection(paths[idx++]);
-        sock.once('error', () => { try { sock.destroy(); } catch (_) {} tryNext(); });
+        const onConnectError = () => { try { sock.destroy(); } catch (_) {} tryNext(); };
+        sock.once('error', onConnectError);
         sock.once('connect', () => {
+            // Only a failed connect moves on to the next path: a later error is a lost connection (below), and
+            // leaving this listener on would also open a second connection while handling it.
+            sock.removeListener('error', onConnectError);
             _discordSocket = sock;
             _discordConnecting = false;
             _discordBuf = Buffer.alloc(0);
@@ -2443,12 +2473,14 @@ function _discordClearActivity() {
 }
 
 ipcMain.on('discord:update', (_, data) => {
+    if (!data || typeof data !== 'object') return;
     _discordEnabled = true;
     if (!DISCORD_CLIENT_ID) return; // inert until a client ID is configured
     const activity = {
         type: 2, // "Listening to …"
-        details: (data.name || '').slice(0, 128) || undefined,
-        state:   (data.artist || '').slice(0, 128) || undefined,
+        // String() first: a non-string from the page would throw here and take the whole app down.
+        details: String(data.name ?? '').slice(0, 128) || undefined,
+        state:   String(data.artist ?? '').slice(0, 128) || undefined,
     };
     // Artwork + play/pause badge.
     // small_image keys ("play" / "pause") must be uploaded as assets in the
@@ -2456,7 +2488,7 @@ ipcMain.on('discord:update', (_, data) => {
     if (data.artworkUrl) {
         activity.assets = {
             large_image: data.artworkUrl,
-            large_text:  (data.album || '').slice(0, 128) || undefined,
+            large_text:  String(data.album ?? '').slice(0, 128) || undefined,
             small_image: data.playing ? 'play' : 'pause',
             small_text:  data.playing ? 'Playing' : 'Paused',
         };
@@ -2471,7 +2503,7 @@ ipcMain.on('discord:update', (_, data) => {
     }
     // "Open in Apple Music" button — opens the song/MV page in the user's browser.
     // Buttons are visible to everyone viewing the user's profile except the user themselves.
-    if (data.appleUrl) {
+    if (typeof data.appleUrl === 'string' && _httpsHost(data.appleUrl) === 'music.apple.com') {
         activity.buttons = [{ label: data.isVideo ? 'Open Music Video' : 'Open in Apple Music', url: data.appleUrl }];
     }
     _discordPendingActivity = activity;
@@ -2674,7 +2706,7 @@ ipcMain.handle('lastfm:auth', async () => {
         const r = await _lastfmCall({ method: 'auth.getToken' });
         if (!r.token) return { error: r.message || 'token request failed' };
         _lastfmPendingToken = r.token;
-        openLastfmAuthWindow(`https://www.last.fm/api/auth/?api_key=${key}&token=${r.token}`);
+        openLastfmAuthWindow(`https://www.last.fm/api/auth/?api_key=${encodeURIComponent(key)}&token=${encodeURIComponent(r.token)}`);
         return { token: r.token };
     } catch (e) { return { error: e.message }; }
 });
@@ -2767,7 +2799,7 @@ ipcMain.handle('lb:status', async () => {
     if (!token) return { connected: false };
     // Validate the token to surface the linked username.
     try {
-        const r = await fetch(`${LB_ROOT}/1/validate-token`, { headers: { Authorization: `Token ${token}` } });
+        const r = await fetch(`${LB_ROOT}/1/validate-token`, { headers: { Authorization: `Token ${token}` }, signal: AbortSignal.timeout(15000) });
         const j = await r.json();
         return { connected: !!j.valid, username: j.user_name || null };
     } catch (_) { return { connected: true, username: null }; }
@@ -2846,8 +2878,10 @@ function createMiniPlayer() {
         sendMiniState({ metadata: _lastMprisMetadata, status: _lastMprisStatus, position: _lastMprisPosition });
         try { win?.webContents.send('miniplayer:sync'); } catch (_) {}
     });
-    miniWin.on('close', () => removeCompositionBackdrop(miniWin));
-    miniWin.on('closed', () => { miniWin = null; restoreMainFromMini(); });
+    const thisMini = miniWin;
+    thisMini.on('close', () => removeCompositionBackdrop(thisMini));
+    // 'closed' arrives after the close that triggered it: by then a new mini player may exist, and it must keep its reference.
+    thisMini.on('closed', () => { if (miniWin === thisMini) miniWin = null; restoreMainFromMini(); });
 }
 
 function restoreMainFromMini() {
@@ -3110,7 +3144,10 @@ app.whenReady().then(() => {
                     }
                 }
                 if (cachedPath) {
-                    return serveLocalMediaRange(cachedPath, reqRange, request.method);
+                    const local = serveLocalMediaRange(cachedPath, reqRange, request.method);
+                    // The file is gone (evicted, cleared): forget the path so the next request asks the engine again.
+                    if (local.status === 404) _mvPathCache.delete(u.pathname);
+                    return local;
                 }
                 // Not cached yet → fall through to the streaming proxy (returns 503).
             }
@@ -3248,7 +3285,9 @@ app.whenReady().then(() => {
 // etc.) are not lost when the process exits before the deferred writeFile fires.
 function _storeFlushSync() {
     if (_storeFlushTimer) { clearTimeout(_storeFlushTimer); _storeFlushTimer = null; }
-    if (!_storeDirty || !_storeCache) return;
+    // A flush still queued or running has cleared the dirty flag but not yet written: the process is about to
+    // exit, so that data must be written here too.
+    if ((!_storeDirty && _storeWritesPending === 0) || !_storeCache) return;
     try {
         ensurePrivateDir(CONFIG_DIR);
         const enc = safeStorage.isEncryptionAvailable();

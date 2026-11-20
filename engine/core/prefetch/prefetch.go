@@ -143,8 +143,9 @@ type WarmJob struct {
 	Cancelled  int       `json:"cancelled"`
 	CreatedAt  time.Time `json:"createdAt"`
 
-	cancel func()
-	mu     sync.Mutex
+	cancel      func()
+	mu          sync.Mutex
+	doneClaimed bool // the job's end has been announced (guarded by mu)
 }
 
 func (j *WarmJob) snapshot() WarmJob {
@@ -209,10 +210,16 @@ func (j *WarmJob) skipCancelled() {
 	j.mu.Unlock()
 }
 
-func (j *WarmJob) isDone() bool {
+// claimDone reports whether the job is finished and this is the first call to see it so: the last two
+// items of a job can finish together and both call checkJobDone, and only one may announce the end.
+func (j *WarmJob) claimDone() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.Cached+j.Failed+j.Cancelled >= j.Total && j.Warming == 0
+	if j.doneClaimed || j.Cached+j.Failed+j.Cancelled < j.Total || j.Warming != 0 {
+		return false
+	}
+	j.doneClaimed = true
+	return true
 }
 
 // Stats holds internal scheduler metrics for observability.
@@ -958,7 +965,7 @@ func (s *Scheduler) warm(item *workItem) {
 }
 
 func (s *Scheduler) checkJobDone(job *WarmJob) {
-	if !job.isDone() {
+	if !job.claimDone() {
 		return
 	}
 	snap := job.snapshot()

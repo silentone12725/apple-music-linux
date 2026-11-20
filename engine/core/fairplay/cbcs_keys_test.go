@@ -54,7 +54,8 @@ func TestSendFragKeyStartsWithFragmentZeroKey(t *testing.T) {
 		keyURIs: []string{cbcsPrefetchKey, "skd://real"},
 	}
 
-	src.sendFragKey(0, rw)
+	var armed string
+	src.sendFragKey(0, rw, &armed)
 	rw.Flush()
 	want := append(append([]byte{1, '0'}, byte(len(cbcsPrefetchKey))), cbcsPrefetchKey...)
 	if !bytes.Equal(buf.Bytes(), want) {
@@ -62,7 +63,7 @@ func TestSendFragKeyStartsWithFragmentZeroKey(t *testing.T) {
 	}
 
 	buf.Reset()
-	src.sendFragKey(1, rw)
+	src.sendFragKey(1, rw, &armed)
 	rw.Flush()
 	wantReal := append([]byte{0, 0, 0, 0, byte(len(src.adamID))}, src.adamID...)
 	// The playlist URI goes out bare, as upstream sends it: no ",<kid>" suffix.
@@ -99,5 +100,20 @@ func TestCBCSSourceFromPastEnd(t *testing.T) {
 	skip, actual := src.SourceFrom(999)
 	if s := skip.(*cbcsSkipSource); s.startFrag != 2 || actual != 20 {
 		t.Fatalf("startFrag=%d actual=%.1f, want last segment (2) at 20.0", s.startFrag, actual)
+	}
+}
+
+// The armed key belongs to one connection: a second run of the same source must handshake again.
+func TestSendFragKeyArmsEachConnectionAfresh(t *testing.T) {
+	src := &cbcsSource{adamID: "1", keyURIs: []string{cbcsPrefetchKey, "skd://real"}}
+	for run := range 2 {
+		var buf bytes.Buffer
+		rw := bufio.NewReadWriter(bufio.NewReader(&bytes.Buffer{}), bufio.NewWriter(&buf))
+		var armed string
+		src.sendFragKey(0, rw, &armed)
+		rw.Flush()
+		if buf.Len() == 0 {
+			t.Fatalf("run %d sent no key on its fresh connection", run)
+		}
 	}
 }

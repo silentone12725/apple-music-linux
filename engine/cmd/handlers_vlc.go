@@ -120,6 +120,8 @@ func (s *APIServer) handleVLCLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		// The player never took the track: do not keep the other downloads parked for it.
+		s.alac.done(req.SessionID)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -204,6 +206,8 @@ func (s *APIServer) handleVLCStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "libvlc not available", http.StatusServiceUnavailable)
 		return
 	}
+	// A load still opening its source must not start playing after this stop: it becomes stale.
+	s.vlcLoads.begin()
 	s.vlcGate.clear()
 	s.vlcPlayer.Stop()
 	w.WriteHeader(http.StatusOK)

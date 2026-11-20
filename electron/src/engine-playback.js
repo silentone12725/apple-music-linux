@@ -1150,7 +1150,9 @@ function setPlayState(next, ctx) {
 // Use at every await point instead of inlining the comparison so the intent
 // is searchable and the check is impossible to misspell.
 function genStale(myGen) { return myGen !== _generation; }
-let _mvMaxHeight    = parseInt(localStorage.getItem('adam-mv-quality') || '2160', 10); // 480/720/1080/2160
+let _mvMaxHeight    = (() => { // 480/720/1080/2160; storage can be blocked, and a bad value must not become NaN
+    try { const n = parseInt(localStorage.getItem('adam-mv-quality') || '2160', 10); return Number.isFinite(n) && n > 0 ? n : 2160; } catch (_) { return 2160; }
+})();
 let _mvVideoHeights = []; // available variant heights from HLS master, set per-session
 
 // ── Quality badge ─────────────────────────────────────────────────────────────
@@ -5241,14 +5243,15 @@ let _queueHistory = [];
 async function _histLoadAsync() {
     try {
         const raw = await window.adamBridge?.storeRead(_HIST_KEY);
-        if (raw) { _queueHistory = JSON.parse(raw); return; }
+        if (raw) { const h = JSON.parse(raw); if (Array.isArray(h)) { _queueHistory = h; return; } }
     } catch (_) {}
     // Migration: read legacy plaintext localStorage and re-save encrypted
     try {
         const legacy = localStorage.getItem(_HIST_KEY);
         if (legacy) {
-            _queueHistory = JSON.parse(legacy);
-            await window.adamBridge?.storeWrite(_HIST_KEY, legacy);
+            const h = JSON.parse(legacy);
+            if (Array.isArray(h)) _queueHistory = h;
+            await window.adamBridge?.storeWrite(_HIST_KEY, JSON.stringify(_queueHistory));
             localStorage.removeItem(_HIST_KEY);
         }
     } catch (_) {}
