@@ -121,6 +121,11 @@ func (s *Settings) FFmpegChain() string {
 		if !b.Enabled {
 			continue
 		}
+		// A zero or negative frequency or Q (an imported file can say so) makes ffmpeg reject the whole chain, and
+		// with it the stream; the band is skipped instead.
+		if !(b.Freq > 0) || !(b.Q > 0) {
+			continue
+		}
 		var filter string
 		switch strings.ToUpper(b.Type) {
 		case "PK":
