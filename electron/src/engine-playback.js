@@ -5333,7 +5333,8 @@ function _histPush(item) {
         catalogId:  item.playParams?.catalogId  || item.attributes?.playParams?.catalogId || item.id,
         ts:         Date.now(),
     };
-    if (!entry.name || _queueHistory[0]?.id === entry.id) return;
+    if (!entry.name || !entry.catalogId) return;
+    _queueHistory = _queueHistory.filter(h => h.catalogId !== entry.catalogId);
     _queueHistory.unshift(entry);
     if (_queueHistory.length > _HIST_MAX) _queueHistory.length = _HIST_MAX;
     _histSaveAsync();
@@ -6311,26 +6312,25 @@ function _broadcastNowPlaying() {
 function _histRender() {
     const section = document.getElementById('adam-history-section');
     if (!section) return;
-    if (_queueHistory.length === 0) { section.style.display = 'none'; return; }
-    section.style.display = '';
+    if (_queueHistory.length === 0) {
+        section.textContent = _t('queueEmpty');
+        return;
+    }
     // Use data attrs — inline onclick is blocked by Apple Music's CSP.
     // Event delegation listener lives on the section div (set once in _histInject).
     section.innerHTML = `
-        <div class="adam-hs-header">
-            <span class="adam-hs-title">History</span>
-        </div>
         <div class="adam-hs-list">
         ${_queueHistory.slice(0, 30).map(h => `
-            <div class="adam-hs-item" data-catalog-id="${_histEscape(h.catalogId)}">
+            <button type="button" class="adam-hs-item" data-catalog-id="${_histEscape(h.catalogId)}">
                 ${h.artworkUrl
-                    ? `<img class="adam-hs-art" src="${_histEscape(h.artworkUrl)}" loading="lazy">`
+                    ? `<img class="adam-hs-art" alt="" src="${_histEscape(h.artworkUrl)}" loading="lazy">`
                     : `<div class="adam-hs-art adam-hs-art-ph"></div>`}
                 <div class="adam-hs-meta">
                     <div class="adam-hs-name">${_histEscape(h.name)}</div>
                     <div class="adam-hs-artist">${_histEscape(h.artist)}</div>
                 </div>
                 ${h.duration ? `<span class="adam-hs-dur">${_histEscape(h.duration)}</span>` : ''}
-            </div>`).join('')}
+            </button>`).join('')}
         </div>`;
 }
 
@@ -6339,26 +6339,54 @@ function _histInjectStyles() {
     const s = document.createElement('style');
     s.id = 'adam-hist-css';
     s.textContent = `
-#adam-history-section {
-    border-bottom: 1px solid var(--separator, rgba(128,128,128,.18));
-    padding-bottom: 8px;
-    margin-bottom: 4px;
-}
-.adam-hs-header {
+.side-panel[data-adam-queue-view]:not([hidden]):not([inert]):not([aria-hidden="true"]) {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px var(--side-panel-horizontal-padding, 20px) 8px;
+    flex-direction: column;
 }
-.adam-hs-title {
-    font-size: 17px;
-    font-weight: 700;
-    letter-spacing: normal;
-    text-transform: none;
-    opacity: 1;
+.side-panel[data-adam-queue-view] > .side-panel-header-wrapper { flex: 0 0 auto; }
+.adam-queue-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 4px 20px 12px;
+    flex: 0 0 auto;
+    z-index: 7;
 }
-.adam-hs-list { padding-bottom: 4px; max-height: 300px; overflow-y: auto; scrollbar-width: thin; }
+.adam-queue-tabs button {
+    flex: 1;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+.adam-queue-tabs button[aria-selected="true"] { background: rgba(128,128,128,.2); }
+.adam-queue-tabs button:focus-visible { outline: 2px solid currentColor !important; outline-offset: -2px; }
+.side-panel[data-adam-queue-view] > .side-panel-content {
+    flex: 1;
+    min-height: 0;
+    height: auto !important;
+}
+.side-panel[data-adam-queue-view="history"] > .side-panel-content,
+.side-panel[data-adam-queue-view="history"] > .side-panel-empty,
+.side-panel[data-adam-queue-view="history"] .side-panel-controls { display: none !important; }
+#adam-history-section {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    padding-bottom: 16px;
+}
+#adam-history-section[hidden] { display: none !important; }
+.adam-hs-list { padding-bottom: 4px; }
 .adam-hs-item {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: start;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -6369,6 +6397,7 @@ function _histInjectStyles() {
     transition: background .12s;
     box-sizing: border-box;
 }
+.adam-hs-item:focus-visible { outline: 2px solid currentColor !important; outline-offset: -2px; }
 .adam-hs-item:hover { background: var(--systemFillTertiary, rgba(128,128,128,.14)); }
 .adam-hs-art {
     width: 40px;
@@ -6407,25 +6436,67 @@ function _histInjectStyles() {
 let _histEnabled = true;
 
 function _histInject() {
-    const panel = document.querySelector('.side-panel');
+    // Lyrics and queue share .side-panel; only the queue button identifies its own panel.
+    const panelId = document.querySelector('[data-testid="up-next-button"]')?.getAttribute('aria-controls');
+    const panel = panelId ? document.getElementById(panelId) : null;
+    const existing = document.getElementById('adam-history-section');
+    if (existing && (existing.parentElement !== panel || !_histEnabled)) existing.remove();
     if (!panel) return;
-    // Remove section if history was disabled.
     if (!_histEnabled) {
-        panel.querySelector('#adam-history-section')?.remove();
+        panel.querySelector('.adam-queue-tabs')?.remove();
+        delete panel.dataset.adamQueueView;
         return;
     }
-    // Guard: do NOT call _histRender() here — that triggers another mutation,
-    // which re-fires this observer, causing an infinite loop.
     if (panel.querySelector('#adam-history-section')) return;
     const div = document.createElement('div');
     div.id = 'adam-history-section';
-    // Event delegation: set once on the container div, survives innerHTML updates.
-    // Inline onclick is blocked by Apple Music's CSP — data attrs + delegation is the fix.
+    div.hidden = true;
     div.addEventListener('click', (e) => {
         const item = e.target.closest('.adam-hs-item');
         if (item?.dataset.catalogId) window._adamHistPlay(item.dataset.catalogId);
     });
-    panel.prepend(div);
+    const tabs = document.createElement('div');
+    tabs.className = 'adam-queue-tabs';
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', _t('queueNext'));
+    const header = panel.querySelector('.side-panel-header-wrapper');
+    div.setAttribute('role', 'tabpanel');
+    for (const [view, label] of [['queue', _t('queueNext')], ['history', _t('queueHistory')]]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.dataset.view = view;
+        button.id = `adam-queue-tab-${view}`;
+        button.setAttribute('role', 'tab');
+        button.setAttribute('aria-selected', String(view === 'queue'));
+        // Apple's own queue content is never given attributes: only our history panel is wired to its tab.
+        if (view === 'history') { button.setAttribute('aria-controls', div.id); div.setAttribute('aria-labelledby', button.id); }
+        button.tabIndex = view === 'queue' ? 0 : -1;
+        button.addEventListener('click', () => {
+            panel.dataset.adamQueueView = view;
+            div.hidden = view !== 'history';
+            for (const tab of tabs.children) {
+                tab.setAttribute('aria-selected', String(tab === button));
+                tab.tabIndex = tab === button ? 0 : -1;
+            }
+        });
+        tabs.appendChild(button);
+    }
+    tabs.addEventListener('keydown', (event) => {
+        const buttons = [...tabs.children];
+        const index = buttons.indexOf(event.target);
+        const rtl = getComputedStyle(tabs).direction === 'rtl';
+        const step = event.key === 'ArrowRight' ? (rtl ? -1 : 1) : event.key === 'ArrowLeft' ? (rtl ? 1 : -1) : 0;
+        const target = event.key === 'Home' ? buttons[0] : event.key === 'End' ? buttons.at(-1)
+            : step && index >= 0 ? buttons[(index + step + buttons.length) % buttons.length] : null;
+        if (!target) return;
+        event.preventDefault();
+        target.click();
+        target.focus();
+    });
+    panel.dataset.adamQueueView = 'queue';
+    if (header) header.after(tabs); else panel.prepend(tabs);
+    panel.appendChild(div);
     _histRender();
 }
 
