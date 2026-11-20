@@ -72,6 +72,13 @@ public class AdamAuth {
                     for (Map.Entry<String, List<String>> e : c.getHeaderFields().entrySet())
                         if (e.getKey() != null) for (String v : e.getValue()) rh.add(new Pair<>(e.getKey(), v));
                     System.err.println("[http] <- " + st + " " + rb.length + " bytes");
+                    // GsService2's "200 OK with the real error inside the body" pattern (classic
+                    // Apple GSA) means the byte count alone doesn't say why anisetteSyncMachineFailed
+                    // keeps firing. Dump small response bodies (never the request, which can carry
+                    // SRP exchange data) as base64 so the actual server-reported reason is visible.
+                    if (rb.length > 0 && rb.length <= 4096) {
+                        System.err.println("[http]    body(b64)=" + Base64.getEncoder().encodeToString(rb));
+                    }
                     cb.complete(new IAndroidNetworkProvider.Response(st, rh, rb, new HTTPMetrics()));
                 } catch (Throwable t) {
                     System.err.println("[http] failed: " + t);
