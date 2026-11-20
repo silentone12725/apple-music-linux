@@ -130,7 +130,7 @@ public class AdamAuth {
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    static Object anisetteProxy(String stage9Bin, String provDir, String androidId) throws Exception {
+    static Object anisetteProxy(String stage9Bin, String provDir, String androidId, boolean allowReprovision) throws Exception {
         Class<?> iface = Class.forName("com.apple.mediaservices.amskit.fairplay.INativeAnisetteProvider");
         Class<?> otp = Class.forName("com.apple.mediaservices.amskit.fairplay.INativeAnisetteProvider$OTPResponse");
         Class<?> startResp = Class.forName("com.apple.mediaservices.amskit.fairplay.INativeAnisetteProvider$StartProvisionResponse");
@@ -160,6 +160,17 @@ public class AdamAuth {
                 return success.invoke(companion, otp.getConstructor(byte[].class, byte[].class).newInstance(fresh[0], fresh[1]));
             }
             if (n.startsWith("startProvisioning")) {
+                if (!allowReprovision) {
+                    // Refuse instead of silently re-provisioning: this identifier may be a
+                    // real device's (e.g. a phone-mirrored session) in active use elsewhere,
+                    // and re-provisioning it from here would hit Apple's real
+                    // startMachineProvisioning/finishMachineProvisioning under that SAME
+                    // identifier, risking desyncing or invalidating that device's own
+                    // working session server-side.
+                    throw new RuntimeException("startProvisioning refused: allowReprovision=false " +
+                        "(this identifier belongs to a real device session; re-provisioning it here " +
+                        "could disrupt that device's own session)");
+                }
                 byte[] spim = (byte[]) a[1];
                 Process proc = startProvisionProcess(stage9Bin, provDir, androidId);
                 java.io.BufferedReader rd = new java.io.BufferedReader(new java.io.InputStreamReader(proc.getInputStream()));
@@ -256,6 +267,11 @@ public class AdamAuth {
         String stage9Bin = a.length > 4 ? a[4] : "../stage9_prov_native";
         String provDir = a.length > 5 ? a[5] : "/home/daksh/Git Projects/apple-music-linux/drm/files";
         String androidId = Files.readString(Path.of(provDir + "/ANDROID_ID")).trim();
+        // false when provDir is a mirrored copy of a real device's identity (e.g. phone_mirror):
+        // re-provisioning that identifier here would hit Apple's real servers under the SAME
+        // identifier the real device actively uses, risking its session. Defaults true (own
+        // freshly-provisioned Linux identities are always safe to re-provision).
+        boolean allowReprovision = a.length > 6 ? Boolean.parseBoolean(a[6]) : true;
 
         java.lang.reflect.Method mk = BundleInfoWrapper.class.getMethod("access$make", String.class, String.class, String.class, String.class, String.class, String.class);
         // The real app's AndroidBundleInfo implementation (jadx p097e7/a.java,
@@ -294,7 +310,7 @@ public class AdamAuth {
         if (!es.hasValue()) throw new RuntimeException("session: " + es.error());
         Session session = es.value();
 
-        NativeAnisetteProviderAdaptor ad = new NativeAnisetteProviderAdaptor((com.apple.mediaservices.amskit.fairplay.INativeAnisetteProvider) anisetteProxy(stage9Bin, provDir, androidId));
+        NativeAnisetteProviderAdaptor ad = new NativeAnisetteProviderAdaptor((com.apple.mediaservices.amskit.fairplay.INativeAnisetteProvider) anisetteProxy(stage9Bin, provDir, androidId, allowReprovision));
         AppleMediaServicesCore.makeAnisetteV3Provider(session, ad);
 
         BagService bag = new BagService(session, "AndroidMusic", "1", bi);
