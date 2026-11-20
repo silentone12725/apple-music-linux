@@ -18,7 +18,7 @@ func GetSongRespContext(ctx context.Context, storefront string, id string, langu
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/songs/%s", storefront, id), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/songs/%s", url.PathEscape(storefront), url.PathEscape(id)), nil)
 	if err != nil {
 		return nil, err
 	}

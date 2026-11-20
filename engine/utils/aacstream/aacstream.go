@@ -263,11 +263,51 @@ func InvalidateKey(kidBase64, uriPrefix string) { keyCache.Delete(cacheKeyFor(ki
 // decryption failure to recover from a stale cached key.
 func AcquireKey(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoken string, forceRefresh bool) (KeyAndIV, error) {
 	ck := cacheKeyFor(kidBase64, uriPrefix)
-	if !forceRefresh {
+	if forceRefresh {
+		return acquireKeyUncached(ctx, adamID, kidBase64, uriPrefix, token, mutoken)
+	}
+	for {
 		if v, ok := keyCache.Load(ck); ok {
 			return v.(KeyAndIV), nil
 		}
+		// One licence request per key: playback, a prefetch and an export opening the same track together
+		// would otherwise each ask Apple for the same key.
+		fl := &keyFlight{done: make(chan struct{})}
+		if other, loaded := keyFlights.LoadOrStore(ck, fl); loaded {
+			w := other.(*keyFlight)
+			select {
+			case <-ctx.Done():
+				return KeyAndIV{}, ctx.Err()
+			case <-w.done:
+			}
+			// The leader's caller went away: that is not our failure, ask again (as the new leader).
+			if errors.Is(w.err, context.Canceled) && ctx.Err() == nil {
+				continue
+			}
+			return w.res, w.err
+		}
+		// Released even if the request panics: waiters would otherwise block on a flight nobody finishes.
+		defer func() {
+			keyFlights.Delete(ck)
+			close(fl.done)
+		}()
+		fl.res, fl.err = acquireKeyUncached(ctx, adamID, kidBase64, uriPrefix, token, mutoken)
+		return fl.res, fl.err
 	}
+}
+
+// keyFlight is one licence request that other callers for the same key wait on.
+type keyFlight struct {
+	done chan struct{}
+	res  KeyAndIV
+	err  error
+}
+
+var keyFlights sync.Map // cacheKeyFor(...) → *keyFlight
+
+// acquireKeyUncached asks the licence server for the key and caches a good answer.
+func acquireKeyUncached(ctx context.Context, adamID, kidBase64, uriPrefix, token, mutoken string) (KeyAndIV, error) {
+	ck := cacheKeyFor(kidBase64, uriPrefix)
 	ctx = withLicenseParams(ctx, licenseParams{pssh: kidBase64, adamID: adamID, uriPrefix: uriPrefix})
 
 	pssh, err := getPSSH("", kidBase64)
@@ -320,6 +360,24 @@ func stableCacheKey(url string) string {
 // segmentStatusErr validates a segment response. A byte-range request must be
 // answered with 206: a 200 carries the whole file, which would otherwise be
 // streamed and cached as if it were the requested segment.
+// maxSegmentBytes caps one segment held in memory.
+const maxSegmentBytes = 50 << 20
+
+var errSegmentTooLarge = errors.New("segment larger than the 50 MB limit")
+
+// readSegmentBody reads a whole segment. One byte past the cap is read so a segment that is too big is an error:
+// cutting it off at the cap would hand the decryptor, and the segment cache, a truncated segment as if complete.
+func readSegmentBody(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxSegmentBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxSegmentBytes {
+		return nil, errSegmentTooLarge
+	}
+	return data, nil
+}
+
 func segmentStatusErr(resp *http.Response, rangeHdr string) error {
 	switch {
 	case rangeHdr != "" && resp.StatusCode == http.StatusPartialContent:
@@ -373,7 +431,7 @@ func fetchSegment(ctx context.Context, cacheKey string) ([]byte, error) {
 			}
 			return nil, err
 		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MB cap per segment
+		data, err := readSegmentBody(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			if attempt < maxRetries-1 && ctx.Err() == nil && retryBackoff(ctx, attempt) {
@@ -709,7 +767,7 @@ func fetchMVSegment(ctx context.Context, url string) ([]byte, error) {
 			}
 			continue
 		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MB cap per MV segment
+		data, err := readSegmentBody(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			if !mvRetry(ctx, attempt, maxRetries) {
@@ -754,7 +812,7 @@ func kickMVSegmentBackground(diskKey, fetchURL, rangeHdr string) {
 			log.Printf("[mv-seg] bg-dl %v key=%s", err, diskKey)
 			return
 		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50 MB cap per MV segment
+		data, err := readSegmentBody(resp.Body)
 		if err != nil {
 			log.Printf("[mv-seg] bg-dl read error key=%s: %v", shortKey(diskKey), err)
 			return

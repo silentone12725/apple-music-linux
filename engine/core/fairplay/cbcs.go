@@ -234,12 +234,11 @@ func upstreamKeyURIs(keyURIs []string) []string {
 }
 
 type cbcsSource struct {
-	adamID       string
-	dialer       CBCSDialer
-	fileURL      string
-	keyURIs      []string
-	durationMs   int    // 0 = leave moov duration unchanged
-	lastArmedKey string // key URI most recently sent via sendKeyHandshake
+	adamID     string
+	dialer     CBCSDialer
+	fileURL    string
+	keyURIs    []string
+	durationMs int // 0 = leave moov duration unchanged
 }
 
 // Stream implements pipeline.Source.  It wraps streamAttempt in a retry loop
@@ -564,20 +563,24 @@ func (s *cbcsSkipSource) sendSeekFragKey(i int, rw *bufio.ReadWriter) error {
 // sendFragKey sends the key URI for fragment i to the decryption socket.
 // Errors are intentionally ignored — key delivery is best-effort and a
 // failure here manifests as a decrypt error on the next fragment.
-func (s *cbcsSource) sendFragKey(i int, rw *bufio.ReadWriter) {
+//
+// armed is the key URI most recently sent on this attempt's connection. It belongs to one attempt, not to the
+// source: a source is run again for every retry and replay (and by several streams at once), and a key
+// remembered from an earlier connection would be taken for armed on a fresh one that has no key at all.
+func (s *cbcsSource) sendFragKey(i int, rw *bufio.ReadWriter, armed *string) {
 	if i >= len(s.keyURIs) || s.keyURIs[i] == "" {
 		return
 	}
 	keyURI := s.keyURIs[i]
-	if keyURI == s.lastArmedKey {
+	if keyURI == *armed {
 		return
 	}
-	if s.lastArmedKey != "" {
+	if *armed != "" {
 		alacstream.SwitchKeys(rw)
 	}
 	alacstream.SendString(rw, keyAdamID(s.adamID, s.keyURIs[i]))
 	alacstream.SendString(rw, keyURI)
-	s.lastArmedKey = keyURI
+	*armed = keyURI
 }
 
 // effectiveKeyURI returns the key in force at fragment i: the last non-empty
@@ -883,6 +886,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 	}
 
 	var accumulatedTfdt uint64
+	var armedKey string // the key this attempt's connection holds; a new connection holds none
 	for i := 0; ; i++ {
 		frag, newOffset, err := alacstream.ReadNextFragment(inBuf, offset)
 		if err != nil {
@@ -902,9 +906,9 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 			if err := sendKeyHandshake(dc.rw, s.adamID, newKey); err != nil {
 				return fmt.Errorf("cbcs: key after proactive reconnect %d: %w", i, err)
 			}
-			s.lastArmedKey = newKey
+			armedKey = newKey
 		} else {
-			s.sendFragKey(i, dc.rw)
+			s.sendFragKey(i, dc.rw, &armedKey)
 		}
 
 		// Snapshot mdat before decryption (in-place) so we can restore on DRM socket failure.
@@ -937,7 +941,7 @@ func (s *cbcsSource) streamAttempt(ctx context.Context, w io.Writer) error {
 			if err := sendKeyHandshake(dc.rw, s.adamID, reconnKey); err != nil {
 				return fmt.Errorf("cbcs: key after reconnect %d: %w", i, err)
 			}
-			s.lastArmedKey = reconnKey
+			armedKey = reconnKey
 
 			if err2 := alacstream.DecryptFragment(frag, tracks, dc.rw); err2 != nil {
 				return fmt.Errorf("cbcs: decrypt fragment %d after reconnect: %w", i, err2)

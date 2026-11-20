@@ -165,6 +165,11 @@ func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		fl.Flush()
 	}
 
+	// The snapshot's id is taken before its state is read. A client treats every event with an id at or below the
+	// snapshot's as already reflected in it, so an id taken after the read would let an event that landed in between
+	// be dropped by the client without ever being in the snapshot.
+	snapshotID := s.events.nextID()
+
 	// engine.snapshot reports current epoch + the reason it last advanced so
 	// clients can answer "why did generation jump?" without a separate query.
 	epochInfo := s.epoch.Current()
@@ -193,7 +198,7 @@ func (s *APIServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if s.scheduler != nil {
 		snapshotState["prefetch"] = s.scheduler.Stats()
 	}
-	writeEv(s.events.nextID(), "engine.snapshot", map[string]any{
+	writeEv(snapshotID, "engine.snapshot", map[string]any{
 		"version":  1,
 		"snapshot": snapshotState,
 	}, epochInfo.Generation, true, epochInfo.Reason)

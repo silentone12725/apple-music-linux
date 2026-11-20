@@ -288,11 +288,16 @@ func (c *Cache) Evict() {
 		c.evictAgain.Store(true) // a pass is running; ask it to go round once more
 		return
 	}
-	defer c.evicting.Store(false)
 	c.sweepStaleTmp()
 	for {
 		c.evictOnce()
-		if !c.evictAgain.Swap(false) {
+		if c.evictAgain.Swap(false) {
+			continue
+		}
+		c.evicting.Store(false)
+		// A request that arrived between the check above and the release saw a pass running and
+		// returned; take the slot back and go round for it, or that commit's eviction is lost.
+		if !c.evictAgain.Load() || !c.evicting.CompareAndSwap(false, true) {
 			return
 		}
 	}
@@ -510,8 +515,42 @@ func (sw *StreamingPutWriter) Written() int64 {
 }
 
 func (sw *StreamingPutWriter) NewReader() *StreamingReader {
-	sw.refs.Add(1)
-	return &StreamingReader{sw: sw}
+	return sw.newReaderAt(0)
+}
+
+// acquireRef takes a reference unless the file has already been closed (every reference
+// released, which happens once the writer finished and its readers left). A caller that
+// looked the writer up before Commit can reach it after that, and Add on a zero count would
+// hand out a reader whose every read fails on the closed file.
+func (sw *StreamingPutWriter) acquireRef() bool {
+	for {
+		n := sw.refs.Load()
+		if n <= 0 {
+			return false
+		}
+		if sw.refs.CompareAndSwap(n, n+1) {
+			return true
+		}
+	}
+}
+
+// newReaderAt is NewReaderAt for any writer state. When the file is already closed it serves
+// the committed entry from a fresh descriptor, or, if the download was discarded, a reader that
+// reports ErrReaderAborted instead of failing on a closed file.
+func (sw *StreamingPutWriter) newReaderAt(offset int64) *StreamingReader {
+	if sw.acquireRef() {
+		return &StreamingReader{sw: sw, pos: offset}
+	}
+	if f, err := openShared(sw.finalPath, os.O_RDONLY, 0); err == nil {
+		if info, err := f.Stat(); err == nil {
+			alt := &StreamingPutWriter{file: f, finalPath: sw.finalPath, key: sw.key, cache: sw.cache, written: info.Size(), done: true}
+			alt.cond = sync.NewCond(&alt.mu)
+			alt.refs.Store(1)
+			return &StreamingReader{sw: alt, pos: offset} // the reader owns the only reference
+		}
+		f.Close()
+	}
+	return &StreamingReader{sw: sw, pos: offset, aborted: true, noRef: true}
 }
 
 // NewReaderAt returns a StreamingReader that begins at offset bytes into the
@@ -519,8 +558,7 @@ func (sw *StreamingPutWriter) NewReader() *StreamingReader {
 // NewReader, but start from the given byte offset rather than zero. Use this
 // to serve HTTP Range requests from an in-progress streaming download.
 func (sw *StreamingPutWriter) NewReaderAt(offset int64) *StreamingReader {
-	sw.refs.Add(1)
-	return &StreamingReader{sw: sw, pos: offset}
+	return sw.newReaderAt(offset)
 }
 
 // NewFromCommitted wraps an already-committed cache entry as a finished
@@ -567,7 +605,9 @@ func (sw *StreamingPutWriter) NewReaderIfActive() *StreamingReader {
 	if sw.done {
 		return nil
 	}
-	sw.refs.Add(1)
+	if !sw.acquireRef() {
+		return nil
+	}
 	return &StreamingReader{sw: sw}
 }
 
@@ -582,6 +622,7 @@ type StreamingReader struct {
 	sw      *StreamingPutWriter
 	pos     int64
 	aborted bool // guarded by sw.mu
+	noRef   bool // holds no reference (the file was gone): Close releases nothing
 
 	closeOnce sync.Once
 }
@@ -659,7 +700,11 @@ func (sr *StreamingReader) Abort() {
 // Close releases the reader's reference to the underlying file exactly once.
 // Repeated or concurrent Close calls are safe.
 func (sr *StreamingReader) Close() {
-	sr.closeOnce.Do(sr.sw.decRef)
+	sr.closeOnce.Do(func() {
+		if !sr.noRef {
+			sr.sw.decRef()
+		}
+	})
 }
 
 // EvictExpired removes all entries older than the configured TTL.

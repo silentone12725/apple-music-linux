@@ -5,32 +5,33 @@
       box.majorBrand = String.fromCharCode(boxData[8], boxData[9], boxData[10], boxData[11]);
     if (type === "hdlr" && boxData.length >= 20)
       box.handler = String.fromCharCode(boxData[16], boxData[17], boxData[18], boxData[19]);
-    if ((type === "mp4a" || type === "enca") && boxData.length >= 28) {
-      box.sampleRate = boxData[24] << 8 | boxData[25];
-      box.channels = boxData[16] << 8 | boxData[17];
+    if ((type === "mp4a" || type === "enca") && boxData.length >= 34) {
+      box.sampleRate = boxData[32] << 8 | boxData[33];
+      box.channels = boxData[24] << 8 | boxData[25];
       box.isEncrypted = type === "enca";
     }
     if (type === "schm" && boxData.length >= 16)
-      box.schemeType = String.fromCharCode(boxData[8], boxData[9], boxData[10], boxData[11]);
+      box.schemeType = String.fromCharCode(boxData[12], boxData[13], boxData[14], boxData[15]);
     if (type === "mdat")
       box.hex32 = Array.from(boxData.slice(8, Math.min(40, boxData.length))).map((b) => b.toString(16).padStart(2, "0")).join(" ");
   }
   function extractTimingFields(type, boxData, box) {
     if (type === "mdhd" && boxData.length >= 24) {
-      const ver = boxData[8];
-      box.timescale = ver === 1 ? (boxData[20] << 24 | boxData[21] << 16 | boxData[22] << 8 | boxData[23]) >>> 0 : (boxData[16] << 24 | boxData[17] << 16 | boxData[18] << 8 | boxData[19]) >>> 0;
+      const ver = boxData[8], t2 = ver === 1 ? 28 : 20;
+      if (boxData.length >= t2 + 4)
+        box.timescale = (boxData[t2] << 24 | boxData[t2 + 1] << 16 | boxData[t2 + 2] << 8 | boxData[t2 + 3]) >>> 0;
     }
     if (type === "tfhd" && boxData.length >= 16) {
-      box.trackID = (boxData[8] << 24 | boxData[9] << 16 | boxData[10] << 8 | boxData[11]) >>> 0;
+      box.trackID = (boxData[12] << 24 | boxData[13] << 16 | boxData[14] << 8 | boxData[15]) >>> 0;
       box.flags = boxData[9] << 16 | boxData[10] << 8 | boxData[11];
     }
     if (type === "trun" && boxData.length >= 16)
-      box.sampleCount = (boxData[8] << 24 | boxData[9] << 16 | boxData[10] << 8 | boxData[11]) >>> 0;
+      box.sampleCount = (boxData[12] << 24 | boxData[13] << 16 | boxData[14] << 8 | boxData[15]) >>> 0;
     if (type === "tfdt" && boxData.length >= 12) {
       const ver = boxData[8];
       box.baseMediaDecodeTime = ver === 1 ? (boxData[12] * 2 ** 24 + boxData[13] * 2 ** 16 + boxData[14] * 256 + boxData[15]) * 2 ** 32 + (boxData[16] * 2 ** 24 + boxData[17] * 2 ** 16 + boxData[18] * 256 + boxData[19]) : (boxData[12] << 24 | boxData[13] << 16 | boxData[14] << 8 | boxData[15]) >>> 0;
     }
-    if (type === "senc" && boxData.length >= 12) {
+    if (type === "senc" && boxData.length >= 16) {
       box.sampleCount = (boxData[12] << 24 | boxData[13] << 16 | boxData[14] << 8 | boxData[15]) >>> 0;
       box.ENCRYPTED = true;
     }
@@ -1194,18 +1195,27 @@
   var _onAccountSignedIn = null;
   var _accountNote = null;
   var _pendingCredentials = null;
+  var _credentialChallengeShown = false;
   function _accountSheet() {
     return _accountSheetInstance ??= createAccountSheet({
       savedEmail: () => window.adamBridge?.drmSavedEmail?.() ?? "",
       openUrl: (url) => window.adamBridge?.openExternal?.(url),
       signIn: async (email, password, remember) => {
-        const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password })
-        });
-        if (!r.ok) return { ok: false, error: (await r.text().catch(() => "")).trim() || `HTTP ${r.status}` };
         _pendingCredentials = { email, password, remember: remember === true };
+        try {
+          const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password })
+          });
+          if (!r.ok) {
+            _pendingCredentials = null;
+            return { ok: false, error: (await r.text().catch(() => "")).trim() || `HTTP ${r.status}` };
+          }
+        } catch (e) {
+          _pendingCredentials = null;
+          throw e;
+        }
         return { ok: true };
       },
       fetchSnapshot: async () => {
@@ -1228,9 +1238,7 @@
       },
       onCancel: () => {
         _pendingCredentials = null;
-        fetch(`${ENGINE}/api/v1/drm/logout`, { method: "POST" }).catch(() => {
-        });
-        window.adamBridge?.drmClearCredentials({ reload: false }).catch(() => {
+        fetch(`${ENGINE}/api/v1/drm/authenticate/cancel`, { method: "POST" }).catch(() => {
         });
         _onAccountSignedIn?.();
       }
@@ -1449,6 +1457,7 @@
   var _nativePauseRef = HTMLMediaElement.prototype.pause;
   var _origFnCall = Function.prototype.call;
   var _origFnApply = Function.prototype.apply;
+  var _nativeReqFS = Element.prototype.requestFullscreen;
   var _vlcMode = false;
   var _vlcPosMs = 0;
   var _vlcPaused = false;
@@ -1578,6 +1587,10 @@
   }
   function _slHide() {
     _slActive = false;
+    if (_slRAFId) {
+      cancelAnimationFrame(_slRAFId);
+      _slRAFId = null;
+    }
     if (_slOverlay) {
       _slOverlay.style.opacity = "0";
       setTimeout(() => {
@@ -1696,11 +1709,8 @@
   async function _slInitForTrack(assetId) {
     const gen = ++_slGen;
     _slStop();
-    if (_slLinesEls.length && _slOverlay) {
-      _slOverlay.querySelector("#adam-sl-inner").innerHTML = "";
-      _slLinesEls = [];
-      _slWordEls = [];
-    }
+    const slInner = _slOverlay?.querySelector("#adam-sl-inner");
+    if (slInner) slInner.innerHTML = "";
     if (!assetId) return;
     try {
       const sf = encodeURIComponent(_mkInstance?.storefrontId ?? "us");
@@ -1799,6 +1809,10 @@
   var _prevSb = null;
   var _engineCaps = { lossless: false, atmos: false };
   var _streamingQuality = "lossless";
+  function _syncQualityFlags() {
+    window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+    window._adamHiRes = window._adamLossless && _streamingQuality === "hi-res-lossless";
+  }
   var _downloadsQuality = "lossless";
   var _losslessWaitDone = false;
   var _snapshotEventId = -1;
@@ -1879,15 +1893,19 @@
     _guardSourceBufferMethods();
   }
   var _proxyInstalled = false;
+  var _playResolvers = [];
   function installPlayProxy(mkAudio) {
     if (_proxyInstalled) return;
     _proxyInstalled = true;
     _nativePlay = HTMLMediaElement.prototype.play.bind(mkAudio);
-    const _resolvers = [];
-    mkAudio.addEventListener("playing", () => {
-      const batch = _resolvers.splice(0);
-      batch.forEach((r) => r());
-    });
+    const _resolvers = _playResolvers;
+    if (!mkAudio.__adamPlayingHook) {
+      mkAudio.__adamPlayingHook = true;
+      mkAudio.addEventListener("playing", () => {
+        const batch = _playResolvers.splice(0);
+        batch.forEach((r) => r());
+      });
+    }
     mkAudio.play = () => {
       if (_vlcMode) {
         if (_vlcTransport.desired === true) return Promise.resolve();
@@ -2080,7 +2098,14 @@
   function genStale(myGen) {
     return myGen !== _generation;
   }
-  var _mvMaxHeight = parseInt(localStorage.getItem("adam-mv-quality") || "2160", 10);
+  var _mvMaxHeight = (() => {
+    try {
+      const n = parseInt(localStorage.getItem("adam-mv-quality") || "2160", 10);
+      return Number.isFinite(n) && n > 0 ? n : 2160;
+    } catch (_) {
+      return 2160;
+    }
+  })();
   var _mvVideoHeights = [];
   var _losslessSVG = `<svg viewBox="0 0 69 44" xmlns="http://www.w3.org/2000/svg" style="height:12px;width:auto;display:block;flex-shrink:0"><path d="M36.8269026,4 C42.3794214,4 45.7184513,10.5183153 48.20334,17.4261699 L48.4450486,18.1066712 L48.6815356,18.788389 L48.9130884,19.4700271 C49.6770268,21.7405814 50.36352,23.9882073 51.0204784,25.9968947 C52.5296562,19.7123189 51.7381954,18.3629096 53.3551269,18.3629096 C53.9565751,18.3629096 54.5652965,18.7717786 54.5652965,19.5168498 C54.5652965,19.8184059 54.0740356,23.0143253 53.391361,26.2165815 L53.2651959,26.7982368 L53.1352128,27.3761743 C52.9156151,28.3341623 52.6817778,29.2605867 52.4420448,30.075084 C59.3914285,48.2833991 64.5514879,24.299737 65.134561,19.3973484 C65.2196627,18.6903693 65.7520794,18.3629223 66.2903224,18.3629223 C67.0092304,18.3629223 67.5985395,18.9043683 67.4862017,19.7191497 C66.2419581,27.647702 64.3284002,40 56.4607867,40 C52.1189889,40 49.6781873,36.6024859 47.7506208,32.7092263 C46.4116896,30.0790205 45.2734117,26.952661 44.2263394,23.8087368 L43.9767371,23.0541028 C43.8940827,22.8026091 43.811956,22.5512479 43.7303009,22.3002645 L43.4866946,21.5486922 C41.1040436,14.1741911 39.0830717,7.34159293 35.9851696,7.34159293 C34.4711899,7.34159293 33.3487598,8.92234593 33.2709954,8.92234593 C33.128169,8.92234593 33.0160746,8.27828447 31.602332,6.51365955 C32.9478242,4.97723054 34.8023002,4 36.8269026,4 Z M11.0614865,4.01937104 C23.4500006,4.01937104 24.5519172,36.7070003 31.5633281,36.7070003 C32.3865195,36.7070003 33.2738509,36.2079668 34.2437613,35.0776923 C34.7806086,35.9871115 35.3308882,36.7945268 35.9004521,37.5054184 C34.500923,39.1028534 32.7595403,39.9988275 30.578884,39.9988275 C22.7448451,39.9977315 19.3788608,26.8790797 16.4819088,18.0220558 C15.7996486,20.8631751 15.4455023,23.434387 15.3068631,24.5887478 C15.2208267,25.3223111 14.6831215,25.6566526 14.1414468,25.6566526 C13.5407541,25.6566526 12.9351571,25.2454896 12.9351571,24.5116332 C12.9351571,24.4569356 12.9385248,24.4004537 12.9455035,24.3422131 C13.346708,21.4307464 14.1551865,17.0196557 15.0604448,13.9441978 C13.8554484,10.7869356 12.3503425,7.33621492 10.1329104,7.33621492 C5.65625092,7.33621492 3.09261157,18.5867088 2.37169324,24.5887478 C2.28565683,25.3223111 1.74795163,25.6566526 1.20627691,25.6566526 C0.605597004,25.6566526 0,25.2454896 0,24.5116332 C0,24.4569356 0.00336770017,24.4004537 0.0103463944,24.3422131 C0.114233957,23.5883333 0.225608359,22.8207923 0.346678477,22.046953 L0.452878843,21.3822914 C0.470991821,21.2713147 0.48931555,21.1602523 0.50785647,21.0491258 L0.621759807,20.3817689 C2.0405473,12.2570738 4.68538356,4.01937104 11.0614865,4.01937104 Z M23.9155499,4.00146557 C26.1404345,4.00146557 28.5270839,5.15921632 30.5844926,7.87545613 C30.6994554,8.00734485 31.8526558,9.79953527 32.2166235,10.4208612 C33.474197,12.6992201 34.5694223,15.4837436 35.5796467,18.378952 L35.8413062,19.1364745 C38.7427747,27.6177062 40.980016,36.7463669 44.4650259,36.7463669 C45.2911112,36.7463669 46.1873164,36.2334422 47.1790849,35.0773864 C47.7158553,35.9867291 48.2660581,36.794068 48.835558,37.5049086 C47.4394606,39.099438 45.6989231,39.9988275 43.5140667,39.9988275 C31.1995909,39.9969924 29.8609621,7.32900175 23.0764932,7.32900175 C21.5454317,7.32900175 20.4138588,8.92244789 20.3357358,8.92244789 C20.1928455,8.92244789 20.0806102,8.27846289 18.6670468,6.51397816 C20.048649,4.9358122 21.9168263,4.00146557 23.9155499,4.00146557 Z" fill="white" fill-rule="nonzero"/></svg>`;
   var _svgPlaySm = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-left:1px"><path d="M6.483 21.466c.22 0 .432-.035.635-.107.203-.072.428-.179.674-.322L20.578 13.609c.438-.253.759-.498.963-.735.204-.237.305-.523.305-.859 0-.332-.101-.617-.305-.856-.204-.239-.525-.485-.963-.738L7.792 3c-.246-.142-.471-.25-.674-.324-.203-.073-.415-.11-.635-.11-.424 0-.777.153-1.058.458-.281.305-.422.723-.422 1.252v15.486c0 .53.141.946.422 1.249.281.304.634.455 1.058.455z" fill-rule="nonzero"/></svg>`;
@@ -2088,6 +2113,8 @@
   var _svgCloseLg = `<svg width="20" height="20" viewBox="0 0 28 28" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M7.923 20.075c.132.128.284.214.459.256.174.043.347.043.519 0 .171-.042.319-.125.442-.248L14.002 15.424l4.653 4.656c.127.127.276.211.448.253.171.042.344.041.517-.001.174-.043.325-.129.453-.259.128-.128.213-.279.256-.451.043-.173.044-.345.003-.517-.041-.172-.124-.321-.249-.447L15.429 13.996l4.654-4.653c.125-.127.209-.276.251-.448.043-.171.042-.343-.002-.515-.045-.172-.131-.322-.259-.45-.132-.131-.283-.219-.455-.261-.172-.043-.344-.044-.515-.003-.172.041-.321.126-.448.254L14.002 12.574l-4.659-4.656c-.123-.125-.272-.208-.445-.249-.174-.041-.347-.041-.522 0-.174.041-.325.127-.453.259-.127.128-.21.279-.251.452-.041.174-.041.347 0 .519.041.173.122.32.243.441L12.574 13.996l-4.659 4.667c-.121.121-.204.268-.247.440-.044.171-.045.344-.003.519.042.174.128.325.258.453z" fill-rule="nonzero"/></svg>`;
   var _svgReset = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M10.2 5.5A4.2 4.2 0 1 1 8.1 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M7.5 0.5L8.5 2.2L6.5 2.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   var _qualityBadgeInfo = { codec: null, sampleRate: null, bitDepth: null, spatialAudio: null };
+  var _qualityBadgeEl = null;
+  var _qualityPopupCloser = null;
   var _slotBadgeObs = null;
   var _slotBadgeRetry = null;
   function _insertBadgeIntoSlot(badge, attempt) {
@@ -2217,7 +2244,7 @@
       }, 80);
     }
     _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
-    let badge = document.getElementById("adam-quality-badge");
+    let badge = _qualityBadgeEl || document.getElementById("adam-quality-badge");
     let color, isHiRes = false, isSpatial = false, label = "";
     if (spatialAudio === "binaural-lossless" || spatialAudio === "binaural") {
       color = "#bf5af2";
@@ -2258,10 +2285,14 @@
           _showQualityPopup(badge);
         }
       }, true);
-      document.addEventListener("click", () => {
-        const pop = document.getElementById("adam-quality-popup");
-        if (pop) pop.style.display = "none";
-      }, true);
+      if (!_qualityPopupCloser) {
+        _qualityPopupCloser = () => {
+          const pop = document.getElementById("adam-quality-popup");
+          if (pop) pop.style.display = "none";
+        };
+        document.addEventListener("click", _qualityPopupCloser, true);
+      }
+      _qualityBadgeEl = badge;
       badge.style.flexShrink = "0";
       badge.style.alignSelf = "center";
       badge.style.marginLeft = "2px";
@@ -2814,10 +2845,15 @@
       };
       console.log("[Adam MV] Function.prototype.call/apply intercept installed for counter-pause");
     }
-    const _origReqFS = Element.prototype.requestFullscreen;
+    const _origReqFS = _nativeReqFS;
     Element.prototype.requestFullscreen = function(opts) {
       return _origReqFS.call(document.documentElement, opts);
     };
+    _abortCtrl.signal.addEventListener("abort", () => {
+      Function.prototype.call = _origFnCall;
+      Function.prototype.apply = _origFnApply;
+      Element.prototype.requestFullscreen = _nativeReqFS;
+    }, { once: true });
     const _containerProps = ["position", "top", "left", "width", "height", "z-index", "background", "display", "justify-content", "align-content"];
     mvContainer.style.setProperty("position", "fixed", "important");
     mvContainer.style.setProperty("top", "0", "important");
@@ -3108,6 +3144,7 @@
     _qualityBtn.addEventListener("mouseleave", () => {
       _qualityBtn.style.background = "none";
     });
+    const footerRow = avp?.querySelector('[slot="footer"]');
     const fsCtrl = avp?.querySelector("amp-playback-controls-full-screen");
     if (fsCtrl?.parentNode) {
       fsCtrl.parentNode.insertBefore(_qualityBtn, fsCtrl);
@@ -3201,7 +3238,10 @@
       opt.addEventListener("click", (e) => {
         e.stopPropagation();
         _mvMaxHeight = height;
-        localStorage.setItem("adam-mv-quality", String(height));
+        try {
+          localStorage.setItem("adam-mv-quality", String(height));
+        } catch (_) {
+        }
         console.log(`[Adam MV quality] set to ${_qualityLabel()} (${height}p)`);
         _qualitySpanEl.textContent = _qualityLabel();
         _qualityMenu.querySelectorAll("button").forEach((b, i) => {
@@ -3301,7 +3341,6 @@
       if (scrimEl.style.visibility !== "visible") scrimEl.style.setProperty("visibility", "visible", "important");
     }) : null;
     if (_scrimObs) _scrimObs.observe(scrimEl, { attributes: true, attributeFilter: ["style", "class"] });
-    const footerRow = avp?.querySelector('[slot="footer"]');
     const infoEls = avp ? [...avp.querySelectorAll('[slot="info"]')] : [];
     [...infoEls, footerRow].forEach((el2) => {
       if (!el2) return;
@@ -4102,7 +4141,7 @@
           if (e.name !== "AbortError") console.warn("[Adam vseg] fetch loop error:", e);
         }
       };
-      ms2.addEventListener("sourceopen", async () => {
+      const _onVsegOpen = async () => {
         if (_durationSec > 0) {
           try {
             ms2.duration = _durationSec;
@@ -4135,7 +4174,8 @@
         sb.appendBuffer(initData);
         await waitUpdateEnd();
         runFetchLoop(0);
-      });
+      };
+      ms2.addEventListener("sourceopen", _onVsegOpen, { once: true });
       myVid.addEventListener("seeking", async () => {
         if (!sb) return;
         if (_seekHandlerActive) return;
@@ -4861,7 +4901,7 @@
       if (_hoverSessions.size >= 4) {
         const oldest = _hoverSessions.keys().next().value;
         const { sess: old } = _hoverSessions.get(oldest);
-        deleteSession(old.sessionId);
+        if (old.sessionId !== _sessionId) deleteSession(old.sessionId);
         _hoverSessions.delete(oldest);
       }
       _hoverSessions.set(adamId, { sess, isVideo });
@@ -4884,7 +4924,6 @@
       }, HOVER_INTENT_MS);
     };
     document.addEventListener("pointerenter", (e) => {
-      if (!_engineCaps.lossless && !_engineCaps.aac) return;
       try {
         let el2 = e.target;
         for (let depth = 0; depth < 12 && el2; depth++) {
@@ -5798,6 +5837,7 @@
         await _setupVLCPath(mkAudio, sess, adamId, ctrl, t0);
       }
     } catch (err) {
+      if (genStale(myGen)) return;
       if (!_abortCtrl?.signal.aborted) {
         const mk2 = window.MusicKit?.getInstance?.();
         console.error(
@@ -5826,16 +5866,20 @@
     try {
       const raw = await window.adamBridge?.storeRead(_HIST_KEY);
       if (raw) {
-        _queueHistory = JSON.parse(raw);
-        return;
+        const h = JSON.parse(raw);
+        if (Array.isArray(h)) {
+          _queueHistory = h;
+          return;
+        }
       }
     } catch (_) {
     }
     try {
       const legacy = localStorage.getItem(_HIST_KEY);
       if (legacy) {
-        _queueHistory = JSON.parse(legacy);
-        await window.adamBridge?.storeWrite(_HIST_KEY, legacy);
+        const h = JSON.parse(legacy);
+        if (Array.isArray(h)) _queueHistory = h;
+        await window.adamBridge?.storeWrite(_HIST_KEY, JSON.stringify(_queueHistory));
         localStorage.removeItem(_HIST_KEY);
       }
     } catch (_) {
@@ -6365,12 +6409,37 @@
   async function _scFetchLoudness() {
     if (!_sessionId) return NaN;
     try {
+      const LIMIT = 262144;
+      const ctrl = new AbortController();
       const resp = await fetch(
         `${ENGINE}/api/v1/playback/${_sessionId}/audio?raw=1`,
-        { headers: { Range: "bytes=0-262143" } }
+        { headers: { Range: `bytes=0-${LIMIT - 1}` }, signal: ctrl.signal }
       );
       if (!resp.ok) return NaN;
-      const dv = new DataView(await resp.arrayBuffer());
+      const reader = resp.body.getReader();
+      const parts = [];
+      let got = 0;
+      try {
+        while (got < LIMIT) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          parts.push(value);
+          got += value.length;
+        }
+      } finally {
+        ctrl.abort();
+        reader.cancel().catch(() => {
+        });
+      }
+      const head = new Uint8Array(Math.min(got, LIMIT));
+      let at = 0;
+      for (const part of parts) {
+        if (at >= head.length) break;
+        const take = part.subarray(0, head.length - at);
+        head.set(take, at);
+        at += take.length;
+      }
+      const dv = new DataView(head.buffer);
       const box = _scFindPath(dv, 0, dv.byteLength, ["moov", "udta", "ludt"]) || _scFindPath(dv, 0, dv.byteLength, ["moov", "trak", "udta", "ludt"]);
       if (!box) return NaN;
       const leaf = _scFindBox(dv, box.start, box.end, "tlou") || _scFindBox(dv, box.start, box.end, "alou");
@@ -7011,7 +7080,7 @@
       _snapshotEventId = msg?.meta?.id ?? -1;
       if (snap?.capabilities) {
         _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-        window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+        _syncQualityFlags();
       }
       console.log(`[Adam Engine] Engine ready \u2014 drm.session=${snap?.drm?.session ?? "unknown"} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
     } catch (e) {
@@ -7021,7 +7090,7 @@
       if (p["streaming-quality"]) _streamingQuality = p["streaming-quality"];
       if (p["lossless-enabled"] === false) _streamingQuality = "high-quality";
       if (p["dl-quality"] || p["downloads-quality"]) _downloadsQuality = p["dl-quality"] || p["downloads-quality"];
-      window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+      _syncQualityFlags();
       const body = {};
       if (p.prewarmLimitMB != null) body.prewarmLimitMB = p.prewarmLimitMB;
       if (p.persistLimitMB != null) body.persistLimitMB = p.persistLimitMB;
@@ -7042,15 +7111,17 @@
       const sess = snap?.state?.session ?? "unknown";
       if (snap?.capabilities) {
         _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-        window._adamLossless = _engineCaps.lossless && _streamingQuality !== "high-quality";
+        _syncQualityFlags();
       }
       console.log(`[Adam Engine] DRM state \u2192 session=${sess} lossless=${_engineCaps.lossless}`);
       if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
       _accountSheet().onSnapshot(snap);
-      if (snap?.challenge?.type === "credentials") {
+      const wantsCredentials = snap?.challenge?.type === "credentials";
+      if (wantsCredentials && !_credentialChallengeShown) {
         console.log("[Adam Engine] DRM credential challenge \u2014 opening sign-in form");
         window.__adamOpenEngineSettings?.();
       }
+      _credentialChallengeShown = wantsCredentials;
     });
     const mk = await waitForMusicKit();
     console.log("[Adam Engine] MusicKit ready");
@@ -7277,6 +7348,7 @@
       const targetSongId = _sessionContainers[ci]?.items[ii];
       const targetItem = targetSongId ? (mk.queue?.items ?? []).find((it) => extractItemId(it) === targetSongId) : null;
       if (targetItem) sendMprisMetadata(targetItem);
+      clearTimeout(_adamAdvancingTimer);
       _adamAdvancingTimer = setTimeout(() => {
         _adamGotoTarget = null;
         _adamGotoTargetId = null;
@@ -7341,7 +7413,7 @@
           });
         }
       }
-      _clearAdvancing();
+      _adamAdvancing = false;
       _updateTransportButtons();
       const mkAudio = document.querySelector("audio");
       if (mkAudio && !_vlcMode) mkAudio.dispatchEvent(new Event("waiting"));
@@ -7505,6 +7577,9 @@
     });
     window.adamBridge?.onMprisCmd?.((cmd) => {
       if (cmd && typeof cmd === "object") {
+        if (cmd.type === "seek" && !Number.isFinite(cmd.deltaMs) || cmd.type === "setPosition" && !Number.isFinite(cmd.ms) || cmd.type === "setVolume" && !Number.isFinite(cmd.value)) {
+          return;
+        }
         if (cmd.type === "seek") {
           const targetMs = Math.max(0, _mprisPosMs() + cmd.deltaMs);
           mk.seekToTime(targetMs / 1e3);
@@ -7702,6 +7777,7 @@
         });
         if (_ADAM_DEBUG) console.log("[Adam click] external play in AAC mode \u2014 opening CDN gate playbackState=" + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null") + " catalogId=" + (aacCatalogId || "not-found") + (aacSetQueueDesc ? " desc=" + JSON.stringify(aacSetQueueDesc) : "") + (_aacPlaylistId ? " playlist=" + _aacPlaylistId + " (pre-fetching)" : "") + " target=" + (e.target?.tagName || "?") + " testId=" + (e.target?.closest("[data-testid]")?.dataset?.testid || "none") + " matched=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 40) || "?"));
         _allowCDNTransition = true;
+        if (_savedAacApiRestore) _savedAacApiRestore();
         const _aacMkApiSaved = {
           setQueue: mk.setQueue,
           changeToMediaAtIndex: mk.changeToMediaAtIndex
@@ -7711,7 +7787,6 @@
           mk.changeToMediaAtIndex = _aacMkApiSaved.changeToMediaAtIndex;
           _savedAacApiRestore = null;
         };
-        if (_savedAacApiRestore) _savedAacApiRestore();
         _savedAacApiRestore = _aacRestoreApi;
         const _aacCloseGate = () => {
           if (_externalPlayGateTimer) {
@@ -8061,7 +8136,7 @@
           const desc = a[0];
           if (desc?.playlists && desc?.startWith?.id) {
             const targetId = desc.startWith.id;
-            const isLibraryTrack = targetId.startsWith("a.") || targetId.startsWith("i.");
+            const isLibraryTrack = typeof targetId === "string" && (targetId.startsWith("a.") || targetId.startsWith("i."));
             if (isLibraryTrack) {
               const startWithLid = targetId;
               const targetNumId = targetId.startsWith("a.") ? targetId.slice(2) : targetId;
@@ -9179,11 +9254,16 @@
       async function runSignOut(scope, button, busyText) {
         button.disabled = true;
         button.textContent = busyText;
-        const res = await signOutFlow({
-          engine: ENGINE,
-          scope,
-          clearCredentials: window.adamBridge?.drmClearCredentials
-        });
+        let res;
+        try {
+          res = await signOutFlow({
+            engine: ENGINE,
+            scope,
+            clearCredentials: window.adamBridge?.drmClearCredentials
+          });
+        } catch (e) {
+          res = { message: `Could not sign out: ${e?.message || e}` };
+        }
         if (res.message) _accountNote = { text: res.message, error: true };
         else if (res.note) _accountNote = { text: res.note, error: false };
         onRefresh();
@@ -9256,10 +9336,20 @@
       const dlg = document.getElementById("adam-settings-dialog");
       if (!dlg?.open) return;
       dlg.classList.replace("adam-opening", "adam-closing") || dlg.classList.add("adam-closing");
-      dlg.addEventListener("animationend", () => {
+      let closed = false;
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        clearTimeout(fallback);
+        dlg.removeEventListener("animationend", onEnd);
         dlg.classList.remove("adam-closing");
-        dlg.close();
-      }, { once: true });
+        if (dlg.open) dlg.close();
+      };
+      const onEnd = (e) => {
+        if (e.target === dlg) finish();
+      };
+      const fallback = setTimeout(finish, 400);
+      dlg.addEventListener("animationend", onEnd);
     }
     function _adamMiniBtn(onClick) {
       const b = document.createElement("button");
@@ -9328,7 +9418,10 @@
         });
         if (save) {
           window.adamBridge?.setTweak(prefKey, value);
-          if (prefKey === "streaming-quality") _streamingQuality = value;
+          if (prefKey === "streaming-quality") {
+            _streamingQuality = value;
+            _syncQualityFlags();
+          }
           if (prefKey === "dl-quality") _downloadsQuality = value;
           onChange?.(value);
         }
@@ -9596,8 +9689,7 @@
       });
       const exportBtn = makeBtn("Export");
       exportBtn.onclick = async () => {
-        const name = prompt("Preset name to export (leave blank for current palette):") || "current";
-        await window.adamBridge.exportThemePreset(name);
+        await window.adamBridge.exportThemePreset("current");
       };
       const importBtn = makeBtn("Import");
       importBtn.onclick = async () => {
@@ -10209,6 +10301,7 @@
         setSQ("lossless");
         window.adamBridge?.setTweak("streaming-quality", "lossless");
         _streamingQuality = "lossless";
+        _syncQualityFlags();
       });
       if (!losslessUsable) {
         sqResetBtn.style.opacity = "0.38";
@@ -10243,6 +10336,7 @@
           setSQ(savedSQ);
           _streamingQuality = savedSQ;
         }
+        _syncQualityFlags();
         _onLosslessChange?.(v);
       });
       if (!losslessUsable) {
@@ -11512,16 +11606,18 @@ ${ALL_SVG} { opacity:0 !important; }
       }
       return { title: "", artist: "", artwork: "" };
     }
+    const _dlPref = (prefs, key, legacyKey) => prefs[key] ?? (legacyKey ? prefs[legacyKey] : void 0);
+    const _MV_RES_HEIGHT = { best: 0, "4k": 2160, "1080p": 1080, "720p": 720, "480p": 480 };
     function buildDownloadOptions(prefs) {
       return {
-        EmbedArtwork: prefs["embed-artwork"] !== false,
-        ArtworkSize: parseInt(prefs["artwork-size"] || "3000", 10),
-        EmbedLyrics: prefs["embed-lyrics"] !== false,
+        EmbedArtwork: _dlPref(prefs, "dl-embed-art", "embed-artwork") !== false,
+        ArtworkSize: parseInt(_dlPref(prefs, "dl-artwork-size", "artwork-size") || "1200", 10),
+        EmbedLyrics: _dlPref(prefs, "dl-lyrics", "embed-lyrics") !== false,
         LrcType: prefs["lyrics-type"] || "lyrics",
         LrcFormat: prefs["lyrics-format"] || "lrc",
         SaveLrcSidecar: !!prefs["save-lrc-sidecar"],
         OverwritePolicy: prefs["download-overwrite"] || "skip",
-        ConvertToFLAC: !!prefs["convert-to-flac"],
+        ConvertToFLAC: !!_dlPref(prefs, "dl-ffmpeg-enabled", "convert-to-flac"),
         FFmpegPath: prefs["ffmpeg-path"] || "",
         KeepOriginal: !!prefs["keep-original"],
         ExplicitChoice: prefs["explicit-enabled"] !== false ? prefs["explicit-marker"] || "[E]" : "",
@@ -11542,8 +11638,8 @@ ${ALL_SVG} { opacity:0 !important; }
         ready: _engineCaps.lossless
       });
       const hint = await prefetchHintMeta(info);
-      const _af = prefs["download-album-folder"] || "{album_artist}/{album}";
-      const _sf = prefs["download-song-file"] || "{track_number:02d} - {title}";
+      const _af = _dlPref(prefs, "dl-dirname-album", "download-album-folder") || "{album_artist}/{year} - {album}";
+      const _sf = _dlPref(prefs, "dl-filename-track", "download-song-file") || "{track_number:02d} - {title}";
       const body = {
         AssetID: info.id,
         Storefront: info.storefront,
@@ -11558,7 +11654,7 @@ ${ALL_SVG} { opacity:0 !important; }
           Playlist: info.type === "playlist",
           LibraryPlaylist: !!info.isLibrary
         },
-        MVMaxHeight: parseInt(prefs["mv-max-height"] ?? "0", 10) || 0,
+        MVMaxHeight: _MV_RES_HEIGHT[prefs["dl-mv-quality"]] ?? (parseInt(prefs["mv-max-height"] ?? "0", 10) || 0),
         OutputDir: prefs["download-dir"] || "",
         FilenameTemplate: `${_af}/${_sf}`,
         Options: buildDownloadOptions(prefs),
@@ -11779,12 +11875,17 @@ ${ALL_SVG} { opacity:0 !important; }
       panel.appendChild(list);
       return panel;
     }
+    const _retriedJobs = /* @__PURE__ */ new Set();
+    const _autoRetries = /* @__PURE__ */ new Map();
+    const MAX_AUTO_RETRIES = 3;
     function syncJobRetry(job, retryEnabled, retryDelay) {
-      if (job.phase === "failed" && retryEnabled) {
+      if (job.phase === "done") _autoRetries.delete(job.assetId);
+      if (job.phase === "failed" && retryEnabled && !_retriedJobs.has(job.jobId) && (_autoRetries.get(job.assetId) ?? 0) < MAX_AUTO_RETRIES) {
         if (!_failedAt.has(job.jobId)) {
           const deadline = Date.now() + retryDelay;
           const t2 = setTimeout(() => {
             _failedAt.delete(job.jobId);
+            _autoRetries.set(job.assetId, (_autoRetries.get(job.assetId) ?? 0) + 1);
             retryJob(job.jobId);
           }, retryDelay);
           _failedAt.set(job.jobId, { timer: t2, deadline });
@@ -12075,6 +12176,7 @@ ${ALL_SVG} { opacity:0 !important; }
       pollJobs();
     }
     async function retryJob(id) {
+      _retriedJobs.add(id);
       await fetch(`${ENGINE}/api/v1/export/${id}/retry`, { method: "POST" }).catch(() => {
       });
       pollJobs();

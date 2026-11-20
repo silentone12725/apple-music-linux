@@ -46,8 +46,12 @@ func loadMVPrefs() {
 	}
 }
 
+var mvPrefsSaveMu sync.Mutex // concurrent setters must not interleave their writes into one file
+
 func saveMVPrefs() {
 	initMVPrefs()
+	mvPrefsSaveMu.Lock()
+	defer mvPrefsSaveMu.Unlock()
 	p := mvCachePrefs{
 		Enabled:  aacstream.MVCacheEnabled(),
 		MaxBytes: mvCachePrefMaxBytes.Load(),
@@ -58,7 +62,14 @@ func saveMVPrefs() {
 	}
 	path := mvPrefsPath()
 	os.MkdirAll(filepath.Dir(path), 0700)
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	// Through a temp file, so a crash mid-write cannot leave half a file that loadMVPrefs then discards.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		log.Printf("[mv-cache] prefs save error: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
 		log.Printf("[mv-cache] prefs save error: %v", err)
 	}
 }

@@ -901,7 +901,17 @@ func fetchWithHeaders(ctx context.Context, rawURL string, headers map[string]str
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, rawURL)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap for HLS playlist
+	// A 1 MB cap for a playlist. Reading one byte past it tells a playlist that is too large from one that ends
+	// there: cutting it off silently would parse as a shorter track instead of failing.
+	const maxPlaylist = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPlaylist+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxPlaylist {
+		return nil, fmt.Errorf("playlist at %s is larger than %d bytes", rawURL, maxPlaylist)
+	}
+	return body, nil
 }
 
 // OpenMasterAuth is like OpenMaster but adds Apple Music auth headers.

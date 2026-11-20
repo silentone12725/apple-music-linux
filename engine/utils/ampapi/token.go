@@ -51,6 +51,10 @@ func GetToken() (string, error) {
 
 	regex = regexp.MustCompile(`eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+`)
 	token := regex.FindString(string(body))
+	if token == "" {
+		// An empty token with a nil error went on as an empty bearer and failed later as an unexplained 401.
+		return "", fmt.Errorf("token: no developer token found in the web player script")
+	}
 
 	return token, nil
 }

@@ -28,6 +28,7 @@ package ffmpeg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -237,8 +238,11 @@ func (b *BinauralSource) runFFmpeg(ctx context.Context, w io.Writer, args []stri
 	var ffmpegStderr strings.Builder
 	cmd.Stderr = &ffmpegStderr
 
-	if err := cmd.Run(); err != nil {
-		pr.Close()
+	runErr := cmd.Run()
+	// Closing the read side unblocks the inner source if ffmpeg stopped reading before the stream ended; without
+	// it the wait below would never return.
+	pr.Close()
+	if err := runErr; err != nil {
 		se := strings.TrimSpace(ffmpegStderr.String())
 		if se != "" {
 			return fmt.Errorf("binaural: ffmpeg: %w (%s)", err, se)
@@ -246,7 +250,7 @@ func (b *BinauralSource) runFFmpeg(ctx context.Context, w io.Writer, args []stri
 		return fmt.Errorf("binaural: ffmpeg: %w", err)
 	}
 
-	if err := <-innerErr; err != nil && err != io.EOF {
+	if err := <-innerErr; err != nil && err != io.EOF && !errors.Is(err, io.ErrClosedPipe) {
 		return fmt.Errorf("binaural: inner source: %w", err)
 	}
 	return nil

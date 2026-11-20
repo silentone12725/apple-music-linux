@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 
 	"engine/core/hls"
 	"engine/core/pipeline"
@@ -104,7 +105,10 @@ func shouldEvictKey(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil {
 		return false
 	}
-	return !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrClosedPipe)
+	// A download cut short or a dropped connection says nothing about the key; only an error from decrypting does.
+	var netErr net.Error
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, io.ErrClosedPipe) &&
+		!errors.Is(err, io.ErrUnexpectedEOF) && !errors.As(err, &netErr)
 }
 
 // ── HLS segment source ────────────────────────────────────────────────────────

@@ -47,18 +47,29 @@ let _accountSheetInstance = null;
 let _onAccountSignedIn = null; // set by the open Settings dialog to refresh itself
 let _accountNote = null;       // { text, error } shown once under the account row after a sign-out
 let _pendingCredentials = null; // kept until Apple accepts the sign-in, then saved
+let _credentialChallengeShown = false; // a credentials challenge is on screen: Settings is opened once for it
 function _accountSheet() {
     return _accountSheetInstance ??= createAccountSheet({
         savedEmail: () => window.adamBridge?.drmSavedEmail?.() ?? '',
         openUrl: (url) => window.adamBridge?.openExternal?.(url),
         signIn: async (email, password, remember) => {
-            const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password }),
-            });
-            if (!r.ok) return { ok: false, error: (await r.text().catch(() => '')).trim() || `HTTP ${r.status}` };
+            // Held before the request goes out: when the engine reuses a session the "signed in" state can
+            // reach onDone before this request's response does, and onDone saves what is held here.
             _pendingCredentials = { email, password, remember: remember === true };
+            try {
+                const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password }),
+                });
+                if (!r.ok) {
+                    _pendingCredentials = null;
+                    return { ok: false, error: (await r.text().catch(() => '')).trim() || `HTTP ${r.status}` };
+                }
+            } catch (e) {
+                _pendingCredentials = null; // a rejected or unreachable sign-in must not leave the password in memory
+                throw e;
+            }
             return { ok: true };
         },
         fetchSnapshot: async () => {
@@ -81,11 +92,11 @@ function _accountSheet() {
             _onAccountSignedIn?.();
         },
         onCancel: () => {
-            // Stop the sign-in the engine is running (it would otherwise wait for the code)
-            // and forget saved credentials, so the next launch does not sign in on its own.
+            // Stop the sign-in the engine is running (it would otherwise wait for the code).
+            // Only the attempt ends: an account that was already signed in stays signed in, and what was saved
+            // for it stays saved (nothing is saved for an attempt until Apple has accepted it).
             _pendingCredentials = null;
-            fetch(`${ENGINE}/api/v1/drm/logout`, { method: 'POST' }).catch(() => {});
-            window.adamBridge?.drmClearCredentials({ reload: false }).catch(() => {});
+            fetch(`${ENGINE}/api/v1/drm/authenticate/cancel`, { method: 'POST' }).catch(() => {});
             _onAccountSignedIn?.();
         },
     });
@@ -380,6 +391,7 @@ const _iframePlay = (() => {
 const _nativePauseRef = HTMLMediaElement.prototype.pause;
 const _origFnCall     = Function.prototype.call;
 const _origFnApply    = Function.prototype.apply;
+const _nativeReqFS     = Element.prototype.requestFullscreen; // the real one: an MV session restores this, never a wrapper it found installed
 
 // ── VLC state ─────────────────────────────────────────────────────────────────
 
@@ -515,6 +527,8 @@ function _slStop() {
 
 function _slHide() {
     _slActive = false;
+    // The highlight loop only has work while the overlay is open: leaving it running woke the page every frame for the rest of the session.
+    if (_slRAFId) { cancelAnimationFrame(_slRAFId); _slRAFId = null; }
     if (_slOverlay) { _slOverlay.style.opacity = '0'; setTimeout(() => { if (_slOverlay && !_slActive) _slOverlay.style.display = 'none'; }, 350); }
 }
 
@@ -623,7 +637,10 @@ function _slRAFLoop(ts) {
 async function _slInitForTrack(assetId) {
     const gen = ++_slGen;
     _slStop();
-    if (_slLinesEls.length && _slOverlay) { _slOverlay.querySelector('#adam-sl-inner').innerHTML = ''; _slLinesEls = []; _slWordEls = []; }
+    // _slStop has just emptied the line lists, so they cannot tell whether the overlay still shows the last track's
+    // lyrics: clear it outright, or a track without lyrics keeps displaying the previous one's.
+    const slInner = _slOverlay?.querySelector('#adam-sl-inner');
+    if (slInner) slInner.innerHTML = '';
     if (!assetId) return;
     try {
         const sf = encodeURIComponent(_mkInstance?.storefrontId ?? 'us');
@@ -753,6 +770,12 @@ let _prevSb           = null;
 
 let _engineCaps       = { lossless: false, atmos: false };
 let _streamingQuality  = 'lossless'; // 'high-quality' | 'lossless' | 'hi-res-lossless'
+// What smart-cache.js (a separate bundle) reads to tell the engine which quality to pre-warm. Updated wherever the
+// engine's capabilities or the quality setting change, so a changed setting is not stale until the next engine event.
+function _syncQualityFlags() {
+    window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+    window._adamHiRes = window._adamLossless && _streamingQuality === 'hi-res-lossless';
+}
 let _downloadsQuality  = 'lossless'; // same options, applied to export requests
 let _losslessWaitDone = false;  // true after waitForLossless has timed out once — skip future waits
 let _snapshotEventId  = -1;     // SSE meta.id of the last engine.snapshot — drm events older than this are stale replays
@@ -856,6 +879,7 @@ function blockAppleCDN() {
 // ── Play proxy (instance-level, installed lazily on first track change) ────────
 
 let _proxyInstalled = false;
+const _playResolvers = []; // promises returned by the proxied play(), settled by the next 'playing' event
 
 /**
  * Override audio.play() on the element instance.
@@ -873,11 +897,16 @@ function installPlayProxy(mkAudio) {
 
     _nativePlay = HTMLMediaElement.prototype.play.bind(mkAudio);
 
-    const _resolvers = [];
-    mkAudio.addEventListener('playing', () => {
-        const batch = _resolvers.splice(0);
-        batch.forEach(r => r());
-    });
+    // The proxy is reinstalled on every click-to-play (the click handler clears _proxyInstalled), so the listener is
+    // added once per element: a new one each time stacked up for the life of the page and all ran on every 'playing'.
+    const _resolvers = _playResolvers;
+    if (!mkAudio.__adamPlayingHook) {
+        mkAudio.__adamPlayingHook = true;
+        mkAudio.addEventListener('playing', () => {
+            const batch = _playResolvers.splice(0);
+            batch.forEach(r => r());
+        });
+    }
 
     mkAudio.play = () => {
         if (_vlcMode) {
@@ -1139,7 +1168,9 @@ function setPlayState(next, ctx) {
 // Use at every await point instead of inlining the comparison so the intent
 // is searchable and the check is impossible to misspell.
 function genStale(myGen) { return myGen !== _generation; }
-let _mvMaxHeight    = parseInt(localStorage.getItem('adam-mv-quality') || '2160', 10); // 480/720/1080/2160
+let _mvMaxHeight    = (() => { // 480/720/1080/2160; storage can be blocked, and a bad value must not become NaN
+    try { const n = parseInt(localStorage.getItem('adam-mv-quality') || '2160', 10); return Number.isFinite(n) && n > 0 ? n : 2160; } catch (_) { return 2160; }
+})();
 let _mvVideoHeights = []; // available variant heights from HLS master, set per-session
 
 // ── Quality badge ─────────────────────────────────────────────────────────────
@@ -1159,6 +1190,8 @@ const _svgReset  = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" 
 
 // State shared across showQualityBadge calls (populated by handleTrackChange)
 let _qualityBadgeInfo = { codec: null, sampleRate: null, bitDepth: null, spatialAudio: null };
+let _qualityBadgeEl = null;       // the badge element, kept across marquee refreshes that detach it
+let _qualityPopupCloser = null;   // the one document click listener that closes the popup
 
 // Marquee slot badge state — shared so re-slot can happen on track change
 let _slotBadgeObs   = null; // MutationObserver watching the marquee slot
@@ -1315,7 +1348,9 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
         }, 80);
     }
     _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
-    let badge = document.getElementById('adam-quality-badge');
+    // getElementById cannot find a badge Apple's marquee refresh detached, which made every refresh build a second
+    // badge and another document click listener; the element is kept so the re-slot below can find it.
+    let badge = _qualityBadgeEl || document.getElementById('adam-quality-badge');
 
     let color, isHiRes = false, isSpatial = false, label = '';
     if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural') {
@@ -1367,10 +1402,14 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
             }
         }, true);
         // Click anywhere else closes popup (capture phase, after badge's own handler above)
-        document.addEventListener('click', () => {
-            const pop = document.getElementById('adam-quality-popup');
-            if (pop) pop.style.display = 'none';
-        }, true);
+        if (!_qualityPopupCloser) {
+            _qualityPopupCloser = () => {
+                const pop = document.getElementById('adam-quality-popup');
+                if (pop) pop.style.display = 'none';
+            };
+            document.addEventListener('click', _qualityPopupCloser, true);
+        }
+        _qualityBadgeEl = badge;
 
         badge.style.flexShrink = '0';
         badge.style.alignSelf  = 'center';
@@ -1952,10 +1991,18 @@ async function startMVPipeline() {
     // controls) enters fullscreen as one unit.  Without this, Adam's native keyboard
     // shortcut may fullscreen only nativeVidEl, showing video without our UI, while
     // our button fullscreens only the document, occasionally without the video.
-    const _origReqFS = Element.prototype.requestFullscreen;
+    const _origReqFS = _nativeReqFS;
     Element.prototype.requestFullscreen = function(opts) {
         return _origReqFS.call(document.documentElement, opts);
     };
+    // Put the page-wide overrides back as soon as this session is aborted. The full cleanup is registered much later,
+    // after two awaits that return early when the session is aborted during setup (a quick skip or exit): without this
+    // those returns left Function.prototype.call/apply and requestFullscreen wrapped for the rest of the page's life.
+    _abortCtrl.signal.addEventListener('abort', () => {
+        Function.prototype.call  = _origFnCall;
+        Function.prototype.apply = _origFnApply;
+        Element.prototype.requestFullscreen = _nativeReqFS;
+    }, { once: true });
 
     // ── Container: full-viewport overlay (Layer 2) ──────────────────────────────
     // Force mvContainer to cover the entire viewport. avpi's internal top:256.5px
@@ -2328,6 +2375,9 @@ async function startMVPipeline() {
     _qualityBtn.addEventListener('mouseenter', () => { _qualityBtn.style.background = 'rgba(255,255,255,0.1)'; });
     _qualityBtn.addEventListener('mouseleave', () => { _qualityBtn.style.background = 'none'; });
 
+    // Declared here, before the quality button below falls back to it: a const read ahead of its declaration throws, which
+    // ended the whole MV setup whenever the fullscreen control was missing.
+    const footerRow = avp?.querySelector('[slot="footer"]');
     // Inject before fullscreen button in the native footer control bar.
     const fsCtrl = avp?.querySelector('amp-playback-controls-full-screen');
     if (fsCtrl?.parentNode) {
@@ -2441,7 +2491,7 @@ async function startMVPipeline() {
         opt.addEventListener('click', (e) => {
             e.stopPropagation();
             _mvMaxHeight = height;
-            localStorage.setItem('adam-mv-quality', String(height));
+            try { localStorage.setItem('adam-mv-quality', String(height)); } catch (_) {}
             console.log(`[Adam MV quality] set to ${_qualityLabel()} (${height}p)`);
             _qualitySpanEl.textContent = _qualityLabel();
             _qualityMenu.querySelectorAll('button').forEach((b, i) => {
@@ -2544,7 +2594,6 @@ async function startMVPipeline() {
     // These have slot="info" / slot="footer" attributes — they are light DOM children
     // of amp-video-player distributed to named slots inside avp's shadow root.
     // Apple Music hides them when no native video is detected — force them visible.
-    const footerRow = avp?.querySelector('[slot="footer"]');
     const infoEls   = avp ? [...avp.querySelectorAll('[slot="info"]')] : [];
     // Force visibility/opacity only — native display values are already correct
     // (info__eyebrow / info__title are display:block; footer rows are display:flex).
@@ -3375,7 +3424,9 @@ async function startMVPipeline() {
             }
         };
 
-        ms.addEventListener('sourceopen', async () => {
+        // Once: 'sourceopen' also fires when an ended MediaSource is reopened by a later append or remove (a seek
+        // after the last segment), and this setup would then add a second SourceBuffer and restart from segment 0.
+        const _onVsegOpen = async () => {
             // Set MediaSource duration so myVid.duration = full track length,
             // not just the currently buffered end. Without this, _mvSeekTo clamps
             // seeks to the buffer edge instead of the actual seek target.
@@ -3403,7 +3454,8 @@ async function startMVPipeline() {
             await waitUpdateEnd();
 
             runFetchLoop(0);
-        });
+        };
+        ms.addEventListener('sourceopen', _onVsegOpen, { once: true });
 
         myVid.addEventListener('seeking', async () => {
             if (!sb) return;
@@ -4167,7 +4219,9 @@ async function _hoverPrewarmById(adamId, isVideo = false) {
         if (_hoverSessions.size >= 4) {
             const oldest = _hoverSessions.keys().next().value;
             const { sess: old } = _hoverSessions.get(oldest);
-            deleteSession(old.sessionId);
+            // The engine hands the same session to a later request for the same track: one that is playing now
+            // must not be released because it also sat in this list.
+            if (old.sessionId !== _sessionId) deleteSession(old.sessionId);
             _hoverSessions.delete(oldest);
         }
         _hoverSessions.set(adamId, { sess, isVideo });
@@ -4192,8 +4246,8 @@ function _installHoverPrewarm() {
         timer = setTimeout(() => { pendingId = null; _hoverPrewarmById(id, isVideo); }, HOVER_INTENT_MS);
     };
     document.addEventListener('pointerenter', (e) => {
-        // Skip if no DRM or engine not ready
-        if (!_engineCaps.lossless && !_engineCaps.aac) return;
+        // No capability check: the guard here read _engineCaps.aac, which nothing ever sets, so the pre-warm was
+        // off for everyone without lossless. An engine that is not up simply fails the request, which is ignored.
         try {
             let el = e.target;
             for (let depth = 0; depth < 12 && el; depth++) {
@@ -5207,6 +5261,9 @@ async function handleTrackChange(mk) {
         }
 
     } catch (err) {
+        // A call a newer track change has superseded failed because that change aborted it. The newer call owns the
+        // element and the play state now: resetting them here would stop the track that is starting.
+        if (genStale(myGen)) return;
         if (!_abortCtrl?.signal.aborted) {
             const mk2 = window.MusicKit?.getInstance?.();
             console.error('[Adam Engine] Playback error:', err,
@@ -5230,14 +5287,15 @@ let _queueHistory = [];
 async function _histLoadAsync() {
     try {
         const raw = await window.adamBridge?.storeRead(_HIST_KEY);
-        if (raw) { _queueHistory = JSON.parse(raw); return; }
+        if (raw) { const h = JSON.parse(raw); if (Array.isArray(h)) { _queueHistory = h; return; } }
     } catch (_) {}
     // Migration: read legacy plaintext localStorage and re-save encrypted
     try {
         const legacy = localStorage.getItem(_HIST_KEY);
         if (legacy) {
-            _queueHistory = JSON.parse(legacy);
-            await window.adamBridge?.storeWrite(_HIST_KEY, legacy);
+            const h = JSON.parse(legacy);
+            if (Array.isArray(h)) _queueHistory = h;
+            await window.adamBridge?.storeWrite(_HIST_KEY, JSON.stringify(_queueHistory));
             localStorage.removeItem(_HIST_KEY);
         }
     } catch (_) {}
@@ -5767,10 +5825,26 @@ function _scParseLoudnessBase(dv, start, end) {
 async function _scFetchLoudness() {
     if (!_sessionId) return NaN;
     try {
+        // The engine honours the Range only for a track already on disk; otherwise it streams the whole track. Read
+        // the first 256 KB (the ludt box is in the moov at the start) and drop the rest, instead of downloading it all.
+        const LIMIT = 262144;
+        const ctrl = new AbortController();
         const resp = await fetch(`${ENGINE}/api/v1/playback/${_sessionId}/audio?raw=1`,
-            { headers: { Range: 'bytes=0-262143' } });
+            { headers: { Range: `bytes=0-${LIMIT - 1}` }, signal: ctrl.signal });
         if (!resp.ok) return NaN;
-        const dv = new DataView(await resp.arrayBuffer());
+        const reader = resp.body.getReader();
+        const parts = []; let got = 0;
+        try {
+            while (got < LIMIT) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                parts.push(value); got += value.length;
+            }
+        } finally { ctrl.abort(); reader.cancel().catch(() => {}); }
+        const head = new Uint8Array(Math.min(got, LIMIT));
+        let at = 0;
+        for (const part of parts) { if (at >= head.length) break; const take = part.subarray(0, head.length - at); head.set(take, at); at += take.length; }
+        const dv = new DataView(head.buffer);
         const box = _scFindPath(dv, 0, dv.byteLength, ['moov', 'udta', 'ludt'])
                  || _scFindPath(dv, 0, dv.byteLength, ['moov', 'trak', 'udta', 'ludt']);
         if (!box) return NaN;
@@ -6451,7 +6525,7 @@ async function setup() {
         _snapshotEventId = msg?.meta?.id ?? -1;  // used to filter stale replayed drm events
         if (snap?.capabilities) {
             _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-            window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+            _syncQualityFlags();
         }
         console.log(`[Adam Engine] Engine ready — drm.session=${snap?.drm?.session ?? 'unknown'} lossless=${_engineCaps.lossless} gen=${gen} reason=${why} snapshotId=${_snapshotEventId}`);
     } catch (e) {
@@ -6465,7 +6539,7 @@ async function setup() {
         if (p['lossless-enabled'] === false) _streamingQuality = 'high-quality';
         // The Downloads dropdown saves 'dl-quality'; 'downloads-quality' is what older builds read.
         if (p['dl-quality'] || p['downloads-quality']) _downloadsQuality = p['dl-quality'] || p['downloads-quality'];
-        window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+        _syncQualityFlags();
 
         const body = {};
         if (p.prewarmLimitMB  != null) body.prewarmLimitMB  = p.prewarmLimitMB;
@@ -6492,7 +6566,7 @@ async function setup() {
         const sess = snap?.state?.session ?? 'unknown';
         if (snap?.capabilities) {
             _engineCaps = { lossless: !!(snap.capabilities.cbcs ?? snap.capabilities.alac ?? snap.capabilities.lossless), atmos: !!snap.capabilities.atmos };
-            window._adamLossless = _engineCaps.lossless && _streamingQuality !== 'high-quality';
+            _syncQualityFlags();
         }
         console.log(`[Adam Engine] DRM state → session=${sess} lossless=${_engineCaps.lossless}`);
 
@@ -6504,10 +6578,14 @@ async function setup() {
 
         // Binary needs credentials but none are stored — open the sign-in form
         // automatically so the user doesn't have to navigate to Settings.
-        if (snap?.challenge?.type === 'credentials') {
+        // Once per challenge: every later snapshot repeats it, and reopening Settings each time would
+        // bring the dialog back after the user closed it.
+        const wantsCredentials = snap?.challenge?.type === 'credentials';
+        if (wantsCredentials && !_credentialChallengeShown) {
             console.log('[Adam Engine] DRM credential challenge — opening sign-in form');
             window.__adamOpenEngineSettings?.();
         }
+        _credentialChallengeShown = wantsCredentials;
 
         // Note: mid-track seamless lossless upgrade is intentionally not attempted here.
         // FLAC transcode streams start at position 0 with no seek support, making a
@@ -6801,6 +6879,7 @@ async function setup() {
         // Safety valve: if NPIDF never fires (ctmi failed silently), reset NPIDF state after 6s.
         // _adamAdvancing itself is released right after ctmi below, so this only cleans up
         // the remaining NPIDF-tracking flags (_adamGotoTarget, _adamNavInternal, pending coords).
+        clearTimeout(_adamAdvancingTimer); // a valve left by an earlier goto must not fire in the middle of this one
         _adamAdvancingTimer = setTimeout(() => {
             _adamGotoTarget = null;
             _adamGotoTargetId = null;
@@ -6890,7 +6969,10 @@ async function setup() {
         // ctmi has been sent — release the advancing lock immediately so rapid prev/next
         // clicks aren't swallowed. The NPIDF filter (_adamGotoTarget) and session-state
         // tracking (_adamNavInternal, _adamPendingCI/II) continue independently.
-        _clearAdvancing();
+        // Release the lock only. _clearAdvancing would also cancel the 6 s valve armed above, which is what resets the
+        // goto flags (and lifts the block on MK's blob URLs) when the target's NPIDF never arrives; the NPIDF handler
+        // cancels it when it does.
+        _adamAdvancing = false;
         _updateTransportButtons();
 
         // Show MK's native loading spinner on the MSE path. Not needed for VLC —
@@ -7141,6 +7223,11 @@ async function setup() {
 
     window.adamBridge?.onMprisCmd?.((cmd) => {
         if (cmd && typeof cmd === 'object') {
+            if ((cmd.type === 'seek' && !Number.isFinite(cmd.deltaMs)) ||
+                (cmd.type === 'setPosition' && !Number.isFinite(cmd.ms)) ||
+                (cmd.type === 'setVolume' && !Number.isFinite(cmd.value))) {
+                return; // a NaN would reach seekToTime / volume, which throw or mute
+            }
             if (cmd.type === 'seek') {
                 // MPRIS Seek is a relative delta in µs; deltaMs is already in ms.
                 const targetMs = Math.max(0, _mprisPosMs() + cmd.deltaMs);
@@ -7378,6 +7465,10 @@ async function setup() {
             // ── Instrument mk.setQueue / changeToMediaAtIndex for diagnostics ─────
             // Passthrough wrappers: log what MK's own click handler calls during the
             // gate window. Matches the VLC path's approach so we can compare logs.
+            // A wrapper left by an earlier click (the gate can be closed elsewhere without restoring) is removed
+            // BEFORE the originals are captured; captured afterwards, the old wrapper would be saved as the
+            // original and then put back for good when this click's gate closes.
+            if (_savedAacApiRestore) _savedAacApiRestore();
             const _aacMkApiSaved = {
                 setQueue: mk.setQueue,
                 changeToMediaAtIndex: mk.changeToMediaAtIndex,
@@ -7387,7 +7478,6 @@ async function setup() {
                 mk.changeToMediaAtIndex = _aacMkApiSaved.changeToMediaAtIndex;
                 _savedAacApiRestore = null;
             };
-            if (_savedAacApiRestore) _savedAacApiRestore(); // clear any leftover from previous click
             _savedAacApiRestore = _aacRestoreApi;
             const _aacCloseGate = () => {
                 if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
@@ -7819,7 +7909,7 @@ async function setup() {
                     // Library song IDs carry an "a." or "i." prefix. "a." is a library song ID
                     // with a numeric part; "i." is an opaque library item ID (no numeric form).
                     // Both resolve via the playlist track cache (lid→cid mapping).
-                    const isLibraryTrack = targetId.startsWith('a.') || targetId.startsWith('i.');
+                    const isLibraryTrack = typeof targetId === 'string' && (targetId.startsWith('a.') || targetId.startsWith('i.'));
                     if (isLibraryTrack) {
                         const startWithLid = targetId;
                         // Pre-computed numeric catalog ID from DOM extraction or "a." prefix strip.
@@ -9091,10 +9181,15 @@ window.adamGetQueueInfo = function () {
 
         async function runSignOut(scope, button, busyText) {
             button.disabled = true; button.textContent = busyText;
-            const res = await signOutFlow({
-                engine: ENGINE, scope,
-                clearCredentials: window.adamBridge?.drmClearCredentials,
-            });
+            let res;
+            try {
+                res = await signOutFlow({
+                    engine: ENGINE, scope,
+                    clearCredentials: window.adamBridge?.drmClearCredentials,
+                });
+            } catch (e) {
+                res = { message: `Could not sign out: ${e?.message || e}` };
+            }
             if (res.message) _accountNote = { text: res.message, error: true };
             else if (res.note) _accountNote = { text: res.note, error: false };
             onRefresh();
@@ -9171,7 +9266,21 @@ window.adamGetQueueInfo = function () {
         const dlg = document.getElementById('adam-settings-dialog');
         if (!dlg?.open) return;
         dlg.classList.replace('adam-opening', 'adam-closing') || dlg.classList.add('adam-closing');
-        dlg.addEventListener('animationend', () => { dlg.classList.remove('adam-closing'); dlg.close(); }, { once: true });
+        // 'animationend' can be missed (the page hidden mid-animation, the animation cancelled), which left the dialog
+        // open and stuck in its closing state: a timer closes it regardless, once.
+        let closed = false;
+        const finish = () => {
+            if (closed) return;
+            closed = true;
+            clearTimeout(fallback);
+            dlg.removeEventListener('animationend', onEnd);
+            dlg.classList.remove('adam-closing');
+            if (dlg.open) dlg.close();
+        };
+        // The event also bubbles up from animated children: only the dialog's own closing animation counts.
+        const onEnd = (e) => { if (e.target === dlg) finish(); };
+        const fallback = setTimeout(finish, 400);
+        dlg.addEventListener('animationend', onEnd);
     }
 
     // ── Shared helpers lifted to IIFE level (used by section builders) ───────
@@ -9245,7 +9354,7 @@ window.adamGetQueueInfo = function () {
             });
             if (save) {
                 window.adamBridge?.setTweak(prefKey, value);
-                if (prefKey === 'streaming-quality') _streamingQuality = value;
+                if (prefKey === 'streaming-quality') { _streamingQuality = value; _syncQualityFlags(); }
                 if (prefKey === 'dl-quality') _downloadsQuality = value;
                 onChange?.(value);
             }
@@ -9474,8 +9583,8 @@ window.adamGetQueueInfo = function () {
         });
         const exportBtn = makeBtn('Export');
         exportBtn.onclick = async () => {
-            const name = prompt('Preset name to export (leave blank for current palette):') || 'current';
-            await window.adamBridge.exportThemePreset(name);
+            // prompt() is disabled in this renderer and returns null, so the name was always 'current': say so.
+            await window.adamBridge.exportThemePreset('current');
         };
         const importBtn = makeBtn('Import');
         importBtn.onclick = async () => {
@@ -9998,6 +10107,7 @@ window.adamGetQueueInfo = function () {
             setSQ('lossless');
             window.adamBridge?.setTweak('streaming-quality', 'lossless');
             _streamingQuality = 'lossless';
+            _syncQualityFlags();
         });
         if (!losslessUsable) { sqResetBtn.style.opacity = '0.38'; sqResetBtn.style.pointerEvents = 'none'; }
         // Wrap: greyed dropdown + always-active reset side by side.
@@ -10030,6 +10140,7 @@ window.adamGetQueueInfo = function () {
                 setSQ(savedSQ);
                 _streamingQuality = savedSQ;
             }
+            _syncQualityFlags(); // what the pre-warm reads must follow the toggle
             _onLosslessChange?.(v);
         });
         if (!losslessUsable) {
@@ -11355,16 +11466,21 @@ ${ALL_SVG} { opacity:0 !important; }
         return { title: '', artist: '', artwork: '' };
     }
 
+    // The Downloads section of Settings saves its choices under dl-* names; the older names stay as a fallback for
+    // profiles that saved them. Reading only the old names left every Downloads setting without effect.
+    const _dlPref = (prefs, key, legacyKey) => prefs[key] ?? (legacyKey ? prefs[legacyKey] : undefined);
+    const _MV_RES_HEIGHT = { best: 0, '4k': 2160, '1080p': 1080, '720p': 720, '480p': 480 };
+
     function buildDownloadOptions(prefs) {
         return {
-            EmbedArtwork:   prefs['embed-artwork']   !== false,
-            ArtworkSize:    parseInt(prefs['artwork-size'] || '3000', 10),
-            EmbedLyrics:    prefs['embed-lyrics']    !== false,
+            EmbedArtwork:   _dlPref(prefs, 'dl-embed-art', 'embed-artwork') !== false,
+            ArtworkSize:    parseInt(_dlPref(prefs, 'dl-artwork-size', 'artwork-size') || '1200', 10),
+            EmbedLyrics:    _dlPref(prefs, 'dl-lyrics', 'embed-lyrics') !== false,
             LrcType:        prefs['lyrics-type']     || 'lyrics',
             LrcFormat:      prefs['lyrics-format']   || 'lrc',
             SaveLrcSidecar: !!(prefs['save-lrc-sidecar']),
             OverwritePolicy: prefs['download-overwrite'] || 'skip',
-            ConvertToFLAC:  !!(prefs['convert-to-flac']),
+            ConvertToFLAC:  !!_dlPref(prefs, 'dl-ffmpeg-enabled', 'convert-to-flac'),
             FFmpegPath:     prefs['ffmpeg-path'] || '',
             KeepOriginal:   !!(prefs['keep-original']),
             ExplicitChoice: prefs['explicit-enabled'] !== false ? (prefs['explicit-marker'] || '[E]') : '',
@@ -11384,8 +11500,8 @@ ${ALL_SVG} { opacity:0 !important; }
         });
         const hint = await prefetchHintMeta(info);
 
-        const _af = prefs['download-album-folder'] || '{album_artist}/{album}';
-        const _sf = prefs['download-song-file']    || '{track_number:02d} - {title}';
+        const _af = _dlPref(prefs, 'dl-dirname-album', 'download-album-folder') || '{album_artist}/{year} - {album}';
+        const _sf = _dlPref(prefs, 'dl-filename-track', 'download-song-file')   || '{track_number:02d} - {title}';
 
         const body = {
             AssetID:          info.id,
@@ -11401,7 +11517,7 @@ ${ALL_SVG} { opacity:0 !important; }
                 Playlist:        info.type === 'playlist',
                 LibraryPlaylist: !!(info.isLibrary),
             },
-            MVMaxHeight:      parseInt(prefs['mv-max-height'] ?? '0', 10) || 0,
+            MVMaxHeight:      _MV_RES_HEIGHT[prefs['dl-mv-quality']] ?? (parseInt(prefs['mv-max-height'] ?? '0', 10) || 0),
             OutputDir:        prefs['download-dir'] || '',
             FilenameTemplate: `${_af}/${_sf}`,
             Options:          buildDownloadOptions(prefs),
@@ -11658,12 +11774,23 @@ ${ALL_SVG} { opacity:0 !important; }
         return panel;
     }
 
+    // A retry makes a NEW job and leaves the failed one in the list. Without a record that it was retried, every poll saw
+    // the old job still failed and scheduled another retry from it, so one failing download spawned a new job every
+    // retry interval, and each of those did the same. Each failed job is retried once, and an asset at most three times
+    // in a row on its own: a download that cannot work (not available, no rights) stops instead of looping.
+    const _retriedJobs = new Set();
+    const _autoRetries = new Map(); // assetId -> automatic retries since it last succeeded
+    const MAX_AUTO_RETRIES = 3;
+
     function syncJobRetry(job, retryEnabled, retryDelay) {
-        if (job.phase === 'failed' && retryEnabled) {
+        if (job.phase === 'done') _autoRetries.delete(job.assetId);
+        if (job.phase === 'failed' && retryEnabled && !_retriedJobs.has(job.jobId)
+                && (_autoRetries.get(job.assetId) ?? 0) < MAX_AUTO_RETRIES) {
             if (!_failedAt.has(job.jobId)) {
                 const deadline = Date.now() + retryDelay;
                 const t = setTimeout(() => {
                     _failedAt.delete(job.jobId);
+                    _autoRetries.set(job.assetId, (_autoRetries.get(job.assetId) ?? 0) + 1);
                     retryJob(job.jobId);
                 }, retryDelay);
                 _failedAt.set(job.jobId, { timer: t, deadline });
@@ -11991,6 +12118,7 @@ ${ALL_SVG} { opacity:0 !important; }
     }
 
     async function retryJob(id) {
+        _retriedJobs.add(id);
         await fetch(`${ENGINE}/api/v1/export/${id}/retry`, { method: 'POST' }).catch(() => {});
         pollJobs();
     }

@@ -10,13 +10,14 @@ function extractMetaFields(type, boxData, box) {
         box.majorBrand = String.fromCharCode(boxData[8], boxData[9], boxData[10], boxData[11]);
     if (type === 'hdlr' && boxData.length >= 20)
         box.handler = String.fromCharCode(boxData[16], boxData[17], boxData[18], boxData[19]);
-    if ((type === 'mp4a' || type === 'enca') && boxData.length >= 28) {
-        box.sampleRate = (boxData[24] << 8 | boxData[25]);
-        box.channels = (boxData[16] << 8 | boxData[17]);
+    // Audio sample entry: 6 reserved + 2 data-ref index, 8 reserved, channelcount@24, samplesize, 4 skipped, 16.16 rate@32.
+    if ((type === 'mp4a' || type === 'enca') && boxData.length >= 34) {
+        box.sampleRate = (boxData[32] << 8 | boxData[33]);
+        box.channels = (boxData[24] << 8 | boxData[25]);
         box.isEncrypted = (type === 'enca');
     }
     if (type === 'schm' && boxData.length >= 16)
-        box.schemeType = String.fromCharCode(boxData[8], boxData[9], boxData[10], boxData[11]);
+        box.schemeType = String.fromCharCode(boxData[12], boxData[13], boxData[14], boxData[15]);
     if (type === 'mdat')
         box.hex32 = Array.from(boxData.slice(8, Math.min(40, boxData.length)))
             .map(b => b.toString(16).padStart(2, '0')).join(' ');
@@ -24,17 +25,17 @@ function extractMetaFields(type, boxData, box) {
 
 function extractTimingFields(type, boxData, box) {
     if (type === 'mdhd' && boxData.length >= 24) {
-        const ver = boxData[8];
-        box.timescale = ver === 1
-            ? (boxData[20] << 24 | boxData[21] << 16 | boxData[22] << 8 | boxData[23]) >>> 0
-            : (boxData[16] << 24 | boxData[17] << 16 | boxData[18] << 8 | boxData[19]) >>> 0;
+        // v0: creation@12 modification@16 timescale@20; v1 has 8-byte times, so timescale@28.
+        const ver = boxData[8], t = ver === 1 ? 28 : 20;
+        if (boxData.length >= t + 4)
+            box.timescale = (boxData[t] << 24 | boxData[t + 1] << 16 | boxData[t + 2] << 8 | boxData[t + 3]) >>> 0;
     }
     if (type === 'tfhd' && boxData.length >= 16) {
-        box.trackID = (boxData[8] << 24 | boxData[9] << 16 | boxData[10] << 8 | boxData[11]) >>> 0;
+        box.trackID = (boxData[12] << 24 | boxData[13] << 16 | boxData[14] << 8 | boxData[15]) >>> 0;
         box.flags = (boxData[9] << 16 | boxData[10] << 8 | boxData[11]);
     }
     if (type === 'trun' && boxData.length >= 16)
-        box.sampleCount = (boxData[8] << 24 | boxData[9] << 16 | boxData[10] << 8 | boxData[11]) >>> 0;
+        box.sampleCount = (boxData[12] << 24 | boxData[13] << 16 | boxData[14] << 8 | boxData[15]) >>> 0;
     if (type === 'tfdt' && boxData.length >= 12) {
         const ver = boxData[8];
         box.baseMediaDecodeTime = ver === 1
@@ -42,7 +43,7 @@ function extractTimingFields(type, boxData, box) {
                 + (boxData[16] * 2 ** 24 + boxData[17] * 2 ** 16 + boxData[18] * 256 + boxData[19]))
             : (boxData[12] << 24 | boxData[13] << 16 | boxData[14] << 8 | boxData[15]) >>> 0;
     }
-    if (type === 'senc' && boxData.length >= 12) {
+    if (type === 'senc' && boxData.length >= 16) {
         box.sampleCount = (boxData[12] << 24 | boxData[13] << 16 | boxData[14] << 8 | boxData[15]) >>> 0;
         box.ENCRYPTED = true;
     }

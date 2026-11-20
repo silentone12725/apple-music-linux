@@ -58,7 +58,10 @@ export async function autoAuthenticate({ request, creds, forget, dropPassword = 
             return 'needs-code';
         }
         if (auth === 'failed') {
-            if (String(snap.message ?? '').includes(SETUP_PREFIX)) return 'kept';
+            // The engine strips SETUP_PREFIX from the message it publishes and classifies the failure instead; a timeout
+            // says nothing about the password either, so both keep what was saved.
+            const kind = snap.failure?.kind;
+            if (kind === 'setup' || kind === 'timeout' || String(snap.message ?? '').includes(SETUP_PREFIX)) return 'kept';
             await forget();
             return 'rejected';
         }

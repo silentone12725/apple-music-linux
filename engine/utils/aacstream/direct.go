@@ -34,6 +34,7 @@ const (
 	directProbeWindow = 16 << 10 // moof headers are a few KiB; mdat is only peeked at (8 bytes)
 	directTargetSlack = 0.05     // seconds a fragment may start after the target and still be chosen
 	directMaxFrags    = 512      // sanity bound on fragments mapped in one segment
+	directMaxMoof     = 1 << 20  // a moof is a few KiB; anything near this is a corrupt size
 )
 
 // DirectPlan is the result of mapping the segment that contains a seek target.
@@ -142,6 +143,9 @@ func (p *DirectPlan) mapFragments(ctx context.Context, rng rangeReader, ts uint6
 			return fmt.Errorf("%w: short header at %d", ErrDirectUnsupported, off)
 		}
 		moofSize := int64(binary.BigEndian.Uint32(hdr[:4]))
+		if moofSize > directMaxMoof { // a size off the wire sizes the read below
+			return fmt.Errorf("%w: implausible moof size %d at %d", ErrDirectUnsupported, moofSize, off)
+		}
 		if string(hdr[4:8]) != "moof" || moofSize < 16 {
 			return fmt.Errorf("%w: expected moof at %d, got %q", ErrDirectUnsupported, off, hdr[4:8])
 		}

@@ -56,13 +56,35 @@ func androidID(baseDir string) (string, error) {
 	if err := os.MkdirAll(baseDir, 0o700); err != nil {
 		return "", err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(id+"\n"), 0o600); err != nil {
+	// Publish with a hard link, which fails when another caller got there first; then both use that caller's ID
+	// instead of the later rename silently replacing it and leaving this session on an ID the file no longer holds.
+	f, err := os.CreateTemp(baseDir, deviceIDFile+".tmp-*")
+	if err != nil {
 		return "", err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.WriteString(id + "\n"); err != nil {
+		f.Close()
 		return "", err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Link(tmp, path); err != nil {
+		if b, rerr := os.ReadFile(path); rerr == nil {
+			if existing := strings.TrimSpace(string(b)); androidIDRe.MatchString(existing) {
+				return existing, nil
+			}
+		}
+		// No hard links here (or the file is unusable): fall back to replacing it.
+		if err := os.Rename(tmp, path); err != nil {
+			return "", err
+		}
 	}
 	return id, nil
 }

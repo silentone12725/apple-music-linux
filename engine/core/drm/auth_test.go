@@ -80,3 +80,64 @@ func TestAuthCoordinatorUnattendedSignInNeverPromptsForACode(t *testing.T) {
 		t.Fatalf("attended challenge: reply=%q err=%v announced=%d", reply, err, announced)
 	}
 }
+
+func TestAuthCoordinatorWithdrawsAChallengeThatEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var snaps []DRMSnapshot
+	auth := NewAuthCoordinator(func(s DRMSnapshot) {
+		snaps = append(snaps, s)
+		if s.Challenge != nil {
+			cancel() // the wait ends (timeout) right after the prompt is shown
+		}
+	})
+	if _, err := auth.Challenge(ctx, AuthChallenge{Type: ChallengeTwoFactor}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation: %v", err)
+	}
+	last := snaps[len(snaps)-1]
+	if last.Challenge != nil || last.State.Authentication != AuthSigningIn {
+		t.Fatalf("the form was left asking for a code: %+v", last)
+	}
+}
+
+func TestAuthCoordinatorAbortedSignInRaisesNoCredentialForm(t *testing.T) {
+	announced := 0
+	auth := NewAuthCoordinator(func(DRMSnapshot) { announced++ })
+	auth.Abort()
+	reply, err := auth.Challenge(context.Background(), AuthChallenge{Type: ChallengeCredentials})
+	if err != nil || reply != "\x00" || announced != 0 {
+		t.Fatalf("reply=%q err=%v announced=%d", reply, err, announced)
+	}
+}
+
+func TestWrongVerificationCodeIsNotAWrongPassword(t *testing.T) {
+	f := ClassifySignInError(errors.New("The verification code is incorrect."))
+	if f.Kind != FailBadCode {
+		t.Fatalf("kind=%s", f.Kind)
+	}
+	s := NewSessionManager(t.TempDir())
+	s.NoteSignInOutcome(false, f)
+	s.NoteSignInOutcome(false, f)
+	if !s.SignInPausedUntil().IsZero() {
+		t.Fatal("wrong codes paused sign-ins")
+	}
+}
+
+func TestCancelSignInOnlyActsOnARunningSignIn(t *testing.T) {
+	m := newMergeManager(t)
+	if m.CancelSignIn() {
+		t.Fatal("cancelled a sign-in that was not running")
+	}
+	// An idle cancel must not poison the next sign-in's challenges.
+	m.auth.SetCredentials(Credentials{Email: "a@b.c", Password: "pw"})
+	if reply, err := m.auth.Challenge(context.Background(), AuthChallenge{Type: ChallengeCredentials}); err != nil || reply != "a@b.c\x00pw" {
+		t.Fatalf("reply=%q err=%v", reply, err)
+	}
+
+	m.signingIn.Store(true)
+	if !m.CancelSignIn() {
+		t.Fatal("running sign-in not cancelled")
+	}
+	if _, err := m.auth.Challenge(context.Background(), AuthChallenge{Type: ChallengeTwoFactor}); err == nil {
+		t.Fatal("verification code still requested after cancel")
+	}
+}

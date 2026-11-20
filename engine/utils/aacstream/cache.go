@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,8 +179,20 @@ func (c *SegmentCache) Put(url string, data []byte) {
 	copy(buf[:32], hash[:])
 	copy(buf[32:], data)
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0600); err != nil {
+	// A temp file of its own: the same segment can be stored by two streams at once (playback and a prefetch), and a
+	// shared name made them write into one file.
+	f, err := os.CreateTemp(filepath.Dir(path), key[:8]+".*.tmp")
+	if err != nil {
+		return
+	}
+	tmp := f.Name()
+	if _, err := f.Write(buf); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -247,6 +260,10 @@ func (c *SegmentCache) WarmFromDisk() {
 	}
 	var files []fileInfo
 	filepath.Walk(c.directory(), func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && strings.HasSuffix(info.Name(), ".tmp") && time.Since(info.ModTime()) > time.Hour {
+			os.Remove(path) // left by a crash between the write and the rename; nothing else ever removes it
+			return nil
+		}
 		if err != nil || info.IsDir() || len(info.Name()) != 64 {
 			return nil
 		}

@@ -323,7 +323,11 @@ func parseSOFABlob(raw []byte) (*sofaIRData, int, error) {
 func nearestSOFAMeasurement(positions [][2]float64, targetAz, targetEl float64) int {
 	best, bestDist := 0, math.MaxFloat64
 	for i, p := range positions {
-		d := math.Hypot(p[0]-targetAz, p[1]-targetEl)
+		daz := math.Mod(math.Abs(p[0]-targetAz), 360)
+		if daz > 180 {
+			daz = 360 - daz // 359° is one degree from 0°
+		}
+		d := math.Hypot(daz, p[1]-targetEl)
 		if d < bestDist {
 			bestDist = d
 			best = i
@@ -337,6 +341,9 @@ func nearestSOFAMeasurement(positions [][2]float64, targetAz, targetEl float64) 
 // per-ear HRTF impulse responses.
 func writeStereoWAV(path string, left, right []float64, sr int) error {
 	n := len(left)
+	if len(right) != n {
+		return fmt.Errorf("left and right responses differ in length (%d, %d)", n, len(right))
+	}
 
 	// Convert float64 → float32 and interleave L/R.
 	interleaved := make([]float32, n*2)
@@ -347,32 +354,36 @@ func writeStereoWAV(path string, left, right []float64, sr int) error {
 
 	dataLen := n * 2 * 4 // samples × 2 channels × 4 bytes
 
-	f, err := os.Create(path)
-	if err != nil {
+	// The file is built in memory and written through a temp file, so a failed write never leaves a
+	// truncated WAV that the stamp check would later accept.
+	var b bytes.Buffer
+	le := binary.LittleEndian
+	put16 := func(v uint16) { binary.Write(&b, le, v) } //nolint:errcheck
+	put32 := func(v uint32) { binary.Write(&b, le, v) } //nolint:errcheck
+
+	b.WriteString("RIFF")
+	put32(uint32(4 + (8 + 18) + (8 + dataLen))) // file size − 8: "WAVE", the 18-byte fmt chunk, the data chunk
+	b.WriteString("WAVE")
+	b.WriteString("fmt ")
+	put32(18)                 // fmt chunk size (includes 2-byte extension)
+	put16(3)                  // IEEE float
+	put16(2)                  // stereo
+	put32(uint32(sr))         // sample rate
+	put32(uint32(sr * 2 * 4)) // byte rate
+	put16(2 * 4)              // block align
+	put16(32)                 // bits per sample
+	put16(0)                  // extension size
+	b.WriteString("data")
+	put32(uint32(dataLen))
+	binary.Write(&b, le, interleaved) //nolint:errcheck
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b.Bytes(), 0o600); err != nil {
 		return err
 	}
-	defer f.Close()
-
-	le := binary.LittleEndian
-	put16 := func(v uint16) { binary.Write(f, le, v) } //nolint:errcheck
-	put32 := func(v uint32) { binary.Write(f, le, v) } //nolint:errcheck
-
-	// RIFF header
-	f.WriteString("RIFF")            //nolint:errcheck
-	put32(uint32(36 + dataLen))      // file size − 8
-	f.WriteString("WAVE")            //nolint:errcheck
-	f.WriteString("fmt ")            //nolint:errcheck
-	put32(18)                        // fmt chunk size (includes 2-byte extension)
-	put16(3)                         // IEEE float
-	put16(2)                         // stereo
-	put32(uint32(sr))                // sample rate
-	put32(uint32(sr * 2 * 4))        // byte rate
-	put16(2 * 4)                     // block align
-	put16(32)                        // bits per sample
-	put16(0)                         // extension size
-	f.WriteString("data")            //nolint:errcheck
-	put32(uint32(dataLen))           // data chunk size
-	binary.Write(f, le, interleaved) //nolint:errcheck
-
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
 	return nil
 }

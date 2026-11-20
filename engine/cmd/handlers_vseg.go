@@ -158,8 +158,9 @@ func (s *APIServer) ensureVsegSession(id, assetID string) (*vsegSession, error) 
 
 	actual, loaded := s.vsegStates.LoadOrStore(id, state)
 	if loaded {
-		// Another goroutine stored a state first; discard ours.
-		cancel()
+		// Another goroutine stored a state first; discard ours. base.cancel also releases the reader pin taken
+		// for it, which a plain cancel would leave holding the cache file open.
+		base.cancel()
 		spw.Discard()
 		existing := actual.(*vsegState)
 		existing.mu.Lock()
@@ -708,6 +709,9 @@ func (s *APIServer) handlePlaybackVsegSeg(w http.ResponseWriter, r *http.Request
 	buf := make([]byte, 32<<10)
 
 	for {
+		if ctx.Err() != nil {
+			return // the client is gone: stop copying a fragment nobody will receive
+		}
 		// Order matters: read the frontier BEFORE the limit. If the limit is unknown at
 		// this point, any moof inside the bytes we are about to send would already have
 		// been indexed (the frontier is capped at what the indexer has parsed).

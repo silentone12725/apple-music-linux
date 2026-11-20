@@ -130,6 +130,10 @@ func (c *CavernSource) Stream(ctx context.Context, w io.Writer) error {
 	defer os.RemoveAll(runDir)
 	socketPath := filepath.Join(runDir, pipeName)
 
+	// Leaving early (the player went away, a socket error) must also stop the server and the inner source: the
+	// server only exits on its own when the stream ends, so waiting for it with a live context would hang.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, bin)
 	cmd.Env = append(os.Environ(), "TMPDIR="+runDir)
 	cmd.Stdout = io.Discard
@@ -137,7 +141,10 @@ func (c *CavernSource) Stream(ctx context.Context, w io.Writer) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("cavern: start CavernPipeServer: %w", err)
 	}
-	defer cmd.Wait() //nolint:errcheck
+	defer func() {
+		cancel()
+		cmd.Wait() //nolint:errcheck
+	}()
 
 	// Poll for the socket to appear (CavernPipeServer opens it asynchronously).
 	var conn net.Conn

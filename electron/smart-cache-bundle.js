@@ -78,6 +78,7 @@
         context: { type, id: id ?? null, reason },
         currentIndex: currentIndex ?? -1,
         lossless: window._adamLossless ?? false,
+        hiRes: window._adamHiRes ?? false,
         tracks: tracks.slice(start, start + MAX_CONTEXT_TRACKS).map((t, k) => {
           const i = start + k;
           const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId ?? t?.id ?? t?.playParams?.id ?? t?.attributes?.playParams?.id;
@@ -218,7 +219,10 @@
       this._navigationObserved = true;
       const onNavigate = (url) => {
         const parsed = parseContentUrl(url);
-        if (!parsed) return;
+        if (!parsed) {
+          this._lastNavKey = null;
+          return;
+        }
         const key = `${parsed.type}:${parsed.id}`;
         if (key === this._lastNavKey) return;
         this._lastNavKey = key;
@@ -232,7 +236,11 @@
       };
       const wrap = (orig) => function(...args) {
         const rv = orig.apply(this, args);
-        onNavigate(location.href);
+        try {
+          onNavigate(location.href);
+        } catch (e) {
+          console.warn("[Adam Cache] navigation hook:", e.message);
+        }
         return rv;
       };
       history.pushState = wrap(history.pushState);

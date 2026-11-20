@@ -18,7 +18,7 @@ func GetAlbumResp(storefront string, id string, language string, token string) (
 		}
 	}
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/albums/%s", storefront, id), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/albums/%s", url.PathEscape(storefront), url.PathEscape(id)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func GetAlbumResp(storefront string, id string, language string, token string) (
 }
 
 func GetAlbumRespContext(ctx context.Context, storefront, id, language, token string) (*AlbumResp, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/albums/%s", storefront, id), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/albums/%s", url.PathEscape(storefront), url.PathEscape(id)), nil)
 	if err != nil {
 		return nil, err
 	}

@@ -111,6 +111,7 @@ class SmartCache {
             context: { type, id: id ?? null, reason },
             currentIndex: currentIndex ?? -1,
             lossless: window._adamLossless ?? false,
+            hiRes: window._adamHiRes ?? false,
             tracks: tracks.slice(start, start + MAX_CONTEXT_TRACKS).map((t, k) => {
                 const i = start + k;
                 const assetId = t?.playParams?.catalogId ?? t?.attributes?.playParams?.catalogId
@@ -250,7 +251,7 @@ class SmartCache {
 
         const onNavigate = (url) => {
             const parsed = parseContentUrl(url);
-            if (!parsed) return;
+            if (!parsed) { this._lastNavKey = null; return; } // leaving a page forgets it, so coming back warms again
             // pushState/replaceState fire constantly inside the SPA; act once per page, not per call.
             const key = `${parsed.type}:${parsed.id}`;
             if (key === this._lastNavKey) return;
@@ -265,9 +266,10 @@ class SmartCache {
             // library-playlist: skip eager prefetch, rely on queue lookahead only.
         };
 
+        // pushState/replaceState belong to Apple's router: nothing we do after them may throw out of them.
         const wrap = (orig) => function(...args) {
             const rv = orig.apply(this, args);
-            onNavigate(location.href);
+            try { onNavigate(location.href); } catch (e) { console.warn('[Adam Cache] navigation hook:', e.message); }
             return rv;
         };
 

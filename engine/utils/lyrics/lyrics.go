@@ -287,7 +287,7 @@ func findTranslitText(itunesMeta *etree.Element, key string) string {
 	if tl == nil {
 		return ""
 	}
-	node := tl.FindElement(fmt.Sprintf("text[@for='%s']", key))
+	node := textFor(tl, "", key)
 	if node == nil {
 		return ""
 	}
@@ -310,7 +310,7 @@ func findTransText(itunesMeta *etree.Element, key string) string {
 	if tr == nil {
 		return ""
 	}
-	node := tr.FindElement(fmt.Sprintf("//text[@for='%s']", key))
+	node := textFor(tr, "//", key)
 	if node == nil {
 		return ""
 	}
@@ -507,7 +507,7 @@ func buildSyllabicAnnotations(itunesMeta *etree.Element, key, transBeginTime str
 	// Syllabic transliteration (per-span timestamps).
 	if tls := itunesMeta.FindElement("transliterations"); tls != nil {
 		if tl := tls.FindElement("transliteration"); tl != nil {
-			if node := tl.FindElement(fmt.Sprintf("text[@for='%s']", key)); node != nil {
+			if node := textFor(tl, "", key); node != nil {
 				var parts []string
 				var transStartTime string
 				for i, span := range node.ChildElements() {
@@ -535,7 +535,7 @@ func buildSyllabicAnnotations(itunesMeta *etree.Element, key, transBeginTime str
 	// Translation (single text string).
 	if trs := itunesMeta.FindElement("translations"); trs != nil {
 		if tr := trs.FindElement("translation"); tr != nil {
-			if node := tr.FindElement(fmt.Sprintf("//text[@for='%s']", key)); node != nil {
+			if node := textFor(tr, "//", key); node != nil {
 				var transTxt string
 				if a := node.SelectAttr("text"); a != nil {
 					transTxt = a.Value
@@ -555,4 +555,13 @@ func buildSyllabicAnnotations(itunesMeta *etree.Element, key, transBeginTime str
 		}
 	}
 	return translitLine, transLine
+}
+
+// textFor finds the <text for="key"> child of parent. The key comes from the lyrics document and is spliced into
+// an etree path, which panics on a malformed one (an unmatched quote), so keys with path syntax are not looked up.
+func textFor(parent *etree.Element, prefix, key string) *etree.Element {
+	if strings.ContainsAny(key, `'"[]\`) {
+		return nil
+	}
+	return parent.FindElement(prefix + "text[@for='" + key + "']")
 }

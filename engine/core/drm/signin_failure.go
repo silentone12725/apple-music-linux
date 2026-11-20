@@ -22,6 +22,7 @@ const (
 	FailLocked             FailureKind = "locked"
 	FailTerms              FailureKind = "terms"
 	FailNotStoreAccount    FailureKind = "not_store_account"
+	FailBadCode            FailureKind = "bad_code"
 	FailTimeout            FailureKind = "timeout"
 	FailSetup              FailureKind = "setup"
 	FailUnknown            FailureKind = "unknown"
@@ -58,6 +59,9 @@ func ClassifySignInError(err error) SignInFailure {
 		return SignInFailure{FailTerms, "Apple needs you to accept its terms before this account can sign in. Accept them at account.apple.com, then try again.", "https://account.apple.com"}
 	case has("not yet been used", "has not been used", "never been used", "itunes store", "not been set up"):
 		return SignInFailure{FailNotStoreAccount, "This Apple Account has not been used with Apple Music yet. Open music.apple.com, sign in once to set it up, then try again.", "https://music.apple.com"}
+	case has("verification code") && has("incorrect", "invalid", "wrong", "expired", "not valid"):
+		// A wrong code says nothing about the password: it must not count toward the wrong-password pause.
+		return SignInFailure{Kind: FailBadCode, Message: "Apple did not accept that verification code. Sign in again to get a new one."}
 	case has("check the account information", "incorrect", "invalid", "wrong password", "verification failed"):
 		return SignInFailure{FailInvalidCredentials, "Apple did not accept that email and password. Check them and try again.", "https://iforgot.apple.com"}
 	case has("timed out", "deadline exceeded", "did not answer"):

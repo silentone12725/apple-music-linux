@@ -364,7 +364,25 @@ func (s *Store) save() {
 	syncedAt := s.querySyncedAtInTx(rtx)
 	var revision string
 	rtx.QueryRow("SELECT value FROM meta WHERE key='revision'").Scan(&revision) //nolint:errcheck — absent is fine
-	rtx.Commit()                                                                //nolint:errcheck — read-only, no changes to commit
+
+	// The query helpers answer nil for a failed read as well as for an empty table. Writing that over the good
+	// file on disk would replace the library with a truncated one, so the dump is checked against the row counts
+	// in the same transaction and a short one is not saved.
+	trackRows := 0
+	for _, t := range plTracks {
+		trackRows += len(t)
+	}
+	for _, c := range []struct {
+		table string
+		got   int
+	}{{"songs", len(songs)}, {"albums", len(albums)}, {"playlists", len(pls)}, {"playlist_tracks", trackRows}} {
+		var want int
+		if err := rtx.QueryRow("SELECT COUNT(*) FROM " + c.table).Scan(&want); err != nil || want != c.got {
+			log.Printf("[library] save skipped: %s dump has %d rows, table has %d (err=%v)", c.table, c.got, want, err)
+			return
+		}
+	}
+	rtx.Commit() //nolint:errcheck — read-only, no changes to commit
 
 	plain, err := json.Marshal(diskCache{Version: cacheFormatVersion, Songs: songs, Albums: albums, Playlists: pls, PlTracks: plTracks, SyncedAt: syncedAt, Revision: revision})
 	if err != nil {
@@ -661,6 +679,16 @@ type IngestPayload struct {
 func (s *Store) Ingest(p IngestPayload) {
 	if s.db == nil {
 		return
+	}
+	// An empty payload over a library that has data is a failed sync (a request that errored part-way, a
+	// signed-out page), not a library that was emptied: replacing the cache with it would wipe the songs and
+	// mark the cache fresh for a day. A store that is itself empty still takes it, so a genuinely empty
+	// library does not retry forever.
+	if len(p.Songs) == 0 && len(p.Albums) == 0 && len(p.Playlists) == 0 && len(p.PlaylistTracks) == 0 {
+		if songs, albums, playlists, _ := s.Stats(); songs+albums+playlists > 0 {
+			log.Printf("[library] ingest ignored: empty payload would replace %d songs, %d albums, %d playlists", songs, albums, playlists)
+			return
+		}
 	}
 	tx, err := s.db.Begin()
 	if err != nil {

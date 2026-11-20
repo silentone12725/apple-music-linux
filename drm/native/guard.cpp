@@ -54,6 +54,16 @@ __attribute__((constructor)) static void install_sigabrt_handler()
     sigaction(SIGABRT, &sa, nullptr);
 }
 
+/* Own the SIGABRT slot for the duration of a guarded call (see aml_open_kd_ctx_guarded). */
+static void arm_sigabrt(struct sigaction *old_sa)
+{
+    struct sigaction sa{};
+    sa.sa_handler = sigabrt_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGABRT, &sa, old_sa);
+}
+
 /* ── Guarded entry points ────────────────────────────────────────────────────*/
 
 extern "C" void *aml_open_kd_ctx_guarded(const char *adam, const char *uri)
@@ -98,10 +108,13 @@ extern "C" void *aml_open_kd_ctx_guarded(const char *adam, const char *uri)
 extern "C" int aml_lib_login_guarded(const char *username, const char *password)
 {
     int result = -1;
+    struct sigaction old_sa{};
 
+    arm_sigabrt(&old_sa);
     g_recovery_valid = true;
     if (sigsetjmp(g_recovery_jmp, 1) != 0) {
         g_recovery_valid = false;
+        sigaction(SIGABRT, &old_sa, nullptr);
         fprintf(stderr, "[guard] drm_lib_login: exception escaped\n");
         fflush(stderr);
         return -1;
@@ -118,16 +131,20 @@ extern "C" int aml_lib_login_guarded(const char *username, const char *password)
     }
 
     g_recovery_valid = false;
+    sigaction(SIGABRT, &old_sa, nullptr);
     return result;
 }
 
 extern "C" int aml_lib_init_guarded(const drm_lib_config_t *cfg)
 {
     int result = -1;
+    struct sigaction old_sa{};
 
+    arm_sigabrt(&old_sa);
     g_recovery_valid = true;
     if (sigsetjmp(g_recovery_jmp, 1) != 0) {
         g_recovery_valid = false;
+        sigaction(SIGABRT, &old_sa, nullptr);
         fprintf(stderr, "[guard] drm_lib_init: SVError escaped\n");
         fflush(stderr);
         drm_lib_abort_init();
@@ -147,6 +164,7 @@ extern "C" int aml_lib_init_guarded(const drm_lib_config_t *cfg)
     }
 
     g_recovery_valid = false;
+    sigaction(SIGABRT, &old_sa, nullptr);
     return result;
 }
 #else
