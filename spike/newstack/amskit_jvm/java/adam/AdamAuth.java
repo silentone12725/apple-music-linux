@@ -260,10 +260,16 @@ public class AdamAuth {
         java.lang.reflect.Method mk = BundleInfoWrapper.class.getMethod("access$make", String.class, String.class, String.class, String.class, String.class, String.class);
         BundleInfoWrapper bi = (BundleInfoWrapper) mk.invoke(null, BUNDLE, BUNDLE, BUNDLE, "Music", "7.0.1", BUNDLE);
 
+        // Real IDeviceInfo derives hardwareType from manufacturer+model (alnum-stripped) and
+        // platformName/machineName from the actual Android OS — the placeholder values here
+        // before (hardwareType="Android", machineName="linux", manufacturer="adam", model="pc")
+        // were an internally-inconsistent, obviously-fabricated device fingerprint, a likely
+        // cause of the server's "environment mismatch" (-29004) rejection. Use the real
+        // provisioned Android ID and a self-consistent, realistic device fingerprint instead.
         SessionBuilder sb = new SessionBuilder();
         sb.setHTTPProvider(new HttpProv());
-        ExpectedSession es = sb.make("0123456789abcdef", "1.0", "Android", "Android", "linux", "14", "adam", "pc",
-            "stable-id", BUNDLE, bi, "", "", true, (byte) 0, false);
+        ExpectedSession es = sb.make(androidId, "87000", "GooglePixel7", "android", "Pixel 7", "14", "Google", "Pixel 7",
+            "d290f1ee-6c54-4b01-90e6-d701748f0851", BUNDLE, bi, "", "", true, (byte) 0, false);
         if (!es.hasValue()) throw new RuntimeException("session: " + es.error());
         Session session = es.value();
 
