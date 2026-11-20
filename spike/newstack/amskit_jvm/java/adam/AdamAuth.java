@@ -258,7 +258,13 @@ public class AdamAuth {
         String androidId = Files.readString(Path.of(provDir + "/ANDROID_ID")).trim();
 
         java.lang.reflect.Method mk = BundleInfoWrapper.class.getMethod("access$make", String.class, String.class, String.class, String.class, String.class, String.class);
-        BundleInfoWrapper bi = (BundleInfoWrapper) mk.invoke(null, BUNDLE, BUNDLE, BUNDLE, "Music", "7.0.1", BUNDLE);
+        // 6th param (accountClientIdentifier) is NOT the app's own bundle ID — real
+        // AndroidBundleInfo.getAccountClientIdentifier() defaults to
+        // BundleInfoWrapper.getClientIdentifierAppStore(), confirmed by calling that real
+        // native getter directly: "com.apple.AppleMediaServicesCore.IMediaAccount.appStore".
+        // Using the app's package name there instead was wrong on every prior attempt.
+        String accountClientId = BundleInfoWrapper.getClientIdentifierAppStore();
+        BundleInfoWrapper bi = (BundleInfoWrapper) mk.invoke(null, BUNDLE, BUNDLE, BUNDLE, "Music", "7.0.1", accountClientId);
 
         // Cross-verified against the real app's decompiled IDeviceInfo defaults and a connected
         // physical device (adb getprop / settings get global device_name / dumpsys package),
