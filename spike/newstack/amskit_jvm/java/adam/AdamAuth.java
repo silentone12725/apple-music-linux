@@ -96,6 +96,85 @@ public class AdamAuth {
         }
     }
 
+    /**
+     * AMSKit's secondary-auth/2FA prompt (trusted-device or SMS verification code) surfaces
+     * here. The bare IInterruptHandlerAdaptor used before had no Java override at all — since
+     * it's @Virtual(true), that means AMSKit's native call into it went nowhere, which is a
+     * strong candidate for why authentication failed with a generic idmsServiceError once past
+     * the anisette-sync stage. This subclass prints the dialog (title/message/actions/text
+     * fields) and reads the user's answer directly from the console — same INTERACTIVE
+     * philosophy as the password prompt: a verification code is typed by the user, never seen
+     * or handled by anything else.
+     */
+    static class InterruptHandler extends com.apple.mediaservices.amskit.authentication.IInterruptHandlerAdaptor {
+        public DialogResultTask handleDialog(DialogRequest request) {
+            try {
+                String title = request.getTitle() != null ? request.getTitle().getString() : "";
+                String message = request.getMessage() != null ? request.getMessage().getString() : "";
+                System.err.println("\n=== DIALOG ===\nTitle: " + title + "\nMessage: " + message);
+
+                DialogActionsVector actions = request.getActions();
+                List<String> actionIds = new ArrayList<>();
+                for (long i = 0; i < actions.size(); i++) {
+                    DialogAction act = actions.at(i);
+                    String id = act.getIdentifier() != null ? act.getIdentifier().getString() : "";
+                    String atitle = act.getTitle() != null ? act.getTitle().getString() : "";
+                    actionIds.add(id);
+                    System.err.println("  Action[" + i + "]: id=" + id + " title=" + atitle);
+                }
+
+                java.io.Console console = System.console();
+                if (console == null) throw new RuntimeException("No controlling terminal for dialog input");
+
+                DialogTextFieldVector fields = request.getTextFields();
+                StringVector values = new StringVector();
+                for (long i = 0; i < fields.size(); i++) {
+                    DialogTextField f = fields.at(i);
+                    String placeholder = f.getPlaceholder();
+                    boolean secure = f.getIsSecure();
+                    String label = (placeholder == null || placeholder.isEmpty() ? "Value" : placeholder) + ": ";
+                    String val;
+                    if (secure) {
+                        char[] pw = console.readPassword(label);
+                        val = pw == null ? "" : new String(pw);
+                        if (pw != null) Arrays.fill(pw, '\0');
+                    } else {
+                        val = console.readLine(label);
+                    }
+                    values.push_back(val == null ? "" : val);
+                }
+
+                String chosenAction = actionIds.isEmpty() ? "" : actionIds.get(0);
+                if (actionIds.size() > 1) {
+                    for (int i = 0; i < actionIds.size(); i++) System.err.println("  [" + i + "] " + actionIds.get(i));
+                    String choice = console.readLine("Choose action [0-" + (actionIds.size() - 1) + "], default 0: ");
+                    if (choice != null && !choice.trim().isEmpty()) chosenAction = actionIds.get(Integer.parseInt(choice.trim()));
+                }
+
+                ExpectedDialogResult result = DialogResult.make(request, chosenAction, values);
+                DialogResultTask.Completable completable = DialogResultTask.Completable.make();
+                completable.complete(result);
+                return completable.takeTask();
+            } catch (Exception e) {
+                System.err.println("[dialog] error: " + e);
+                DialogResultTask.Completable completable = DialogResultTask.Completable.make();
+                completable.completeError(com.apple.mediaservices.amskit.bindings.Error.exceptionToError(e));
+                return completable.takeTask();
+            }
+        }
+
+        public UnitTask handleOpenUrl(AMSURL url) {
+            System.err.println("[dialog] handleOpenUrl: " + (url != null ? url.getStringRepresentation() : "(null)"));
+            UnitTask.Completable completable = UnitTask.Completable.make();
+            Class<?> unitClass = kotlin.Unit.class;
+            Object unitTmp = null;
+            for (java.lang.reflect.Field f : unitClass.getDeclaredFields())
+                if (f.getType() == unitClass) { try { f.setAccessible(true); unitTmp = f.get(null); } catch (Exception ignored) {} break; }
+            completable.complete(new ExpectedUnit((kotlin.Unit) unitTmp));
+            return completable.takeTask();
+        }
+    }
+
     static byte[] b64(String path) throws Exception {
         return Base64.getDecoder().decode(Files.readString(Path.of(path)).trim());
     }
@@ -329,7 +408,7 @@ public class AdamAuth {
         ob.withUserName(user);
         ob.withCredential(new AccountCredential(token, credType));
         ob.withType((byte) 0);
-        ob.withHandler(new com.apple.mediaservices.amskit.authentication.IInterruptHandlerAdaptor());
+        ob.withHandler(new InterruptHandler());
         CredentialsAuthenticateTaskOptions opts = ob.build();
 
         AuthenticateResultTask task = AppleMediaServicesCore.perform(session, opts);
