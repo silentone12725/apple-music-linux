@@ -36,7 +36,7 @@ func GetPlaylistRespContext(ctx context.Context, storefront string, id string, l
 
 	// Catalog playlist endpoint (works for Apple-curated and user-shared playlists).
 	// Library playlists (/v1/me/library/playlists/) require a different path.
-	baseURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/playlists/%s", storefront, id)
+	baseURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/playlists/%s", url.PathEscape(storefront), url.PathEscape(id))
 	q := url.Values{}
 	q.Set("include", "tracks,artists")
 	q.Set("include[songs]", "artists")
@@ -124,7 +124,7 @@ func GetLibraryPlaylistTracksContext(ctx context.Context, id, language, token, m
 	q.Set("include[library-music-videos]", "catalog")
 	q.Set("l", language)
 	q.Set("limit", "100")
-	baseURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/me/library/playlists/%s/tracks?%s", id, q.Encode())
+	baseURL := fmt.Sprintf("https://amp-api.music.apple.com/v1/me/library/playlists/%s/tracks?%s", url.PathEscape(id), q.Encode())
 
 	out := &LibraryPlaylistTrackResp{}
 	next := baseURL
@@ -164,7 +164,7 @@ func GetPlaylistResp(storefront string, id string, language string, token string
 		}
 	}
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/playlists/%s", storefront, id), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://amp-api.music.apple.com/v1/catalog/%s/playlists/%s", url.PathEscape(storefront), url.PathEscape(id)), nil)
 	if err != nil {
 		return nil, err
 	}
