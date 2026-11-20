@@ -5816,6 +5816,7 @@
         await _setupVLCPath(mkAudio, sess, adamId, ctrl, t0);
       }
     } catch (err) {
+      if (genStale(myGen)) return;
       if (!_abortCtrl?.signal.aborted) {
         const mk2 = window.MusicKit?.getInstance?.();
         console.error(

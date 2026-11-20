@@ -5226,6 +5226,9 @@ async function handleTrackChange(mk) {
         }
 
     } catch (err) {
+        // A call a newer track change has superseded failed because that change aborted it. The newer call owns the
+        // element and the play state now: resetting them here would stop the track that is starting.
+        if (genStale(myGen)) return;
         if (!_abortCtrl?.signal.aborted) {
             const mk2 = window.MusicKit?.getInstance?.();
             console.error('[Adam Engine] Playback error:', err,
