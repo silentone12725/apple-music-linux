@@ -385,11 +385,20 @@ type resolvedAttrs struct {
 	hasLyrics, isMastered            bool
 }
 
+// notFoundErr names what could not be loaded. The API answers an unknown id with an empty list and no error, and
+// wrapping that nil with %w printed "%!w(<nil>)" in the message the user sees.
+func notFoundErr(what string, err error) error {
+	if err == nil {
+		return fmt.Errorf("%s not found or has no tracks", what)
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
 // fetchVideoAttrs resolves track metadata from the music-video API.
 func fetchVideoAttrs(ctx context.Context, sf, assetID, lang, token string, opts ExportOptions) (resolvedAttrs, error) {
 	mv, err := ampapi.GetMusicVideoRespContext(ctx, sf, assetID, lang, token)
 	if err != nil || len(mv.Data) == 0 {
-		return resolvedAttrs{}, fmt.Errorf("music video %s not found in %s: %w", assetID, sf, err)
+		return resolvedAttrs{}, notFoundErr(fmt.Sprintf("music video %s in %s", assetID, sf), err)
 	}
 	a := mv.Data[0].Attributes
 	ra := resolvedAttrs{
@@ -444,7 +453,7 @@ func (m *Manager) fetchSongAttrsOrExpand(ctx context.Context, sf string, req Exp
 			m.mu.Unlock()
 			return resolvedAttrs{}, true, nil
 		}
-		return resolvedAttrs{}, false, fmt.Errorf("song %s not found in %s: %w", req.AssetID, sf, err)
+		return resolvedAttrs{}, false, notFoundErr(fmt.Sprintf("song %s in %s", req.AssetID, sf), err)
 	}
 	a := song.Data[0].Attributes
 	ra := resolvedAttrs{
@@ -943,7 +952,7 @@ func (m *Manager) expandCollection(ctx context.Context, req ExportRequest, job *
 	if req.Capabilities.LibraryPlaylist {
 		tracks, err := ampapi.GetLibraryPlaylistTracksContext(ctx, req.AssetID, lang, req.Token, req.MUT)
 		if err != nil || len(tracks.Data) == 0 {
-			m.fail(job, fmt.Errorf("library playlist %s: %w", req.AssetID, err))
+			m.fail(job, notFoundErr(fmt.Sprintf("library playlist %s", req.AssetID), err))
 			return true
 		}
 		for _, track := range tracks.Data {
@@ -963,7 +972,7 @@ func (m *Manager) expandCollection(ctx context.Context, req ExportRequest, job *
 	} else {
 		pl, err := ampapi.GetPlaylistRespContext(ctx, sf, req.AssetID, lang, req.Token, req.MUT)
 		if err != nil || len(pl.Data) == 0 || len(pl.Data[0].Relationships.Tracks.Data) == 0 {
-			m.fail(job, fmt.Errorf("playlist %s: %w", req.AssetID, err))
+			m.fail(job, notFoundErr(fmt.Sprintf("playlist %s", req.AssetID), err))
 			return true
 		}
 		for _, track := range pl.Data[0].Relationships.Tracks.Data {

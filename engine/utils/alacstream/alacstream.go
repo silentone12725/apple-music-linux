@@ -186,6 +186,11 @@ func cbcsFullSubsampleDecrypt(data []byte, conn *bufio.ReadWriter) error {
 	// function would just return them as-is, but we're truncating the data here
 	// for clarity and interoperability
 	truncatedLen := len(data) & ^0xf
+	// Nothing to decrypt (under one AES block): send nothing. A zero size is not an empty chunk on this wire, it
+	// is the "end of this key" marker, and the decryptor would read the next sample's size as a new key header.
+	if truncatedLen == 0 {
+		return nil
+	}
 	// send the whole chunk at once
 	err := binary.Write(conn, binary.LittleEndian, uint32(truncatedLen))
 	if err != nil {
