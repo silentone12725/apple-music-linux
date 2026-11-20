@@ -122,8 +122,11 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 	tr.RecordCatalogFetchStart()
 	song, err := ampapi.GetSongRespContext(ctx, req.Storefront, req.AssetID, req.Language, token)
 	tr.RecordCatalogFetchEnd()
-	if err != nil || len(song.Data) == 0 {
+	if err != nil {
 		return nil, fmt.Errorf("song %s not found in %s: %w", req.AssetID, req.Storefront, err)
+	}
+	if len(song.Data) == 0 { // an unknown id is an empty list with no error: wrapping the nil printed "%!w(<nil>)"
+		return nil, fmt.Errorf("song %s not found in %s", req.AssetID, req.Storefront)
 	}
 	a := song.Data[0].Attributes
 
