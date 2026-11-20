@@ -1456,6 +1456,7 @@
   var _nativePauseRef = HTMLMediaElement.prototype.pause;
   var _origFnCall = Function.prototype.call;
   var _origFnApply = Function.prototype.apply;
+  var _nativeReqFS = Element.prototype.requestFullscreen;
   var _vlcMode = false;
   var _vlcPosMs = 0;
   var _vlcPaused = false;
@@ -2837,10 +2838,15 @@
       };
       console.log("[Adam MV] Function.prototype.call/apply intercept installed for counter-pause");
     }
-    const _origReqFS = Element.prototype.requestFullscreen;
+    const _origReqFS = _nativeReqFS;
     Element.prototype.requestFullscreen = function(opts) {
       return _origReqFS.call(document.documentElement, opts);
     };
+    _abortCtrl.signal.addEventListener("abort", () => {
+      Function.prototype.call = _origFnCall;
+      Function.prototype.apply = _origFnApply;
+      Element.prototype.requestFullscreen = _nativeReqFS;
+    }, { once: true });
     const _containerProps = ["position", "top", "left", "width", "height", "z-index", "background", "display", "justify-content", "align-content"];
     mvContainer.style.setProperty("position", "fixed", "important");
     mvContainer.style.setProperty("top", "0", "important");
@@ -3131,6 +3137,7 @@
     _qualityBtn.addEventListener("mouseleave", () => {
       _qualityBtn.style.background = "none";
     });
+    const footerRow = avp?.querySelector('[slot="footer"]');
     const fsCtrl = avp?.querySelector("amp-playback-controls-full-screen");
     if (fsCtrl?.parentNode) {
       fsCtrl.parentNode.insertBefore(_qualityBtn, fsCtrl);
@@ -3224,7 +3231,10 @@
       opt.addEventListener("click", (e) => {
         e.stopPropagation();
         _mvMaxHeight = height;
-        localStorage.setItem("adam-mv-quality", String(height));
+        try {
+          localStorage.setItem("adam-mv-quality", String(height));
+        } catch (_) {
+        }
         console.log(`[Adam MV quality] set to ${_qualityLabel()} (${height}p)`);
         _qualitySpanEl.textContent = _qualityLabel();
         _qualityMenu.querySelectorAll("button").forEach((b, i) => {
@@ -3324,7 +3334,6 @@
       if (scrimEl.style.visibility !== "visible") scrimEl.style.setProperty("visibility", "visible", "important");
     }) : null;
     if (_scrimObs) _scrimObs.observe(scrimEl, { attributes: true, attributeFilter: ["style", "class"] });
-    const footerRow = avp?.querySelector('[slot="footer"]');
     const infoEls = avp ? [...avp.querySelectorAll('[slot="info"]')] : [];
     [...infoEls, footerRow].forEach((el2) => {
       if (!el2) return;
@@ -4125,7 +4134,7 @@
           if (e.name !== "AbortError") console.warn("[Adam vseg] fetch loop error:", e);
         }
       };
-      ms2.addEventListener("sourceopen", async () => {
+      const _onVsegOpen = async () => {
         if (_durationSec > 0) {
           try {
             ms2.duration = _durationSec;
@@ -4158,7 +4167,8 @@
         sb.appendBuffer(initData);
         await waitUpdateEnd();
         runFetchLoop(0);
-      });
+      };
+      ms2.addEventListener("sourceopen", _onVsegOpen, { once: true });
       myVid.addEventListener("seeking", async () => {
         if (!sb) return;
         if (_seekHandlerActive) return;

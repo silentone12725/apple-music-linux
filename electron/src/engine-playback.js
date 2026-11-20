@@ -391,6 +391,7 @@ const _iframePlay = (() => {
 const _nativePauseRef = HTMLMediaElement.prototype.pause;
 const _origFnCall     = Function.prototype.call;
 const _origFnApply    = Function.prototype.apply;
+const _nativeReqFS     = Element.prototype.requestFullscreen; // the real one: an MV session restores this, never a wrapper it found installed
 
 // ── VLC state ─────────────────────────────────────────────────────────────────
 
@@ -1982,10 +1983,18 @@ async function startMVPipeline() {
     // controls) enters fullscreen as one unit.  Without this, Adam's native keyboard
     // shortcut may fullscreen only nativeVidEl, showing video without our UI, while
     // our button fullscreens only the document, occasionally without the video.
-    const _origReqFS = Element.prototype.requestFullscreen;
+    const _origReqFS = _nativeReqFS;
     Element.prototype.requestFullscreen = function(opts) {
         return _origReqFS.call(document.documentElement, opts);
     };
+    // Put the page-wide overrides back as soon as this session is aborted. The full cleanup is registered much later,
+    // after two awaits that return early when the session is aborted during setup (a quick skip or exit): without this
+    // those returns left Function.prototype.call/apply and requestFullscreen wrapped for the rest of the page's life.
+    _abortCtrl.signal.addEventListener('abort', () => {
+        Function.prototype.call  = _origFnCall;
+        Function.prototype.apply = _origFnApply;
+        Element.prototype.requestFullscreen = _nativeReqFS;
+    }, { once: true });
 
     // ── Container: full-viewport overlay (Layer 2) ──────────────────────────────
     // Force mvContainer to cover the entire viewport. avpi's internal top:256.5px
@@ -2358,6 +2367,9 @@ async function startMVPipeline() {
     _qualityBtn.addEventListener('mouseenter', () => { _qualityBtn.style.background = 'rgba(255,255,255,0.1)'; });
     _qualityBtn.addEventListener('mouseleave', () => { _qualityBtn.style.background = 'none'; });
 
+    // Declared here, before the quality button below falls back to it: a const read ahead of its declaration throws, which
+    // ended the whole MV setup whenever the fullscreen control was missing.
+    const footerRow = avp?.querySelector('[slot="footer"]');
     // Inject before fullscreen button in the native footer control bar.
     const fsCtrl = avp?.querySelector('amp-playback-controls-full-screen');
     if (fsCtrl?.parentNode) {
@@ -2471,7 +2483,7 @@ async function startMVPipeline() {
         opt.addEventListener('click', (e) => {
             e.stopPropagation();
             _mvMaxHeight = height;
-            localStorage.setItem('adam-mv-quality', String(height));
+            try { localStorage.setItem('adam-mv-quality', String(height)); } catch (_) {}
             console.log(`[Adam MV quality] set to ${_qualityLabel()} (${height}p)`);
             _qualitySpanEl.textContent = _qualityLabel();
             _qualityMenu.querySelectorAll('button').forEach((b, i) => {
@@ -2574,7 +2586,6 @@ async function startMVPipeline() {
     // These have slot="info" / slot="footer" attributes — they are light DOM children
     // of amp-video-player distributed to named slots inside avp's shadow root.
     // Apple Music hides them when no native video is detected — force them visible.
-    const footerRow = avp?.querySelector('[slot="footer"]');
     const infoEls   = avp ? [...avp.querySelectorAll('[slot="info"]')] : [];
     // Force visibility/opacity only — native display values are already correct
     // (info__eyebrow / info__title are display:block; footer rows are display:flex).
@@ -3405,7 +3416,9 @@ async function startMVPipeline() {
             }
         };
 
-        ms.addEventListener('sourceopen', async () => {
+        // Once: 'sourceopen' also fires when an ended MediaSource is reopened by a later append or remove (a seek
+        // after the last segment), and this setup would then add a second SourceBuffer and restart from segment 0.
+        const _onVsegOpen = async () => {
             // Set MediaSource duration so myVid.duration = full track length,
             // not just the currently buffered end. Without this, _mvSeekTo clamps
             // seeks to the buffer edge instead of the actual seek target.
@@ -3433,7 +3446,8 @@ async function startMVPipeline() {
             await waitUpdateEnd();
 
             runFetchLoop(0);
-        });
+        };
+        ms.addEventListener('sourceopen', _onVsegOpen, { once: true });
 
         myVid.addEventListener('seeking', async () => {
             if (!sb) return;
