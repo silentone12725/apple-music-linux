@@ -1,6 +1,8 @@
 #!/bin/bash
-# Usage: run.sh adam.Smoke <bridge.so> <classes.jar>
-# Needs: BUILD (dir with libs/amskit-v52.jar, libs/javacpp-1.5.10.jar, java/out, lib64-701/)
+# Usage: run.sh adam.AdamAuth <bridge.so> <classes.jar> <state-dir> <cred-file|INTERACTIVE> <stage9-bin> <prov-dir> [allowReprovision]
+#     or run.sh adam.Smoke <bridge.so>
+# Needs: BUILD (dir with libs/amskit-v52.jar, libs/javacpp-1.5.10.jar, java/out, lib64-701/) — see setup.sh.
+# See README.md for the full argument list and current status.
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 BUILD="${BUILD:-$HERE/build}"
