@@ -108,12 +108,22 @@ func (s *APIServer) handleArtwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	imgResp, err := artworkClient.Get(fmtArtworkURL(rawURL, size))
+	imgReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, fmtArtworkURL(rawURL, size), nil)
+	if err != nil {
+		http.Error(w, "artwork fetch failed", http.StatusBadGateway)
+		return
+	}
+	imgResp, err := artworkClient.Do(imgReq)
 	if err != nil {
 		http.Error(w, "artwork fetch failed", http.StatusBadGateway)
 		return
 	}
 	defer imgResp.Body.Close()
+	// An error page from the CDN must not be served as the image with a day's cache lifetime.
+	if imgResp.StatusCode != http.StatusOK {
+		http.Error(w, "artwork not available", http.StatusBadGateway)
+		return
+	}
 	w.Header().Set("Content-Type", imgResp.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	io.Copy(w, imgResp.Body) //nolint:errcheck
