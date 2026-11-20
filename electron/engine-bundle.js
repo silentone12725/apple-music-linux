@@ -2113,6 +2113,8 @@
   var _svgCloseLg = `<svg width="20" height="20" viewBox="0 0 28 28" fill="currentColor" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M7.923 20.075c.132.128.284.214.459.256.174.043.347.043.519 0 .171-.042.319-.125.442-.248L14.002 15.424l4.653 4.656c.127.127.276.211.448.253.171.042.344.041.517-.001.174-.043.325-.129.453-.259.128-.128.213-.279.256-.451.043-.173.044-.345.003-.517-.041-.172-.124-.321-.249-.447L15.429 13.996l4.654-4.653c.125-.127.209-.276.251-.448.043-.171.042-.343-.002-.515-.045-.172-.131-.322-.259-.45-.132-.131-.283-.219-.455-.261-.172-.043-.344-.044-.515-.003-.172.041-.321.126-.448.254L14.002 12.574l-4.659-4.656c-.123-.125-.272-.208-.445-.249-.174-.041-.347-.041-.522 0-.174.041-.325.127-.453.259-.127.128-.21.279-.251.452-.041.174-.041.347 0 .519.041.173.122.32.243.441L12.574 13.996l-4.659 4.667c-.121.121-.204.268-.247.440-.044.171-.045.344-.003.519.042.174.128.325.258.453z" fill-rule="nonzero"/></svg>`;
   var _svgReset = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M10.2 5.5A4.2 4.2 0 1 1 8.1 2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M7.5 0.5L8.5 2.2L6.5 2.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   var _qualityBadgeInfo = { codec: null, sampleRate: null, bitDepth: null, spatialAudio: null };
+  var _qualityBadgeEl = null;
+  var _qualityPopupCloser = null;
   var _slotBadgeObs = null;
   var _slotBadgeRetry = null;
   function _insertBadgeIntoSlot(badge, attempt) {
@@ -2242,7 +2244,7 @@
       }, 80);
     }
     _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
-    let badge = document.getElementById("adam-quality-badge");
+    let badge = _qualityBadgeEl || document.getElementById("adam-quality-badge");
     let color, isHiRes = false, isSpatial = false, label = "";
     if (spatialAudio === "binaural-lossless" || spatialAudio === "binaural") {
       color = "#bf5af2";
@@ -2283,10 +2285,14 @@
           _showQualityPopup(badge);
         }
       }, true);
-      document.addEventListener("click", () => {
-        const pop = document.getElementById("adam-quality-popup");
-        if (pop) pop.style.display = "none";
-      }, true);
+      if (!_qualityPopupCloser) {
+        _qualityPopupCloser = () => {
+          const pop = document.getElementById("adam-quality-popup");
+          if (pop) pop.style.display = "none";
+        };
+        document.addEventListener("click", _qualityPopupCloser, true);
+      }
+      _qualityBadgeEl = badge;
       badge.style.flexShrink = "0";
       badge.style.alignSelf = "center";
       badge.style.marginLeft = "2px";
@@ -7571,6 +7577,9 @@
     });
     window.adamBridge?.onMprisCmd?.((cmd) => {
       if (cmd && typeof cmd === "object") {
+        if (cmd.type === "seek" && !Number.isFinite(cmd.deltaMs) || cmd.type === "setPosition" && !Number.isFinite(cmd.ms) || cmd.type === "setVolume" && !Number.isFinite(cmd.value)) {
+          return;
+        }
         if (cmd.type === "seek") {
           const targetMs = Math.max(0, _mprisPosMs() + cmd.deltaMs);
           mk.seekToTime(targetMs / 1e3);
@@ -7768,6 +7777,7 @@
         });
         if (_ADAM_DEBUG) console.log("[Adam click] external play in AAC mode \u2014 opening CDN gate playbackState=" + mk.playbackState + " nowPlaying=" + (mk.nowPlayingItem?.attributes?.name || "null") + " catalogId=" + (aacCatalogId || "not-found") + (aacSetQueueDesc ? " desc=" + JSON.stringify(aacSetQueueDesc) : "") + (_aacPlaylistId ? " playlist=" + _aacPlaylistId + " (pre-fetching)" : "") + " target=" + (e.target?.tagName || "?") + " testId=" + (e.target?.closest("[data-testid]")?.dataset?.testid || "none") + " matched=" + (_dbgPlaySel?.dataset?.testid || _dbgPlaySel?.className?.toString()?.slice(0, 40) || "?"));
         _allowCDNTransition = true;
+        if (_savedAacApiRestore) _savedAacApiRestore();
         const _aacMkApiSaved = {
           setQueue: mk.setQueue,
           changeToMediaAtIndex: mk.changeToMediaAtIndex
@@ -7777,7 +7787,6 @@
           mk.changeToMediaAtIndex = _aacMkApiSaved.changeToMediaAtIndex;
           _savedAacApiRestore = null;
         };
-        if (_savedAacApiRestore) _savedAacApiRestore();
         _savedAacApiRestore = _aacRestoreApi;
         const _aacCloseGate = () => {
           if (_externalPlayGateTimer) {
@@ -8127,7 +8136,7 @@
           const desc = a[0];
           if (desc?.playlists && desc?.startWith?.id) {
             const targetId = desc.startWith.id;
-            const isLibraryTrack = targetId.startsWith("a.") || targetId.startsWith("i.");
+            const isLibraryTrack = typeof targetId === "string" && (targetId.startsWith("a.") || targetId.startsWith("i."));
             if (isLibraryTrack) {
               const startWithLid = targetId;
               const targetNumId = targetId.startsWith("a.") ? targetId.slice(2) : targetId;

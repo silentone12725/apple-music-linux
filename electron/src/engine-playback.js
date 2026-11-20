@@ -1190,6 +1190,8 @@ const _svgReset  = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" 
 
 // State shared across showQualityBadge calls (populated by handleTrackChange)
 let _qualityBadgeInfo = { codec: null, sampleRate: null, bitDepth: null, spatialAudio: null };
+let _qualityBadgeEl = null;       // the badge element, kept across marquee refreshes that detach it
+let _qualityPopupCloser = null;   // the one document click listener that closes the popup
 
 // Marquee slot badge state — shared so re-slot can happen on track change
 let _slotBadgeObs   = null; // MutationObserver watching the marquee slot
@@ -1346,7 +1348,9 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
         }, 80);
     }
     _qualityBadgeInfo = { codec, sampleRate, bitDepth, spatialAudio };
-    let badge = document.getElementById('adam-quality-badge');
+    // getElementById cannot find a badge Apple's marquee refresh detached, which made every refresh build a second
+    // badge and another document click listener; the element is kept so the re-slot below can find it.
+    let badge = _qualityBadgeEl || document.getElementById('adam-quality-badge');
 
     let color, isHiRes = false, isSpatial = false, label = '';
     if (spatialAudio === 'binaural-lossless' || spatialAudio === 'binaural') {
@@ -1398,10 +1402,14 @@ function showQualityBadge(codec, sampleRate, bitDepth, spatialAudio) {
             }
         }, true);
         // Click anywhere else closes popup (capture phase, after badge's own handler above)
-        document.addEventListener('click', () => {
-            const pop = document.getElementById('adam-quality-popup');
-            if (pop) pop.style.display = 'none';
-        }, true);
+        if (!_qualityPopupCloser) {
+            _qualityPopupCloser = () => {
+                const pop = document.getElementById('adam-quality-popup');
+                if (pop) pop.style.display = 'none';
+            };
+            document.addEventListener('click', _qualityPopupCloser, true);
+        }
+        _qualityBadgeEl = badge;
 
         badge.style.flexShrink = '0';
         badge.style.alignSelf  = 'center';
@@ -7215,6 +7223,11 @@ async function setup() {
 
     window.adamBridge?.onMprisCmd?.((cmd) => {
         if (cmd && typeof cmd === 'object') {
+            if ((cmd.type === 'seek' && !Number.isFinite(cmd.deltaMs)) ||
+                (cmd.type === 'setPosition' && !Number.isFinite(cmd.ms)) ||
+                (cmd.type === 'setVolume' && !Number.isFinite(cmd.value))) {
+                return; // a NaN would reach seekToTime / volume, which throw or mute
+            }
             if (cmd.type === 'seek') {
                 // MPRIS Seek is a relative delta in µs; deltaMs is already in ms.
                 const targetMs = Math.max(0, _mprisPosMs() + cmd.deltaMs);
@@ -7452,6 +7465,10 @@ async function setup() {
             // ── Instrument mk.setQueue / changeToMediaAtIndex for diagnostics ─────
             // Passthrough wrappers: log what MK's own click handler calls during the
             // gate window. Matches the VLC path's approach so we can compare logs.
+            // A wrapper left by an earlier click (the gate can be closed elsewhere without restoring) is removed
+            // BEFORE the originals are captured; captured afterwards, the old wrapper would be saved as the
+            // original and then put back for good when this click's gate closes.
+            if (_savedAacApiRestore) _savedAacApiRestore();
             const _aacMkApiSaved = {
                 setQueue: mk.setQueue,
                 changeToMediaAtIndex: mk.changeToMediaAtIndex,
@@ -7461,7 +7478,6 @@ async function setup() {
                 mk.changeToMediaAtIndex = _aacMkApiSaved.changeToMediaAtIndex;
                 _savedAacApiRestore = null;
             };
-            if (_savedAacApiRestore) _savedAacApiRestore(); // clear any leftover from previous click
             _savedAacApiRestore = _aacRestoreApi;
             const _aacCloseGate = () => {
                 if (_externalPlayGateTimer) { clearTimeout(_externalPlayGateTimer); _externalPlayGateTimer = null; }
@@ -7893,7 +7909,7 @@ async function setup() {
                     // Library song IDs carry an "a." or "i." prefix. "a." is a library song ID
                     // with a numeric part; "i." is an opaque library item ID (no numeric form).
                     // Both resolve via the playlist track cache (lid→cid mapping).
-                    const isLibraryTrack = targetId.startsWith('a.') || targetId.startsWith('i.');
+                    const isLibraryTrack = typeof targetId === 'string' && (targetId.startsWith('a.') || targetId.startsWith('i.'));
                     if (isLibraryTrack) {
                         const startWithLid = targetId;
                         // Pre-computed numeric catalog ID from DOM extraction or "a." prefix strip.
