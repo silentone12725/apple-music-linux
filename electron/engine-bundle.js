@@ -6402,12 +6402,37 @@
   async function _scFetchLoudness() {
     if (!_sessionId) return NaN;
     try {
+      const LIMIT = 262144;
+      const ctrl = new AbortController();
       const resp = await fetch(
         `${ENGINE}/api/v1/playback/${_sessionId}/audio?raw=1`,
-        { headers: { Range: "bytes=0-262143" } }
+        { headers: { Range: `bytes=0-${LIMIT - 1}` }, signal: ctrl.signal }
       );
       if (!resp.ok) return NaN;
-      const dv = new DataView(await resp.arrayBuffer());
+      const reader = resp.body.getReader();
+      const parts = [];
+      let got = 0;
+      try {
+        while (got < LIMIT) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          parts.push(value);
+          got += value.length;
+        }
+      } finally {
+        ctrl.abort();
+        reader.cancel().catch(() => {
+        });
+      }
+      const head = new Uint8Array(Math.min(got, LIMIT));
+      let at = 0;
+      for (const part of parts) {
+        if (at >= head.length) break;
+        const take = part.subarray(0, head.length - at);
+        head.set(take, at);
+        at += take.length;
+      }
+      const dv = new DataView(head.buffer);
       const box = _scFindPath(dv, 0, dv.byteLength, ["moov", "udta", "ludt"]) || _scFindPath(dv, 0, dv.byteLength, ["moov", "trak", "udta", "ludt"]);
       if (!box) return NaN;
       const leaf = _scFindBox(dv, box.start, box.end, "tlou") || _scFindBox(dv, box.start, box.end, "alou");
@@ -7316,6 +7341,7 @@
       const targetSongId = _sessionContainers[ci]?.items[ii];
       const targetItem = targetSongId ? (mk.queue?.items ?? []).find((it) => extractItemId(it) === targetSongId) : null;
       if (targetItem) sendMprisMetadata(targetItem);
+      clearTimeout(_adamAdvancingTimer);
       _adamAdvancingTimer = setTimeout(() => {
         _adamGotoTarget = null;
         _adamGotoTargetId = null;
@@ -7380,7 +7406,7 @@
           });
         }
       }
-      _clearAdvancing();
+      _adamAdvancing = false;
       _updateTransportButtons();
       const mkAudio = document.querySelector("audio");
       if (mkAudio && !_vlcMode) mkAudio.dispatchEvent(new Event("waiting"));

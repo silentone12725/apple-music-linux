@@ -5817,10 +5817,26 @@ function _scParseLoudnessBase(dv, start, end) {
 async function _scFetchLoudness() {
     if (!_sessionId) return NaN;
     try {
+        // The engine honours the Range only for a track already on disk; otherwise it streams the whole track. Read
+        // the first 256 KB (the ludt box is in the moov at the start) and drop the rest, instead of downloading it all.
+        const LIMIT = 262144;
+        const ctrl = new AbortController();
         const resp = await fetch(`${ENGINE}/api/v1/playback/${_sessionId}/audio?raw=1`,
-            { headers: { Range: 'bytes=0-262143' } });
+            { headers: { Range: `bytes=0-${LIMIT - 1}` }, signal: ctrl.signal });
         if (!resp.ok) return NaN;
-        const dv = new DataView(await resp.arrayBuffer());
+        const reader = resp.body.getReader();
+        const parts = []; let got = 0;
+        try {
+            while (got < LIMIT) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                parts.push(value); got += value.length;
+            }
+        } finally { ctrl.abort(); reader.cancel().catch(() => {}); }
+        const head = new Uint8Array(Math.min(got, LIMIT));
+        let at = 0;
+        for (const part of parts) { if (at >= head.length) break; const take = part.subarray(0, head.length - at); head.set(take, at); at += take.length; }
+        const dv = new DataView(head.buffer);
         const box = _scFindPath(dv, 0, dv.byteLength, ['moov', 'udta', 'ludt'])
                  || _scFindPath(dv, 0, dv.byteLength, ['moov', 'trak', 'udta', 'ludt']);
         if (!box) return NaN;
@@ -6855,6 +6871,7 @@ async function setup() {
         // Safety valve: if NPIDF never fires (ctmi failed silently), reset NPIDF state after 6s.
         // _adamAdvancing itself is released right after ctmi below, so this only cleans up
         // the remaining NPIDF-tracking flags (_adamGotoTarget, _adamNavInternal, pending coords).
+        clearTimeout(_adamAdvancingTimer); // a valve left by an earlier goto must not fire in the middle of this one
         _adamAdvancingTimer = setTimeout(() => {
             _adamGotoTarget = null;
             _adamGotoTargetId = null;
@@ -6944,7 +6961,10 @@ async function setup() {
         // ctmi has been sent — release the advancing lock immediately so rapid prev/next
         // clicks aren't swallowed. The NPIDF filter (_adamGotoTarget) and session-state
         // tracking (_adamNavInternal, _adamPendingCI/II) continue independently.
-        _clearAdvancing();
+        // Release the lock only. _clearAdvancing would also cancel the 6 s valve armed above, which is what resets the
+        // goto flags (and lifts the block on MK's blob URLs) when the target's NPIDF never arrives; the NPIDF handler
+        // cancels it when it does.
+        _adamAdvancing = false;
         _updateTransportButtons();
 
         // Show MK's native loading spinner on the MSE path. Not needed for VLC —
