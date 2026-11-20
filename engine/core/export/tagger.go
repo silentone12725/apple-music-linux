@@ -119,7 +119,7 @@ func fetchArtworkPicture(ctx context.Context, urlTemplate string, size int) (*mp
 		return nil, err
 	}
 	imgType := mp4tag.ImageTypeJPEG
-	if ct == "image/png" {
+	if strings.HasPrefix(strings.ToLower(ct), "image/png") {
 		imgType = mp4tag.ImageTypePNG
 	}
 	return &mp4tag.MP4Picture{Format: imgType, Data: data}, nil

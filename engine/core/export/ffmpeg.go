@@ -49,10 +49,11 @@ func findVLC(explicit string) (string, bool) {
 // The output FLAC has correct audio data but STREAMINFO.total_samples=0
 // (VLC streaming mode); tagFLAC re-encodes it to fix that.
 func runVLCToFLAC(ctx context.Context, vlcPath, src, dst string) error {
-	// Escape VLC sout special characters in the dst path.
-	// '}' closes the option block; ':' and '#' are sout module separators.
+	// Escape VLC sout special characters in the dst path. The backslash goes first, as it is the escape itself;
+	// ',' separates options and '{' '}' delimit the block, so an output folder named "a,b" or "x{1}" would
+	// otherwise cut the path short; ':' and '#' are sout module separators; quotes start a quoted value.
 	sout := fmt.Sprintf("#transcode{acodec=flac,channels=2}:std{access=file,mux=raw,dst=%s}",
-		strings.NewReplacer("}", "\\}", ":", "\\:", "#", "\\#").Replace(dst))
+		strings.NewReplacer(`\`, `\\`, ",", `\,`, "{", `\{`, "}", `\}`, ":", `\:`, "#", `\#`, `"`, `\"`, "'", `\'`).Replace(dst))
 	cmd := toolCommand(ctx, vlcPath,
 		"--intf", "dummy",
 		"--no-video",
