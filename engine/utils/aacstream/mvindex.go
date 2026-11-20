@@ -85,6 +85,7 @@ type mvDecIndexer struct {
 	body      []byte // buffered full box (header+body) when collect
 
 	timescale    uint64
+	nTracks      int    // tracks in the moov
 	videoTrackID uint32 // track to index times from (raw input is multi-track: audio+video+subs)
 	initSize     int64
 	initSet      bool
@@ -271,6 +272,7 @@ func (ix *mvDecIndexer) finishBox() {
 		if vTimescale > 0 {
 			ix.mu.Lock()
 			ix.timescale = vTimescale
+			ix.nTracks = len(b.Traks)
 			ix.videoTrackID = vTrackID
 			ix.mu.Unlock()
 		}
@@ -292,7 +294,10 @@ func (ix *mvDecIndexer) finishBox() {
 				break
 			}
 		}
-		if vtraf == nil {
+		// Only single-track input may fall back to the first traf (its track id need not match the moov's). With
+		// several tracks, a moof without the video traf is audio or subtitles, and indexing it under the video
+		// timescale would add a bogus fragment.
+		if vtraf == nil && (ix.nTracks <= 1 || ix.videoTrackID == 0) {
 			vtraf = b.Traf
 		}
 		if vtraf == nil || vtraf.Tfdt == nil {

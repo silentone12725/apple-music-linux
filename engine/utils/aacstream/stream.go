@@ -178,8 +178,13 @@ func readNextFragment(r io.Reader, offset *uint64) (*mp4.Fragment, error) {
 	for {
 		box, err := mp4.DecodeBox(*offset, r)
 		if err != nil {
-			if !hasMoof && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
-				return nil, io.EOF // clean end between fragments
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				if !hasMoof && errors.Is(err, io.EOF) {
+					return nil, io.EOF // clean end between fragments
+				}
+				// A stream cut inside a box, or after a moof with no mdat, is a truncated download. Callers treat
+				// io.EOF as the normal end, so returning it here would accept the short stream as complete.
+				return nil, fmt.Errorf("truncated fragment: %w", io.ErrUnexpectedEOF)
 			}
 			return nil, err
 		}

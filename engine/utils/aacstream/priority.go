@@ -47,8 +47,12 @@ func HoldBackground(maxHold time.Duration) (release func()) {
 	bgHold.mu.Unlock()
 
 	var once sync.Once
+	var capTimer atomic.Pointer[time.Timer]
 	rel := func() {
 		once.Do(func() {
+			if t := capTimer.Load(); t != nil {
+				t.Stop() // a released hold must not leave its cap timer pending for the full duration
+			}
 			bgHold.mu.Lock()
 			bgHold.holds--
 			bgHold.n.Store(int32(bgHold.holds))
@@ -60,7 +64,7 @@ func HoldBackground(maxHold time.Duration) (release func()) {
 		})
 	}
 	// The cap guarantees a lost release can never park the from-0 producer for good.
-	time.AfterFunc(maxHold, rel)
+	capTimer.Store(time.AfterFunc(maxHold, rel))
 	return rel
 }
 

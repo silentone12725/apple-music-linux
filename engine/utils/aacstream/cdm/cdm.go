@@ -39,12 +39,19 @@ type Key struct {
 // Creates a new CDM object with the specified device information.
 func NewCDM(privateKey string, clientID []byte, initData []byte) (*CDM, error) {
 	block, _ := pem.Decode([]byte(privateKey))
-	if block == nil || block.Type != "RSA PRIVATE KEY" {
+	if block == nil {
 		return nil, errors.New("failed to decode device private key")
 	}
+	// identity.go accepts both encodings when it validates a stored key, so both have to load here: a PKCS#8 key
+	// ("PRIVATE KEY") would otherwise pass validation and then fail every licence request.
 	keyParsed, err := x509.ParsePKCS1PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, err
+		pk, err8 := x509.ParsePKCS8PrivateKey(block.Bytes)
+		rsaKey, isRSA := pk.(*rsa.PrivateKey)
+		if err8 != nil || !isRSA {
+			return nil, errors.New("failed to parse device private key")
+		}
+		keyParsed = rsaKey
 	}
 
 	widevineCencHeader := new(WidevineCencHeader)
@@ -150,6 +157,9 @@ func (c *CDM) GetLicenseRequest() ([]byte, error) {
 		encryptedClientID := make([]byte, len(paddedClientID))
 		cipher.NewCBCEncrypter(block, cidIV[:]).CryptBlocks(encryptedClientID, paddedClientID)
 
+		if c.signedDeviceCertificate == nil || c.signedDeviceCertificate.XDeviceCertificate == nil {
+			return nil, errors.New("privacy mode needs a service certificate")
+		}
 		servicePublicKey, err := x509.ParsePKCS1PublicKey(c.signedDeviceCertificate.XDeviceCertificate.PublicKey)
 		if err != nil {
 			return nil, err
@@ -229,9 +239,12 @@ func (c *CDM) GetLicenseKeys(licenseRequest []byte, licenseResponse []byte) (key
 		return
 	}
 
-	unpad := func(b []byte) []byte {
+	if license.Msg == nil {
+		return nil, errors.New("licence response has no message")
+	}
+	unpad := func(b []byte) ([]byte, bool) {
 		if len(b) == 0 {
-			return b
+			return b, true
 		}
 		// pks padding is designed so that the value of all the padding bytes is
 		// the number of padding bytes repeated so to figure out how many
@@ -240,16 +253,29 @@ func (c *CDM) GetLicenseKeys(licenseRequest []byte, licenseResponse []byte) (key
 		// i.e if there are 6 padding bytes then it will look at like
 		// <data> 0x6 0x6 0x6 0x6 0x6 0x6
 		count := int(b[len(b)-1])
-		return b[0 : len(b)-count]
+		if count > len(b) {
+			return nil, false
+		}
+		return b[0 : len(b)-count], true
 	}
 	for _, key := range license.Msg.Key {
+		// All of this comes from the server: a short IV, a key that is not whole blocks or a padding byte
+		// larger than the key would panic in the cipher or the slice, taking the engine down.
+		if key == nil || key.Type == nil || len(key.Iv) != aes.BlockSize ||
+			len(key.Key) == 0 || len(key.Key)%aes.BlockSize != 0 {
+			return nil, errors.New("licence response carries a malformed key")
+		}
 		decrypter := cipher.NewCBCDecrypter(encryptionKeyCipher, key.Iv)
 		decryptedKey := make([]byte, len(key.Key))
 		decrypter.CryptBlocks(decryptedKey, key.Key)
+		value, ok := unpad(decryptedKey)
+		if !ok {
+			return nil, errors.New("licence response carries a key with bad padding")
+		}
 		keys = append(keys, Key{
 			ID:    key.Id,
 			Type:  *key.Type,
-			Value: unpad(decryptedKey),
+			Value: value,
 		})
 	}
 

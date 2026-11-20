@@ -16,9 +16,16 @@ var ErrTimeout = errors.New("response timed out")
 // SanitizeInit removes boxes in the init segment that are known to cause
 // compatibility issues with downstream players and muxers.
 func SanitizeInit(init *mp4.InitSegment) error {
+	if init == nil || init.Moov == nil || len(init.Moov.Traks) == 0 {
+		return errors.New("init segment has no track")
+	}
 	traks := init.Moov.Traks
 	if len(traks) > 1 {
 		return errors.New("more than 1 track found")
+	}
+	if traks[0].Tkhd == nil || traks[0].Mdia == nil || traks[0].Mdia.Minf == nil ||
+		traks[0].Mdia.Minf.Stbl == nil || traks[0].Mdia.Minf.Stbl.Stsd == nil {
+		return errors.New("init segment track has no sample description")
 	}
 	// Remove duplicate ec-3 or alac boxes in stsd since some programs (e.g. cuetools) don't
 	// like it when there's more than 1 entry in stsd.
@@ -89,6 +96,10 @@ func ReadNextFragment(r io.Reader, offset uint64) (*mp4.Fragment, uint64, error)
 	for {
 		box, err := mp4.DecodeBox(offset, r)
 		if err == io.EOF {
+			if len(frag.Children) > 0 {
+				// A moof (or emsg) with no mdat after it: the stream was cut, not finished.
+				return nil, offset, io.ErrUnexpectedEOF
+			}
 			return nil, offset, nil
 		}
 		if err != nil {
@@ -172,6 +183,9 @@ func SwitchKeys(conn io.Writer) error {
 
 // Send id or keyUri
 func SendString(conn io.Writer, uri string) error {
+	if len(uri) > 255 { // the length is one byte on this wire; a longer string would desynchronise the stream
+		return fmt.Errorf("string of %d bytes does not fit the one-byte length", len(uri))
+	}
 	_, err := conn.Write([]byte{byte(len(uri))})
 	if err != nil {
 		return err
