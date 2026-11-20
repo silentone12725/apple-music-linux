@@ -11,6 +11,8 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import kotlin.Pair;
 
 public class AdamAuth {
@@ -108,10 +110,23 @@ public class AdamAuth {
         return new byte[][] {Base64.getDecoder().decode(mdmB64), Base64.getDecoder().decode(otpB64)};
     }
 
+    /**
+     * Starts a persistent stage9_prov_native "provision" subprocess and sends it the SPIM.
+     * The ADI session handle lives only in that process's memory (see memory note
+     * project-linux-native-anisette), so startProvisioning and the later finishProvisioning
+     * for the same session MUST talk to the same live process, not two fresh invocations.
+     */
+    static Process startProvisionProcess(String stage9Bin, String provDir, String androidId) throws Exception {
+        return new ProcessBuilder(stage9Bin, "provision", provDir, androidId)
+            .directory(Path.of(stage9Bin).toAbsolutePath().getParent().toFile())
+            .redirectErrorStream(false).start();
+    }
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     static Object anisetteProxy(String stage9Bin, String provDir, String androidId) throws Exception {
         Class<?> iface = Class.forName("com.apple.mediaservices.amskit.fairplay.INativeAnisetteProvider");
         Class<?> otp = Class.forName("com.apple.mediaservices.amskit.fairplay.INativeAnisetteProvider$OTPResponse");
+        Class<?> startResp = Class.forName("com.apple.mediaservices.amskit.fairplay.INativeAnisetteProvider$StartProvisionResponse");
         Object companion = Class.forName("com.apple.mediaservices.amskit.bindings.Expected").getField("Companion").get(null);
         java.lang.reflect.Method success = companion.getClass().getMethod("success", Object.class);
         // dex2jar renamed kotlin.Unit's singleton field from INSTANCE to "a"; find it by type instead of name.
@@ -123,6 +138,9 @@ public class AdamAuth {
         final Object unit = unitTmp;
         final int[] requestCount = {0};
         final int MAX_REQUESTS = 3; // hard stop: a controlled attempt, not an unbounded retry loop
+        final AtomicLong nextSession = new AtomicLong(1);
+        final Map<Long, Process> sessions = new ConcurrentHashMap<>();
+        final Map<Long, java.io.BufferedReader> sessionOut = new ConcurrentHashMap<>();
         return Proxy.newProxyInstance(AdamAuth.class.getClassLoader(), new Class<?>[] {iface}, (p, m, a) -> {
             String n = m.getName();
             System.err.println("[anisette] " + n);
@@ -134,24 +152,74 @@ public class AdamAuth {
                 byte[][] fresh = freshOtp(stage9Bin, provDir, androidId);
                 return success.invoke(companion, otp.getConstructor(byte[].class, byte[].class).newInstance(fresh[0], fresh[1]));
             }
+            if (n.startsWith("startProvisioning")) {
+                byte[] spim = (byte[]) a[1];
+                Process proc = startProvisionProcess(stage9Bin, provDir, androidId);
+                java.io.BufferedReader rd = new java.io.BufferedReader(new java.io.InputStreamReader(proc.getInputStream()));
+                java.io.OutputStream in = proc.getOutputStream();
+                in.write(("SPIM_B64=" + Base64.getEncoder().encodeToString(spim) + "\n").getBytes());
+                in.flush();
+                String line = rd.readLine();
+                System.err.println("[anisette] stage9 provision(start) -> " + line);
+                if (line == null || !line.startsWith("CPIM_B64=")) {
+                    String err = new String(proc.getErrorStream().readAllBytes());
+                    proc.destroy();
+                    throw new RuntimeException("stage9_prov_native provision(start) failed: " + line + " stderr=" + err);
+                }
+                byte[] cpim = Base64.getDecoder().decode(line.substring(9).trim());
+                long sessionId = nextSession.getAndIncrement();
+                sessions.put(sessionId, proc);
+                sessionOut.put(sessionId, rd);
+                java.lang.reflect.Constructor<?> ctor = startResp.getConstructor(long.class, byte[].class, Class.forName("kotlin.jvm.internal.g"));
+                return success.invoke(companion, ctor.newInstance(sessionId, cpim, null));
+            }
+            if (n.startsWith("finishProvisioning")) {
+                long sessionId = (Long) a[0];
+                byte[] ptm = (byte[]) a[1], tk = (byte[]) a[2];
+                Process proc = sessions.remove(sessionId);
+                java.io.BufferedReader rd = sessionOut.remove(sessionId);
+                if (proc == null) throw new RuntimeException("finishProvisioning: no live session " + sessionId);
+                java.io.OutputStream in = proc.getOutputStream();
+                in.write(("PTM_B64=" + Base64.getEncoder().encodeToString(ptm) + "\n").getBytes());
+                in.write(("TK_B64=" + Base64.getEncoder().encodeToString(tk) + "\n").getBytes());
+                in.flush();
+                String line = rd.readLine();
+                System.err.println("[anisette] stage9 provision(finish) -> " + line);
+                proc.waitFor(10, TimeUnit.SECONDS);
+                proc.destroy();
+                if (!"PROVISIONED=1".equals(line)) throw new RuntimeException("stage9_prov_native provision(finish) failed: " + line);
+                // A successful re-provisioning is a legitimate reason for AMSKit to retry
+                // request() again — don't let the earlier pre-provisioning attempts count
+                // against that fresh cycle.
+                requestCount[0] = 0;
+                return success.invoke(companion, unit);
+            }
             // eraseProvisioning/dispose must return a successful Expected<Unit>, not throw —
             // an unhandled exception here was what made AMSKit discard the session and retry
             // request() from scratch every time, masking the real stale-OTP bug as a loop.
-            if (n.startsWith("eraseProvisioning")) return success.invoke(companion, unit);
+            if (n.startsWith("eraseProvisioning")) {
+                sessions.values().forEach(Process::destroy);
+                sessions.clear(); sessionOut.clear();
+                return success.invoke(companion, unit);
+            }
             if (n.startsWith("dispose")) return null;
             throw new UnsupportedOperationException(n);
         });
     }
 
     public static void main(String[] a) throws Exception {
-        // a: bridge.so classes.jar state-dir [idms-token-file] [stage9-bin] [prov-dir]
+        // a: bridge.so classes.jar state-dir [credential-token-file] [stage9-bin] [prov-dir]
+        // credential-token-file must hold the PET (idmsPersonalEmailToken, cred_pet.txt, 503
+        // bytes) to match AccountCredential.Type.PasswordEquivalentToken below — NOT
+        // cred_idmsauth.txt (idmsAuthToken, 280 bytes), a different token that caused
+        // srpInitFailed when passed here.
         System.load(a[0]);
         Native.registerAll(a[1], "com/apple/mediaservices/amskit/");
         Native.registerAll(System.getProperty("javacpp.jar"), "org/bytedeco/javacpp/");
         String state = a[2];
         initTrust(state + "/apple-roots.pem");
         String user = Files.readString(Path.of(state + "/cred_username.txt")).trim();
-        String token = Files.readString(Path.of(state + "/" + (a.length > 3 ? a[3] : "cred_idmsauth.txt"))).trim();
+        String token = Files.readString(Path.of(state + "/" + (a.length > 3 ? a[3] : "cred_pet.txt"))).trim();
         String stage9Bin = a.length > 4 ? a[4] : "../stage9_prov_native";
         String provDir = a.length > 5 ? a[5] : "/home/daksh/Git Projects/apple-music-linux/drm/files";
         String androidId = Files.readString(Path.of(provDir + "/ANDROID_ID")).trim();
