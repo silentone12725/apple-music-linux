@@ -208,18 +208,44 @@ public class AdamAuth {
     }
 
     public static void main(String[] a) throws Exception {
-        // a: bridge.so classes.jar state-dir [credential-token-file] [stage9-bin] [prov-dir]
-        // credential-token-file must hold the PET (idmsPersonalEmailToken, cred_pet.txt, 503
-        // bytes) to match AccountCredential.Type.PasswordEquivalentToken below — NOT
-        // cred_idmsauth.txt (idmsAuthToken, 280 bytes), a different token that caused
-        // srpInitFailed when passed here.
+        // a: bridge.so classes.jar state-dir [credential-token-file|INTERACTIVE] [stage9-bin] [prov-dir]
+        //
+        // INTERACTIVE mode: prompts for the Apple ID and password directly on the controlling
+        // terminal via System.console() — which is null (and this refuses to start) unless a
+        // real TTY is attached, so it cannot be driven from a non-interactive pipe. The
+        // password is read with echo off and never written to a file, logged, or passed as a
+        // process argument; it lives only in this JVM's memory for the one AccountCredential
+        // construction below, then the backing char[] is zeroed.
         System.load(a[0]);
         Native.registerAll(a[1], "com/apple/mediaservices/amskit/");
         Native.registerAll(System.getProperty("javacpp.jar"), "org/bytedeco/javacpp/");
         String state = a[2];
         initTrust(state + "/apple-roots.pem");
-        String user = Files.readString(Path.of(state + "/cred_username.txt")).trim();
-        String token = Files.readString(Path.of(state + "/" + (a.length > 3 ? a[3] : "cred_pet.txt"))).trim();
+
+        String user, token;
+        byte credType;
+        boolean interactive = a.length > 3 && a[3].equals("INTERACTIVE");
+        if (interactive) {
+            java.io.Console console = System.console();
+            if (console == null) throw new RuntimeException(
+                "No controlling terminal (System.console() is null) — INTERACTIVE mode must run in a real terminal, not a pipe/redirect.");
+            user = console.readLine("Apple ID: ");
+            if (user == null) throw new RuntimeException("no Apple ID entered");
+            user = user.trim();
+            char[] pw = console.readPassword("Password: ");
+            if (pw == null) throw new RuntimeException("no password entered");
+            token = new String(pw);
+            Arrays.fill(pw, '\0');
+            credType = AccountCredential.rawPassword;
+        } else {
+            // credential-token-file must hold the PET (idmsPersonalEmailToken, cred_pet.txt,
+            // 503 bytes) to match AccountCredential.Type.PasswordEquivalentToken below — NOT
+            // cred_idmsauth.txt (idmsAuthToken, 280 bytes), a different token that caused
+            // srpInitFailed when passed here.
+            user = Files.readString(Path.of(state + "/cred_username.txt")).trim();
+            token = Files.readString(Path.of(state + "/" + (a.length > 3 ? a[3] : "cred_pet.txt"))).trim();
+            credType = AccountCredential.passwordEquivalentToken;
+        }
         String stage9Bin = a.length > 4 ? a[4] : "../stage9_prov_native";
         String provDir = a.length > 5 ? a[5] : "/home/daksh/Git Projects/apple-music-linux/drm/files";
         String androidId = Files.readString(Path.of(provDir + "/ANDROID_ID")).trim();
@@ -241,7 +267,7 @@ public class AdamAuth {
         IdMSBagService idms = AppleMediaServicesCore.createIdMSBagService(session);
         CredentialsAuthenticateTaskOptionsBuilder ob = new CredentialsAuthenticateTaskOptionsBuilder(idms, bag, "adam-auth");
         ob.withUserName(user);
-        ob.withCredential(new AccountCredential(token, AccountCredential.passwordEquivalentToken));
+        ob.withCredential(new AccountCredential(token, credType));
         ob.withType((byte) 0);
         ob.withHandler(new com.apple.mediaservices.amskit.authentication.IInterruptHandlerAdaptor());
         CredentialsAuthenticateTaskOptions opts = ob.build();
