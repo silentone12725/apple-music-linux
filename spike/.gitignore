@@ -8,6 +8,8 @@
 !*.c
 !*.h
 !*.py
+!*.java
+!*.sh
 !*.md
 !*.plist
 !Makefile
