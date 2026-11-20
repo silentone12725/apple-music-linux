@@ -1194,18 +1194,27 @@
   var _onAccountSignedIn = null;
   var _accountNote = null;
   var _pendingCredentials = null;
+  var _credentialChallengeShown = false;
   function _accountSheet() {
     return _accountSheetInstance ??= createAccountSheet({
       savedEmail: () => window.adamBridge?.drmSavedEmail?.() ?? "",
       openUrl: (url) => window.adamBridge?.openExternal?.(url),
       signIn: async (email, password, remember) => {
-        const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password })
-        });
-        if (!r.ok) return { ok: false, error: (await r.text().catch(() => "")).trim() || `HTTP ${r.status}` };
         _pendingCredentials = { email, password, remember: remember === true };
+        try {
+          const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password })
+          });
+          if (!r.ok) {
+            _pendingCredentials = null;
+            return { ok: false, error: (await r.text().catch(() => "")).trim() || `HTTP ${r.status}` };
+          }
+        } catch (e) {
+          _pendingCredentials = null;
+          throw e;
+        }
         return { ok: true };
       },
       fetchSnapshot: async () => {
@@ -1228,9 +1237,7 @@
       },
       onCancel: () => {
         _pendingCredentials = null;
-        fetch(`${ENGINE}/api/v1/drm/logout`, { method: "POST" }).catch(() => {
-        });
-        window.adamBridge?.drmClearCredentials({ reload: false }).catch(() => {
+        fetch(`${ENGINE}/api/v1/drm/authenticate/cancel`, { method: "POST" }).catch(() => {
         });
         _onAccountSignedIn?.();
       }
@@ -7047,10 +7054,12 @@
       console.log(`[Adam Engine] DRM state \u2192 session=${sess} lossless=${_engineCaps.lossless}`);
       if (!wasLossless && _engineCaps.lossless) _losslessWaitDone = false;
       _accountSheet().onSnapshot(snap);
-      if (snap?.challenge?.type === "credentials") {
+      const wantsCredentials = snap?.challenge?.type === "credentials";
+      if (wantsCredentials && !_credentialChallengeShown) {
         console.log("[Adam Engine] DRM credential challenge \u2014 opening sign-in form");
         window.__adamOpenEngineSettings?.();
       }
+      _credentialChallengeShown = wantsCredentials;
     });
     const mk = await waitForMusicKit();
     console.log("[Adam Engine] MusicKit ready");
@@ -9179,11 +9188,16 @@
       async function runSignOut(scope, button, busyText) {
         button.disabled = true;
         button.textContent = busyText;
-        const res = await signOutFlow({
-          engine: ENGINE,
-          scope,
-          clearCredentials: window.adamBridge?.drmClearCredentials
-        });
+        let res;
+        try {
+          res = await signOutFlow({
+            engine: ENGINE,
+            scope,
+            clearCredentials: window.adamBridge?.drmClearCredentials
+          });
+        } catch (e) {
+          res = { message: `Could not sign out: ${e?.message || e}` };
+        }
         if (res.message) _accountNote = { text: res.message, error: true };
         else if (res.note) _accountNote = { text: res.note, error: false };
         onRefresh();

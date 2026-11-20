@@ -47,18 +47,29 @@ let _accountSheetInstance = null;
 let _onAccountSignedIn = null; // set by the open Settings dialog to refresh itself
 let _accountNote = null;       // { text, error } shown once under the account row after a sign-out
 let _pendingCredentials = null; // kept until Apple accepts the sign-in, then saved
+let _credentialChallengeShown = false; // a credentials challenge is on screen: Settings is opened once for it
 function _accountSheet() {
     return _accountSheetInstance ??= createAccountSheet({
         savedEmail: () => window.adamBridge?.drmSavedEmail?.() ?? '',
         openUrl: (url) => window.adamBridge?.openExternal?.(url),
         signIn: async (email, password, remember) => {
-            const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password }),
-            });
-            if (!r.ok) return { ok: false, error: (await r.text().catch(() => '')).trim() || `HTTP ${r.status}` };
+            // Held before the request goes out: when the engine reuses a session the "signed in" state can
+            // reach onDone before this request's response does, and onDone saves what is held here.
             _pendingCredentials = { email, password, remember: remember === true };
+            try {
+                const r = await fetch(`${ENGINE}/api/v1/drm/authenticate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password }),
+                });
+                if (!r.ok) {
+                    _pendingCredentials = null;
+                    return { ok: false, error: (await r.text().catch(() => '')).trim() || `HTTP ${r.status}` };
+                }
+            } catch (e) {
+                _pendingCredentials = null; // a rejected or unreachable sign-in must not leave the password in memory
+                throw e;
+            }
             return { ok: true };
         },
         fetchSnapshot: async () => {
@@ -81,11 +92,11 @@ function _accountSheet() {
             _onAccountSignedIn?.();
         },
         onCancel: () => {
-            // Stop the sign-in the engine is running (it would otherwise wait for the code)
-            // and forget saved credentials, so the next launch does not sign in on its own.
+            // Stop the sign-in the engine is running (it would otherwise wait for the code).
+            // Only the attempt ends: an account that was already signed in stays signed in, and what was saved
+            // for it stays saved (nothing is saved for an attempt until Apple has accepted it).
             _pendingCredentials = null;
-            fetch(`${ENGINE}/api/v1/drm/logout`, { method: 'POST' }).catch(() => {});
-            window.adamBridge?.drmClearCredentials({ reload: false }).catch(() => {});
+            fetch(`${ENGINE}/api/v1/drm/authenticate/cancel`, { method: 'POST' }).catch(() => {});
             _onAccountSignedIn?.();
         },
     });
@@ -6504,10 +6515,14 @@ async function setup() {
 
         // Binary needs credentials but none are stored — open the sign-in form
         // automatically so the user doesn't have to navigate to Settings.
-        if (snap?.challenge?.type === 'credentials') {
+        // Once per challenge: every later snapshot repeats it, and reopening Settings each time would
+        // bring the dialog back after the user closed it.
+        const wantsCredentials = snap?.challenge?.type === 'credentials';
+        if (wantsCredentials && !_credentialChallengeShown) {
             console.log('[Adam Engine] DRM credential challenge — opening sign-in form');
             window.__adamOpenEngineSettings?.();
         }
+        _credentialChallengeShown = wantsCredentials;
 
         // Note: mid-track seamless lossless upgrade is intentionally not attempted here.
         // FLAC transcode streams start at position 0 with no seek support, making a
@@ -9091,10 +9106,15 @@ window.adamGetQueueInfo = function () {
 
         async function runSignOut(scope, button, busyText) {
             button.disabled = true; button.textContent = busyText;
-            const res = await signOutFlow({
-                engine: ENGINE, scope,
-                clearCredentials: window.adamBridge?.drmClearCredentials,
-            });
+            let res;
+            try {
+                res = await signOutFlow({
+                    engine: ENGINE, scope,
+                    clearCredentials: window.adamBridge?.drmClearCredentials,
+                });
+            } catch (e) {
+                res = { message: `Could not sign out: ${e?.message || e}` };
+            }
             if (res.message) _accountNote = { text: res.message, error: true };
             else if (res.note) _accountNote = { text: res.note, error: false };
             onRefresh();

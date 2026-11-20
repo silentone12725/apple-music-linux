@@ -98,6 +98,17 @@ func (s *APIServer) handleDRMAuthenticate(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusAccepted, snap)
 }
 
+// handleDRMCancelSignIn abandons the sign-in in progress. Unlike logout it leaves the signed-in
+// account (and its saved files) alone, so cancelling a re-sign-in does not sign anyone out.
+func (s *APIServer) handleDRMCancelSignIn(w http.ResponseWriter, r *http.Request) {
+	if s.dm == nil {
+		http.Error(w, "DRM backend not available", http.StatusServiceUnavailable)
+		return
+	}
+	s.dm.CancelSignIn()
+	writeJSON(w, http.StatusOK, s.dm.Status())
+}
+
 func (s *APIServer) handleDRMChallenge(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10) // 4 KB
 	var req struct {

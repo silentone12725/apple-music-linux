@@ -55,6 +55,13 @@ test('a failure about this installation keeps the saved password', async () => {
     assert.deepEqual(await run(e), { outcome: 'kept', forgotten: 0 });
 });
 
+test('a classified setup failure or timeout keeps the saved password', async () => {
+    for (const kind of ['setup', 'timeout']) {
+        const e = engine({ statuses: [{ state: {} }, { state: { authentication: 'failed' }, failure: { kind }, message: 'the FairPlay libraries are not installed' }] });
+        assert.deepEqual(await run(e), { outcome: 'kept', forgotten: 0 }, kind);
+    }
+});
+
 test('a failure reported before this attempt began is ignored', async () => {
     const e = engine({ statuses: [{ state: {} }] });
     let n = 0;

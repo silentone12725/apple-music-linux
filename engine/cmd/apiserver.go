@@ -756,6 +756,7 @@ func NewAPIServer(port int, cfg ServerConfig) *APIServer {
 	mux.HandleFunc("GET /api/v1/drm/status", cors(s.handleDRMStatus))
 	mux.HandleFunc("POST /api/v1/drm/authenticate", cors(s.handleDRMAuthenticate))
 	mux.HandleFunc("POST /api/v1/drm/challenge", cors(s.handleDRMChallenge))
+	mux.HandleFunc("POST /api/v1/drm/authenticate/cancel", cors(s.handleDRMCancelSignIn))
 	mux.HandleFunc("POST /api/v1/drm/logout", cors(s.handleDRMLogout))
 	mux.HandleFunc("DELETE /api/v1/drm/session", cors(s.handleDRMClearSession))
 	mux.HandleFunc("POST /api/v1/drm/forget-device", cors(s.handleDRMForgetDevice))

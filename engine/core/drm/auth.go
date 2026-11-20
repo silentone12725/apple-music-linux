@@ -117,9 +117,14 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		a.mu.Lock()
 		email := a.stored.Email
 		pass := a.stored.Password
+		aborted := a.aborted
 		a.mu.Unlock()
 		if email != "" {
 			return email + "\x00" + pass, nil
+		}
+		if aborted {
+			// A sign-out or shutdown ended the sign-in: do not raise a sign-in form for it.
+			return "\x00", nil
 		}
 		// No credentials stored — emit SSE so the frontend shows the sign-in
 		// form automatically, then return empty to let the binary's own auth
@@ -186,6 +191,14 @@ func (a *AuthCoordinator) Challenge(ctx context.Context, req AuthChallenge) (str
 		}
 		return reply, nil
 	case <-ctx.Done():
+		// Withdraw the challenge so the sign-in form does not keep asking for a code nobody can
+		// submit any more. After an abort the logout path owns the state.
+		a.mu.Lock()
+		aborted := a.aborted
+		a.mu.Unlock()
+		if !aborted && a.emitter != nil {
+			a.emitter(DRMSnapshot{State: DRMState{Authentication: AuthSigningIn}})
+		}
 		return "", ctx.Err()
 	}
 }

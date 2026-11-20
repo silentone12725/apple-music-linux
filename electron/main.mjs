@@ -35,6 +35,7 @@ import { gnomeWallpaperPath } from './wallpaper.mjs';
 import { acrylicBackend, normalizeAcrylic, acrylicOverlayScript, ACRYLIC_DEFAULTS } from './acrylic.mjs';
 import https from 'https';
 import { autoAuthenticate } from './drm-autoauth.mjs';
+import { sealLocal, openLocal } from './local-secret.mjs';
 import { fetchFairPlayLibs } from './fairplay-fetch.mjs';
 import { setCompositionBackdrop, setNativeCaptionDrag, removeCompositionBackdrop } from './composition-backdrop.mjs';
 import { cleanZoom, cleanBgBlur, cleanTrackReport } from './src/engine/view-limits.js';
@@ -1640,32 +1641,43 @@ function applyThemeMode() {
 ipcMain.once('app:ui-ready', async () => {
     try {
         const store = await _storeLoad();
-        if (!store.drm_email && !store.drm_password) return;
+        if (store.drm_password && !_keyringBacked()) {
+            // Written as plain text by an earlier version, with no keyring to protect it: seal it now.
+            const plain = store.drm_password;
+            if (!_keepPassword(store, plain)) _forgetPassword(store);
+            _storeDirty = true; _storeFlush();
+        }
+        if (!store.drm_email && !_savedPassword(store)) return;
         // Details are kept only from a sign-in Apple accepted (drm:save-credentials marks them).
         // Anything else is an incomplete or abandoned attempt: left alone it would start a sign-in
         // on every launch and raise Apple's verification-code prompt unasked.
         if (!store.drm_verified || !store.drm_email) {
-            delete store.drm_email; delete store.drm_password; delete store.drm_verified;
+            delete store.drm_email; _forgetPassword(store); delete store.drm_verified;
             _storeDirty = true; _storeFlush();
             console.log('[Adam] Removed saved sign-in details that never completed a sign-in');
             return;
         }
         // Only the email was kept (the password is remembered when the user asks for it): it just
         // pre-fills the sign-in form, there is nothing to sign in with.
-        if (!store.drm_password) return;
+        if (!_savedPassword(store)) return;
         // Give the engine a moment to load hybris and emit its initial DRM state.
         await new Promise(r => setTimeout(r, 3500));
+        // Read the saved details again: the user may have signed out (or changed account) while this waited,
+        // and signing back in with what was read before would undo that.
+        const fresh = await _storeLoad();
+        const freshPassword = _savedPassword(fresh);
+        if (!fresh.drm_verified || !fresh.drm_email || !freshPassword) return;
         const outcome = await autoAuthenticate({
             request: engineRequest,
-            creds: { email: store.drm_email, password: store.drm_password },
+            creds: { email: fresh.drm_email, password: freshPassword },
             forget: async () => {
                 const s = await _storeLoad();
-                delete s.drm_email; delete s.drm_password; delete s.drm_verified;
+                delete s.drm_email; _forgetPassword(s); delete s.drm_verified;
                 _storeDirty = true; _storeFlush();
             },
             dropPassword: async () => {
                 const s = await _storeLoad();
-                delete s.drm_password; // keep the email (and the verified mark): it pre-fills the sign-in form
+                _forgetPassword(s); // keep the email (and the verified mark): it pre-fills the sign-in form
                 _storeDirty = true; _storeFlush();
             },
             log: m => console.log('[Adam]', m),
@@ -2526,6 +2538,42 @@ ipcMain.handle('lastfm:set-credentials', async (_, c) => {
     return { ok: true };
 });
 
+// The saved Apple password. With a real keyring behind safeStorage the whole store is encrypted by the OS
+// and the password sits in it. Without one (Electron then writes the store as plaintext, or on Linux under
+// a key that ships in the app) the password is sealed on its own (local-secret.mjs) so it is never readable
+// in the file. A password that cannot be sealed is not kept.
+const LOCAL_KEY_FILE = path.join(CONFIG_DIR, '.local-secret');
+function _keyringBacked() {
+    try {
+        if (!safeStorage.isEncryptionAvailable()) return false;
+        if (process.platform === 'linux') {
+            const backend = safeStorage.getSelectedStorageBackend?.();
+            if (backend === 'basic_text' || backend === 'unknown') return false;
+        }
+        return true;
+    } catch { return false; }
+}
+function _forgetPassword(store) { delete store.drm_password; delete store.drm_password_enc; }
+function _keepPassword(store, password) {
+    _forgetPassword(store);
+    if (_keyringBacked()) { store.drm_password = password; return true; }
+    try {
+        ensurePrivateDir(CONFIG_DIR);
+        store.drm_password_enc = sealLocal(password, { keyFile: LOCAL_KEY_FILE });
+        return true;
+    } catch (e) {
+        console.warn('[Adam] Could not seal the password, not keeping it:', e.message);
+        return false;
+    }
+}
+function _savedPassword(store) {
+    if (typeof store.drm_password === 'string' && store.drm_password) return store.drm_password;
+    if (store.drm_password_enc) {
+        try { return openLocal(store.drm_password_enc, { keyFile: LOCAL_KEY_FILE }) || ''; } catch { return ''; }
+    }
+    return '';
+}
+
 // Called once Apple has accepted a sign-in. The email is kept to pre-fill the form and to show
 // which account is signed in; the password only when the user ticked "Remember password".
 ipcMain.handle('drm:save-credentials', async (_, c) => {
@@ -2534,7 +2582,7 @@ ipcMain.handle('drm:save-credentials', async (_, c) => {
     const store = await _storeLoad();
     store.drm_email    = c.email.trim();
     store.drm_verified = true; // only called once Apple has accepted the sign-in
-    if (remember) store.drm_password = c.password; else delete store.drm_password;
+    if (!remember || !_keepPassword(store, c.password)) _forgetPassword(store);
     _storeDirty = true; _storeFlush();
     return { ok: true };
 });
@@ -2562,7 +2610,7 @@ ipcMain.handle('drm:clear-credentials', async (_, opts) => {
         deleteCredentials: async () => {
             const store = await _storeLoad();
             delete store.drm_email;
-            delete store.drm_password;
+            _forgetPassword(store);
             delete store.drm_verified;
             _storeDirty = true;
             return _storeFlushNow();

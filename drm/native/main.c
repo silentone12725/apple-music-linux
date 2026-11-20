@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -201,10 +202,24 @@ static void __attribute__((sysv_abi)) dialogHandler(int64_t j, struct shared_ptr
         write_drm_state("WAITING_DIALOG");
         g_drm_auth_cb(type_buf, choice, sizeof(choice), g_drm_auth_ud);
 
-        /* Reply is a decimal button index ("0", "1", "2"). Default to 0. */
+        /* Reply is a decimal button index ("0", "1", "2"). An empty reply means nobody answered (cancelled,
+         * timed out, shut down): dismiss with a Cancel-like button rather than the first one, which can be
+         * "Text code" and would send an SMS nobody asked for. */
         if (choice[0] >= '0' && choice[0] <= '9') {
             int idx = choice[0] - '0';
             chosen_idx = (idx < btn_count) ? idx : 0;
+        } else {
+            chosen_idx = btn_count - 1; /* no Cancel-like title: the last button is the dismissal in Apple's menus */
+            int i = 0;
+            for (struct shared_ptr *b = butVec->begin; b != butVec->end; ++b, ++i) {
+                const char *bt = std_string_data(_ZNK17storeservicescore14ProtocolButton5titleEv(b->obj));
+                if (bt && (strcasecmp(bt, "Cancel") == 0 || strcasecmp(bt, "Not Now") == 0 ||
+                           strcasecmp(bt, "Close") == 0 || strcasecmp(bt, "Dismiss") == 0)) {
+                    chosen_idx = i;
+                    break;
+                }
+            }
+            fprintf(stderr, "[.] dialogHandler: no answer, dismissing with button %d\n", chosen_idx);
         }
 
         struct shared_ptr *picked = (struct shared_ptr *)butVec->begin + chosen_idx;

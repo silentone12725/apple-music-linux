@@ -154,22 +154,27 @@ func NewDRMManager(backend DRMBackend, session *SessionManager, sink EventSink, 
 	if replay != nil {
 		if err := waitOp(context.Background(), replay, m.timing.ReplayWait); err != nil {
 			slog.Warn("drm: pending sign-out not complete at start", "err", err)
+			m.mu.Lock()
 			m.snapshot.Message = "sign-out incomplete"
+			m.mu.Unlock()
 		}
 	}
 	// Reflect session state at startup so GET /api/v1/drm/status shows the
 	// correct state immediately — before any playback request fires ensureRunning.
+	hasSession := session.HasSession()
+	m.mu.Lock()
 	if !backend.Running() {
 		// The backend starts lazily; "stopped" is accurate, "unknown" made a healthy idle engine look broken.
 		m.snapshot.State.Process = ProcessStopped
 	}
-	if session.HasSession() {
+	if hasSession {
 		m.snapshot.State.Session = SessionValid
 		m.snapshot.State.Authentication = AuthSignedIn
 	} else {
 		m.snapshot.State.Session = SessionEmpty
 		m.snapshot.State.Authentication = AuthSignedOut
 	}
+	m.mu.Unlock()
 	go m.watchEvents()
 	return m
 }
@@ -422,6 +427,9 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 				Failure: &f,
 				Message: f.Message,
 			})
+		} else {
+			// Nothing to sign in with: do not leave the "signing in" state announced above behind.
+			m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthSignedOut}, Message: authErr.Error()})
 		}
 		return fmt.Errorf("authenticate: %w", authErr)
 	}
@@ -443,6 +451,9 @@ func (m *DRMManager) authenticate(ctx context.Context, creds Credentials) error 
 			State:   DRMState{Session: SessionValid, Authentication: AuthSignedIn},
 			Message: "session reuse — mpl_db present",
 		})
+	} else {
+		// A restart with no session and nothing to sign in with: signed out, not still signing in.
+		m.mergeAndEmit(DRMSnapshot{State: DRMState{Authentication: AuthSignedOut}, Message: "no saved session"})
 	}
 	m.setManagerState(ManagerReady)
 	return nil
@@ -454,6 +465,17 @@ func (m *DRMManager) SignInPausedFor() time.Duration {
 		return time.Until(until)
 	}
 	return 0
+}
+
+// CancelSignIn ends the sign-in in progress without touching any session that is already on
+// disk: the pending verification-code wait is dropped and that attempt ends as cancelled.
+// It reports whether a sign-in was running; with none, nothing happens.
+func (m *DRMManager) CancelSignIn() bool {
+	if !m.signingIn.Load() {
+		return false
+	}
+	m.auth.Abort()
+	return true
 }
 
 // SignInRunning reports whether a sign-in is in progress.
@@ -491,6 +513,9 @@ func (m *DRMManager) Shutdown() {
 	m.shutdownStop() // cancel any in-progress handleCrash sleep or restart
 	m.setManagerState(ManagerShuttingDown)
 	m.closed.Store(true) // after the state is set: setManagerState refuses anything but shutting_down from here
+	// A sign-in blocked on a verification code holds the backend until its challenge ends, and
+	// Stop waits for that: end the challenge first, or shutting down hangs until the code times out.
+	m.auth.Abort()
 	if m.restartPending.Load() {
 		// A sign-out is waiting for this process to end, possibly because a start is
 		// stuck in native code holding the backend: stopping could hang, and the next

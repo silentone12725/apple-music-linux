@@ -97,6 +97,15 @@ type adamplayBackend struct {
 	// state strings would then reach the manager only after the sign-in ended, in no useful order.
 	hybrisUp atomic.Bool
 
+	// stopEpoch counts the stops (and abandoned sign-ins) of this backend. A hybris init that
+	// outlives the Start that began it (a background session-reuse init, or a sign-in that timed
+	// out) compares it before it writes the session-ready marker or reports FairPlay ready, so a
+	// sign-out or stop can never be undone by an init that finishes late.
+	stopEpoch atomic.Uint64
+	// authCtx ends the verification-code waits of the sign-in in progress, so a sign-in that gave
+	// up (timeout) does not leave the native login blocked on a challenge nobody can answer.
+	authCtx atomic.Pointer[context.Context]
+
 	// hybrisInitDone is closed when the background hybris init goroutine completes
 	// (success or failure). nil means hybris was initialised synchronously (login
 	// path) or has not started yet.
@@ -291,6 +300,7 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		if err := b.signIn(ctx, baseDir, lib64Dir, hybrisLinkerDir, cfg); err != nil {
 			// A sign-in that did not complete leaves no half-started backend behind.
 			b.running = false
+			b.stopEpoch.Add(1)
 			C.drm_shutdown()
 			return err
 		}
@@ -303,16 +313,22 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 		// DialCBCS will wait on hybrisInitDone before opening a CBCS connection.
 		done := make(chan struct{})
 		b.hybrisInitDone = done
+		epoch := b.stopEpoch.Load()
 		go func() {
 			defer close(done)
-			if err := b.runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir, cfg); err != nil {
+			if err := b.runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir, cfg, epoch); err != nil {
 				log.Printf("[drm] FairPlay not ready, ALAC disabled: %v", err)
 			} else {
 				b.mu.Lock()
-				b.hybrisReady = true
-				b.hybrisUp.Store(true)
+				stopped := b.stopEpoch.Load() != epoch
+				if !stopped {
+					b.hybrisReady = true
+					b.hybrisUp.Store(true)
+				}
 				b.mu.Unlock()
-				b.emitFairPlayReady()
+				if !stopped {
+					b.emitFairPlayReady()
+				}
 			}
 		}()
 	}
@@ -324,7 +340,7 @@ func (b *adamplayBackend) Start(ctx context.Context, cfg BackendConfig) error {
 // ready (nil when it is). Errors about this installation start with SetupErrorPrefix. It is called either from Start (login flow, b.mu held) or
 // from a background goroutine (session reuse, b.mu not held), so it must not
 // touch b.mu or b.hybrisReady; the caller records the result.
-func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir string, cfg BackendConfig) error {
+func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir string, cfg BackendConfig, epoch uint64) error {
 	// Guard: libhybris-core.so calls exit(1) if q.so is missing.
 	qso := filepath.Join(hybrisLinkerDir, "q.so")
 	if _, err := os.Stat(qso); err != nil {
@@ -380,6 +396,11 @@ func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir strin
 		}
 		return fmt.Errorf("Apple's sign-in did not complete (code %d)", int(fpRet))
 	}
+	if b.stopEpoch.Load() != epoch {
+		// Stopped (sign-out, shutdown, timeout) while this init ran: leave no marker behind for
+		// the next start to take for a signed-in session.
+		return errBackendStopped
+	}
 	_ = os.WriteFile(filepath.Join(baseDir, "session-ready"), []byte("1"), 0o600)
 	log.Printf("[drm] hybris: FairPlay ready via Android libraries (%s)", lib64Dir)
 	// enter() takes b.mu, so this waits until Start has returned.
@@ -391,11 +412,20 @@ func (b *adamplayBackend) runHybrisInit(baseDir, lib64Dir, hybrisLinkerDir strin
 // interrupted: after a timeout it finishes in the background and its outcome is only logged.
 func (b *adamplayBackend) signIn(ctx context.Context, baseDir, lib64Dir, linkerDir string, cfg BackendConfig) error {
 	res := make(chan error, 1)
-	go func() { res <- b.runHybrisInit(baseDir, lib64Dir, linkerDir, cfg) }()
+	epoch := b.stopEpoch.Load()
+	actx, acancel := context.WithCancel(context.Background())
+	b.authCtx.Store(&actx)
+	defer acancel()
+	go func() { res <- b.runHybrisInit(baseDir, lib64Dir, linkerDir, cfg, epoch) }()
 	select {
 	case err := <-res:
+		b.authCtx.Store(nil)
 		return err
 	case <-ctx.Done():
+		// Give up on the sign-in for good: no marker when it finishes, and a pending
+		// verification-code wait ends so the native login can return.
+		b.stopEpoch.Add(1)
+		acancel()
 		go func() {
 			if err := <-res; err != nil {
 				log.Printf("[drm] sign-in finished after the timeout: %v", err)
@@ -442,6 +472,7 @@ func (b *adamplayBackend) Authenticate(ctx context.Context) error {
 // quiesce refuses new calls into the C library and waits (bounded) for the ones already
 // inside it to finish. It reports whether everything drained in time.
 func (b *adamplayBackend) quiesce(timeout time.Duration) bool {
+	b.stopEpoch.Add(1) // before taking mu: Start holds it for a whole sign-in
 	b.mu.Lock()
 	b.running = false
 	var wait chan struct{}
@@ -543,6 +574,11 @@ func (b *adamplayBackend) Stop() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	C.drm_shutdown()
+	// FairPlay is no longer ready for this backend: the next Start decides again from the session on disk.
+	// Safe to repeat: hybris_backend_init returns at once when the runtime is up, and hybris_fairplay_init
+	// without credentials only re-checks the session-ready marker, which a sign-out has removed.
+	b.hybrisReady = false
+	b.hybrisUp.Store(false)
 	return nil
 }
 
@@ -861,7 +897,7 @@ func (b *adamplayBackend) answerChallenge(kind string) string {
 		if len(parts) > 1 {
 			buttons = parts[1]
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), twoFactorTimeout)
+		ctx, cancel := context.WithTimeout(b.authParent(), twoFactorTimeout)
 		defer cancel()
 		idx, err := h.src.Challenge(ctx, AuthChallenge{
 			Type:        ChallengeDialogChoice,
@@ -870,8 +906,10 @@ func (b *adamplayBackend) answerChallenge(kind string) string {
 			Metadata:    map[string]string{"buttons": buttons},
 		})
 		if err != nil {
+			// Not answered: say so, and the native side dismisses the dialog. Answering "0" would pick
+			// its first option, which may be "Text code" and send an SMS nobody asked for.
 			log.Printf("[drm] dialog choice not answered: %v", err)
-			return "0"
+			return ""
 		}
 		return idx
 	}
@@ -879,7 +917,7 @@ func (b *adamplayBackend) answerChallenge(kind string) string {
 	if kind != "2fa" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), twoFactorTimeout)
+	ctx, cancel := context.WithTimeout(b.authParent(), twoFactorTimeout)
 	defer cancel()
 	code, err := h.src.Challenge(ctx, AuthChallenge{
 		Type:        ChallengeTwoFactor,
@@ -896,4 +934,12 @@ func (b *adamplayBackend) answerChallenge(kind string) string {
 		return code
 	}
 	return verificationDigits(code)
+}
+
+// authParent is the context the verification-code waits of the sign-in in progress hang from.
+func (b *adamplayBackend) authParent() context.Context {
+	if c := b.authCtx.Load(); c != nil {
+		return *c
+	}
+	return context.Background()
 }
