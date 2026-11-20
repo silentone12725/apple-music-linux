@@ -4,7 +4,7 @@
 // on Windows, for one).
 import path from 'path';
 import os from 'os';
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, realpathSync } from 'fs';
 import { APPLE_SCHEMES, SCHEME_GROUPS } from './deeplink.mjs';
 
 const GROUP_TITLE = Object.fromEntries(SCHEME_GROUPS.map(g => [g.id, g.title]));
@@ -35,6 +35,15 @@ export function removeSchemeAssociations(text, desktopId, schemes) {
         // no entries left: drop the line
     }
     return out.join('\n');
+}
+
+// Replace a mimeapps.list through a temp file. A list kept in a dotfiles repo is a symlink, and renaming over the
+// link would turn it into a plain file and leave the repo's copy stale, so the write goes to the link's target.
+function writeReplacing(f, text) {
+    let target = f;
+    try { target = realpathSync(f); } catch { /* does not exist yet */ }
+    writeFileSync(target + '.adam-tmp', text);
+    renameSync(target + '.adam-tmp', target);
 }
 
 const DEFAULTS_SECTION = '[Default Applications]';
@@ -100,8 +109,7 @@ export function createLinkSchemeManager({ app, loadPrefs, savePrefs, plat = proc
                 const after = addSchemeAssociations(before, linuxDesktopId(env), [scheme]);
                 if (after !== before) {
                     mkdirSync(path.dirname(f), { recursive: true });
-                    writeFileSync(f + '.adam-tmp', after);
-                    renameSync(f + '.adam-tmp', f);
+                    writeReplacing(f, after);
                 }
                 return true;
             } catch { return false; }
@@ -131,8 +139,7 @@ export function createLinkSchemeManager({ app, loadPrefs, savePrefs, plat = proc
                 const before = readFileSync(f, 'utf8');
                 const after = removeSchemeAssociations(before, id, [scheme]);
                 if (after !== before) {
-                    writeFileSync(f + '.adam-tmp', after);
-                    renameSync(f + '.adam-tmp', f);
+                    writeReplacing(f, after);
                 }
             } catch { /* leave the file alone */ }
         }

@@ -25,12 +25,10 @@ function concat(...arrs) {
 }
 
 test('mp4ParseBoxes: top-level boxes, ftyp majorBrand, container recursion, mdhd timescale', () => {
-    // mdhd v0: payload starts at box byte 8 → version at [8], timescale at [16..19].
-    // payload index = box index - 8, so version=payload[0], timescale=payload[8..11].
+    // mdhd v0: version at box[8], timescale at box[20..23] → payload[12..15].
     const mdhdPayload = new Uint8Array(24); // 8 (hdr) + 24 = 32-byte box, length >= 24
     mdhdPayload[0] = 0; // version 0
-    // timescale 44100 = 0x0000AC44 at box[16..19] → payload[8..11]
-    mdhdPayload[8] = 0x00; mdhdPayload[9] = 0x00; mdhdPayload[10] = 0xac; mdhdPayload[11] = 0x44;
+    mdhdPayload[12] = 0x00; mdhdPayload[13] = 0x00; mdhdPayload[14] = 0xac; mdhdPayload[15] = 0x44; // 44100
     const mdhd = box('mdhd', mdhdPayload);            // 32 bytes
     const moov = box('moov', mdhd);                   // 8 + 32 = 40 bytes, container
     const ftyp = box('ftyp', new Uint8Array([0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0])); // "isom" + 4 pad → 16 bytes
