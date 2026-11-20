@@ -258,13 +258,21 @@ public class AdamAuth {
         String androidId = Files.readString(Path.of(provDir + "/ANDROID_ID")).trim();
 
         java.lang.reflect.Method mk = BundleInfoWrapper.class.getMethod("access$make", String.class, String.class, String.class, String.class, String.class, String.class);
-        // 6th param (accountClientIdentifier) is NOT the app's own bundle ID — real
-        // AndroidBundleInfo.getAccountClientIdentifier() defaults to
-        // BundleInfoWrapper.getClientIdentifierAppStore(), confirmed by calling that real
-        // native getter directly: "com.apple.AppleMediaServicesCore.IMediaAccount.appStore".
-        // Using the app's package name there instead was wrong on every prior attempt.
+        // The real app's AndroidBundleInfo implementation (jadx p097e7/a.java,
+        // C0670a.getIdentifier()) returns the literal string "musicAndroid" — NOT the
+        // Android package name "com.apple.android.music". This is AMSKit's own internal
+        // bundle-identifier scheme (used for `identifier`, and by default for
+        // bundleIdentifierForMetrics/mediaAPIClientIdentifier too), completely separate
+        // from the OS package name. Every prior attempt sent the wrong identifier here —
+        // very plausibly the actual, most direct cause of the server's "environment
+        // mismatch", since -29004 appears exactly where the server would validate the
+        // client identifier against its list of known GrandSlam clients, and
+        // "com.apple.android.music" is not one of them. applicationId (passed separately
+        // to SessionBuilder.make() below) is correctly still the OS package name — that's
+        // a different field (IDeviceInfo.applicationId = context.getPackageName()).
+        String realIdentifier = "musicAndroid";
         String accountClientId = BundleInfoWrapper.getClientIdentifierAppStore();
-        BundleInfoWrapper bi = (BundleInfoWrapper) mk.invoke(null, BUNDLE, BUNDLE, BUNDLE, "Music", "7.0.1", accountClientId);
+        BundleInfoWrapper bi = (BundleInfoWrapper) mk.invoke(null, realIdentifier, realIdentifier, realIdentifier, "Music", "7.0.1", accountClientId);
 
         // Cross-verified against the real app's decompiled IDeviceInfo defaults and a connected
         // physical device (adb getprop / settings get global device_name / dumpsys package),
