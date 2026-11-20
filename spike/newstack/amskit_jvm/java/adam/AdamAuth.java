@@ -260,16 +260,23 @@ public class AdamAuth {
         java.lang.reflect.Method mk = BundleInfoWrapper.class.getMethod("access$make", String.class, String.class, String.class, String.class, String.class, String.class);
         BundleInfoWrapper bi = (BundleInfoWrapper) mk.invoke(null, BUNDLE, BUNDLE, BUNDLE, "Music", "7.0.1", BUNDLE);
 
-        // Real IDeviceInfo derives hardwareType from manufacturer+model (alnum-stripped) and
-        // platformName/machineName from the actual Android OS — the placeholder values here
-        // before (hardwareType="Android", machineName="linux", manufacturer="adam", model="pc")
-        // were an internally-inconsistent, obviously-fabricated device fingerprint, a likely
-        // cause of the server's "environment mismatch" (-29004) rejection. Use the real
-        // provisioned Android ID and a self-consistent, realistic device fingerprint instead.
+        // Cross-verified against the real app's decompiled IDeviceInfo defaults and a connected
+        // physical device (adb getprop / settings get global device_name / dumpsys package),
+        // not guessed: platformName's real literal default is "Android" (not lowercase);
+        // hardwareType/model are Build.MANUFACTURER+Build.MODEL with non-alphanumerics
+        // stripped (real device here: manufacturer=motorola, model="motorola edge 60 pro" ->
+        // model already starts with manufacturer, so hardwareType == sanitized model);
+        // machineName is the raw Settings.Global "device_name" string, unsanitized;
+        // platformVersion is Build.VERSION.RELEASE; buildVersion is the APK's versionCode
+        // (1622 for the 7.0.1 build whose libAMSKit.so this bridge loads — confirmed via
+        // `adb shell dumpsys package com.apple.android.music`); and stableIdentifier's real
+        // algorithm (AMSStableIdentifierKt.getAppleStableIdentifier) is NOT a random UUID —
+        // it falls back to Settings.Secure "android_id", the same 16-hex format as our own
+        // provisioned ANDROID_ID, so it's set to the same value here for self-consistency.
         SessionBuilder sb = new SessionBuilder();
         sb.setHTTPProvider(new HttpProv());
-        ExpectedSession es = sb.make(androidId, "87000", "GooglePixel7", "android", "Pixel 7", "14", "Google", "Pixel 7",
-            "d290f1ee-6c54-4b01-90e6-d701748f0851", BUNDLE, bi, "", "", true, (byte) 0, false);
+        ExpectedSession es = sb.make(androidId, "1622", "motorolaedge60pro", "Android", "Daksh's Moto", "17", "motorola", "motorolaedge60pro",
+            androidId, BUNDLE, bi, "", "", true, (byte) 0, false);
         if (!es.hasValue()) throw new RuntimeException("session: " + es.error());
         Session session = es.value();
 
