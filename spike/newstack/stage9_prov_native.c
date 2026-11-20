@@ -157,6 +157,7 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "start") == 0) {
         if (argc < 5) { fprintf(stderr, "Need spim_b64\n"); return 1; }
         const char *spim_b64 = argv[4];
+        int64_t dsid = (argc > 5) ? strtoll(argv[5], NULL, 10) : (int64_t)-2LL;
 
         uint8_t spim_buf[8192];
         int spim_len = 0;
@@ -167,7 +168,7 @@ int main(int argc, char **argv) {
         int cpim_len = 0;
         uint32_t session = 0;
 
-        int rc = prov_start((int64_t)-2LL, spim_buf, spim_len, &cpim, &cpim_len, &session);
+        int rc = prov_start(dsid, spim_buf, spim_len, &cpim, &cpim_len, &session);
         fprintf(stderr, "[stage9] ADIProvisioningStart -> rc=%d, cpim_len=%d, session=%u\n",
                 rc, cpim_len, session);
 
@@ -208,8 +209,13 @@ int main(int argc, char **argv) {
     else if (strcmp(cmd, "otp") == 0) {
         uint8_t *otp = NULL, *mid = NULL;
         int otp_len = 0, mid_len = 0;
+        /* The real app's ADI wrapper (com.apple.android.music.foothill.impl.a.a(long))
+         * passes the real account dsid straight into ADIOTPRequest, not a hardcoded -2.
+         * Optional argv[4] lets callers do the same; -2 stays the default for anonymous/
+         * pre-auth use. */
+        int64_t dsid = (argc > 4) ? strtoll(argv[4], NULL, 10) : (int64_t)-2LL;
 
-        int rc = adi_otp((int64_t)-2LL, &otp, &otp_len, &mid, &mid_len);
+        int rc = adi_otp(dsid, &otp, &otp_len, &mid, &mid_len);
         fprintf(stderr, "[stage9] ADIOTPRequest -> rc=%d\n", rc);
 
         if (rc != 0) {
@@ -237,6 +243,8 @@ int main(int argc, char **argv) {
          *   stdout: PROVISIONED=1   (or exits non-zero on failure)
          */
         char line[16384];
+        /* Optional argv[4]: real account dsid, same reasoning as "otp" above. */
+        int64_t dsid = (argc > 4) ? strtoll(argv[4], NULL, 10) : (int64_t)-2LL;
 
         /* Read SPIM */
         if (!fgets(line, sizeof line, stdin)) { fprintf(stderr, "[stage9] no SPIM\n"); return 1; }
@@ -249,7 +257,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[stage9] SPIM decoded: %d bytes\n", spim_len);
 
         uint8_t *cpim = NULL; int cpim_len = 0; uint32_t session = 0;
-        int rc = prov_start((int64_t)-2LL, spim_buf, spim_len, &cpim, &cpim_len, &session);
+        int rc = prov_start(dsid, spim_buf, spim_len, &cpim, &cpim_len, &session);
         fprintf(stderr, "[stage9] ADIProvisioningStart -> rc=%d, cpim_len=%d, session=%u\n",
                 rc, cpim_len, session);
         if (rc != 0) { fprintf(stderr, "[stage9] FAILED\n"); return 1; }
