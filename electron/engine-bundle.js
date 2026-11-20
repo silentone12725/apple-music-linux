@@ -1891,15 +1891,19 @@
     _guardSourceBufferMethods();
   }
   var _proxyInstalled = false;
+  var _playResolvers = [];
   function installPlayProxy(mkAudio) {
     if (_proxyInstalled) return;
     _proxyInstalled = true;
     _nativePlay = HTMLMediaElement.prototype.play.bind(mkAudio);
-    const _resolvers = [];
-    mkAudio.addEventListener("playing", () => {
-      const batch = _resolvers.splice(0);
-      batch.forEach((r) => r());
-    });
+    const _resolvers = _playResolvers;
+    if (!mkAudio.__adamPlayingHook) {
+      mkAudio.__adamPlayingHook = true;
+      mkAudio.addEventListener("playing", () => {
+        const batch = _playResolvers.splice(0);
+        batch.forEach((r) => r());
+      });
+    }
     mkAudio.play = () => {
       if (_vlcMode) {
         if (_vlcTransport.desired === true) return Promise.resolve();

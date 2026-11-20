@@ -878,6 +878,7 @@ function blockAppleCDN() {
 // ── Play proxy (instance-level, installed lazily on first track change) ────────
 
 let _proxyInstalled = false;
+const _playResolvers = []; // promises returned by the proxied play(), settled by the next 'playing' event
 
 /**
  * Override audio.play() on the element instance.
@@ -895,11 +896,16 @@ function installPlayProxy(mkAudio) {
 
     _nativePlay = HTMLMediaElement.prototype.play.bind(mkAudio);
 
-    const _resolvers = [];
-    mkAudio.addEventListener('playing', () => {
-        const batch = _resolvers.splice(0);
-        batch.forEach(r => r());
-    });
+    // The proxy is reinstalled on every click-to-play (the click handler clears _proxyInstalled), so the listener is
+    // added once per element: a new one each time stacked up for the life of the page and all ran on every 'playing'.
+    const _resolvers = _playResolvers;
+    if (!mkAudio.__adamPlayingHook) {
+        mkAudio.__adamPlayingHook = true;
+        mkAudio.addEventListener('playing', () => {
+            const batch = _playResolvers.splice(0);
+            batch.forEach(r => r());
+        });
+    }
 
     mkAudio.play = () => {
         if (_vlcMode) {
