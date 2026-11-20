@@ -1585,6 +1585,10 @@
   }
   function _slHide() {
     _slActive = false;
+    if (_slRAFId) {
+      cancelAnimationFrame(_slRAFId);
+      _slRAFId = null;
+    }
     if (_slOverlay) {
       _slOverlay.style.opacity = "0";
       setTimeout(() => {
@@ -1703,11 +1707,8 @@
   async function _slInitForTrack(assetId) {
     const gen = ++_slGen;
     _slStop();
-    if (_slLinesEls.length && _slOverlay) {
-      _slOverlay.querySelector("#adam-sl-inner").innerHTML = "";
-      _slLinesEls = [];
-      _slWordEls = [];
-    }
+    const slInner = _slOverlay?.querySelector("#adam-sl-inner");
+    if (slInner) slInner.innerHTML = "";
     if (!assetId) return;
     try {
       const sf = encodeURIComponent(_mkInstance?.storefrontId ?? "us");
@@ -4879,7 +4880,7 @@
       if (_hoverSessions.size >= 4) {
         const oldest = _hoverSessions.keys().next().value;
         const { sess: old } = _hoverSessions.get(oldest);
-        deleteSession(old.sessionId);
+        if (old.sessionId !== _sessionId) deleteSession(old.sessionId);
         _hoverSessions.delete(oldest);
       }
       _hoverSessions.set(adamId, { sess, isVideo });
@@ -4902,7 +4903,6 @@
       }, HOVER_INTENT_MS);
     };
     document.addEventListener("pointerenter", (e) => {
-      if (!_engineCaps.lossless && !_engineCaps.aac) return;
       try {
         let el2 = e.target;
         for (let depth = 0; depth < 12 && el2; depth++) {

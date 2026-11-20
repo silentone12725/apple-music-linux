@@ -526,6 +526,8 @@ function _slStop() {
 
 function _slHide() {
     _slActive = false;
+    // The highlight loop only has work while the overlay is open: leaving it running woke the page every frame for the rest of the session.
+    if (_slRAFId) { cancelAnimationFrame(_slRAFId); _slRAFId = null; }
     if (_slOverlay) { _slOverlay.style.opacity = '0'; setTimeout(() => { if (_slOverlay && !_slActive) _slOverlay.style.display = 'none'; }, 350); }
 }
 
@@ -634,7 +636,10 @@ function _slRAFLoop(ts) {
 async function _slInitForTrack(assetId) {
     const gen = ++_slGen;
     _slStop();
-    if (_slLinesEls.length && _slOverlay) { _slOverlay.querySelector('#adam-sl-inner').innerHTML = ''; _slLinesEls = []; _slWordEls = []; }
+    // _slStop has just emptied the line lists, so they cannot tell whether the overlay still shows the last track's
+    // lyrics: clear it outright, or a track without lyrics keeps displaying the previous one's.
+    const slInner = _slOverlay?.querySelector('#adam-sl-inner');
+    if (slInner) slInner.innerHTML = '';
     if (!assetId) return;
     try {
         const sf = encodeURIComponent(_mkInstance?.storefrontId ?? 'us');
@@ -4186,7 +4191,9 @@ async function _hoverPrewarmById(adamId, isVideo = false) {
         if (_hoverSessions.size >= 4) {
             const oldest = _hoverSessions.keys().next().value;
             const { sess: old } = _hoverSessions.get(oldest);
-            deleteSession(old.sessionId);
+            // The engine hands the same session to a later request for the same track: one that is playing now
+            // must not be released because it also sat in this list.
+            if (old.sessionId !== _sessionId) deleteSession(old.sessionId);
             _hoverSessions.delete(oldest);
         }
         _hoverSessions.set(adamId, { sess, isVideo });
@@ -4211,8 +4218,8 @@ function _installHoverPrewarm() {
         timer = setTimeout(() => { pendingId = null; _hoverPrewarmById(id, isVideo); }, HOVER_INTENT_MS);
     };
     document.addEventListener('pointerenter', (e) => {
-        // Skip if no DRM or engine not ready
-        if (!_engineCaps.lossless && !_engineCaps.aac) return;
+        // No capability check: the guard here read _engineCaps.aac, which nothing ever sets, so the pre-warm was
+        // off for everyone without lossless. An engine that is not up simply fails the request, which is ignored.
         try {
             let el = e.target;
             for (let depth = 0; depth < 12 && el; depth++) {
