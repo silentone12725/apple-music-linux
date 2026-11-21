@@ -1,0 +1,108 @@
+name: Bug report
+description: Something in Adam does not work as expected
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Adam can fill most of this in: open **Settings, Report a bug**, review what is shared, and continue to GitHub.
+        **Issues are public and permanent.** Read anything you paste or attach first; remove anything private.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: A short description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Playback (AAC)
+        - Lossless (ALAC)
+        - Atmos / spatial audio
+        - Music videos
+        - Downloads
+        - Sign-in / DRM
+        - Theme / UI
+        - Media keys / MPRIS
+        - Scrobbling
+        - Packaging / install
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - .run installer
+        - AppImage
+        - Flatpak
+        - Windows installer
+        - From source
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Adam version
+      description: Version and channel (release or nightly), for example `1.5.0 nightly`.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics summary
+      description: |
+        Paste the **Adam diagnostics v1** block from Settings, Report a bug (the "Copy summary" button). It contains no logs.
+        Do not paste secrets: this issue is public.
+      render: text
+  - type: checkboxes
+    id: diag_waiver
+    attributes:
+      label: Diagnostics availability
+      options:
+        - label: I could not collect diagnostics (explain in the description)
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched existing issues and this is not a duplicate
+          required: true
+        - label: I reviewed everything I pasted or attached and removed anything private
+          required: true

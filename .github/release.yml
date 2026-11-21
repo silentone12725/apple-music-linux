@@ -1,0 +1,13 @@
+# Groups the notes GitHub generates for a release by label.
+changelog:
+  exclude:
+    labels: [duplicate, invalid, wontfix, question]
+  categories:
+    - title: Bug fixes
+      labels: [bug]
+    - title: Features and improvements
+      labels: [enhancement]
+    - title: Documentation
+      labels: [documentation]
+    - title: Other changes
+      labels: ["*"]
