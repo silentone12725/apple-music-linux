@@ -129,7 +129,17 @@ for f in engine libdrm_client.so \
 done
 [ ! -e "$RES/libdrm-native.so" ] || die "stale resources/libdrm-native.so is packaged (old wrapper library)"
 [ ! -e "$RES/libhybris-core.so" ] || die "stale resources/libhybris-core.so is packaged (it is embedded in libdrm_client.so)"
+# The release glibc target is fixed here, whatever ADAM_MAX_GLIBC the bundle step used.
+ADAM_MAX_GLIBC= python3 "$REPO/scripts/check-vlc-glibc.py" --runtime "$RES/vlc" --max 2.38 >/dev/null \
+    || die "resources/vlc needs a newer glibc than the 2.38 release target (development bundle?)"
 [ ! -e "$RES/rootfs" ] || die "resources/rootfs is packaged: Apple's libraries must not ship, they are downloaded at install time"
+# Candidate C (patches/vlc/3.0.24) is a development opt-in; release packages ship stock VLC.
+[ ! -e "$RES/vlc/playback01-candidate-c.json" ] || die "resources/vlc is a Candidate C development runtime; rebuild stock with scripts/bundle-vlc.sh --force"
+[ -z "$(find "$RES/vlc" -name '*.so.new' -o -name '*.json.tmp')" ] || die "resources/vlc holds an interrupted Candidate C staging file"
+# Without the marker too (removed by hand, older interrupted build), only the system VLC's MP4 demuxer ships.
+STOCK_MP4="${ADAM_VLC_PLUGINS:-${ADAM_VLC_LIBDIR:-/usr/lib}/vlc/plugins}/demux/libmp4_plugin.so"
+cmp -s "$STOCK_MP4" "$RES/vlc/plugins/demux/libmp4_plugin.so" \
+    || die "resources/vlc MP4 demuxer differs from $STOCK_MP4; rebuild stock with scripts/bundle-vlc.sh --force"
 
 same() { cmp -s "$1" "$2" || die "$3 in the package differs from the fresh build — stale copy"; }
 same "$RES_SRC/engine"           "$RES/engine"             "resources/engine"
