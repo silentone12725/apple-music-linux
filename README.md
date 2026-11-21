@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows-blue?style=for-the-badge)](https://github.com/silentone12725/apple-music-linux/releases/latest)
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/tY4v52KpVV)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-buy%20me%20a%20coffee-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/silentone0725)
 
 An Apple Music desktop client for Linux and Windows — lossless audio on Linux, music videos, downloads, and a native-feeling UI.
 
@@ -445,6 +446,8 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 ## Community
 
 Questions, bug reports, feature requests and polls live on the [Adam Discord server](https://discord.gg/tY4v52KpVV).
+
+Adam is free and developed in spare time. If it's useful to you, you can [buy me a coffee on Ko-fi](https://ko-fi.com/silentone0725).
 
 ## References
 
