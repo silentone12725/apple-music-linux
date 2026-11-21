@@ -819,6 +819,7 @@
     function showSignIn(error = "", { email: knownEmail = "", failure = null } = {}) {
       view = "signin";
       busy = false;
+      submittedId = null;
       const email = el(doc, "input", { type: "email", placeholder: "Email or Phone Number", autocomplete: "username", spellcheck: false, value: knownEmail });
       const pass = el(doc, "input", { type: "password", placeholder: "Password", autocomplete: "current-password" });
       inputs = [email, pass];
@@ -886,6 +887,7 @@
     function showCode() {
       view = "code";
       busy = false;
+      submittedId = null;
       const fields = el(doc, "div", { class: "digits" });
       inputs = [];
       for (let i = 0; i < CODE_LENGTH; i++) {
