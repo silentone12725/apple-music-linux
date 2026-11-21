@@ -8,3 +8,6 @@ third_party/ffmpeg/bin/ffmpeg filter=lfs diff=lfs merge=lfs -text
 third_party/ffmpeg/lib/*.so.* filter=lfs diff=lfs merge=lfs -text
 third_party/ffmpeg-win/bin/*.exe filter=lfs diff=lfs merge=lfs -text
 third_party/ffmpeg-win/bin/*.dll filter=lfs diff=lfs merge=lfs -text
+
+# Preserve the reviewed unified diff context bytes and checksum.
+patches/vlc/3.0.24/playback01-candidate-c.patch whitespace=-blank-at-eol,-blank-at-eof

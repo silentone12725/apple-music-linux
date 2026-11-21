@@ -284,6 +284,8 @@ bash build.sh
 
 `build.sh` installs npm dependencies, bundles system VLC libs into `dist/resources/vlc`, and launches the app.
 
+An opt-in VLC 3.0.24 MP4 fragment-clock correction (fragmented ALAC could end with the position about 2.7 s short) is available for development builds. Stock VLC remains the default and release packages refuse the patched runtime; see [the patch, build, validation status and evidence](patches/vlc/3.0.24/README.md). On a distribution newer than glibc 2.38, development builds of the VLC runtime set `ADAM_MAX_GLIBC` to the host version ([details](patches/vlc/3.0.24/GLIBC-COMPATIBILITY.md)).
+
 **Dependencies:**
 
 ```bash

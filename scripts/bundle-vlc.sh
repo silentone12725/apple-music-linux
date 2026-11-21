@@ -5,11 +5,20 @@
 # installed app depends on whatever VLC the user has.
 #
 # Usage: scripts/bundle-vlc.sh [--force]   (--force rebuilds an existing bundle)
+# ADAM_VLC_DEST selects a dev/package stage under electron/dist/.
+# ADAM_VLC_CANDIDATE_C_SOURCE opts into the reviewed VLC 3.0.24 development patch.
 
 set -euo pipefail
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="$REPO/electron/dist/resources/vlc"
+REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
+DEST="$(realpath -m "${ADAM_VLC_DEST:-$REPO/electron/dist/resources/vlc}")"
+case "$DEST" in */vlc) ;; *) echo 'error: VLC destination must be a vlc directory' >&2; exit 1 ;; esac
+case "$DEST/" in "$REPO/electron/dist/"*) ;; *) echo 'error: VLC destination must be under electron/dist/' >&2; exit 1 ;; esac
+# Opt-in DEVELOPMENT integration only. Default/release packaging remains stock.
+apply_candidate_c() {
+    [ -n "${ADAM_VLC_CANDIDATE_C_SOURCE:-}" ] || return 0
+    python3 "$REPO/scripts/build-vlc-mp4.py" --source "$ADAM_VLC_CANDIDATE_C_SOURCE" --runtime "$DEST"
+}
 LIBDIR="${ADAM_VLC_LIBDIR:-/usr/lib}"
 SRC="${ADAM_VLC_PLUGINS:-$LIBDIR/vlc/plugins}"
 
@@ -17,9 +26,12 @@ if [ "${1:-}" = "--force" ]; then
     rm -rf "$DEST"
 fi
 if [ -f "$DEST/libvlc.so.5" ] && [ -d "$DEST/plugins" ]; then
-    echo "VLC already bundled: $(du -sh "$DEST" | cut -f1)"
-    exit 0
-fi
+    if [ -f "$DEST/playback01-candidate-c.json" ] && [ -z "${ADAM_VLC_CANDIDATE_C_SOURCE:-}" ]; then
+        echo 'error: cached Candidate C dev runtime requires explicit ADAM_VLC_CANDIDATE_C_SOURCE; use --force for stock.' >&2
+        exit 1
+    fi
+    echo "Rechecking existing VLC bundle: $DEST"
+else
 
 if ! ls "$LIBDIR"/libvlc.so.5.* >/dev/null 2>&1 || [ ! -d "$SRC" ]; then
     echo "error: system VLC not found (looked for $LIBDIR/libvlc.so.5.* and $SRC)." >&2
@@ -82,15 +94,8 @@ for need in access/libimem_plugin.so demux/libmp4_plugin.so audio_output/libpuls
     fi
 done
 
-# FFmpeg libraries matching this VLC's plugins, when third_party/ffmpeg (FFmpeg 9) does not: built by
-# scripts/build-vlc-ffmpeg.sh. They go next to libvlc, which LD_LIBRARY_PATH already covers.
-if [ -n "${ADAM_VLC_FFMPEG_LIBDIR:-}" ]; then
-    cp -a "$ADAM_VLC_FFMPEG_LIBDIR"/lib*.so.* "$DEST/"
-fi
-
 # Libraries the plugins link that other distros (and the Flatpak runtime) do not provide. The
-# FFmpeg libraries are not among them: they ship in third_party/ffmpeg (a minimal build whose
-# sonames match these plugins) and reach VLC through LD_LIBRARY_PATH.
+# FFmpeg ABI compatibility libraries are staged separately below.
 for lib in libvlc_pulse.so.0 libsoxr.so.0 libdvbpsi.so.10 libaribb24.so.0 liba52.so.0; do
     real=""
     for d in "$LIBDIR" "$LIBDIR/vlc"; do   # libvlc_pulse lives in the vlc subdirectory
@@ -103,12 +108,24 @@ for lib in libvlc_pulse.so.0 libsoxr.so.0 libdvbpsi.so.10 libaribb24.so.0 liba52
     fi
 done
 
+fi # initial stock staging; cached bundles still stage compatibility libs and validate
+
+# FFmpeg libraries matching this VLC's plugins, when third_party/ffmpeg (FFmpeg 9) does not: built by
+# scripts/build-vlc-ffmpeg.sh. They go next to libvlc, which LD_LIBRARY_PATH already covers.
+if [ -n "${ADAM_VLC_FFMPEG_LIBDIR:-}" ]; then
+    cp -a "$ADAM_VLC_FFMPEG_LIBDIR"/lib*.so.* "$DEST/"
+fi
+
+apply_candidate_c
+
 # Every library a bundled plugin links must resolve inside the bundle or be a library every
 # system has. FFmpeg and the support libraries above resolving from /usr/lib would work here and
 # fail on the next machine, so insist they come from the bundle.
 FFLIB="$REPO/third_party/ffmpeg/lib"
 [ -d "$FFLIB" ] || { echo "error: $FFLIB is missing (git lfs pull?)" >&2; exit 1; }
 bad=0
+P="$DEST/plugins"
+python3 "$REPO/scripts/check-vlc-ffmpeg.py" --plugins "$P" --runtime "$DEST" --ffmpeg-libdir "$FFLIB"
 for plug in "$P/codec/libavcodec_plugin.so" "$P/demux/libavformat_plugin.so" "$P/audio_output/libpulse_plugin.so"; do
     [ -f "$plug" ] || continue
     out="$(LD_LIBRARY_PATH="$DEST:$FFLIB" ldd "$plug" 2>/dev/null)"
@@ -120,19 +137,12 @@ for plug in "$P/codec/libavcodec_plugin.so" "$P/demux/libavformat_plugin.so" "$P
 done
 [ "$bad" = 0 ] || exit 1
 
-# Nothing bundled may need a newer glibc than the other packaged binaries (2.38 by default; release builds
-# on Ubuntu 22.04 set ADAM_MAX_GLIBC=2.35): a library copied from a rolling distro can require symbols that
-# older systems and the Flatpak runtime lack.
-MAX_GLIBC="${ADAM_MAX_GLIBC:-2.38}"
-over=0
-while IFS= read -r f; do
-    v="$(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
-    [ -z "$v" ] && continue
-    if [ "$(printf '%s\n%s\n' "$MAX_GLIBC" "$v" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
-        echo "error: ${f#$DEST/} needs GLIBC_$v (limit $MAX_GLIBC): do not bundle it" >&2; over=1
-    fi
-done < <(find "$DEST" -type f \( -name '*.so' -o -name '*.so.*' \))
-[ "$over" = 0 ] || exit 1
+# Nothing bundled may need a newer glibc than the other packaged binaries (the 2.38 release target): a
+# library copied from a rolling distro can require symbols that older systems and the Flatpak runtime lack.
+# ADAM_MAX_GLIBC above 2.38 is a development-only target; build-installer.sh re-audits at 2.38 regardless.
+# A cached bundle is re-audited on every run, so a development bundle cannot pass a release build.
+python3 "$REPO/scripts/check-vlc-glibc.py" --runtime "$DEST" \
+    --library-dir "$FFLIB" --max "${ADAM_MAX_GLIBC:-2.38}" --closure
 
 # Regenerate the plugin cache so VLC does not scan on every start.
 vlc-cache-gen "$P" 2>/dev/null || true
