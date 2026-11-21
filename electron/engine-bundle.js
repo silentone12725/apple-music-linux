@@ -642,26 +642,28 @@
     const focus = Math.min(index + digits.length, CODE_LENGTH - 1);
     return { digits: next, focus };
   }
-  function promptAction(snap, { open, view = null, submittedId = null, dismissedId = null, challengeId = null }) {
+  function promptAction(snap, { open, view = null, submittedId = null, dismissedIds = /* @__PURE__ */ new Set(), challengeId = null }) {
     const st = snap?.state ?? {};
     if (st.fairplay === "ready" || snap?.capabilities?.cbcs === true || st.authentication === "signed_in") {
       return open ? "close" : "none";
     }
     const ch = snap?.challenge;
+    const newChallenge = ch?.id != null && ch.id !== challengeId && ch.id !== submittedId && !dismissedIds.has(ch.id);
+    if (st.authentication === "failed" && open && !newChallenge) return view === "code" ? "expired" : "failed";
+    if (ch?.id != null && dismissedIds.has(ch.id)) return "none";
     if (ch?.type === "two_factor") {
-      if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "code";
+      if (!open) return "code";
       if (view !== "code") return "code";
       if (submittedId != null && ch.id !== submittedId) return "retry";
       if (submittedId == null && challengeId != null && ch.id !== challengeId) return "code";
       return "none";
     }
     if (ch?.type === "dialog_choice") {
-      if (!open) return ch.id != null && ch.id === dismissedId ? "none" : "choice";
+      if (!open) return "choice";
       if (view !== "choice") return "choice";
       if (challengeId != null && ch.id !== challengeId) return "choice";
       return "none";
     }
-    if (st.authentication === "failed" && open) return view === "code" ? "expired" : "failed";
     return "none";
   }
 
@@ -755,10 +757,13 @@
   }, fetchSnapshot = null, pollMs = 4e3, savedEmail = async () => "", openUrl = () => {
   }, doc = globalThis.document }) {
     let dlg = null, view = null, busy = false, poll = null, remember = null;
-    let challengeId = null, submittedId = null, dismissedId = null;
+    let challengeId = null, submittedId = null;
+    const dismissedIds = /* @__PURE__ */ new Set();
+    let passwordActionPending = false;
     let inputs = [], msg = null, primary = null;
     let hidePassword = () => {
     };
+    let revision = 0;
     function ensureDialog() {
       if (dlg) return dlg;
       if (!doc.getElementById("adam-account-style")) {
@@ -817,6 +822,7 @@
       return b;
     }
     function showSignIn(error = "", { email: knownEmail = "", failure = null } = {}) {
+      revision++;
       view = "signin";
       busy = false;
       submittedId = null;
@@ -869,6 +875,7 @@
     }
     async function submitSignIn() {
       if (busy || !ready()) return;
+      const myRevision = revision;
       hidePassword();
       setMessage("");
       setBusy(true, "Signing In\u2026");
@@ -878,13 +885,14 @@
       } catch (e) {
         res = { ok: false, error: e?.message };
       }
-      if (view !== "signin") return;
+      if (revision !== myRevision) return;
       if (!res?.ok) {
         setBusy(false);
         setMessage(res?.error || "Could not sign in. Try again.", true);
       } else startPoll();
     }
     function showCode() {
+      revision++;
       view = "code";
       busy = false;
       submittedId = null;
@@ -1008,8 +1016,10 @@
     }
     const isWrongPasswordDialog = (labels) => labels.length === 2 && labels.some((l) => /^retry$/i.test(l)) && labels.some((l) => /^cancel$/i.test(l));
     function showChoice(buttonsStr, title = "Recovery Options") {
+      revision++;
       view = "choice";
       busy = false;
+      passwordActionPending = false;
       inputs = [];
       const btnLabels = (buttonsStr || "").split("\n").filter(Boolean);
       const wrongPassword = isWrongPasswordDialog(btnLabels);
@@ -1018,8 +1028,12 @@
         const b = button(label, {
           onClick: async () => {
             if (busy) return;
+            const myRevision = revision;
+            const answeredId = challengeId;
+            trace(`choice ${wrongPassword ? /^retry$/i.test(label) ? "retry" : "cancel" : idx}`);
             setBusy(true, "Sending\u2026");
             submittedId = challengeId;
+            passwordActionPending = wrongPassword;
             const retry = wrongPassword && /^retry$/i.test(label);
             const reply = retry ? btnLabels.findIndex((l) => /^cancel$/i.test(l)) : idx;
             let ok = false;
@@ -1028,7 +1042,7 @@
             } catch {
               ok = false;
             }
-            if (view !== "choice") return;
+            if (revision !== myRevision) return;
             if (!ok) {
               submittedId = null;
               setBusy(false);
@@ -1036,13 +1050,13 @@
               return;
             }
             if (retry) {
-              dismissedId = challengeId;
+              dismissedIds.add(answeredId);
               let email = "";
               try {
                 email = await savedEmail() || "";
               } catch {
               }
-              if (view === "choice") showSignIn("Check your Apple Account and password, then try again.", { email });
+              if (revision === myRevision) showSignIn("Check your Apple Account and password, then try again.", { email });
             } else if (wrongPassword) {
               cancel();
             }
@@ -1089,6 +1103,7 @@
     }
     function close() {
       trace(`close from ${view} ${(new Error().stack ?? "").split("\n")[2]?.trim() ?? ""}`);
+      revision++;
       stopPoll();
       hidePassword();
       if (dlg?.open) dlg.close();
@@ -1101,12 +1116,13 @@
     }
     function cancel() {
       const running = view === "code" || view === "choice" || view === "signin" && busy;
-      if (view === "code" || view === "choice") dismissedId = challengeId;
+      if (view === "code" || view === "choice") dismissedIds.add(challengeId);
       close();
       if (running) onCancel();
     }
     function onSnapshot(snap) {
-      const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedId, challengeId });
+      if (passwordActionPending && view === "choice" && busy && submittedId != null && snap?.state?.authentication === "failed") return;
+      const action = promptAction(snap, { open: view !== null, view, submittedId, dismissedIds, challengeId });
       if (action !== "none") trace(`snapshot auth=${snap?.state?.authentication} challenge=${snap?.challenge?.type ?? "-"} \u2192 ${action}`);
       if (snap?.challenge?.type === "two_factor" || snap?.challenge?.type === "dialog_choice") {
         challengeId = snap.challenge.id ?? null;

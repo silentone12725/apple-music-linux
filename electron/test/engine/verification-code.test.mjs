@@ -38,8 +38,8 @@ test('promptAction tells a re-ask (wrong code) from the same challenge repeated'
 });
 
 test('promptAction does not reopen a challenge the user cancelled', () => {
-    assert.equal(promptAction(twoFactor(3), { open: false, dismissedId: 3 }), 'none');
-    assert.equal(promptAction(twoFactor(4), { open: false, dismissedId: 3 }), 'code', 'a new challenge opens again');
+    assert.equal(promptAction(twoFactor(3), { open: false, dismissedIds: new Set([3]) }), 'none');
+    assert.equal(promptAction(twoFactor(4), { open: false, dismissedIds: new Set([3]) }), 'code', 'a new challenge opens again');
 });
 
 test('promptAction: a sign-in that fails while the code is being asked for goes back to the form', async () => {
@@ -62,4 +62,12 @@ test('a new dialog challenge while one is shown re-renders; the same one does no
     const snap = (id) => ({ state: {}, challenge: { type: 'dialog_choice', id } });
     assert.equal(promptAction(snap(2), { open: true, view: 'choice', challengeId: 1 }), 'choice');
     assert.equal(promptAction(snap(1), { open: true, view: 'choice', challengeId: 1 }), 'none');
+});
+
+test('a failure closes the open dialog, but a challenge Apple has just asked still wins', () => {
+    const failedWith = id => ({ state: { authentication: 'failed' }, challenge: { type: 'dialog_choice', id } });
+    assert.equal(promptAction(failedWith(4), { open: true, view: 'choice', challengeId: 4, submittedId: 4 }), 'failed', 'the answered dialog');
+    assert.equal(promptAction(failedWith(5), { open: true, view: 'choice', challengeId: 4, submittedId: 4 }), 'choice', 'a new dialog');
+    assert.equal(promptAction(failedWith(5), { open: true, view: 'choice', challengeId: 4, dismissedIds: new Set([5]) }), 'failed', 'a dismissed one is not new');
+    assert.equal(promptAction({ state: { authentication: 'failed' } }, { open: true, view: 'code' }), 'expired');
 });
