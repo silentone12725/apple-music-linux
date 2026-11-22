@@ -130,19 +130,19 @@ func (p *appleMusicProvider) openSong(ctx context.Context, req media.OpenRequest
 	}
 	a := song.Data[0].Attributes
 
-	if a.ExtendedAssetUrls.EnhancedHls == "" {
-		return nil, fmt.Errorf("no HLS URL for track %s", req.AssetID)
-	}
-
 	traits := traitSet(a.AudioTraits)
 	var codec pipeline.Codec
 	var hlsFilter string
 	var sr, bd int
 
+	// The catalog's enhanced HLS only exists for lossless/Atmos renditions.
+	// AAC-only tracks have none and play through webplayback, so a missing URL
+	// selects AAC rather than failing.
+	hasEnhanced := a.ExtendedAssetUrls.EnhancedHls != ""
 	switch {
-	case req.Atmos && traits["atmos"]:
+	case hasEnhanced && req.Atmos && traits["atmos"]:
 		codec, hlsFilter = pipeline.CodecAtmos, "ec-3"
-	case req.Lossless && (traits["lossless"] || traits["hi-res-lossless"]):
+	case hasEnhanced && req.Lossless && (traits["lossless"] || traits["hi-res-lossless"]):
 		codec, hlsFilter = pipeline.CodecALAC, "alac"
 	default:
 		codec, hlsFilter = pipeline.CodecAAC, "mp4a.40.2"
