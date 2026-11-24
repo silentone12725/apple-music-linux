@@ -11287,7 +11287,7 @@
       onLosslessChange(applyDlLossless);
       dlg.appendChild(playbackWrap);
       dlg.appendChild(_buildShortcutsSection().wrap);
-      dlg.appendChild(_buildLinksSection().wrap);
+      if (window.adamBridge.platform !== "win32") dlg.appendChild(_buildLinksSection().wrap);
       dlg.appendChild(scrobbleWrap);
       dlg.appendChild(historyWrap);
       dlg.appendChild(libraryWrap);

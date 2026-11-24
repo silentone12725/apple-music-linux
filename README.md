@@ -234,11 +234,11 @@ The system tray requires the [AppIndicator extension](https://extensions.gnome.o
 Adam opens Apple Music links from other apps and from the command line (`adam <link>`):
 
 - **`adam://`** links always work: `adam://song/<id>`, `adam://album/<id>`, `adam://playlist/<id>`, `adam://play/<s|a|p|r>/<id>`, `adam://open/<s|a|p|r>/<id>` (add `?sf=us` for a storefront), or `adam://music.apple.com/...` with any Apple Music path.
-- **Apple Music URLs** (`https://music.apple.com/...` on any Apple Music host, including legacy `itunes.apple.com` links and `?i=` song links) play when they point at a song, album, playlist, artist or music video, and open in the app for any other page (browse, radio, search, curators, library, stations).
-- **Apple's own schemes** are the ones the Apple Music app registers (full list below). **Adam claims none of them until you turn them on in Settings → Links**, one by one, because claiming a scheme takes it away from whatever handles it now. `daap://` (shared iTunes libraries) and `itpc://` (podcast subscriptions) cannot be played in a web client, so Adam shows a notice for them.
+- **Apple Music URLs** (`https://music.apple.com/...` on any Apple Music host, including legacy `itunes.apple.com` links and `?i=` song links) open that page in the app, whether it is a song, album, playlist, artist, music video or any other page (browse, radio, search, curators, library, stations), the way Apple's own app does. Only `adam://play/...` and `adam://<type>/<id>` start playing.
+- **Apple's own schemes** are the ones the Apple Music app registers (full list below). **On Linux Adam claims none of them until you turn them on in Settings → Links**, one by one, because claiming a scheme takes it away from whatever handles it now. On Windows there is no such setting: pick Adam under Settings → Apps → Default apps (see the Windows notes below). `daap://` (shared iTunes libraries) and `itpc://` (podcast subscriptions) cannot be played in a web client, so Adam shows a notice for them.
 
 <details>
-<summary>The 24 schemes Settings → Links can claim</summary>
+<summary>The 24 schemes Adam can claim (Settings → Links on Linux)</summary>
 
 `music://` `musics://` `itms://` `itmss://` `itunes://` `itals://` `italss://` `itvls://` `itvlss://` `itsradio://` `itunesradio://` `daap://` `itpc://` and the Windows `itunes.assocprotocol.*` aliases.
 
@@ -322,7 +322,7 @@ This is the `nightly` branch: the next release's code plus the Windows DRM runti
 ### What a nightly has that the release does not
 
 - The Windows DRM runtime (`libdrm_client.dll`, `libhybris-core.dll` and the Windows `hybris-linker\q.so`), so ALAC plays on Windows after the Apple Account sign-in (Settings → Account → Sign In…).
-- Windows link types: the installer lists Adam under Settings → Apps → Default apps → *Choose defaults by link type* for `adam://` and the Apple Music schemes (`music://`, `musics://`, `itms://`, `itmss://`, `itunes://`, `itals://`, `italss://`, `itvls://`, `itvlss://`, `itsradio://`, `itunesradio://`, `daap://`, `itpc://` and the `itunes.assocprotocol.*` aliases). Windows does not let an app take a link type silently, so pick Adam there; Settings → Links in the app also registers the ones you turn on.
+- Windows link types: the installer lists Adam under Settings → Apps → Default apps → *Choose defaults by link type* for `adam://` and the Apple Music schemes (`music://`, `musics://`, `itms://`, `itmss://`, `itunes://`, `itals://`, `italss://`, `itvls://`, `itvlss://`, `itsradio://`, `itunesradio://`, `daap://`, `itpc://` and the `itunes.assocprotocol.*` aliases). Windows does not let an app take a link type silently, so pick Adam there. The app's Settings has no Links section on Windows.
 - Apple's Android FairPlay libraries are downloaded by the app on its first launch (pinned and SHA-256 checked, see `drm/fairplay-libs.lock`); nothing to install by hand. The Linux `.run` and AppImage already do the same.
 
 ### Linux

@@ -21,7 +21,7 @@ import net from 'net';
 import crypto from 'crypto';
 import { hasSessionBus, mprisRetryDelay, IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, yamlStr, migrateLegacyConfig, migrateStoreKeys } from './platform.mjs';
 import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
-import { parseLink, isLinkArg } from './deeplink.mjs';
+import { parseLink, isLinkArg, playsOnOpen, intentPageUrl, storefrontOf } from './deeplink.mjs';
 import { createLinkSchemeManager } from './link-schemes.mjs';
 import { resolveThemeMode } from './theme-mode.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
@@ -213,7 +213,13 @@ function _dispatchDeepLink(raw) {
         win.focus();
     }
     if (link.kind === 'intent') {
-        win?.webContents.send('adam:open', link.intent);
+        // Playing needs a signed-in account and only adam://play and adam://<type>/<id> ask for it; any other link
+        // opens the item's page.
+        if (_signedIn && playsOnOpen(raw)) win?.webContents.send('adam:open', link.intent);
+        else if (win) {
+            const page = intentPageUrl(link.intent, storefrontOf(win.webContents.getURL()));
+            if (_navigationAllowed(page)) win.loadURL(page);
+        }
     } else if (link.kind === 'navigate') {
         if (win && _navigationAllowed(link.url)) win.loadURL(link.url);
     } else if (link.kind === 'unsupported') {
@@ -1451,6 +1457,10 @@ function createWindow() {
         event.preventDefault();
         if (_httpsHost(url)) shell.openExternal(url);
     });
+
+    // While something plays, Apple's page asks before it is left (beforeunload). Electron has no dialog for that,
+    // so without this handler it silently refuses every load Adam starts itself: an opened link, a reload, a retry.
+    win.webContents.on('will-prevent-unload', (event) => event.preventDefault());
 
     // Apple's sign-in and authorize pages open as real popups: MusicKit talks back to the page that
     // opened them through window.opener, which navigating the player itself would lose. Ordinary

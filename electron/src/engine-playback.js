@@ -11045,7 +11045,9 @@ window.adamGetQueueInfo = function () {
         onLosslessChange(applyDlLossless);
         dlg.appendChild(playbackWrap);
         dlg.appendChild(_buildShortcutsSection().wrap);
-        dlg.appendChild(_buildLinksSection().wrap);
+        // Windows hands out link types through Settings → Apps → Default apps (the installer lists them), so only the
+        // other desktops claim schemes from here.
+        if (window.adamBridge.platform !== 'win32') dlg.appendChild(_buildLinksSection().wrap);
         dlg.appendChild(scrobbleWrap);
         dlg.appendChild(historyWrap);
         dlg.appendChild(libraryWrap);

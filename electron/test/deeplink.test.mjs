@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { parseLink, isLinkArg, APPLE_SCHEMES, SCHEME_GROUPS } from '../deeplink.mjs';
+import { parseLink, isLinkArg, playsOnOpen, intentPageUrl, storefrontOf, APPLE_SCHEMES, SCHEME_GROUPS } from '../deeplink.mjs';
 import { createLinkSchemeManager, removeSchemeAssociations, addSchemeAssociations, defaultHandler, normalizeSelection, linuxDesktopId, OPTIONAL_SCHEMES } from '../link-schemes.mjs';
 
 const intent = (type, id, sf = null) => ({ kind: 'intent', intent: { type, id, sf } });
@@ -125,6 +125,31 @@ test('isLinkArg picks links out of an argument list', () => {
     const argv = ['/usr/bin/adam', '--no-sandbox', 'music://music.apple.com/us/album/x/1'];
     assert.equal(argv.find(isLinkArg), argv[2]);
     assert.equal(['--hidden', '--aml-cmd=next'].find(isLinkArg), undefined);
+});
+
+test('only adam://play and adam://<type>/<id> start playback; Apple links open the page', () => {
+    for (const u of ['adam://play/a/123', 'adam://play/s/9?sf=in', 'adam://song/1', 'adam://album/1', 'adam://playlist/pl.abc'])
+        assert.equal(playsOnOpen(u), true, u);
+    for (const u of ['music://music.apple.com/us/album/x/1', 'itms://itunes.apple.com/us/album/x/id1?app=music', 'itmss://music.apple.com/us/album/x/1',
+        'itunes.assocprotocol.itms://music.apple.com/us/album/x/1', 'adam://music.apple.com/us/album/x/1', 'adam://open/a/123',
+        'https://music.apple.com/us/album/x/1', '', null, undefined, 42])
+        assert.equal(playsOnOpen(u), false, String(u));
+});
+
+test('storefrontOf reads the storefront of an Apple Music page URL', () => {
+    assert.equal(storefrontOf('https://music.apple.com/in/album/x/1'), 'in');
+    assert.equal(storefrontOf('https://music.apple.com/TW/browse'), 'tw');
+    for (const u of ['https://music.apple.com/', 'https://music.apple.com/album/1', 'https://example.com/in/album/1',
+        'http://music.apple.com/in/album/1', 'file:///C:/offline.html', 'not a url', '', null, undefined])
+        assert.equal(storefrontOf(u), null, String(u));
+});
+
+test('intentPageUrl is the item page on music.apple.com; a missing storefront keeps the current one, then US', () => {
+    assert.equal(intentPageUrl({ type: 'album', id: '123', sf: 'tw' }, 'in'), 'https://music.apple.com/tw/album/123');
+    assert.equal(intentPageUrl({ type: 'song', id: '9', sf: null }, 'in'), 'https://music.apple.com/in/song/9');
+    assert.equal(intentPageUrl({ type: 'song', id: '9', sf: null }), 'https://music.apple.com/us/song/9');
+    for (const u of ['itms://itunes.apple.com/in/album/x/id123?app=music', 'adam://play/p/pl.abc'])
+        assert.equal(new URL(intentPageUrl(parseLink(u).intent)).origin, 'https://music.apple.com', u);
 });
 
 // ── scheme registration ──────────────────────────────────────────────────────

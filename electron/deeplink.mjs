@@ -147,3 +147,27 @@ export function parseLink(raw) {
 
 // True for a command-line argument that is a link we handle.
 export const isLinkArg = (a) => parseLink(a) !== null;
+
+// Only adam://play/<code>/<id> and adam://<type>/<id> start playback. Every other link (Apple's "Open in Music" button,
+// an Apple Music URL, adam://music.apple.com/…) opens the item's page, as Apple's own app does.
+export function playsOnOpen(raw) {
+    let u;
+    try { u = new URL(String(raw).trim()); } catch { return false; }
+    const host = u.hostname.toLowerCase();
+    return u.protocol === `${OWN_SCHEME}:` && (host === 'play' || TYPES.has(host));
+}
+
+// The storefront of a music.apple.com page URL (the first path segment, like "in" or "tw"), or null.
+export function storefrontOf(url) {
+    try {
+        const u = new URL(String(url));
+        if (u.protocol !== 'https:' || !APPLE_HOSTS.has(u.hostname.toLowerCase())) return null;
+        const first = u.pathname.split('/').filter(Boolean)[0] || '';
+        return STOREFRONT.test(first) ? first.toLowerCase() : null;
+    } catch { return null; }
+}
+
+// The music.apple.com page of a catalog item. A link without a storefront keeps the one the window is on
+// (`current`), so Apple does not offer to switch country; "us" is only the last resort.
+export const intentPageUrl = ({ type, id, sf }, current = null) => `https://music.apple.com/${sf || current || 'us'}/${type}/${id}`;
+
