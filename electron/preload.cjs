@@ -109,6 +109,8 @@ if (IS_APPLE_MUSIC) contextBridge.exposeInMainWorld('adamBridge', {
     mediaCmd:       (c)         => ipcRenderer.send('media:cmd', c),
     authState:      (v)         => ipcRenderer.send('app:auth-state', v === true),
     appRestart:     ()          => ipcRenderer.send('app:restart'),
+    startupGet:     ()          => ipcRenderer.invoke('startup:get'),
+    startupSet:     (k, on)     => ipcRenderer.invoke('startup:set', k, on),
     linksGet:       ()          => ipcRenderer.invoke('links:get'),
     linksSet:       (s, on)     => ipcRenderer.invoke('links:set', s, on),
     // Encrypted per-key store (backed by safeStorage in main process)

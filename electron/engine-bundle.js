@@ -10951,6 +10951,45 @@
       });
       return { wrap };
     }
+    function _buildStartupSection() {
+      const { wrap, body } = makeSection("Startup");
+      const note = document.createElement("div");
+      note.style.cssText = FF + "font-size:11px;color:rgba(255,255,255,0.42);line-height:1.5;padding:2px 0 8px;display:none;";
+      body.appendChild(note);
+      const rows = document.createElement("div");
+      body.appendChild(rows);
+      const render = (st) => {
+        rows.textContent = "";
+        rows.style.opacity = st.supported ? "" : "0.45";
+        rows.style.pointerEvents = st.supported ? "" : "none";
+        note.style.display = st.supported ? "none" : "";
+        note.textContent = st.reason || "";
+        const change = async (key, on) => {
+          try {
+            render(await window.adamBridge.startupSet(key, on));
+          } catch (e) {
+            console.warn("[Adam Startup] could not change", key, e?.message || e);
+            refresh();
+          }
+        };
+        rows.appendChild(makeRow(
+          "Launch at login",
+          _adamIOSToggle(st.launchAtLogin, (v) => change("launchAtLogin", v)),
+          "Start Adam when you sign in to your computer",
+          false
+        ));
+        rows.appendChild(makeRow(
+          "Start minimised",
+          _adamIOSToggle(st.startMinimized, (v) => change("startMinimized", v)),
+          "Open in the system tray instead of showing the window. Applies when launching at login.",
+          true
+        ));
+      };
+      const refresh = () => window.adamBridge?.startupGet?.().then(render).catch(() => {
+      });
+      refresh();
+      return { wrap };
+    }
     function _buildShortcutsSection() {
       const { wrap, body } = makeSection("Keyboard Shortcuts");
       const enToggle = _adamIOSToggle(_hotkeysEnabled, async (v) => {
@@ -11286,6 +11325,7 @@
       dlg.appendChild(dlWrap);
       onLosslessChange(applyDlLossless);
       dlg.appendChild(playbackWrap);
+      dlg.appendChild(_buildStartupSection().wrap);
       dlg.appendChild(_buildShortcutsSection().wrap);
       if (window.adamBridge.platform !== "win32") dlg.appendChild(_buildLinksSection().wrap);
       dlg.appendChild(scrobbleWrap);

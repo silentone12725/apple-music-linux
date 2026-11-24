@@ -1,5 +1,5 @@
 // Windows shell integration: SMTC (system media transport controls), taskbar thumbnail
-// buttons and progress, jump-list tasks and launch-at-login. main.mjs creates one instance on
+// buttons and progress and jump-list tasks. (Launch at login is startup.mjs.) main.mjs creates one instance on
 // win32 and feeds it the same now-playing updates the MPRIS bridge receives on Linux.
 import path from 'path';
 import zlib from 'zlib';
@@ -220,14 +220,6 @@ export function createWinIntegration({ app, getWin, sendCmd, nativeImage }) {
             const cmd = parseCmdArg(argv);
             if (cmd) sendCmd(cmd);
             return !!cmd;
-        },
-
-        getOpenAtLogin() { return app.getLoginItemSettings().openAtLogin; },
-        setOpenAtLogin(on) {
-            // An unpackaged dev run would register electron.exe itself, which is never wanted.
-            if (!app.isPackaged) return false;
-            app.setLoginItemSettings({ openAtLogin: !!on, args: ['--hidden'] });
-            return app.getLoginItemSettings().openAtLogin;
         },
     };
 }

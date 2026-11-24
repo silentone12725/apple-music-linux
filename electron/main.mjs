@@ -23,6 +23,7 @@ import { hasSessionBus, mprisRetryDelay, IS_WIN, IS_LINUX, configRoot, engineFil
 import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
 import { parseLink, isLinkArg, playsOnOpen, intentPageUrl, storefrontOf } from './deeplink.mjs';
 import { createLinkSchemeManager } from './link-schemes.mjs';
+import { createStartupManager } from './startup.mjs';
 import { resolveThemeMode } from './theme-mode.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
 import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
@@ -181,6 +182,7 @@ if (IS_LINUX) {
 let win    = null;
 let tray   = null;
 const linkSchemes = createLinkSchemeManager({ app, loadPrefs, savePrefs });
+const startup = createStartupManager({ app, shell, loadPrefs, savePrefs });
 // Windows blur theme uses the local Composition Gaussian backend on both supported Windows versions.
 const _acrylicBackend = !IS_WIN ? null
     : acrylicBackend(os.release());
@@ -191,7 +193,7 @@ if (_acrylicBackend) nativeTheme.on('updated', () => {
     if (_acrylicSettings().theme === 'system') _applyAcrylic();
 });
 let winIntegration = null; // Windows only: SMTC, taskbar buttons, jump list, login item
-const _startHidden = process.argv.includes('--hidden');
+let _startHidden = process.argv.includes('--hidden'); // cleared once the window is shown on purpose (tray, second launch, link)
 let isQuitting = false;
 
 // ── Deep link handling ────────────────────────────────────────────────────────
@@ -255,7 +257,7 @@ app.on('second-instance', (_e, argv) => {
     // The clicked link is one of the arguments (xdg-open and the OS pass it on the command line).
     const url = argv.find(isLinkArg);
     if (url) _dispatchDeepLink(url);
-    else if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
+    else if (win) { if (win.isMinimized()) win.restore(); if (!win.isVisible()) win.show(); win.focus(); } // show: it may have been started hidden
 });
 
 // ── Engine API server ─────────────────────────────────────────────────────────
@@ -1471,13 +1473,14 @@ function createWindow() {
         // Only show if the initial ready-signal already fired; don't interrupt the
         // first-load sequence where the window stays hidden until content is loaded.
         // A memory-maintenance reload happens while the window is hidden on purpose.
-        if (shown && !win.isVisible() && !memoryMaintenance.isReloading) win.show();
+        if (shown && !_startHidden && !win.isVisible() && !memoryMaintenance.isReloading) win.show();
     });
 
     // ── Idle memory maintenance (see memory-maintenance.mjs) ─────────────────
     // Apple's page never releases the pages you leave, so reload it while nobody is looking.
     win.webContents.on('did-finish-load', () => memoryMaintenance.pageLoaded());
     for (const ev of ['focus', 'show', 'restore']) win.on(ev, () => memoryMaintenance.setActive(true));
+    win.on('show', () => { _startHidden = false; });
     for (const ev of ['blur', 'hide', 'minimize']) win.on(ev, () => memoryMaintenance.setActive(false));
     memoryMaintenance.start();
 
@@ -1892,7 +1895,7 @@ ipcMain.on('view:bg-blur',   (_, raw) => {
 // window state) are set only through their dedicated handlers, never here.
 const _MAIN_OWNED_PREFS = new Set([
     'customCssPath', 'themePalette', 'themePresets', 'themeMode', 'themeAppearance',
-    'themeNavBgAlpha', 'winAcrylic', 'zoomFactor', 'glassBlur', 'glassOpacity', 'bgBlur', 'linkSchemes', 'linkSchemesApplied', 'signedIn', 'themeVersion',
+    'themeNavBgAlpha', 'winAcrylic', 'zoomFactor', 'glassBlur', 'glassOpacity', 'bgBlur', 'linkSchemes', 'linkSchemesApplied', 'signedIn', 'themeVersion', 'launchAtLogin', 'startMinimized',
 ]);
 const _tweakKeyRe = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 function _validTweak(k, v) {
@@ -2376,6 +2379,11 @@ ipcMain.on('mpris:update', (_, data) => {
 
 // Settings → Links: which URL schemes Adam claims. The scheme list and the choices live in
 // link-schemes.mjs; the page can only toggle schemes that module offers.
+ipcMain.handle('startup:get', () => startup.get());
+ipcMain.handle('startup:set', (_e, key, value) => {
+    if ((key !== 'launchAtLogin' && key !== 'startMinimized') || typeof value !== 'boolean') throw new Error('invalid startup setting');
+    return startup.set(key, value);
+});
 ipcMain.handle('links:get', () => linkSchemes.list());
 ipcMain.handle('links:set', (_e, scheme, enabled) => {
     if (typeof scheme !== 'string' || typeof enabled !== 'boolean') throw new Error('bad arguments');
@@ -3241,6 +3249,7 @@ app.whenReady().then(() => {
 
     Menu.setApplicationMenu(null);
     linkSchemes.apply(); // claim the Apple Music schemes the user turned on (none by default)
+    try { startup.apply(); } catch (e) { console.warn('[Adam] startup entry check failed:', e.message); }
     if (IS_WIN) {
         winIntegration = createWinIntegration({
             app, getWin: () => win, nativeImage,

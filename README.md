@@ -85,6 +85,7 @@ An Apple Music desktop client for Linux and Windows — lossless audio on Linux,
 
 - **Media keys** — hardware play/pause, next, and previous keys work even when the window is in the background (includes Bluetooth AVRCP)
 - **System tray** — minimize to tray; playback controls in the right-click menu
+- **Launch at login** — optional, under Settings → Startup (off by default), with *Start minimised* to begin in the tray; on Linux it writes an XDG autostart entry (`~/.config/autostart/adam.desktop`), on Windows the Run key (or a Startup shortcut in the MSIX)
 - **Mini player** — a small always-on-top now-playing window
 - **Discord Rich Presence**, **Last.fm** and **ListenBrainz** scrobbling
 - **Wayland + X11** — tested on Hyprland, KDE Plasma, GNOME, and Sway
@@ -219,7 +220,7 @@ Windows integration:
 
 - **Media controls** — the Windows media overlay, lock screen and hardware media keys show the current track and drive play/pause/next/previous/seek (SMTC).
 - **Taskbar** — thumbnail buttons (previous, play/pause, next), playback progress on the taskbar icon, and jump-list tasks.
-- **Startup** — optional *Launch at login* in the tray menu (starts hidden in the tray) and the `adam://` link handler.
+- **Startup** — *Launch at login* and *Start minimised* under Settings → Startup (both off by default; minimised starts hidden in the tray), and the `adam://` link handler.
 - **Discord Rich Presence** over the Windows named pipe.
 
 > [!NOTE]
