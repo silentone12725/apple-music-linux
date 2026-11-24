@@ -21,10 +21,11 @@ import net from 'net';
 import crypto from 'crypto';
 import { hasSessionBus, mprisRetryDelay, IS_WIN, IS_LINUX, configRoot, engineFileName, engineLibEnv, discordIpcPaths, yamlStr, migrateLegacyConfig, migrateStoreKeys } from './platform.mjs';
 import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
-import { parseLink, isLinkArg, playsOnOpen, intentPageUrl, storefrontOf } from './deeplink.mjs';
+import { parseLink, isLinkArg, playsOnOpen, intentPageUrl, storefrontOf, withStorefront } from './deeplink.mjs';
 import { createLinkSchemeManager } from './link-schemes.mjs';
 import { createStartupManager } from './startup.mjs';
 import { detectTrayHost, trayAdvice, parseOsRelease } from './tray.mjs';
+import { purgeTargets, purgeUserData } from './purge.mjs';
 import { resolveThemeMode } from './theme-mode.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
 import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
@@ -241,7 +242,9 @@ function _dispatchDeepLink(raw) {
             if (_navigationAllowed(page)) win.loadURL(page);
         }
     } else if (link.kind === 'navigate') {
-        if (win && _navigationAllowed(link.url)) win.loadURL(link.url);
+        // A link that named no country keeps the one the window is on, so Apple does not offer to switch country.
+        const url = link.storefrontDefaulted && win ? withStorefront(link.url, storefrontOf(win.webContents.getURL())) : link.url;
+        if (win && _navigationAllowed(url)) win.loadURL(url);
     } else if (link.kind === 'unsupported') {
         const [title, detail] = _UNSUPPORTED_LINK_TEXT[link.reason] || ['This link is not supported', `Adam cannot open ${link.scheme}:// links.`];
         dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, { type: 'info', title: 'Adam', message: title, detail });
@@ -252,6 +255,21 @@ function _dispatchDeepLink(raw) {
 // Music schemes are registered separately, per the user's choices (linkSchemes below).
 if (process.defaultApp && process.argv[1]) app.setAsDefaultProtocolClient('adam', process.execPath, [path.resolve(process.argv[1])]);
 else app.setAsDefaultProtocolClient('adam');
+
+// `adam --purge-data`: switch off launch at login and the claimed link types, then delete every folder Adam keeps for
+// this user (purge.mjs). Refused while Adam is running, since its files are in use.
+if (process.argv.includes('--purge-data')) {
+    if (!app.requestSingleInstanceLock()) {
+        console.error('Adam is running. Close it, then run this again.');
+        app.exit(1);
+    } else {
+        try { startup.set('launchAtLogin', false); } catch (e) { console.warn('[Adam] launch at login not switched off:', e.message); }
+        try { for (const s of linkSchemes.selection()) linkSchemes.set(s, false); } catch (e) { console.warn('[Adam] link types not released:', e.message); }
+        const removed = purgeUserData(purgeTargets());
+        console.log(removed.length ? `Removed:\n${removed.map((d) => '  ' + d).join('\n')}` : 'Nothing to remove.');
+        app.exit(0);
+    }
+}
 
 // Single-instance lock: if a second instance opens (e.g. user clicked a link
 // while Adam is already running), forward the URL to the existing instance.

@@ -66,6 +66,23 @@
 !macroend
 
 !macro customUnInstall
+  ; Settings, the DRM session and its token, the web sign-in and the caches are removed with the app, unless the
+  ; uninstaller is started with /KEEPDATA (for testing). An update (--updated) always keeps them. They are per-user
+  ; folders, even for an all-users install.
+  ClearErrors
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "/KEEPDATA" $R1
+  ${If} ${Errors}
+  ${AndIfNot} ${isUpdated}
+    ${If} $installMode == "all"
+      SetShellVarContext current
+    ${EndIf}
+    RMDir /r "$APPDATA\adam"
+    RMDir /r "$LOCALAPPDATA\adam"
+    ${If} $installMode == "all"
+      SetShellVarContext all
+    ${EndIf}
+  ${EndIf}
   !insertmacro AdamSchemeRemove "music"
   !insertmacro AdamSchemeRemove "musics"
   !insertmacro AdamSchemeRemove "itms"

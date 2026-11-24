@@ -149,11 +149,25 @@ This installs to `~/.local/lib/adam` and adds a launcher to `~/.local/bin`. A de
 ./adam.run --no-lossless  # skip the FairPlay library download (lossless stays off)
 ./adam.run --tray-support # install the system-tray package for this desktop if it has none (see below)
 ./adam.run --no-tray-check # skip the system-tray check
-./adam.run --uninstall    # remove the installation
+./adam.run --uninstall    # remove the installation and all your data (see Uninstalling below)
+./adam.run --uninstall --keep-data  # remove the program, keep your settings and sign-in
 ./adam.run --help         # show all options
 ```
 
 After install, launch from your app menu or run `adam` in a terminal.
+
+### Uninstalling, and what is deleted
+
+A normal uninstall leaves nothing of yours behind: your settings, the **DRM session** (its token and account files), the **web sign-in** (the Electron session and its cookies), the saved credentials, every cache and log, the launch-at-login entry, and the link types Adam was made the handler of. To keep them (for a reinstall or for testing) use the keep option.
+
+| Install | Remove everything | Keep settings and sign-in |
+|---|---|---|
+| Linux `.run` | `./adam.run --uninstall` | `./adam.run --uninstall --keep-data` |
+| Windows installer (exe) | Settings → Apps, or `"%LOCALAPPDATA%\Programs\Adam\Uninstall Adam.exe" /currentuser` | add `/S /KEEPDATA` to that command |
+| Windows MSIX | run `adam.exe --purge-data` first, then remove the app in Settings → Apps | just remove the app |
+| Any install | `adam --purge-data` deletes the data and switches off launch at login (refused while Adam is running) | |
+
+An update never deletes your data. On Linux the data is `~/.config/adam` and `~/.cache/adam` (and the old `~/.config/apple-music-linux` if present); on Windows it is `%APPDATA%\adam` and `%LOCALAPPDATA%\adam`. A removed MSIX leaves that data behind because a package runs no code when it is uninstalled, which is why `--purge-data` exists.
 
 ### Launch at login and the system tray
 

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { parseLink, isLinkArg, playsOnOpen, intentPageUrl, storefrontOf, APPLE_SCHEMES, SCHEME_GROUPS } from '../deeplink.mjs';
+import { parseLink, isLinkArg, playsOnOpen, intentPageUrl, storefrontOf, withStorefront, APPLE_SCHEMES, SCHEME_GROUPS } from '../deeplink.mjs';
 import { createLinkSchemeManager, removeSchemeAssociations, addSchemeAssociations, defaultHandler, normalizeSelection, linuxDesktopId, OPTIONAL_SCHEMES } from '../link-schemes.mjs';
 
 const intent = (type, id, sf = null) => ({ kind: 'intent', intent: { type, id, sf } });
@@ -101,7 +101,7 @@ test('adam:// forms', () => {
     assert.deepEqual(parseLink('adam://play/s/123'), intent('song', '123'));
     assert.deepEqual(parseLink('adam://play/a/123?sf=in'), intent('album', '123', 'in'));
     assert.deepEqual(parseLink('adam://play/p/pl.abc'), intent('playlist', 'pl.abc'));
-    assert.deepEqual(parseLink('adam://play/r/ra.123'), nav('https://music.apple.com/us/station/ra.123'));
+    assert.deepEqual(parseLink('adam://play/r/ra.123'), { ...nav('https://music.apple.com/us/station/ra.123'), storefrontDefaulted: true });
     assert.deepEqual(parseLink('adam://open/a/123?sf=gb'), nav('https://music.apple.com/gb/album/123'));
     assert.deepEqual(parseLink('adam://music.apple.com/us/album/x/123'), intent('album', '123', 'us'));
     assert.equal(parseLink('adam://song/'), null);
@@ -150,6 +150,23 @@ test('intentPageUrl is the item page on music.apple.com; a missing storefront ke
     assert.equal(intentPageUrl({ type: 'song', id: '9', sf: null }), 'https://music.apple.com/us/song/9');
     for (const u of ['itms://itunes.apple.com/in/album/x/id123?app=music', 'adam://play/p/pl.abc'])
         assert.equal(new URL(intentPageUrl(parseLink(u).intent)).origin, 'https://music.apple.com', u);
+});
+
+test('adam://open and station links without a country are marked, so the window can use its own', () => {
+    assert.deepEqual(parseLink('adam://open/a/123'), { ...nav('https://music.apple.com/us/album/123'), storefrontDefaulted: true });
+    assert.deepEqual(parseLink('adam://open/s/9'), { ...nav('https://music.apple.com/us/song/9'), storefrontDefaulted: true });
+    assert.deepEqual(parseLink('adam://open/a/123?sf=in'), nav('https://music.apple.com/in/album/123')); // named: not marked
+    assert.equal('storefrontDefaulted' in parseLink('adam://open/a/123?sf=in'), false);
+    assert.equal('storefrontDefaulted' in parseLink('https://music.apple.com/us/browse'), false);
+});
+
+test('withStorefront swaps the storefront and leaves everything else alone', () => {
+    assert.equal(withStorefront('https://music.apple.com/us/album/123', 'in'), 'https://music.apple.com/in/album/123');
+    assert.equal(withStorefront('https://music.apple.com/us/album/x/123?i=9', 'TW'), 'https://music.apple.com/tw/album/x/123?i=9');
+    assert.equal(withStorefront('https://music.apple.com/us/album/123', null), 'https://music.apple.com/us/album/123');
+    assert.equal(withStorefront('https://music.apple.com/us/album/123', 'india'), 'https://music.apple.com/us/album/123');
+    assert.equal(withStorefront('https://music.apple.com/browse', 'in'), 'https://music.apple.com/browse'); // no storefront to swap
+    assert.equal(withStorefront('not a url', 'in'), 'not a url');
 });
 
 // ── scheme registration ──────────────────────────────────────────────────────

@@ -1,13 +1,15 @@
 #!/bin/sh
 # Adam — self-extracting installer
-# Usage: ./adam.run [--force] [--system] [--no-lossless] [--tray-support | --no-tray-check] [--uninstall]
+# Usage: ./adam.run [--force] [--system] [--no-lossless] [--tray-support | --no-tray-check] [--uninstall [--keep-data]]
 #
 # --force        reinstall even if already at this version
 # --system       install to /opt/adam + /usr/local/bin (needs sudo)
 # --no-lossless  skip downloading Apple's FairPlay libraries (lossless/ALAC stays off)
 # --tray-support    install the system-tray package for this desktop if it has none (GNOME, bare Wayland compositors)
 # --no-tray-check   skip the system-tray check
-# --uninstall    remove a previous installation
+# --uninstall    remove a previous installation, and everything Adam set up for you: your settings, the DRM session,
+#                the web sign-in, caches, launch at login and the link associations it wrote
+# --keep-data    with --uninstall: keep the settings, DRM session and web sign-in (for reinstalling or testing)
 
 VERSION="__VERSION__"
 
@@ -22,6 +24,7 @@ SYSTEM=0
 UNINSTALL=0
 LOSSLESS=1
 TRAY=ask   # ask | yes | no
+KEEP_DATA=0
 
 # ── launcher directory ───────────────────────────────────────────────────────
 # The command is installed as `adam`. The standard home for user executables is
@@ -37,11 +40,12 @@ for arg in "$@"; do
         --force)    FORCE=1 ;;
         --system)   SYSTEM=1 ;;
         --uninstall) UNINSTALL=1 ;;
+        --keep-data) KEEP_DATA=1 ;;
         --no-lossless) LOSSLESS=0 ;;
         --tray-support) TRAY=yes ;;
         --no-tray-check) TRAY=no ;;
         --help|-h)
-            echo "Usage: $0 [--force] [--system] [--no-lossless] [--tray-support | --no-tray-check] [--uninstall]"
+            echo "Usage: $0 [--force] [--system] [--no-lossless] [--tray-support | --no-tray-check] [--uninstall [--keep-data]]"
             exit 0 ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
     esac
@@ -58,6 +62,26 @@ if [ "$SYSTEM" != "1" ] && ! on_path "$BIN_DIR" && [ -d "$HOME/bin" ] && [ -w "$
     BIN_DIR="$HOME/bin"
 fi
 
+# Remove the block Adam wrote ("Adam launch at login" markers) from a compositor config; a symlinked config is
+# written through the link, so a dotfiles repo stays in step.
+strip_adam_block() {
+    [ -f "$1" ] && grep -q "Adam launch at login (managed by Adam" "$1" 2>/dev/null || return 0
+    tmp=$(mktemp) || return 0
+    awk '/>>> Adam launch at login \(managed by Adam/ { skip = 1 } !skip { print } /<<< Adam launch at login <<</ { skip = 0 }' "$1" > "$tmp" \
+        && cat "$tmp" > "$1"
+    rm -f "$tmp"
+}
+
+# Drop adam.desktop from x-scheme-handler lines of a mimeapps.list. Only an exact adam.desktop after "=" or ";" goes,
+# so another application's entry (winpodx-adam.desktop, say) is never touched; a line left empty is removed.
+strip_adam_mime() {
+    [ -f "$1" ] && grep -q "adam\.desktop" "$1" 2>/dev/null || return 0
+    tmp=$(mktemp) || return 0
+    sed -e 's/\([=;]\)adam\.desktop;\{0,1\}/\1/g' "$1" | sed -e '/^x-scheme-handler\/[^=]*=[[:space:]]*;*[[:space:]]*$/d' > "$tmp" \
+        && cat "$tmp" > "$1"
+    rm -f "$tmp"
+}
+
 # ── uninstall ─────────────────────────────────────────────────────────────────
 if [ "$UNINSTALL" = "1" ]; then
     rm -rf "$INSTALL_DIR"
@@ -70,7 +94,38 @@ if [ "$UNINSTALL" = "1" ]; then
     rm -f  "$DESKTOP_DIR/adam.desktop"
     rm -f  "$ICON_DIR/adam.png"
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-    echo "Uninstalled Adam."
+
+    # Everything else Adam set up for this user. The config, data and cache folders follow the XDG variables.
+    CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
+    DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+    CACHE="${XDG_CACHE_HOME:-$HOME/.cache}"
+
+    # Launch at login: the autostart entry, the systemd user unit, and the marked block Adam may have put in a
+    # compositor config (its toggle in Settings → Startup writes exactly one of these).
+    rm -f "$CFG/autostart/adam.desktop"
+    if [ -f "$CFG/systemd/user/adam-autostart.service" ]; then
+        systemctl --user disable adam-autostart.service >/dev/null 2>&1 || true
+        rm -f "$CFG/systemd/user/adam-autostart.service"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
+    for f in "$CFG/hypr/hyprland.conf" "$CFG/sway/config" "$HOME/.sway/config" "$CFG/i3/config" "$HOME/.i3/config" \
+             "$CFG/niri/config.kdl" "$CFG/labwc/autostart" "$CFG/bspwm/bspwmrc" "$CFG/river/init"; do
+        strip_adam_block "$f"
+    done
+    # The link types Adam was made the handler of (Settings → Links): only entries that are exactly adam.desktop.
+    for f in "$CFG/mimeapps.list" "$DATA/applications/mimeapps.list"; do strip_adam_mime "$f"; done
+
+    # Settings, the DRM session (its token), the web sign-in (the Electron session) and every cache. --keep-data
+    # leaves them, for a reinstall or for testing.
+    if [ "$KEEP_DATA" = "1" ]; then
+        echo "Uninstalled Adam. Kept your settings and sign-in in $CFG/adam."
+        echo "To remove them too:  rm -rf \"$CFG/adam\" \"$CACHE/adam\""
+    else
+        for d in "$CFG/adam" "$CFG/apple-music-linux" "$CFG/aml" "$CACHE/adam"; do
+            [ -n "$HOME" ] && rm -rf "$d"
+        done
+        echo "Uninstalled Adam, including your settings, sign-in and caches."
+    fi
     exit 0
 fi
 

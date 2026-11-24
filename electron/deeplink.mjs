@@ -5,6 +5,7 @@
 // parseLink() returns one of
 //   { kind: 'intent',   intent: { type, id, sf } }   play/open one catalog item (handled by the page)
 //   { kind: 'navigate', url }                         any other music.apple.com page (browse, radio, search…)
+//                                                     (+ storefrontDefaulted when the link named no country: see withStorefront)
 //   { kind: 'unsupported', reason, scheme }           a scheme Apple Music registers but a web client can't act on
 //   null                                              not a link we handle
 
@@ -116,7 +117,9 @@ function fromOwnUrl(u) {
         const id = parts[1] || '';
         if (!type || !validId(type, id)) return null;
         if (host === 'play' && type !== 'station') return intent(type, id, sf);
-        return navigate(`/${sf || 'us'}/${type}/${id}`);
+        const link = navigate(`/${sf || 'us'}/${type}/${id}`);
+        // No country in the link: "us" is only a placeholder, and the window swaps in the storefront it is on.
+        return sf ? link : { ...link, storefrontDefaulted: true };
     }
     // adam://<type>/<id> — hostname is the type
     if (TYPES.has(host)) {
@@ -171,3 +174,15 @@ export function storefrontOf(url) {
 // (`current`), so Apple does not offer to switch country; "us" is only the last resort.
 export const intentPageUrl = ({ type, id, sf }, current = null) => `https://music.apple.com/${sf || current || 'us'}/${type}/${id}`;
 
+// The URL with its storefront (the first path segment) replaced by `sf`; unchanged when there is none to swap or no sf.
+export function withStorefront(url, sf) {
+    if (!sf || !STOREFRONT.test(sf)) return url;
+    try {
+        const u = new URL(url);
+        const parts = u.pathname.split('/');
+        if (!STOREFRONT.test(parts[1] || '')) return url;
+        parts[1] = sf.toLowerCase();
+        u.pathname = parts.join('/');
+        return u.href;
+    } catch { return url; }
+}
