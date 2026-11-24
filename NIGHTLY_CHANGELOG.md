@@ -2,6 +2,31 @@
 
 Unreleased changes, one entry per nightly build, newest first. Each entry is also posted on its own in the nightly channel on Discord, separate from the download announcement. Add the new entry at the top before publishing a nightly.
 
+# Nightly: unreleased changes (2026-11-24)
+
+### Playback
+- **Tracks with no lossless version now play instead of failing.** Some older catalog entries (for example some Taiwan-storefront tracks) are AAC-only and have no enhanced HLS playlist. Adam used to stop with `no HLS URL for track`; it now plays them as AAC.
+- AAC is served when FairPlay is not ready yet, the Hi-Res tier setting is honoured, and the cache is keyed by tier.
+- A truncated stream fragment is now an error instead of a clean end, and a superseded track change no longer resets the play state of the track that replaced it.
+- Lyrics clear between tracks, hover pre-warm cannot release the track that is playing, and failed downloads retry up to three times per asset.
+
+### Sign-in
+- Sign-in races and unsafe defaults are fixed, and a saved password is sealed even without a keyring. The account sheet clears a stale challenge, so an old one no longer reads as a wrong code.
+- Adam reports lossless "ready" again, and "signed in" now follows the account's own state.
+
+### Shutdown and safety
+- **Clean shutdown on every exit path**, including a hard kill: the engine stops with Adam, and the next start sweeps a dead run's unfinished downloads.
+- Temporary files are private with explicit modes, served files are contained, page-supplied values are clamped and scrobbles are validated.
+
+### Interface
+- Apple's Pin, Unpin, Delete and Download menu items are found by their icon or element rather than by their translated label, so they work in every language.
+- The loading skeleton for the New page matches the real page, and long pages no longer stall clicks.
+
+### Windows
+- This build is Windows only. It was cross-compiled with the full lossless/DRM engine and has not been tested on a real account.
+
+---
+
 # Nightly: unreleased changes (2026-11-18)
 
 ### Sign-in
