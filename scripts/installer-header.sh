@@ -1,10 +1,12 @@
 #!/bin/sh
 # Adam — self-extracting installer
-# Usage: ./adam.run [--force] [--system] [--no-lossless] [--uninstall]
+# Usage: ./adam.run [--force] [--system] [--no-lossless] [--tray-support | --no-tray-check] [--uninstall]
 #
 # --force        reinstall even if already at this version
 # --system       install to /opt/adam + /usr/local/bin (needs sudo)
 # --no-lossless  skip downloading Apple's FairPlay libraries (lossless/ALAC stays off)
+# --tray-support    install the system-tray package for this desktop if it has none (GNOME, bare Wayland compositors)
+# --no-tray-check   skip the system-tray check
 # --uninstall    remove a previous installation
 
 VERSION="__VERSION__"
@@ -19,6 +21,7 @@ FORCE=0
 SYSTEM=0
 UNINSTALL=0
 LOSSLESS=1
+TRAY=ask   # ask | yes | no
 
 # ── launcher directory ───────────────────────────────────────────────────────
 # The command is installed as `adam`. The standard home for user executables is
@@ -35,8 +38,10 @@ for arg in "$@"; do
         --system)   SYSTEM=1 ;;
         --uninstall) UNINSTALL=1 ;;
         --no-lossless) LOSSLESS=0 ;;
+        --tray-support) TRAY=yes ;;
+        --no-tray-check) TRAY=no ;;
         --help|-h)
-            echo "Usage: $0 [--force] [--system] [--no-lossless] [--uninstall]"
+            echo "Usage: $0 [--force] [--system] [--no-lossless] [--tray-support | --no-tray-check] [--uninstall]"
             exit 0 ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
     esac
@@ -172,6 +177,76 @@ if [ "$LOSSLESS" = "1" ] && [ "$SYSTEM" != "1" ] && [ -f "$FETCH" ]; then
         echo "or run: sh \"$FETCH\""
     fi
 fi
+
+# ── system tray (optional) ────────────────────────────────────────────────────
+# Adam's tray icon needs a StatusNotifier host on the session bus. KDE Plasma, MATE, Cinnamon, LXQt, Budgie, Deepin,
+# COSMIC and current Xfce have one; GNOME does not, and a bare Wayland compositor needs a bar with a tray module.
+# On X11 the older XEmbed tray is used, which the usual bars provide. This only offers the package for the desktop in
+# use: nothing is installed without a yes (or --tray-support), and a refusal or a failure never stops the install.
+# >>> tray functions
+tray_host() {
+    command -v dbus-send >/dev/null 2>&1 || { echo unknown; return; }
+    out=$(dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus.NameHasOwner string:org.kde.StatusNotifierWatcher 2>/dev/null) || { echo unknown; return; }
+    case "$out" in *"boolean true"*) echo true ;; *"boolean false"*) echo false ;; *) echo unknown ;; esac
+}
+
+pkg_install_cmd() { # $1 = package; prints the install command for this distribution, or nothing
+    rel="${ADAM_OS_RELEASE:-/etc/os-release}"
+    [ -r "$rel" ] || return 0
+    ids=$(sed -n 's/^ID=//p;s/^ID_LIKE=//p' "$rel" | tr -d '"' | tr '\n' ' ' | tr 'A-Z' 'a-z')
+    case " $ids " in
+        *" arch "*|*" cachyos "*|*" manjaro "*|*" endeavouros "*|*" garuda "*|*" artix "*) echo "sudo pacman -S --needed $1" ;;
+        *" debian "*|*" ubuntu "*|*" linuxmint "*|*" pop "*|*" elementary "*|*" zorin "*) echo "sudo apt install $1" ;;
+        *" fedora "*|*" rhel "*|*" centos "*|*" rocky "*|*" almalinux "*|*" nobara "*) echo "sudo dnf install $1" ;;
+        *" opensuse "*|*" opensuse-leap "*|*" opensuse-tumbleweed "*|*" suse "*|*" sles "*) echo "sudo zypper install $1" ;;
+    esac
+}
+
+tray_offer() {
+    [ "$TRAY" = "no" ] && return 0
+    [ "$(tray_host)" = "false" ] || return 0
+    desk=$(printf '%s:%s:%s' "$XDG_CURRENT_DESKTOP" "$XDG_SESSION_DESKTOP" "$DESKTOP_SESSION" | tr 'A-Z' 'a-z')
+    enable=""
+    case ":$desk:" in
+        *:gnome:*|*:gnome-flashback:*|*:ubuntu:*)
+            pkg=gnome-shell-extension-appindicator
+            enable="gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com" ;;
+        *:kde:*|*:plasma:*|*:x-cinnamon:*|*:cinnamon:*|*:mate:*|*:lxqt:*|*:budgie:*|*:budgie-desktop:*|*:deepin:*|*:cosmic:*|*:xfce:*)
+            return 0 ;; # the panel has its own tray; it is just not running
+        *)
+            [ "$XDG_SESSION_TYPE" = "wayland" ] || return 0 # X11 bars have the XEmbed tray
+            pkg=waybar ;;
+    esac
+    cmd=$(pkg_install_cmd "$pkg")
+    echo ""
+    echo "No system tray was found on this desktop, so Adam's tray icon will not show."
+    if [ "$pkg" = "waybar" ]; then
+        echo "A bar with a tray module provides one, for example Waybar: enable its \"tray\" module and start it."
+    else
+        echo "GNOME needs the AppIndicator extension for a tray."
+    fi
+    if [ -z "$cmd" ]; then echo "Package to install: $pkg"; return 0; fi
+    if [ "$TRAY" = "yes" ]; then
+        answer=y
+    elif [ -t 0 ]; then
+        printf 'Install it now with: %s ? [y/N] ' "$cmd"; read -r answer
+    else
+        echo "To install it:  $cmd"; [ -n "$enable" ] && echo "Then:           $enable"; return 0
+    fi
+    case "$answer" in
+        y|Y|yes|YES)
+            if sh -c "$cmd"; then
+                [ -n "$enable" ] && { sh -c "$enable" 2>/dev/null || true; echo "Log out and back in to start using the tray."; }
+            else
+                echo "That did not work; the tray is optional, Adam is installed."
+            fi ;;
+        *) echo "Skipped. Later:  $cmd"; [ -n "$enable" ] && echo "Then:            $enable" ;;
+    esac
+    return 0
+}
+# <<< tray functions
+tray_offer || true
 
 # ── version stamp ─────────────────────────────────────────────────────────────
 echo "$VERSION" > "$INSTALL_DIR/.version"

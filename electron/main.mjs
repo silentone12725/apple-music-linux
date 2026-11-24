@@ -1,6 +1,6 @@
 import * as electronMain from 'electron/main';
 const { app, BrowserWindow, ipcMain, session, shell, Menu, Tray, nativeImage, desktopCapturer, dialog, globalShortcut, screen, nativeTheme, safeStorage, protocol, net: electronNet } = electronMain;
-import { spawn, execFileSync, execFile } from 'child_process';
+import { spawn, spawnSync, execFileSync, execFile } from 'child_process';
 import { createEngineLifecycle, recoverOrphanEngine, isPortFree } from './engine-lifecycle.mjs';
 import { createMemoryMaintenance, readConfigFromEnv, toMb } from './memory-maintenance.mjs';
 
@@ -24,6 +24,7 @@ import { createWinIntegration, APP_USER_MODEL_ID } from './win-integration.mjs';
 import { parseLink, isLinkArg, playsOnOpen, intentPageUrl, storefrontOf } from './deeplink.mjs';
 import { createLinkSchemeManager } from './link-schemes.mjs';
 import { createStartupManager } from './startup.mjs';
+import { detectTrayHost, trayAdvice, parseOsRelease } from './tray.mjs';
 import { resolveThemeMode } from './theme-mode.mjs';
 import { BUILTIN_PRESETS, defaultPalette, migrateThemePrefs, sanitizePalette, sanitizePreset } from './theme-presets.mjs';
 import { writeFileAtomicSync, writeFileAtomic } from './atomic-write.mjs';
@@ -183,6 +184,23 @@ let win    = null;
 let tray   = null;
 const linkSchemes = createLinkSchemeManager({ app, loadPrefs, savePrefs });
 const startup = createStartupManager({ app, shell, loadPrefs, savePrefs });
+
+// Is a tray icon going to show? (Linux: a StatusNotifier host on the session bus; see tray.mjs.) Cached for a few
+// seconds: Settings asks when it opens, and the start-hidden check asks once.
+let _trayCache = null, _trayAt = 0;
+function trayInfo() {
+    if (!IS_LINUX) return { likely: true, host: 'present', message: '', packageName: '', command: '', enable: '', relogin: false };
+    if (_trayCache && Date.now() - _trayAt < 5000) return _trayCache;
+    const run = (cmd, args) => {
+        const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 3000 });
+        return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', error: r.error || null };
+    };
+    let osRelease = { id: '', like: [] };
+    try { osRelease = parseOsRelease(readFileSync('/etc/os-release', 'utf8')); } catch { /* not a distribution with one */ }
+    _trayCache = trayAdvice({ env: process.env, hasWatcher: detectTrayHost(run), osRelease });
+    _trayAt = Date.now();
+    return _trayCache;
+}
 // Windows blur theme uses the local Composition Gaussian backend on both supported Windows versions.
 const _acrylicBackend = !IS_WIN ? null
     : acrylicBackend(os.release());
@@ -254,6 +272,8 @@ if (_gotLock) {
 }
 app.on('second-instance', (_e, argv) => {
     if (winIntegration?.handleArgv(argv)) return; // jump-list transport command
+    // Another autostart launch (--hidden) is not a request to show the window, only a duplicate to ignore.
+    if (argv.includes('--hidden') && !argv.some(isLinkArg)) return;
     // The clicked link is one of the arguments (xdg-open and the OS pass it on the command line).
     const url = argv.find(isLinkArg);
     if (url) _dispatchDeepLink(url);
@@ -972,7 +992,12 @@ function createWindow() {
         if (shown) return;
         shown = true;
         console.log(`[Adam] Window shown (${reason}) ${Math.round(performance.now())} ms after start`);
-        if (_startHidden) return; // launched at login: stay in the tray until asked
+        if (_startHidden) {
+            // Launched at login: stay in the tray until asked. With no tray icon a hidden window cannot be found
+            // again, so it is minimised to the taskbar instead.
+            if (IS_LINUX && !trayInfo().likely) { _startHidden = false; win.showInactive(); win.minimize(); }
+            return;
+        }
         win.setOpacity(0);
         win.show();
         // Ramp opacity 0→1 over ~300 ms so it fades in smoothly.
@@ -2379,10 +2404,10 @@ ipcMain.on('mpris:update', (_, data) => {
 
 // Settings → Links: which URL schemes Adam claims. The scheme list and the choices live in
 // link-schemes.mjs; the page can only toggle schemes that module offers.
-ipcMain.handle('startup:get', () => startup.get());
+ipcMain.handle('startup:get', () => ({ ...startup.get(), tray: trayInfo() }));
 ipcMain.handle('startup:set', (_e, key, value) => {
     if ((key !== 'launchAtLogin' && key !== 'startMinimized') || typeof value !== 'boolean') throw new Error('invalid startup setting');
-    return startup.set(key, value);
+    return { ...startup.set(key, value), tray: trayInfo() };
 });
 ipcMain.handle('links:get', () => linkSchemes.list());
 ipcMain.handle('links:set', (_e, scheme, enabled) => {

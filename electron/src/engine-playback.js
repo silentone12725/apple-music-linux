@@ -10706,6 +10706,10 @@ window.adamGetQueueInfo = function () {
         body.appendChild(note);
         const rows = document.createElement('div');
         body.appendChild(rows);
+        // How Adam starts in this session, and what to install when there is no tray (selectable, to copy the command).
+        const info = document.createElement('div');
+        info.style.cssText = FF + 'font-size:11px;color:rgba(255,255,255,0.42);line-height:1.5;padding:8px 0 2px;white-space:pre-wrap;user-select:text;display:none;';
+        body.appendChild(info);
         const render = (st) => {
             rows.textContent = '';
             rows.style.opacity = st.supported ? '' : '0.45';
@@ -10720,6 +10724,11 @@ window.adamGetQueueInfo = function () {
                 'Start Adam when you sign in to your computer', false));
             rows.appendChild(makeRow('Start minimised', _adamIOSToggle(st.startMinimized, (v) => change('startMinimized', v)),
                 'Open in the system tray instead of showing the window. Applies when launching at login.', true));
+            const hints = [];
+            if (st.supported && st.note) hints.push(st.note);
+            if (st.supported && st.tray && !st.tray.likely && st.tray.message) hints.push(st.tray.message + ' Until then, Start minimised puts the window in the taskbar instead.');
+            info.textContent = hints.join('\n\n');
+            info.style.display = hints.length ? '' : 'none';
         };
         const refresh = () => window.adamBridge?.startupGet?.().then(render).catch(() => {});
         refresh();

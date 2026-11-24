@@ -85,7 +85,7 @@ An Apple Music desktop client for Linux and Windows — lossless audio on Linux,
 
 - **Media keys** — hardware play/pause, next, and previous keys work even when the window is in the background (includes Bluetooth AVRCP)
 - **System tray** — minimize to tray; playback controls in the right-click menu
-- **Launch at login** — optional, under Settings → Startup (off by default), with *Start minimised* to begin in the tray; on Linux it writes an XDG autostart entry (`~/.config/autostart/adam.desktop`), on Windows the Run key (or a Startup shortcut in the MSIX)
+- **Launch at login** — optional, under Settings → Startup (off by default), with *Start minimised* to begin in the tray. It works on every Linux session, see [Launch at login and the system tray](#launch-at-login-and-the-system-tray); on Windows it uses the Run key (or a Startup shortcut in the MSIX)
 - **Mini player** — a small always-on-top now-playing window
 - **Discord Rich Presence**, **Last.fm** and **ListenBrainz** scrobbling
 - **Wayland + X11** — tested on Hyprland, KDE Plasma, GNOME, and Sway
@@ -147,11 +147,35 @@ This installs to `~/.local/lib/adam` and adds a launcher to `~/.local/bin`. A de
 ./adam.run --system       # install system-wide to /opt/ (needs sudo)
 ./adam.run --force        # overwrite an existing installation
 ./adam.run --no-lossless  # skip the FairPlay library download (lossless stays off)
+./adam.run --tray-support # install the system-tray package for this desktop if it has none (see below)
+./adam.run --no-tray-check # skip the system-tray check
 ./adam.run --uninstall    # remove the installation
 ./adam.run --help         # show all options
 ```
 
 After install, launch from your app menu or run `adam` in a terminal.
+
+### Launch at login and the system tray
+
+**Launch at login** (Settings → Startup) picks the mechanism your session actually runs, so it works on every desktop:
+
+| Session | What Adam writes | Why |
+|---|---|---|
+| GNOME, KDE Plasma, Xfce, Cinnamon, MATE, LXQt, Budgie, Deepin, COSMIC … | `~/.config/autostart/adam.desktop` | these run XDG autostart themselves |
+| Hyprland with uwsm, niri (`niri-session`), any session that activates `xdg-desktop-autostart.target` | the same `adam.desktop` | systemd turns it into a service |
+| A plain Hyprland, Sway, river or similar session that starts `graphical-session.target` | `~/.config/systemd/user/adam-autostart.service`, enabled | these do not run autostart entries, and this edits no dotfile |
+| i3, bspwm, labwc … with no systemd session | a marked block in the compositor's config (`exec`, `exec-once`, `spawn-at-startup` …) | nothing else would start it |
+
+Settings shows which one is in use. Turning the toggle off removes it again, including the config block, and the entry is read back from the system, so one you remove yourself shows as off. A config that is a symlink (dotfiles in a repo) is written through the link; a Hyprland setup with a Lua config next to `hyprland.conf` is not edited. The Flatpak build cannot do this from inside its sandbox and says so.
+
+**Start minimised** starts in the tray without showing the window. Adam's tray icon needs a StatusNotifier host:
+
+- built in: KDE Plasma, MATE, Cinnamon, LXQt, Budgie, Deepin, COSMIC, Xfce
+- GNOME: the *AppIndicator and KStatusNotifierItem Support* extension (`gnome-shell-extension-appindicator`, then `gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com` and log in again)
+- Hyprland, Sway, river, niri, labwc …: a bar with a tray module, for example `waybar` with its `tray` module
+- X11 with i3, polybar, tint2 …: Electron falls back to the XEmbed tray these bars provide; `snixembed` bridges a bar that only speaks StatusNotifier
+
+When there is no tray, a minimised start puts the window in the taskbar instead of hiding it where it cannot be found, and Settings shows the package for your distribution (pacman, apt, dnf or zypper). The `.run` installer offers the same package when it sees no tray on GNOME or a bare Wayland compositor, and installs nothing unless you answer yes or pass `--tray-support`.
 
 ### Lossless (ALAC) and the FairPlay libraries
 
