@@ -22,8 +22,8 @@ Unreleased changes, one entry per nightly build, newest first. Each entry is als
 - Apple's Pin, Unpin, Delete and Download menu items are found by their icon or element rather than by their translated label, so they work in every language.
 - The loading skeleton for the New page matches the real page, and long pages no longer stall clicks.
 
-### Windows
-- This build is Windows only. It was cross-compiled with the full lossless/DRM engine and has not been tested on a real account.
+### Builds
+- Linux and Windows installers are both available. The Windows installer was cross-compiled with the full lossless/DRM engine and has not been tested on a real account.
 
 ---
 
