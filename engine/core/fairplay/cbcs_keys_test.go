@@ -74,11 +74,11 @@ func TestSendFragKeyStartsWithFragmentZeroKey(t *testing.T) {
 	}
 }
 
-// Like upstream, only the keys on segments 0 and 1 are used; later tags are ignored.
+// Ignore tags after the first content key.
 func TestUpstreamKeyURIs(t *testing.T) {
-	in := []string{cbcsPrefetchKey, "skd://real", "", "skd://later"}
+	in := []string{cbcsPrefetchKey, "", "skd://real", "skd://later"}
 	got := upstreamKeyURIs(in)
-	want := []string{cbcsPrefetchKey, "skd://real", "", ""}
+	want := []string{cbcsPrefetchKey, "", "skd://real", ""}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("key %d = %q, want %q", i, got[i], want[i])
