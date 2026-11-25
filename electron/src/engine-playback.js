@@ -8182,8 +8182,24 @@ async function setup() {
         }
     });
 
+    // True for the whole lifetime of one NPIDF handler run (including its own internal polling for a
+    // settled item, well before handleTrackChange sets _currentAssetId). The playbackStateDidChange
+    // fallback below only has _currentAssetId to tell a real-but-slow NPIDF from a missing one; without
+    // this flag it mistakes "still processing" for "never fired" and calls handleTrackChange a second
+    // time for the same track, opening a duplicate engine session (confirmed from a hardware log: two
+    // concurrent /api/v1/audio GETs for the same asset ~1s apart).
+    let _npidfInFlight = false;
+
     mk.addEventListener('nowPlayingItemDidChange', async () => {
         console.log('[NPIDF] fired item=' + (mk.nowPlayingItem?.attributes?.name || 'null') + ' allowCDN=' + _allowCDNTransition + ' adamGotoTarget=' + _adamGotoTarget);
+        _npidfInFlight = true;
+        try {
+            await _npidfHandler();
+        } finally {
+            _npidfInFlight = false;
+        }
+    });
+    async function _npidfHandler() {
         // During a controlled _adamGoto transition, filter out spurious NPIDFs.
         // setQueue fires a null NPIDF (item === null) that must be fully suppressed —
         // if we let it through, _clearAdvancing() releases the lock early and
@@ -8353,7 +8369,7 @@ async function setup() {
         } else {
             sendMprisStatus('Stopped');
         }
-    });
+    }
 
     let trackFallbackTimer;
     mk.addEventListener('playbackStateDidChange', () => {
@@ -8369,6 +8385,7 @@ async function setup() {
                 const item = mk.nowPlayingItem;
                 const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id;
                 if (!id || String(id) === String(_currentAssetId) || String(id) === String(_directPlayAdamId)) return;
+                if (_npidfInFlight) return; // a real NPIDF is already being processed for this change — not missing, just slow
                 if (item === _htcSkippedItem) return; // handleTrackChange already declined it
                 if (mk.playbackState !== PS?.loading && mk.playbackState !== PS?.playing) return;
                 console.warn('[Adam Engine] recovering missing track-change event');

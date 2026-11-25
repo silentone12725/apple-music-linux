@@ -8382,8 +8382,17 @@
         _updateTransportButtons();
       }
     });
+    let _npidfInFlight = false;
     mk.addEventListener("nowPlayingItemDidChange", async () => {
       console.log("[NPIDF] fired item=" + (mk.nowPlayingItem?.attributes?.name || "null") + " allowCDN=" + _allowCDNTransition + " adamGotoTarget=" + _adamGotoTarget);
+      _npidfInFlight = true;
+      try {
+        await _npidfHandler();
+      } finally {
+        _npidfInFlight = false;
+      }
+    });
+    async function _npidfHandler() {
       if (_adamGotoTarget !== null) {
         const item2 = mk.nowPlayingItem;
         if (!item2) return;
@@ -8530,7 +8539,7 @@
       } else {
         sendMprisStatus("Stopped");
       }
-    });
+    }
     let trackFallbackTimer;
     mk.addEventListener("playbackStateDidChange", () => {
       const PS = window.MusicKit?.PlaybackStates;
@@ -8541,6 +8550,7 @@
           const item = mk.nowPlayingItem;
           const id = item?.playParams?.catalogId ?? item?.attributes?.playParams?.catalogId ?? item?.id;
           if (!id || String(id) === String(_currentAssetId) || String(id) === String(_directPlayAdamId)) return;
+          if (_npidfInFlight) return;
           if (item === _htcSkippedItem) return;
           if (mk.playbackState !== PS?.loading && mk.playbackState !== PS?.playing) return;
           console.warn("[Adam Engine] recovering missing track-change event");
