@@ -2091,6 +2091,7 @@
     ")!important}"
   ].join("");
   var _playState = PLAY_STATE.IDLE;
+  var _adamLastGotoMs = 0;
   function setPlayState(next, ctx) {
     const prev = _playState;
     if (!isLegalPlayTransition(prev, next)) console.warn(`[Adam State] unexpected transition ${prev} \u2192 ${next}${ctx ? " | " + ctx : ""}`);
@@ -5741,6 +5742,7 @@
       item = await _handleNullNPIDF(mk);
       if (!item) return;
     }
+    _adamLastGotoMs = performance.now();
     _closeCDNGate(mk);
     const _htcAdamId = item.playParams?.catalogId ?? item.attributes?.playParams?.catalogId ?? item.id ?? item.playParams?.id ?? item.attributes?.playParams?.id;
     if (_htcConfirmDirectPlay(_htcAdamId)) {
@@ -7026,7 +7028,6 @@
     if (window.__adamEngineMounted) return;
     window.__adamEngineMounted = true;
     blockAppleCDN();
-    let _adamLastGotoMs = 0;
     const _inGotoWindow = () => performance.now() - _adamLastGotoMs < 1e3 || _playState === PLAY_STATE.OPENING || _playState === PLAY_STATE.STREAMING;
     const _isSpuriousDialog = (el2) => el2?.tagName === "DIALOG" && el2?.dataset?.testid === "dialog" && el2?.classList?.contains("error");
     const _origShowModal = HTMLDialogElement.prototype.showModal;

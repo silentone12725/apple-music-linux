@@ -1155,6 +1155,16 @@ const _BUF_BAR_CSS = [
 // Transitions are logged at trace level for diagnosis.
 let _playState = PLAY_STATE.IDLE;
 
+// Timestamp of the most recent track-change we are responsible for — opens a 1s window in which
+// Apple's own spurious "An error occurred" dialog (fired by its internal stopMediaElement cleanup
+// during the transition) is suppressed. Stamped from handleTrackChange itself, not just from
+// _adamGoto: handleTrackChange is the one function every track-change path funnels through —
+// a real nowPlayingItemDidChange, the playbackStateDidChange fallback, or MK's own native advance
+// slipping past our blocking — and a hardware log showed the dialog reaching the user because the
+// window was only ever opened by _adamGoto, which none of those paths go through when MK itself
+// drives the transition.
+let _adamLastGotoMs = 0;
+
 function setPlayState(next, ctx) {
     const prev = _playState;
     // Not enforced: this machine is shared by the AAC and lossless paths. An edge outside the design is
@@ -5124,6 +5134,7 @@ async function handleTrackChange(mk) {
         item = await _handleNullNPIDF(mk);
         if (!item) return;
     }
+    _adamLastGotoMs = performance.now(); // see the declaration above for why this isn't just in _adamGoto
 
     _closeCDNGate(mk);
 
@@ -6469,7 +6480,8 @@ async function setup() {
     //      so a setAttribute intercept alone is insufficient.
     //   2. React defers rendering, so the dialog can open AFTER _adamTransitioning is
     //      already cleared by NPIDF — use a 1s timestamp window instead.
-    let _adamLastGotoMs = 0; // updated each time _adamGoto starts
+    // _adamLastGotoMs is declared at module scope (see its definition) so handleTrackChange can
+    // stamp it too, not just this function.
     // Suppress errors while: (a) within 1s of a goto call, OR (b) while a session is
     // actively opening/streaming — VLC can take 2-5s to start, well past the 1s window.
     const _inGotoWindow = () =>
@@ -6824,7 +6836,7 @@ async function setup() {
         if (_adamAdvancing) { console.log('[Adam] _adamGoto busy, ignoring ci=', ci, 'ii=', ii); return; }
         _adamAdvancing = true;
         _adamTransitioning = true;
-        _adamLastGotoMs = performance.now(); // open 1s suppression window for error dialog
+        _adamLastGotoMs = performance.now(); // open 1s suppression window for error dialog (handleTrackChange also stamps this)
         _adamNavInternal = true;
         _adamPendingCI = ci;
         _adamPendingII = ii;
